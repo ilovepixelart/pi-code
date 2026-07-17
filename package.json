@@ -9,6 +9,9 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "prompts": [
+      "./extensions/subagent/prompts"
     ]
   },
   "peerDependencies": {

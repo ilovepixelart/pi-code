@@ -3,8 +3,25 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+
+// Claude Code tool names -> pi tool names; unmapped names pass through lowercased
+const CLAUDE_TOOL_MAP: Record<string, string> = {
+	read: "read",
+	write: "write",
+	edit: "edit",
+	bash: "bash",
+	grep: "grep",
+	glob: "find",
+	ls: "ls",
+};
+
+function normalizeToolName(tool: string): string {
+	const lower = tool.toLowerCase();
+	return CLAUDE_TOOL_MAP[lower] ?? lower;
+}
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -57,7 +74,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 
 		const tools = frontmatter.tools
 			?.split(",")
-			.map((t: string) => t.trim())
+			.map((t: string) => normalizeToolName(t.trim()))
 			.filter(Boolean);
 
 		agents.push({
@@ -96,9 +113,12 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(getAgentDir(), "agents");
+	const claudeUserDir = path.join(os.homedir(), ".claude", "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
+	// ~/.claude/agents loads first so ~/.pi/agent/agents wins on name conflicts
+	const userAgents =
+		scope === "project" ? [] : [...loadAgentsFromDir(claudeUserDir, "user"), ...loadAgentsFromDir(userDir, "user")];
 	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 
 	const agentMap = new Map<string, AgentConfig>();
