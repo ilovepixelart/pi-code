@@ -1,32 +1,59 @@
 /**
  * Status Line Extension
  *
- * Demonstrates ctx.ui.setStatus() for displaying persistent status text in the footer.
- * Shows turn progress with themed colors.
+ * Adds a Claude Code style status segment to pi's footer: turn state plus
+ * running session cost. Cost is summed from per-message usage on the current
+ * branch, so it stays correct across /tree navigation and forks.
+ *
+ * pi's built-in footer already shows path, branch, context, and model;
+ * this extension only adds what is missing instead of replacing the footer.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export default function (pi: ExtensionAPI) {
+interface UsageEntry {
+	type: string;
+	message?: { usage?: { cost?: { total?: number } } };
+}
+
+function sessionCost(ctx: ExtensionContext): number {
+	let total = 0;
+	for (const entry of ctx.sessionManager.getBranch() as UsageEntry[]) {
+		total += entry.message?.usage?.cost?.total ?? 0;
+	}
+	return total;
+}
+
+function formatCost(cost: number): string {
+	return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`;
+}
+
+export default function statusLine(pi: ExtensionAPI) {
 	let turnCount = 0;
 
-	pi.on("session_start", async (_event, ctx) => {
+	function showIdle(ctx: ExtensionContext, symbol: string): void {
 		const theme = ctx.ui.theme;
-		ctx.ui.setStatus("status-demo", theme.fg("dim", "Ready"));
+		const cost = sessionCost(ctx);
+		const costText = cost > 0 ? theme.fg("muted", ` ${formatCost(cost)}`) : "";
+		const turnText = turnCount > 0 ? theme.fg("dim", ` turn ${turnCount}`) : theme.fg("dim", " ready");
+		ctx.ui.setStatus("pi-code-status", symbol + turnText + costText);
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		showIdle(ctx, ctx.ui.theme.fg("dim", "○"));
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
 		turnCount++;
 		const theme = ctx.ui.theme;
-		const spinner = theme.fg("accent", "●");
-		const text = theme.fg("dim", ` Turn ${turnCount}...`);
-		ctx.ui.setStatus("status-demo", spinner + text);
+		ctx.ui.setStatus("pi-code-status", theme.fg("accent", "●") + theme.fg("dim", ` turn ${turnCount}...`));
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
-		const theme = ctx.ui.theme;
-		const check = theme.fg("success", "✓");
-		const text = theme.fg("dim", ` Turn ${turnCount} complete`);
-		ctx.ui.setStatus("status-demo", check + text);
+		showIdle(ctx, ctx.ui.theme.fg("success", "✓"));
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		showIdle(ctx, ctx.ui.theme.fg("success", "✓"));
 	});
 }
