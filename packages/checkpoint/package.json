@@ -1,0 +1,40 @@
+{
+  "name": "pi-code-checkpoint",
+  "version": "0.1.0",
+  "description": "Git checkpoint and rewind of agent edits",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "type": "module",
+  "scripts": {
+    "biome": "npx @biomejs/biome check",
+    "biome:fix": "npx @biomejs/biome check --write .",
+    "type:check": "tsc --noEmit",
+    "test": "vitest run --coverage",
+    "check": "npm run biome && npm run type:check && npm run test"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.4",
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
+    "@types/node": "^26.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typebox": "^1.3.6",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
