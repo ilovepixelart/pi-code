@@ -626,7 +626,7 @@ export default function (pi: ExtensionAPI) {
           // Clean up {previous} placeholder for display
           const cleanTask = step.task.replace(/\{previous\}/g, '').trim()
           const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask
-          text += '\n  ' + theme.fg('muted', `${i + 1}.`) + ' ' + theme.fg('accent', step.agent) + theme.fg('dim', ` ${preview}`)
+          text += `\n  ${theme.fg('muted', `${i + 1}.`)} ${theme.fg('accent', step.agent)}${theme.fg('dim', ` ${preview}`)}`
         }
         if (args.chain.length > 3) text += `\n  ${theme.fg('muted', `... +${args.chain.length - 3} more`)}`
         return new Text(text, 0, 0)
@@ -741,7 +741,7 @@ export default function (pi: ExtensionAPI) {
 
         if (expanded) {
           const container = new Container()
-          container.addChild(new Text(icon + ' ' + theme.fg('toolTitle', theme.bold('chain ')) + theme.fg('accent', `${successCount}/${details.results.length} steps`), 0, 0))
+          container.addChild(new Text(`${icon} ${theme.fg('toolTitle', theme.bold('chain '))}${theme.fg('accent', `${successCount}/${details.results.length} steps`)}`, 0, 0))
 
           for (const r of details.results) {
             const rIcon = r.exitCode === 0 ? theme.fg('success', '✓') : theme.fg('error', '✗')
@@ -778,7 +778,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         // Collapsed view
-        let text = icon + ' ' + theme.fg('toolTitle', theme.bold('chain ')) + theme.fg('accent', `${successCount}/${details.results.length} steps`)
+        let text = `${icon} ${theme.fg('toolTitle', theme.bold('chain '))}${theme.fg('accent', `${successCount}/${details.results.length} steps`)}`
         for (const r of details.results) {
           const rIcon = r.exitCode === 0 ? theme.fg('success', '✓') : theme.fg('error', '✗')
           const displayItems = getDisplayItems(r.messages)
