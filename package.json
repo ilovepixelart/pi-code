@@ -1,0 +1,18 @@
+{
+  "name": "pi-code-question",
+  "version": "0.1.0",
+  "description": "Structured questions with typed options, AskUserQuestion style",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "type": "module"
+}
