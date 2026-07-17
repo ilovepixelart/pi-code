@@ -1,0 +1,61 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { describe, expect, it } from 'vitest'
+
+import { formatToolName, interpolateEnv, loadConfigFrom, mapContent, normalizeSchema } from '../extensions/mcp.ts'
+
+describe('mcp adapter helpers', () => {
+  it('interpolates ${VAR} from the environment', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what interpolateEnv parses
+    expect(interpolateEnv('Bearer ${TOKEN}', { TOKEN: 'abc' } as NodeJS.ProcessEnv)).toBe('Bearer abc')
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
+    expect(interpolateEnv('${MISSING}', {} as NodeJS.ProcessEnv)).toBe('')
+  })
+
+  it('merges config files with later files winning', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'))
+    const global = join(dir, 'global.json')
+    const project = join(dir, 'project.json')
+    writeFileSync(global, JSON.stringify({ mcpServers: { a: { command: 'one' }, b: { command: 'two' } } }))
+    writeFileSync(project, JSON.stringify({ mcpServers: { b: { command: 'override' } } }))
+    const merged = loadConfigFrom([global, project])
+    expect(Object.keys(merged).sort()).toEqual(['a', 'b'])
+    expect((merged.b as { command: string }).command).toBe('override')
+  })
+
+  it('skips missing and invalid config files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'))
+    const broken = join(dir, 'broken.json')
+    writeFileSync(broken, '{not json')
+    expect(loadConfigFrom([join(dir, 'absent.json'), broken])).toEqual({})
+  })
+
+  it('formats tool names as server_tool with dashes replaced', () => {
+    expect(formatToolName('sonar-qube', 'search-issues')).toBe('sonar_qube_search_issues')
+  })
+
+  it('normalizes schemas by stripping $schema and additionalProperties', () => {
+    const schema = normalizeSchema({ $schema: 'x', additionalProperties: false, type: 'object', properties: { a: { type: 'string' } } })
+    expect(schema).toEqual({ type: 'object', properties: { a: { type: 'string' } } })
+    expect(normalizeSchema(undefined)).toEqual({ type: 'object', properties: {} })
+  })
+
+  it('maps text, image, and resource content blocks', () => {
+    const mapped = mapContent([
+      { type: 'text', text: 'hello' },
+      { type: 'image', data: 'base64data', mimeType: 'image/jpeg' },
+      { type: 'resource', resource: { uri: 'file:///x', text: 'body' } },
+    ])
+    expect(mapped[0]).toEqual({ type: 'text', text: 'hello' })
+    expect(mapped[1]).toEqual({ type: 'image', data: 'base64data', mimeType: 'image/jpeg' })
+    expect((mapped[2] as { text: string }).text).toContain('[Resource: file:///x]')
+  })
+
+  it('falls back to structuredContent for empty results and truncates huge text', () => {
+    expect(mapContent([], { ok: true })).toEqual([{ type: 'text', text: JSON.stringify({ ok: true }, null, 2) }])
+    const big = mapContent([{ type: 'text', text: 'x'.repeat(60_000) }])
+    expect((big[0] as { text: string }).text).toContain('[truncated')
+  })
+})
