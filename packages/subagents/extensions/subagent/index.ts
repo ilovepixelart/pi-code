@@ -404,7 +404,7 @@ const SubagentParams = Type.Object({
   confirmProjectAgents: Type.Optional(Type.Boolean({ description: 'Prompt before running project-local agents. Default: true.', default: true })),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process (single mode)' })),
   background: Type.Optional(Type.Boolean({ description: 'Run the single-mode task in the background: returns a run id immediately and a notification arrives when it completes.' })),
-  action: Type.Optional(StringEnum(['status'] as const, { description: "Query instead of run: 'status' lists background runs" })),
+  status: Type.Optional(Type.Boolean({ description: 'Set true (alone, no other params) to list background runs instead of running anything.' })),
 })
 
 export default function (pi: ExtensionAPI) {
@@ -414,7 +414,7 @@ export default function (pi: ExtensionAPI) {
     description: [
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
-      'Single mode also supports background: true for long tasks; a notification arrives on completion and {action: "status"} lists runs.',
+      'Single mode also supports background: true for long tasks; a notification arrives on completion and {status: true} lists runs.',
       'Default agent scope is "user" (from ~/.pi/agent/agents).',
       'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
     ].join(' '),
@@ -440,7 +440,7 @@ export default function (pi: ExtensionAPI) {
           results,
         })
 
-      if (params.action === 'status') {
+      if (params.status) {
         return { content: [{ type: 'text', text: backgroundStatusText() }], details: makeDetails('single')([]) }
       }
 
@@ -494,7 +494,7 @@ export default function (pi: ExtensionAPI) {
           )
         })
         return {
-          content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {action: "status"}.` }],
+          content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
           details: makeDetails('single')([]),
         }
       }
