@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { decodeEntities, htmlToText, parseSearchResults, resolveResultUrl, stripTags } from '../extensions/web.ts'
+import { decodeEntities, htmlToText, isPrivateAddress, parseSearchResults, resolveResultUrl, stripTags } from '../extensions/web.ts'
 
 const FIXTURE = `
 <div class="result">
@@ -34,6 +34,15 @@ describe('web helpers', () => {
   it('strips tags and decodes entities', () => {
     expect(stripTags('<b>a &amp; b</b>')).toBe('a & b')
     expect(decodeEntities('&lt;x&gt;')).toBe('<x>')
+  })
+
+  it('classifies private and internal addresses for the SSRF guard', () => {
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fe80::1', 'fd00::1', 'fc00::1', '::ffff:127.0.0.1', 'not-an-ip']) {
+      expect(isPrivateAddress(ip), ip).toBe(true)
+    }
+    for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '100.128.0.1', '2606:4700::1111', '::ffff:8.8.8.8']) {
+      expect(isPrivateAddress(ip), ip).toBe(false)
+    }
   })
 
   it('converts html to readable text with structure-preserving newlines', () => {

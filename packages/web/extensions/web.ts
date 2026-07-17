@@ -6,6 +6,7 @@
  * Honors the local-only setup: no cloud accounts, plain HTTPS to public web.
  */
 
+import { lookup } from 'node:dns/promises'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
@@ -74,14 +75,54 @@ export function htmlToText(html: string): string {
   return text.length > MAX_FETCH_CHARS ? `${text.slice(0, MAX_FETCH_CHARS)}\n[truncated ${text.length - MAX_FETCH_CHARS} chars]` : text
 }
 
-async function fetchText(url: string): Promise<{ text: string; contentType: string }> {
-  const response = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    redirect: 'follow',
-  })
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  return { text: await response.text(), contentType: response.headers.get('content-type') ?? '' }
+/** SSRF guard: true for loopback, RFC1918, link-local, CGNAT, and private IPv6 ranges. Fails closed on unparseable input. */
+export function isPrivateAddress(ip: string): boolean {
+  if (ip.includes(':')) {
+    const v6 = ip.toLowerCase()
+    const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+    if (mapped) return isPrivateAddress(mapped[1])
+    return v6 === '::1' || v6 === '::' || v6.startsWith('fe80:') || v6.startsWith('fc') || v6.startsWith('fd')
+  }
+  const parts = ip.split('.').map(Number)
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true
+  const [a, b] = parts
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  return false
+}
+
+async function assertPublicHost(url: URL): Promise<void> {
+  const host = url.hostname.replace(/^\[|\]$/g, '')
+  const addresses = await lookup(host, { all: true, verbatim: true })
+  for (const { address } of addresses) {
+    if (isPrivateAddress(address)) throw new Error(`refusing to fetch private/internal address for ${url.hostname} (${address})`)
+  }
+}
+
+const MAX_REDIRECTS = 5
+
+async function fetchText(rawUrl: string): Promise<{ text: string; contentType: string }> {
+  let url = new URL(rawUrl)
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertPublicHost(url)
+    const response = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      redirect: 'manual',
+    })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (!location) throw new Error(`redirect without location from ${url.hostname}`)
+      url = new URL(location, url)
+      continue
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
+    return { text: await response.text(), contentType: response.headers.get('content-type') ?? '' }
+  }
+  throw new Error(`too many redirects for ${rawUrl}`)
 }
 
 export default function webExtension(pi: ExtensionAPI) {
