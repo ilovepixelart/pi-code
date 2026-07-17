@@ -23,6 +23,7 @@ import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from '@ear
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
+import { backgroundStatusText, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -402,6 +403,8 @@ const SubagentParams = Type.Object({
   agentScope: Type.Optional(AgentScopeSchema),
   confirmProjectAgents: Type.Optional(Type.Boolean({ description: 'Prompt before running project-local agents. Default: true.', default: true })),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process (single mode)' })),
+  background: Type.Optional(Type.Boolean({ description: 'Run the single-mode task in the background: returns a run id immediately and a notification arrives when it completes.' })),
+  action: Type.Optional(StringEnum(['status'] as const, { description: "Query instead of run: 'status' lists background runs" })),
 })
 
 export default function (pi: ExtensionAPI) {
@@ -411,6 +414,7 @@ export default function (pi: ExtensionAPI) {
     description: [
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
+      'Single mode also supports background: true for long tasks; a notification arrives on completion and {action: "status"} lists runs.',
       'Default agent scope is "user" (from ~/.pi/agent/agents).',
       'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
     ].join(' '),
@@ -436,6 +440,10 @@ export default function (pi: ExtensionAPI) {
           results,
         })
 
+      if (params.action === 'status') {
+        return { content: [{ type: 'text', text: backgroundStatusText() }], details: makeDetails('single')([]) }
+      }
+
       if (modeCount !== 1) {
         const available = agents.map((a) => `${a.name} (${a.source})`).join(', ') || 'none'
         return {
@@ -445,6 +453,48 @@ export default function (pi: ExtensionAPI) {
               text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
             },
           ],
+          details: makeDetails('single')([]),
+        }
+      }
+
+      if (params.background) {
+        const task = params.task
+        const agentName = params.agent
+        if (!hasSingle || !task || !agentName) {
+          return {
+            content: [{ type: 'text', text: 'background: true requires single mode (agent + task).' }],
+            details: makeDetails('single')([]),
+          }
+        }
+        const agent = agents.find((a) => a.name === agentName)
+        if (!agent) {
+          const available = agents.map((a) => `"${a.name}"`).join(', ') || 'none'
+          return {
+            content: [{ type: 'text', text: `Unknown agent: "${agentName}". Available agents: ${available}.` }],
+            details: makeDetails('single')([]),
+          }
+        }
+        const args: string[] = ['--mode', 'json', '-p', '--no-session']
+        if (agent.model) args.push('--model', agent.model)
+        if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+        if (agent.systemPrompt.trim()) {
+          const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt)
+          args.push('--append-system-prompt', tmp.filePath)
+        }
+        args.push(`Task: ${task}`)
+        const invocation = getPiInvocation(args)
+        const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? ctx.cwd }, (run) => {
+          pi.sendMessage(
+            {
+              customType: 'subagent-background',
+              content: `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${run.output || '(no output)'}`,
+              display: true,
+            },
+            { triggerTurn: true },
+          )
+        })
+        return {
+          content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {action: "status"}.` }],
           details: makeDetails('single')([]),
         }
       }
