@@ -15,7 +15,7 @@ Sleep 10s
 
 Type "Use the todo tool to add three todos for building a snake game, then use the start action on the first one. Do nothing else."
 Enter
-Sleep 45s
+Sleep 75s
 
 Type "/rewind"
 Enter
