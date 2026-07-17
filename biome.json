@@ -3,7 +3,7 @@
   "vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": false },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["extensions/**/*.ts", "tests/**/*.ts"]
+    "includes": ["packages/*/extensions/**/*.ts", "packages/*/tests/**/*.ts"]
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "assist": {
@@ -21,7 +21,7 @@
   },
   "overrides": [
     {
-      "includes": ["tests/**/*.ts"],
+      "includes": ["packages/*/tests/**/*.ts"],
       "linter": {
         "rules": {
           "suspicious": { "noExplicitAny": "off" }

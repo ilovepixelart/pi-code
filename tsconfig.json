@@ -12,5 +12,5 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["extensions", "tests"]
+  "include": ["packages/*/extensions", "packages/*/tests"]
 }
