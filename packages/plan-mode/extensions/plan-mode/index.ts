@@ -16,10 +16,11 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, TextContent } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { Key } from '@earendil-works/pi-tui'
-import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } from './utils.js'
+import { Type } from 'typebox'
+import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, type TodoItem } from './utils.js'
 
 // Tools
-const PLAN_MODE_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question']
+const PLAN_MODE_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete']
 
 // Type guard for assistant messages
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
@@ -38,6 +39,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let planModeEnabled = false
   let executionMode = false
   let todoItems: TodoItem[] = []
+  let planFromTool = false
   let savedTools: string[] = []
 
   function enterPlanTools(): void {
@@ -86,6 +88,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     planModeEnabled = !planModeEnabled
     executionMode = false
     todoItems = []
+    planFromTool = false
 
     if (planModeEnabled) {
       enterPlanTools()
@@ -108,6 +111,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   pi.registerCommand('plan', {
     description: 'Toggle plan mode (read-only exploration)',
     handler: async (_args, ctx) => togglePlanMode(ctx),
+  })
+
+  pi.registerTool({
+    name: 'plan_mode_complete',
+    label: 'Plan complete',
+    description: 'Submit the finished plan for user review while in plan mode. Pass the full plan as numbered steps (1. ... 2. ...). Call this exactly once, when the plan is ready.',
+    parameters: Type.Object({ plan: Type.String({ description: 'The complete numbered plan' }) }),
+    async execute(_id, params) {
+      if (!planModeEnabled) {
+        return { content: [{ type: 'text', text: 'Not in plan mode; tool ignored.' }], details: {} }
+      }
+      todoItems = planToTodos(params.plan)
+      planFromTool = true
+      persistState()
+      return { content: [{ type: 'text', text: 'Plan submitted. The user will now review it.' }], details: {}, terminate: true }
+    },
   })
 
   pi.registerCommand('todos', {
@@ -178,9 +197,8 @@ Restrictions:
 
 Ask clarifying questions using the question tool.
 
-Create a detailed numbered plan under a "Plan:" header:
+When your plan is ready, call the plan_mode_complete tool with the full plan as numbered steps:
 
-Plan:
 1. First step description
 2. Second step description
 ...
@@ -240,12 +258,14 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
     if (!planModeEnabled || !ctx.hasUI) return
 
-    // Extract todos from last assistant message
-    const lastAssistant = [...event.messages].reverse().find(isAssistantMessage)
-    if (lastAssistant) {
-      const extracted = extractTodoItems(getTextContent(lastAssistant))
-      if (extracted.length > 0) {
-        todoItems = extracted
+    // Prefer an explicitly submitted plan; fall back to extracting from prose
+    if (!planFromTool) {
+      const lastAssistant = [...event.messages].reverse().find(isAssistantMessage)
+      if (lastAssistant) {
+        const extracted = extractTodoItems(getTextContent(lastAssistant))
+        if (extracted.length > 0) {
+          todoItems = extracted
+        }
       }
     }
 
@@ -267,6 +287,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
     if (choice?.startsWith('Execute')) {
       planModeEnabled = false
       executionMode = todoItems.length > 0
+      planFromTool = false
       restoreTools()
       updateStatus(ctx)
 

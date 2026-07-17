@@ -163,3 +163,13 @@ export function markCompletedSteps(text: string, items: TodoItem[]): number {
   }
   return doneSteps.length
 }
+
+/**
+ * Parse an explicitly submitted plan (from the plan_mode_complete tool) into
+ * todo items. Unlike extractTodoItems, the Plan: header is optional because
+ * the tool input is already known to be the plan itself.
+ */
+export function planToTodos(plan: string): TodoItem[] {
+  const withHeader = /\*{0,2}Plan:\*{0,2}\s*\n/i.test(plan) ? plan : `Plan:\n${plan}`
+  return extractTodoItems(withHeader)
+}
