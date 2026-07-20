@@ -111,6 +111,17 @@ function findNearestDir(cwd: string, relative: string): string | null {
   }
 }
 
+function buildAgentMap(userAgents: AgentConfig[], projectAgents: AgentConfig[], scope: AgentScope): Map<string, AgentConfig> {
+  const agentMap = new Map<string, AgentConfig>()
+  const register = (agents: AgentConfig[]): void => {
+    for (const agent of agents) agentMap.set(agent.name, agent)
+  }
+  // user agents first so project agents win on name conflicts
+  if (scope !== 'project') register(userAgents)
+  if (scope !== 'user') register(projectAgents)
+  return agentMap
+}
+
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), 'agents')
   const claudeUserDir = path.join(os.homedir(), '.claude', 'agents')
@@ -122,17 +133,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   // project .claude/agents loads first so project .pi/agents wins on name conflicts
   const projectAgents = scope === 'user' ? [] : [...(projectClaudeDir ? loadAgentsFromDir(projectClaudeDir, 'project') : []), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
 
-  const agentMap = new Map<string, AgentConfig>()
-
-  if (scope === 'both') {
-    for (const agent of userAgents) agentMap.set(agent.name, agent)
-    for (const agent of projectAgents) agentMap.set(agent.name, agent)
-  } else if (scope === 'user') {
-    for (const agent of userAgents) agentMap.set(agent.name, agent)
-  } else {
-    for (const agent of projectAgents) agentMap.set(agent.name, agent)
-  }
-
+  const agentMap = buildAgentMap(userAgents, projectAgents, scope)
   return { agents: Array.from(agentMap.values()), projectAgentsDir: projectPiDir }
 }
 

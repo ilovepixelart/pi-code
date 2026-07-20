@@ -129,7 +129,9 @@ export function extractTodoItems(message: string): TodoItem[] {
   if (!headerMatch) return items
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length)
-  const numberedPattern = /^\s*(\d+)[.)]\s+\*{0,2}([^*\n]+)/gm
+  // Capture starts on a non-whitespace char so the leading \s+ owns all separator
+  // whitespace unambiguously (avoids super-linear backtracking); output is unchanged.
+  const numberedPattern = /^\s*(\d+)[.)]\s+\*{0,2}([^\s*\n][^*\n]*)/gm
 
   for (const match of planSection.matchAll(numberedPattern)) {
     const text = match[2]

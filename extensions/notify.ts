@@ -32,8 +32,8 @@ function notifyWindows(title: string, body: string): void {
   const { execFile } = require('node:child_process')
   // Resolve powershell from a fixed system path rather than through PATH, and let the callback
   // capture a spawn failure instead of an unhandled 'error' event crashing the host.
-  const root = process.env.SystemRoot ?? 'C:\\Windows'
-  const powershell = `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  const root = process.env.SystemRoot ?? String.raw`C:\Windows`
+  const powershell = String.raw`${root}\System32\WindowsPowerShell\v1.0\powershell.exe`
   execFile(powershell, ['-NoProfile', '-Command', windowsToastScript(title, body)], () => {})
 }
 

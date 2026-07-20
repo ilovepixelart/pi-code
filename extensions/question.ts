@@ -4,7 +4,7 @@
  * Escape in editor returns to options, Escape in options cancels
  */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent'
 import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 
@@ -32,6 +32,60 @@ const QuestionParams = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
   options: Type.Array(OptionSchema, { description: 'Options for the user to choose from' }),
 })
+
+function optionLine(opt: DisplayOption, index: number, selected: boolean, editMode: boolean, theme: Theme): string {
+  const label = `${index + 1}. ${opt.label}`
+  const prefix = selected ? theme.fg('accent', '> ') : '  '
+  if (opt.isOther === true && editMode) {
+    return prefix + theme.fg('accent', `${label} ✎`)
+  }
+  if (selected) {
+    return prefix + theme.fg('accent', label)
+  }
+  return `  ${theme.fg('text', label)}`
+}
+
+interface QuestionView {
+  width: number
+  question: string
+  options: DisplayOption[]
+  optionIndex: number
+  editMode: boolean
+  editor: Editor
+  theme: Theme
+}
+
+function buildQuestionLines(view: QuestionView): string[] {
+  const { width, question, options, optionIndex, editMode, editor, theme } = view
+  const lines: string[] = []
+  const add = (s: string) => lines.push(truncateToWidth(s, width))
+
+  add(theme.fg('accent', '─'.repeat(width)))
+  add(theme.fg('text', ` ${question}`))
+  lines.push('')
+
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i]
+    add(optionLine(opt, i, i === optionIndex, editMode, theme))
+    if (opt.description) {
+      add(`     ${theme.fg('muted', opt.description)}`)
+    }
+  }
+
+  if (editMode) {
+    lines.push('')
+    add(theme.fg('muted', ' Your answer:'))
+    for (const line of editor.render(width - 2)) {
+      add(` ${line}`)
+    }
+  }
+
+  lines.push('')
+  add(theme.fg('dim', editMode ? ' Enter to submit • Esc to go back' : ' ↑↓ navigate • Enter to select • Esc to cancel'))
+  add(theme.fg('accent', '─'.repeat(width)))
+
+  return lines
+}
 
 export default function question(pi: ExtensionAPI) {
   pi.registerTool({
@@ -137,53 +191,9 @@ export default function question(pi: ExtensionAPI) {
 
         function render(width: number): string[] {
           if (cachedLines && cachedWidth === width) return cachedLines
-
-          const lines: string[] = []
-          const add = (s: string) => lines.push(truncateToWidth(s, width))
-
-          add(theme.fg('accent', '─'.repeat(width)))
-          add(theme.fg('text', ` ${params.question}`))
-          lines.push('')
-
-          for (let i = 0; i < allOptions.length; i++) {
-            const opt = allOptions[i]
-            const selected = i === optionIndex
-            const isOther = opt.isOther === true
-            const prefix = selected ? theme.fg('accent', '> ') : '  '
-
-            if (isOther && editMode) {
-              add(prefix + theme.fg('accent', `${i + 1}. ${opt.label} ✎`))
-            } else if (selected) {
-              add(prefix + theme.fg('accent', `${i + 1}. ${opt.label}`))
-            } else {
-              add(`  ${theme.fg('text', `${i + 1}. ${opt.label}`)}`)
-            }
-
-            // Show description if present
-            if (opt.description) {
-              add(`     ${theme.fg('muted', opt.description)}`)
-            }
-          }
-
-          if (editMode) {
-            lines.push('')
-            add(theme.fg('muted', ' Your answer:'))
-            for (const line of editor.render(width - 2)) {
-              add(` ${line}`)
-            }
-          }
-
-          lines.push('')
-          if (editMode) {
-            add(theme.fg('dim', ' Enter to submit • Esc to go back'))
-          } else {
-            add(theme.fg('dim', ' ↑↓ navigate • Enter to select • Esc to cancel'))
-          }
-          add(theme.fg('accent', '─'.repeat(width)))
-
           cachedWidth = width
-          cachedLines = lines
-          return lines
+          cachedLines = buildQuestionLines({ width, question: params.question, options: allOptions, optionIndex, editMode, editor, theme })
+          return cachedLines
         }
 
         return {
@@ -234,7 +244,8 @@ export default function question(pi: ExtensionAPI) {
       if (opts.length) {
         const labels = opts.map((o: OptionWithDesc) => o.label)
         const numbered = [...labels, 'Type something.'].map((o, i) => `${i + 1}. ${o}`)
-        text += `\n${theme.fg('dim', `  Options: ${numbered.join(', ')}`)}`
+        const optionsLine = `  Options: ${numbered.join(', ')}`
+        text += `\n${theme.fg('dim', optionsLine)}`
       }
       return new Text(text, 0, 0)
     },
