@@ -127,19 +127,49 @@ export function cleanStepText(text: string): string {
 // the following \n, which is what backtracks super-linearly.
 const PLAN_HEADER = /\*{0,2}Plan:\*{0,2}[^\S\n]*\n/i
 
+const isBlank = (ch: string | undefined): boolean => ch !== undefined && ch !== '\n' && ch.trim() === ''
+
+/**
+ * Text of a `1. step` / `2) step` line, stopping at an inline `*`, or undefined when
+ * the line is not a numbered step. Scanned rather than matched: the equivalent
+ * pattern needs adjacent quantifiers over overlapping classes, which backtracks
+ * super-linearly on a long line that turns out not to be a step.
+ */
+function numberedStepText(line: string): string | undefined {
+  let i = 0
+  while (isBlank(line[i])) i++
+
+  const digitsStart = i
+  while (line[i] >= '0' && line[i] <= '9') i++
+  if (i === digitsStart) return undefined
+
+  if (line[i] !== '.' && line[i] !== ')') return undefined
+  i++
+
+  const spaceStart = i
+  while (isBlank(line[i])) i++
+  if (i === spaceStart) return undefined // the marker must be followed by whitespace
+
+  for (let stars = 0; stars < 2 && line[i] === '*'; stars++) i++
+  const first = line[i]
+  if (first === undefined || first === '*' || isBlank(first)) return undefined
+
+  const rest = line.slice(i)
+  const star = rest.indexOf('*')
+  return star === -1 ? rest : rest.slice(0, star)
+}
+
 export function extractTodoItems(message: string): TodoItem[] {
   const items: TodoItem[] = []
   const headerMatch = PLAN_HEADER.exec(message)
   if (!headerMatch) return items
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length)
-  // Separators are horizontal whitespace only: under /m the anchor already sits at
-  // each line start, so letting \s cross newlines only adds backtracking. The capture
-  // starts on a non-whitespace char so the preceding run owns all separator space.
-  const numberedPattern = /^[^\S\n]*(\d+)[.)][^\S\n]+\*{0,2}([^\s*][^*\n]*)/gm
 
-  for (const match of planSection.matchAll(numberedPattern)) {
-    const text = match[2]
+  for (const line of planSection.split('\n')) {
+    const captured = numberedStepText(line)
+    if (captured === undefined) continue
+    const text = captured
       .trim()
       .replace(/\*{1,2}$/, '')
       .trim()
