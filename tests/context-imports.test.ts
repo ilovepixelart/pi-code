@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import contextImports, { collectImports, expandHome, rootsForImporter } from '../extensions/context-imports.ts'
+import contextImports, { collectImports, createImportBudget, expandHome, IMPORT_TRUNCATED_MARKER, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, rootsForImporter } from '../extensions/context-imports.ts'
 
 /** Roots granted to `file`, then the imports it actually pulls in. */
 const importsFor = (file: string, home: string, cwd: string, content?: string) => {
@@ -73,6 +73,52 @@ describe('collectImports', () => {
   })
 })
 
+describe('import budget', () => {
+  /** A directory of `count` one-byte files plus a context body importing all of them. */
+  const fanOut = (count: number) => {
+    const dir = tempDir()
+    const names = Array.from({ length: count }, (_, i) => `f${i}.md`)
+    for (const name of names) writeFileSync(join(dir, name), 'x')
+    return { dir, body: names.map((name) => `@${name}`).join('\n') }
+  }
+
+  it('collects at most MAX_IMPORT_FILES files and counts the rest as dropped', () => {
+    const excess = 10
+    const { dir, body } = fanOut(MAX_IMPORT_FILES + excess)
+    const budget = createImportBudget()
+
+    const out = collectImports(body, dir, dir, [dir], new Set(), budget)
+
+    expect(out).toHaveLength(MAX_IMPORT_FILES)
+    expect(budget.dropped).toBe(excess)
+  })
+
+  it('truncates the body that outruns the byte budget and marks the cut', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'big.md'), 'a'.repeat(MAX_IMPORT_BYTES + 1024))
+    const budget = createImportBudget()
+
+    const out = collectImports('@big.md', dir, dir, [dir], new Set(), budget)
+
+    expect(out).toHaveLength(1)
+    expect(out[0].body.endsWith(IMPORT_TRUNCATED_MARKER)).toBe(true)
+    expect(out[0].body.replace(`\n${IMPORT_TRUNCATED_MARKER}`, '').length).toBeLessThanOrEqual(MAX_IMPORT_BYTES)
+    expect(budget.bytes).toBe(0)
+  })
+
+  it('spends one budget across every context file, not one per file', () => {
+    const { dir, body } = fanOut(MAX_IMPORT_FILES)
+    writeFileSync(join(dir, 'extra.md'), 'extra')
+    const budget = createImportBudget()
+
+    collectImports(body, dir, dir, [dir], new Set(), budget)
+    const second = collectImports('@extra.md', dir, dir, [dir], new Set(), budget)
+
+    expect(second).toEqual([])
+    expect(budget.dropped).toBe(1)
+  })
+})
+
 describe('extension wiring', () => {
   it('appends only imported content within the project root', async () => {
     const dir = tempDir()
@@ -93,6 +139,24 @@ describe('extension wiring', () => {
     expect(result.systemPrompt).toContain('Two-space indent.')
     // base content appears once (from the original prompt), not re-injected
     expect(result.systemPrompt.match(/Root rules\./g)).toBeNull()
+  })
+
+  it('tells the model how many imports the budget skipped', async () => {
+    const dir = tempDir()
+    const excess = 3
+    const names = Array.from({ length: MAX_IMPORT_FILES + excess }, (_, i) => `f${i}.md`)
+    for (const name of names) writeFileSync(join(dir, name), 'x')
+    const content = names.map((name) => `@${name}`).join('\n')
+    const claudeMd = join(dir, 'CLAUDE.md')
+    writeFileSync(claudeMd, content)
+
+    const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+
+    const event = { systemPrompt: 'BASE', systemPromptOptions: { cwd: dir, contextFiles: [{ path: claudeMd, content }] } }
+    const result = (await handlers.get('before_agent_start')?.(event)) as { systemPrompt: string }
+
+    expect(result.systemPrompt).toContain(`${excess} further @import`)
   })
 
   it('returns nothing when there are no context files', async () => {
