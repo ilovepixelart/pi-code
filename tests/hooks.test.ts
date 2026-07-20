@@ -110,6 +110,16 @@ describe('runPreToolUse', () => {
 })
 
 describe('runHookCommand (real shell)', () => {
+  it('decodes multi-byte output split across stream chunks', async () => {
+    // 100KB of two-byte characters crosses many 64KB pipe boundaries. Concatenating raw
+    // Buffers would mangle every code point that straddles one, and a mangled byte in a
+    // hook's deny decision makes it unparseable, which reads as an allow.
+    const result = await runHookCommand(`printf 'e\u0301%.0s' $(seq 1 50000)`, {}, 10_000)
+
+    expect(result.stdout).not.toContain('\uFFFD')
+    expect(result.stdout.length).toBeGreaterThan(50_000)
+  })
+
   it('captures a non-zero exit code and stderr', async () => {
     const result = await runHookCommand('echo boom >&2; exit 2', {}, 5000)
     expect(result.code).toBe(2)

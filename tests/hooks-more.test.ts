@@ -2,6 +2,7 @@ import type { EventEmitter as Emitter } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -54,8 +55,10 @@ vi.mock('node:child_process', async (importOriginal) => {
       hoisted.calls.push(record)
 
       const child = new EventEmitter() as Emitter & Record<string, unknown>
-      child.stdout = new EventEmitter()
-      child.stderr = new EventEmitter()
+      // Real streams, so setEncoding decodes multi-byte characters split across chunks
+      // exactly as it does in production.
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
       const stdin = new EventEmitter() as Emitter & Record<string, unknown>
       stdin.end = (data: string) => {
         record.stdin = data
@@ -68,13 +71,24 @@ vi.mock('node:child_process', async (importOriginal) => {
       }
       hoisted.live.push(child)
 
-      // Microtask (not a timer) so scripted output still flows under fake timers.
+      // Microtask (not a timer) so scripted output still flows under fake timers. A real
+      // child ends its streams before close, which is when a decoder flushes its tail.
       queueMicrotask(() => {
-        for (const chunk of behavior.stdout ?? []) (child.stdout as Emitter).emit('data', chunk)
-        for (const chunk of behavior.stderr ?? []) (child.stderr as Emitter).emit('data', chunk)
+        const out = child.stdout as PassThrough
+        const err = child.stderr as PassThrough
+        for (const chunk of behavior.stdout ?? []) out.write(chunk)
+        for (const chunk of behavior.stderr ?? []) err.write(chunk)
         if (behavior.error) return void child.emit('error', behavior.error)
         if (behavior.hang) return
-        child.emit('close', behavior.code === undefined ? 0 : behavior.code)
+
+        let ended = 0
+        const onEnd = () => {
+          if (++ended === 2) child.emit('close', behavior.code === undefined ? 0 : behavior.code)
+        }
+        out.on('end', onEnd)
+        err.on('end', onEnd)
+        out.end()
+        err.end()
       })
       return child
     },
@@ -167,6 +181,15 @@ describe('runHookCommand process wiring', () => {
   it('reports a signal-killed close (null exit code) as exit code 0', async () => {
     script('killed', { code: null })
     expect(await runHookCommand('killed', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '' })
+  })
+
+  it('stops accumulating stdout past the cap', async () => {
+    const huge = 'x'.repeat(600_000)
+    script('flood', { stdout: [huge, huge, huge], code: 0 })
+
+    const result = await runHookCommand('flood', {}, 5000)
+    // 1.8MB written; the cap stops accumulation after the chunk that crosses it.
+    expect(result.stdout.length).toBeLessThan(1_800_000)
   })
 
   it('resolves as a clean run when the process fails to spawn', async () => {
