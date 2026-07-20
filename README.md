@@ -3,8 +3,10 @@
 [![npm](https://img.shields.io/npm/v/pi-code)](https://www.npmjs.com/package/pi-code)
 [![npm](https://img.shields.io/npm/dt/pi-code)](https://www.npmjs.com/package/pi-code)
 [![GitHub](https://img.shields.io/github/license/ilovepixelart/pi-code)](https://github.com/ilovepixelart/pi-code/blob/main/LICENSE)
+\
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=coverage)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
+\
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
