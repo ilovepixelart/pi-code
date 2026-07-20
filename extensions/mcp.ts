@@ -18,6 +18,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+// NOSONAR: SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers
+// still on the old spec exist, so this stays as a fallback for the migration period.
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -167,7 +169,7 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
   } catch (error) {
     if (String(error).includes('Unauthorized')) throw error
     const fallback = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
-    const transport = new SSEClientTransport(url, { requestInit: { headers } })
+    const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: deliberate legacy fallback
     await withTimeout(fallback.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)
     return fallback
   }

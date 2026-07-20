@@ -42,10 +42,14 @@ function parsePaths(frontmatter: string): string[] {
   const inline = lines[index].replace(/^\s*paths\s*:/, '').trim()
   if (inline) return splitInline(inline)
   const items: string[] = []
+  // Matched with string ops rather than a regex: the equivalent pattern needs two
+  // adjacent whitespace quantifiers, which backtracks super-linearly on long lines.
   for (let i = index + 1; i < lines.length; i++) {
-    const match = /^\s*-\s*(\S.*)$/.exec(lines[i])
-    if (!match) break
-    items.push(unquote(match[1].trim()))
+    const entry = lines[i].trimStart()
+    if (!entry.startsWith('-')) break
+    const value = entry.slice(1).trim()
+    if (!value) break
+    items.push(unquote(value))
   }
   return items
 }

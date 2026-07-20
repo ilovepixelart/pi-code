@@ -65,6 +65,20 @@ function checkpointLabel(checkpoint: Checkpoint, index: number): string {
   return `${index + 1}. ${time}  ${checkpoint.prompt || '(empty prompt)'}${marker}`
 }
 
+async function restoreConversation(ctx: ExtensionCommandContext, entryId: string): Promise<boolean> {
+  try {
+    // navigateTree's published type omits editorText, but it is present at runtime (docs/extensions.md)
+    const result = (await ctx.navigateTree(entryId, { summarize: false })) as { cancelled: boolean; editorText?: string }
+    if (result.cancelled) return false
+    if (typeof result.editorText === 'string') ctx.ui.setEditorText(result.editorText)
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.ui.notify(`Conversation restore failed: ${message}`, 'error')
+    return false
+  }
+}
+
 export default function gitCheckpointExtension(pi: ExtensionAPI) {
   const checkpoints = new Map<string, Checkpoint>()
   let pending: { ref: string; createdAt: string } | undefined
@@ -115,20 +129,6 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       return false
     }
     return true
-  }
-
-  async function restoreConversation(ctx: ExtensionCommandContext, entryId: string): Promise<boolean> {
-    try {
-      // navigateTree's published type omits editorText, but it is present at runtime (docs/extensions.md)
-      const result = (await ctx.navigateTree(entryId, { summarize: false })) as { cancelled: boolean; editorText?: string }
-      if (result.cancelled) return false
-      if (typeof result.editorText === 'string') ctx.ui.setEditorText(result.editorText)
-      return true
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      ctx.ui.notify(`Conversation restore failed: ${message}`, 'error')
-      return false
-    }
   }
 
   async function runRestoreMode(ctx: ExtensionCommandContext, checkpoint: Checkpoint): Promise<void> {

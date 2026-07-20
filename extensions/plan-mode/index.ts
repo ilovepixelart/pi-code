@@ -14,7 +14,7 @@
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, TextContent } from '@earendil-works/pi-ai'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from '@earendil-works/pi-coding-agent'
 import { Key } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, type TodoItem } from './utils.js'
@@ -33,6 +33,23 @@ function getTextContent(message: AssistantMessage): string {
     .filter((block): block is TextContent => block.type === 'text')
     .map((block) => block.text)
     .join('\n')
+}
+
+// Last element matching the predicate (the lib target predates Array.prototype.findLast)
+function findLast<T>(items: T[], match: (item: T) => boolean): T | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (match(items[i])) return items[i]
+  }
+  return undefined
+}
+
+// Index of the last plan-mode-execute entry, or -1 when the current run never started one
+function findLastExecuteIndex(entries: SessionEntry[]): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i] as { customType?: string }
+    if (entry.customType === 'plan-mode-execute') return i
+  }
+  return -1
 }
 
 export default function planModeExtension(pi: ExtensionAPI): void {
@@ -106,6 +123,62 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       todos: todoItems,
       executing: executionMode,
     })
+  }
+
+  // Announce completion and reset once every step is done
+  function finalizeCompletedExecution(ctx: ExtensionContext): void {
+    if (!todoItems.every((t) => t.completed)) return
+    const completedList = todoItems.map((t) => `~~${t.text}~~`).join('\n')
+    pi.sendMessage({ customType: 'plan-complete', content: `**Plan Complete!** ✓\n\n${completedList}`, display: true }, { triggerTurn: false })
+    executionMode = false
+    todoItems = []
+    restoreTools()
+    updateStatus(ctx)
+    persistState() // Save cleared state so resume doesn't restore old execution mode
+  }
+
+  // Fall back to extracting a plan from the last assistant message's prose
+  function deriveTodosFromProse(messages: AgentMessage[]): void {
+    const lastAssistant = [...messages].reverse().find(isAssistantMessage)
+    if (!lastAssistant) return
+    const extracted = extractTodoItems(getTextContent(lastAssistant))
+    if (extracted.length > 0) {
+      todoItems = extracted
+    }
+  }
+
+  // Ask the user how to proceed after a plan is ready
+  async function promptPlanNextAction(ctx: ExtensionContext): Promise<void> {
+    const choice = await ctx.ui.select('Plan mode - what next?', [todoItems.length > 0 ? 'Execute the plan (track progress)' : 'Execute the plan', 'Stay in plan mode', 'Refine the plan'])
+
+    if (choice?.startsWith('Execute')) {
+      planModeEnabled = false
+      executionMode = todoItems.length > 0
+      planFromTool = false
+      restoreTools()
+      updateStatus(ctx)
+
+      const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
+      pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
+    } else if (choice === 'Refine the plan') {
+      const refinement = await ctx.ui.editor('Refine the plan:', '')
+      if (refinement?.trim()) {
+        pi.sendUserMessage(refinement.trim())
+      }
+    }
+  }
+
+  // Rebuild completion state from assistant messages after the last execute marker
+  function rescanCompletion(entries: SessionEntry[]): void {
+    const executeIndex = findLastExecuteIndex(entries)
+    const messages: AssistantMessage[] = []
+    for (let i = executeIndex + 1; i < entries.length; i++) {
+      const entry = entries[i]
+      if (entry.type === 'message' && 'message' in entry && isAssistantMessage(entry.message as AgentMessage)) {
+        messages.push(entry.message as AssistantMessage)
+      }
+    }
+    markCompletedSteps(messages.map(getTextContent).join('\n'), todoItems)
   }
 
   pi.registerCommand('plan', {
@@ -244,15 +317,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
   pi.on('agent_end', async (event, ctx) => {
     // Check if execution is complete
     if (executionMode && todoItems.length > 0) {
-      if (todoItems.every((t) => t.completed)) {
-        const completedList = todoItems.map((t) => `~~${t.text}~~`).join('\n')
-        pi.sendMessage({ customType: 'plan-complete', content: `**Plan Complete!** ✓\n\n${completedList}`, display: true }, { triggerTurn: false })
-        executionMode = false
-        todoItems = []
-        restoreTools()
-        updateStatus(ctx)
-        persistState() // Save cleared state so resume doesn't restore old execution mode
-      }
+      finalizeCompletedExecution(ctx)
       return
     }
 
@@ -260,13 +325,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
     // Prefer an explicitly submitted plan; fall back to extracting from prose
     if (!planFromTool) {
-      const lastAssistant = [...event.messages].reverse().find(isAssistantMessage)
-      if (lastAssistant) {
-        const extracted = extractTodoItems(getTextContent(lastAssistant))
-        if (extracted.length > 0) {
-          todoItems = extracted
-        }
-      }
+      deriveTodosFromProse(event.messages)
     }
 
     // Show plan steps and prompt for next action
@@ -282,23 +341,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
       )
     }
 
-    const choice = await ctx.ui.select('Plan mode - what next?', [todoItems.length > 0 ? 'Execute the plan (track progress)' : 'Execute the plan', 'Stay in plan mode', 'Refine the plan'])
-
-    if (choice?.startsWith('Execute')) {
-      planModeEnabled = false
-      executionMode = todoItems.length > 0
-      planFromTool = false
-      restoreTools()
-      updateStatus(ctx)
-
-      const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
-      pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
-    } else if (choice === 'Refine the plan') {
-      const refinement = await ctx.ui.editor('Refine the plan:', '')
-      if (refinement?.trim()) {
-        pi.sendUserMessage(refinement.trim())
-      }
-    }
+    await promptPlanNextAction(ctx)
   })
 
   // Restore state on session start/resume
@@ -310,7 +353,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
     const entries = ctx.sessionManager.getEntries()
 
     // Restore persisted state
-    const planModeEntry = entries.filter((e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode').pop() as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean } } | undefined
+    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean } } | undefined
 
     if (planModeEntry?.data) {
       planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled
@@ -318,30 +361,11 @@ After completing a step, include a [DONE:n] tag in your response.`,
       executionMode = planModeEntry.data.executing ?? executionMode
     }
 
-    // On resume: re-scan messages to rebuild completion state
-    // Only scan messages AFTER the last "plan-mode-execute" to avoid picking up [DONE:n] from previous plans
+    // On resume: re-scan messages after the last "plan-mode-execute" to rebuild
+    // completion state without picking up [DONE:n] from previous plans
     const isResume = planModeEntry !== undefined
     if (isResume && executionMode && todoItems.length > 0) {
-      // Find the index of the last plan-mode-execute entry (marks when current execution started)
-      let executeIndex = -1
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const entry = entries[i] as { type: string; customType?: string }
-        if (entry.customType === 'plan-mode-execute') {
-          executeIndex = i
-          break
-        }
-      }
-
-      // Only scan messages after the execute marker
-      const messages: AssistantMessage[] = []
-      for (let i = executeIndex + 1; i < entries.length; i++) {
-        const entry = entries[i]
-        if (entry.type === 'message' && 'message' in entry && isAssistantMessage(entry.message as AgentMessage)) {
-          messages.push(entry.message as AssistantMessage)
-        }
-      }
-      const allText = messages.map(getTextContent).join('\n')
-      markCompletedSteps(allText, todoItems)
+      rescanCompletion(entries)
     }
 
     if (planModeEnabled) {

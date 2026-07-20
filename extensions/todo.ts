@@ -134,7 +134,7 @@ class TodoOverlay {
   private uiCtx?: ExtensionUIContext
   private widgetRegistered = false
   private tui?: TUI
-  private getTodos: () => Todo[]
+  private readonly getTodos: () => Todo[]
 
   constructor(getTodos: () => Todo[]) {
     this.getTodos = getTodos
@@ -225,9 +225,9 @@ class TodoOverlay {
  * UI component for the /todos command
  */
 class TodoListComponent {
-  private todos: Todo[]
-  private theme: Theme
-  private onClose: () => void
+  private readonly todos: Todo[]
+  private readonly theme: Theme
+  private readonly onClose: () => void
   private cachedWidth?: number
   private cachedLines?: string[]
 
@@ -254,15 +254,14 @@ class TodoListComponent {
     lines.push('')
     const title = th.fg('accent', ' Todos ')
     const headerLine = th.fg('borderMuted', '─'.repeat(3)) + title + th.fg('borderMuted', '─'.repeat(Math.max(0, width - 10)))
-    lines.push(truncateToWidth(headerLine, width))
-    lines.push('')
+    lines.push(truncateToWidth(headerLine, width), '')
 
     if (this.todos.length === 0) {
       lines.push(truncateToWidth(`  ${th.fg('dim', 'No todos yet. Ask the agent to add some!')}`, width))
     } else {
       const completed = this.todos.filter((t) => t.status === 'completed').length
-      lines.push(truncateToWidth(`  ${th.fg('muted', `${completed}/${this.todos.length} completed`)}`, width))
-      lines.push('')
+      const completedLabel = `${completed}/${this.todos.length} completed`
+      lines.push(truncateToWidth(`  ${th.fg('muted', completedLabel)}`, width), '')
 
       for (const todo of this.todos) {
         const glyph = statusGlyph(todo.status, th)
@@ -270,15 +269,14 @@ class TodoListComponent {
         const text = todo.status === 'completed' ? th.fg('dim', todo.text) : th.fg('text', todo.text)
         let line = `  ${glyph} ${id} ${text}`
         if (todo.status === 'in_progress' && todo.activeForm) {
-          line += ` ${th.fg('dim', `(${todo.activeForm})`)}`
+          const activeFormLabel = `(${todo.activeForm})`
+          line += ` ${th.fg('dim', activeFormLabel)}`
         }
         lines.push(truncateToWidth(line, width))
       }
     }
 
-    lines.push('')
-    lines.push(truncateToWidth(`  ${th.fg('dim', 'Press Escape to close')}`, width))
-    lines.push('')
+    lines.push('', truncateToWidth(`  ${th.fg('dim', 'Press Escape to close')}`, width), '')
 
     this.cachedWidth = width
     this.cachedLines = lines
@@ -296,7 +294,27 @@ class TodoListComponent {
 // genuine replay bugs still propagate instead of being silently swallowed.
 const isStaleCtxError = (e: unknown): boolean => /stale after session replacement/.test(String(e))
 
-export default function (pi: ExtensionAPI) {
+const LIST_RESULT_PREVIEW = 5
+
+const renderTodoListResult = (todoList: Todo[], expanded: boolean, theme: Theme): Text => {
+  if (todoList.length === 0) {
+    return new Text(theme.fg('dim', 'No todos'), 0, 0)
+  }
+  let listText = theme.fg('muted', `${todoList.length} todo(s):`)
+  const display = expanded ? todoList : todoList.slice(0, LIST_RESULT_PREVIEW)
+  for (const t of display) {
+    const idLabel = `#${t.id}`
+    const itemText = t.status === 'completed' ? theme.fg('dim', t.text) : theme.fg('muted', t.text)
+    listText += `\n${statusGlyph(t.status, theme)} ${theme.fg('accent', idLabel)} ${itemText}`
+  }
+  if (!expanded && todoList.length > LIST_RESULT_PREVIEW) {
+    const moreLabel = `... ${todoList.length - LIST_RESULT_PREVIEW} more`
+    listText += `\n${theme.fg('dim', moreLabel)}`
+  }
+  return new Text(listText, 0, 0)
+}
+
+export default function todoExtension(pi: ExtensionAPI) {
   // In-memory state (reconstructed from session on load)
   let todos: Todo[] = []
   let nextId = 1
@@ -382,7 +400,10 @@ export default function (pi: ExtensionAPI) {
     todo.status = 'in_progress'
     if (params.activeForm) todo.activeForm = params.activeForm
     let text = `Started #${todo.id}: ${todo.text}`
-    if (demoted.length > 0) text += ` (moved ${demoted.map((t) => `#${t.id}`).join(', ')} back to pending)`
+    if (demoted.length > 0) {
+      const movedIds = demoted.map((t) => `#${t.id}`).join(', ')
+      text += ` (moved ${movedIds} back to pending)`
+    }
     return ok('start', text)
   }
 
@@ -446,9 +467,18 @@ export default function (pi: ExtensionAPI) {
 
     renderCall(args, theme, _context) {
       let text = theme.fg('toolTitle', theme.bold('todo ')) + theme.fg('muted', args.action)
-      if (args.id !== undefined) text += ` ${theme.fg('accent', `#${args.id}`)}`
-      if (args.text) text += ` ${theme.fg('dim', `"${args.text}"`)}`
-      if (args.activeForm) text += ` ${theme.fg('dim', `(${args.activeForm})`)}`
+      if (args.id !== undefined) {
+        const idLabel = `#${args.id}`
+        text += ` ${theme.fg('accent', idLabel)}`
+      }
+      if (args.text) {
+        const textLabel = `"${args.text}"`
+        text += ` ${theme.fg('dim', textLabel)}`
+      }
+      if (args.activeForm) {
+        const activeFormLabel = `(${args.activeForm})`
+        text += ` ${theme.fg('dim', activeFormLabel)}`
+      }
       return new Text(text, 0, 0)
     },
 
@@ -464,20 +494,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (details.action === 'list') {
-        const todoList = details.todos
-        if (todoList.length === 0) {
-          return new Text(theme.fg('dim', 'No todos'), 0, 0)
-        }
-        let listText = theme.fg('muted', `${todoList.length} todo(s):`)
-        const display = expanded ? todoList : todoList.slice(0, 5)
-        for (const t of display) {
-          const itemText = t.status === 'completed' ? theme.fg('dim', t.text) : theme.fg('muted', t.text)
-          listText += `\n${statusGlyph(t.status, theme)} ${theme.fg('accent', `#${t.id}`)} ${itemText}`
-        }
-        if (!expanded && todoList.length > 5) {
-          listText += `\n${theme.fg('dim', `... ${todoList.length - 5} more`)}`
-        }
-        return new Text(listText, 0, 0)
+        return renderTodoListResult(details.todos, expanded, theme)
       }
 
       const text = result.content[0]
