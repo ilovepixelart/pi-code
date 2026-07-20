@@ -41,8 +41,8 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
-| MCP servers | `.mcp.json`, `~/.claude.json`, `.pi/mcp.json`; stdio + HTTP | `mcp.ts` |
-| Subagents / Task | `~/.claude/agents` + project `.claude/agents`, background runs | `subagent/` |
+| MCP servers | `~/.claude.json`, `~/.pi/agent/mcp.json`, `.mcp.json`, `.pi/mcp.json` (later wins); stdio, HTTP, SSE | `mcp.ts` |
+| Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
 | Checkpoints / rewind | shadow-repo snapshots, hard-reset restore | `git-checkpoint.ts` |
@@ -65,4 +65,4 @@ scripts/e2e.sh          # drives the real pi TUI via tmux (needs a working model
 scripts/record-demos.sh # re-records demos/*.tape with vhs at low thinking
 ```
 
-Extensions live in `extensions/`, tests in `tests/`. Install locally with `pi install ~/Documents/pi-code`, then `/reload` after edits.
+Extensions live in `extensions/`, tests in `tests/`. Install a local checkout with `pi install ./pi-code`, then `/reload` after edits.
