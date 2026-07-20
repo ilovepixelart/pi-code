@@ -326,36 +326,53 @@ async function runSingleAgent(defaultCwd: string, agents: AgentConfig[], agentNa
         }
       }
 
+      let killTimer: ReturnType<typeof setTimeout> | undefined
+      let onAbort: (() => void) | undefined
+      const cleanup = () => {
+        if (killTimer) clearTimeout(killTimer)
+        if (onAbort && signal) signal.removeEventListener('abort', onAbort)
+      }
+
       proc.stdout.on('data', (data) => {
         buffer += data.toString()
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
         for (const line of lines) processLine(line)
       })
+      proc.stdout.on('error', () => {})
 
       proc.stderr.on('data', (data) => {
         currentResult.stderr += data.toString()
       })
+      proc.stderr.on('error', () => {})
 
       proc.on('close', (code) => {
+        cleanup()
         if (buffer.trim()) processLine(buffer)
         resolve(code ?? 0)
       })
 
       proc.on('error', () => {
+        cleanup()
         resolve(1)
       })
 
       if (signal) {
-        const killProc = () => {
+        onAbort = () => {
           wasAborted = true
           proc.kill('SIGTERM')
-          setTimeout(() => {
-            if (!proc.killed) proc.kill('SIGKILL')
+          // proc.killed only reports that the signal was sent, not that the child died. Escalate
+          // on a timer that the 'close' handler clears once the child has actually exited.
+          killTimer = setTimeout(() => {
+            try {
+              proc.kill('SIGKILL')
+            } catch {
+              /* already gone */
+            }
           }, 5000)
         }
-        if (signal.aborted) killProc()
-        else signal.addEventListener('abort', killProc, { once: true })
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
       }
     })
 
@@ -510,13 +527,26 @@ export default function (pi: ExtensionAPI) {
         const args: string[] = ['--mode', 'json', '-p', '--no-session']
         if (agent.model) args.push('--model', agent.model)
         if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+        let tmpPrompt: { dir: string; filePath: string } | undefined
         if (agent.systemPrompt.trim()) {
-          const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt)
-          args.push('--append-system-prompt', tmp.filePath)
+          tmpPrompt = await writePromptToTempFile(agent.name, agent.systemPrompt)
+          args.push('--append-system-prompt', tmpPrompt.filePath)
         }
         args.push(`Task: ${task}`)
         const invocation = getPiInvocation(args)
         const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? ctx.cwd }, (run) => {
+          if (tmpPrompt) {
+            try {
+              fs.unlinkSync(tmpPrompt.filePath)
+            } catch {
+              /* ignore */
+            }
+            try {
+              fs.rmdirSync(tmpPrompt.dir)
+            } catch {
+              /* ignore */
+            }
+          }
           pi.sendMessage(
             {
               customType: 'subagent-background',

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -50,6 +50,12 @@ describe('collectImports', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'b.md'), 'B')
     expect(collectImports('```\n@b.md\n```', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('skips an import that resolves to a directory instead of crashing', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'sub'))
+    expect(collectImports('@sub', dir, dir, [dir], new Set())).toEqual([])
   })
 
   it('is cycle-safe', () => {

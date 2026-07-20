@@ -157,10 +157,13 @@ async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner:
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     const trusted = ctx.isProjectTrusted?.() ?? false
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
-    await runNotifyHooks(matchingCommands(config.SessionStart, ''), { hook_event_name: 'SessionStart' }, runHookCommand)
+    // Only fire SessionStart hooks on a genuine session begin, matched by source (Claude uses
+    // "startup"/"resume"/...). "reload" and "fork" re-fire in-process and would double-run hooks.
+    if (event.reason === 'reload' || event.reason === 'fork') return
+    await runNotifyHooks(matchingCommands(config.SessionStart, event.reason), { hook_event_name: 'SessionStart', source: event.reason }, runHookCommand)
   })
 
   pi.on('tool_call', async (event) => {

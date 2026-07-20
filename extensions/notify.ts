@@ -30,7 +30,9 @@ function notifyOSC99(title: string, body: string): void {
 
 function notifyWindows(title: string, body: string): void {
   const { execFile } = require('node:child_process')
-  execFile('powershell.exe', ['-NoProfile', '-Command', windowsToastScript(title, body)])
+  // The callback captures a spawn failure (e.g. powershell.exe missing) instead of
+  // letting an unhandled 'error' event crash the host process.
+  execFile('powershell.exe', ['-NoProfile', '-Command', windowsToastScript(title, body)], () => {})
 }
 
 function notify(title: string, body: string): void {

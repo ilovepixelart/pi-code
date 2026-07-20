@@ -80,7 +80,13 @@ export function collectImports(content: string, fromDir: string, home: string, a
       if (seen.has(real)) continue
       seen.add(real)
       if (!isUnder(real, allowedRoots)) continue
-      const body = fs.readFileSync(real, 'utf-8')
+      let body: string
+      try {
+        // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
+        body = fs.readFileSync(real, 'utf-8')
+      } catch {
+        continue
+      }
       out.push({ path: real, body: body.trim() })
       out.push(...collectImports(body, path.dirname(real), home, allowedRoots, seen, depth + 1))
     }

@@ -130,6 +130,9 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
   })
+  // If the timeout wins, `promise` stays pending; swallow any late rejection so it can never
+  // surface as an unhandled rejection that crashes the host.
+  promise.catch(() => {})
   try {
     return await Promise.race([promise, timeout])
   } finally {
@@ -247,9 +250,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_shutdown', async () => {
-    for (const client of clients.values()) {
-      await client.close().catch(() => {})
-    }
+    // Close in parallel with a per-client timeout so one hung server can't stall pi's exit.
+    await Promise.all([...clients.values()].map((client) => withTimeout(client.close(), 3000, 'close').catch(() => {})))
   })
 
   pi.registerCommand('mcp', {

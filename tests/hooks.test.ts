@@ -52,6 +52,13 @@ describe('matchingCommands', () => {
     expect(matchingCommands([hook], 'write')).toEqual([{ command: 'fmt' }])
     expect(matchingCommands([hook], 'read')).toEqual([])
   })
+
+  it('matches a SessionStart matcher against the session source, not an empty string', () => {
+    const hook = { matcher: 'startup', hooks: [{ command: 'setup.sh' }] }
+    expect(matchingCommands([hook], 'startup')).toEqual([{ command: 'setup.sh' }])
+    expect(matchingCommands([hook], 'resume')).toEqual([])
+    expect(matchingCommands([hook], '')).toEqual([])
+  })
 })
 
 describe('interpretHookResult', () => {
