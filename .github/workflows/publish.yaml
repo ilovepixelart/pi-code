@@ -1,0 +1,103 @@
+name: Publish
+
+on:
+  release:
+    types:
+      - published
+
+# Read by default; jobs upgrade to the minimal scopes they need.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, attest, and pack
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload the attestation bundle to the triggering release
+      id-token: write # OIDC token for Sigstore keyless signing
+      attestations: write # persist the build provenance attestation
+    outputs:
+      tarball-name: ${{ steps.pack.outputs.tarball-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check
+        run: npm run check
+
+      - name: Pack tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          npm pack
+          tarball=$(ls -1 pi-code-*.tgz | head -n1)
+          echo "tarball-name=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ steps.pack.outputs.tarball-name }}
+
+      - name: Attach attestation bundles to release
+        # Publish provenance in extra channels beyond GitHub's native store and
+        # npm's registry attestation (publishConfig.provenance: true):
+        # <tarball>.sigstore.json is the full Sigstore bundle (offline verify via
+        # `gh attestation verify --bundle`); <tarball>.intoto.jsonl is the in-toto
+        # DSSE bundle slsa-verifier and OpenSSF Scorecard look for.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          TARBALL: ${{ steps.pack.outputs.tarball-name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          sigstore="${TARBALL}.sigstore.json"
+          cp "$BUNDLE_PATH" "$sigstore"
+          intoto="${TARBALL}.intoto.jsonl"
+          jq -c '.dsseEnvelope' "$BUNDLE_PATH" > "$intoto"
+          gh release upload "$RELEASE_TAG" "$sigstore" "$intoto" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: ${{ steps.pack.outputs.tarball-name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish to npm
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance attestation via OIDC trusted publisher
+    steps:
+      - name: Use Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+
+      - name: Download tarball artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+
+      - name: Publish to npm
+        run: npm publish "${{ needs.build.outputs.tarball-name }}"
