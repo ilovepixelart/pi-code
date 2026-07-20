@@ -127,7 +127,10 @@ const TIMEOUT_EXIT_CODE = 124
 function killTree(child: ChildProcess): void {
   try {
     // Negative pid targets the whole process group, which `detached` gave the shell.
-    if (child.pid) return void process.kill(-child.pid, 'SIGKILL')
+    if (child.pid) {
+      process.kill(-child.pid, 'SIGKILL')
+      return
+    }
   } catch {
     // Group already reaped, or the platform refused it; fall through to the direct kill.
   }

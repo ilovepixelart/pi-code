@@ -102,6 +102,14 @@ const SUBSTITUTION = /\$\(|`|<\(|>\(/
  *
  * A shell AST would be exact; this is the honest approximation for a quoting-only concern.
  */
+/** Length of the separator at `i`, or 0 when there is none. */
+function separatorAt(command: string, i: number): number {
+  const pair = command.slice(i, i + 2)
+  if (pair === '&&' || pair === '||' || pair === '|&') return 2
+  const ch = command[i]
+  return ch === ';' || ch === '|' || ch === '&' || ch === '\n' ? 1 : 0
+}
+
 function splitSegments(command: string): string[] {
   const segments: string[] = []
   let current = ''
@@ -123,16 +131,11 @@ function splitSegments(command: string): string[] {
       current += ch + command[++i]
       continue
     }
-    const pair = command.slice(i, i + 2)
-    if (pair === '&&' || pair === '||' || pair === '|&') {
+    const separator = separatorAt(command, i)
+    if (separator > 0) {
       segments.push(current)
       current = ''
-      i++
-      continue
-    }
-    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n') {
-      segments.push(current)
-      current = ''
+      i += separator - 1
       continue
     }
     current += ch
