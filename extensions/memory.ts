@@ -11,8 +11,9 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type ExtensionAPI, formatSize, truncateHead } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
+import { capForContext } from './output-guard.js'
 
 const INDEX_FILE = 'MEMORY.md'
 
@@ -61,17 +62,6 @@ function readIndex(dir: string): string {
   } catch {
     return ''
   }
-}
-
-/**
- * Keep a memory inside pi's context budget. truncateHead keeps whole lines, so a
- * single oversized line yields nothing; fall back to a hard slice in that case.
- */
-function capForContext(body: string): string {
-  const cut = truncateHead(body, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES })
-  if (!cut.truncated) return body
-  const kept = cut.content || body.slice(0, DEFAULT_MAX_BYTES)
-  return `${kept}\n\n[truncated: ${formatSize(cut.totalBytes)} total]`
 }
 
 export default function memoryExtension(pi: ExtensionAPI) {

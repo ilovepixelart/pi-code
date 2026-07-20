@@ -663,6 +663,20 @@ describe('mcp tool execution', () => {
   })
 })
 
+it('truncates a result with too many lines even when it is under the byte budget', async () => {
+  // pi's budget is 50KB or 2000 lines, whichever hits first; 3000 short lines is well
+  // under the byte cap but still floods the context.
+  const many = Array.from({ length: 3000 }, (_, i) => `line ${i}`).join('\n')
+  hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: many }] })
+  withTools([{ name: 'dump' }])
+  const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+
+  const out = await harness.tools[0].execute('c1', {})
+  const text = out.content[0].text ?? ''
+  expect(text.split('\n').length).toBeLessThan(2100)
+  expect(text).toContain('truncated')
+})
+
 describe('mcp failure reporting', () => {
   it('records the error message of a server that fails to connect', async () => {
     hoisted.control.connect = async () => {
