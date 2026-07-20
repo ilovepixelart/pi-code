@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest'
 
 import contextImports, { collectImports, expandHome } from '../extensions/context-imports.ts'
 
-const tempDir = (): string => mkdtempSync(join(tmpdir(), 'ci-'))
+// realpath so allowed-root prefix checks hold on macOS (/tmp -> /private/tmp)
+const tempDir = (): string => realpathSync(mkdtempSync(join(tmpdir(), 'ci-')))
 
 describe('expandHome', () => {
   it('expands ~ and ~/ but leaves other paths alone', () => {
@@ -21,43 +22,57 @@ describe('collectImports', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'a.md'), 'A body\n@b.md')
     writeFileSync(join(dir, 'b.md'), 'B body')
-    const out = collectImports('see @a.md', dir, dir, new Set())
+    const out = collectImports('see @a.md', dir, dir, [dir], new Set())
     expect(out.map((f) => f.body)).toEqual(['A body\n@b.md', 'B body'])
   })
 
   it('ignores an unreadable import and does not treat emails as imports', () => {
     const dir = tempDir()
-    expect(collectImports('@missing.md and user@example.com', dir, dir, new Set())).toEqual([])
+    expect(collectImports('@missing.md and user@example.com', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('blocks an absolute import that escapes the allowed roots', () => {
+    const dir = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'secret.md'), 'TOP SECRET')
+    expect(collectImports(`@${join(outside, 'secret.md')}`, dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('blocks a symlink that points outside the allowed roots', () => {
+    const dir = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'secret.md'), 'TOP SECRET')
+    symlinkSync(join(outside, 'secret.md'), join(dir, 'link.md'))
+    expect(collectImports('@link.md', dir, dir, [dir], new Set())).toEqual([])
   })
 
   it('skips imports inside fenced code blocks', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'b.md'), 'B')
-    expect(collectImports('```\n@b.md\n```', dir, dir, new Set())).toEqual([])
+    expect(collectImports('```\n@b.md\n```', dir, dir, [dir], new Set())).toEqual([])
   })
 
-  it('is cycle-safe and honors the seen set', () => {
+  it('is cycle-safe', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'a.md'), '@b.md')
     writeFileSync(join(dir, 'b.md'), '@a.md')
-    const out = collectImports('@a.md', dir, dir, new Set())
-    // a imports b, b imports a (already seen) -> stops
-    expect(out.map((f) => f.body)).toEqual(['@b.md', '@a.md'])
+    expect(collectImports('@a.md', dir, dir, [dir], new Set()).map((f) => f.body)).toEqual(['@b.md', '@a.md'])
   })
 })
 
 describe('extension wiring', () => {
-  it('appends only imported content, never the base context file', async () => {
+  it('appends only imported content within the project root', async () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'style.md'), 'Two-space indent.')
     const claudeMd = join(dir, 'CLAUDE.md')
+    writeFileSync(claudeMd, 'Root rules.\n@style.md')
 
     const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
     contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
 
     const event = {
       systemPrompt: 'BASE with @style.md line already loaded',
-      systemPromptOptions: { contextFiles: [{ path: claudeMd, content: 'Root rules.\n@style.md' }] },
+      systemPromptOptions: { cwd: dir, contextFiles: [{ path: claudeMd, content: 'Root rules.\n@style.md' }] },
     }
     const result = (await handlers.get('before_agent_start')?.(event)) as { systemPrompt: string }
 
@@ -70,6 +85,6 @@ describe('extension wiring', () => {
   it('returns nothing when there are no context files', async () => {
     const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
     contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
-    expect(await handlers.get('before_agent_start')?.({ systemPrompt: 'X', systemPromptOptions: { contextFiles: [] } })).toBeUndefined()
+    expect(await handlers.get('before_agent_start')?.({ systemPrompt: 'X', systemPromptOptions: { cwd: '/tmp', contextFiles: [] } })).toBeUndefined()
   })
 })

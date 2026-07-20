@@ -7,8 +7,14 @@
  * systemPromptOptions, resolves any `@path` imports (recursive, depth-capped,
  * cycle-safe; ~ expands to home, relative paths resolve against the importing
  * file), and appends ONLY the imported content. pi already injected the base
- * files, so nothing is duplicated. Imports inside fenced code blocks and
- * unreadable paths are ignored.
+ * files, so nothing is duplicated.
+ *
+ * Security: context files can come from an untrusted project, so imports are
+ * confined (after resolving symlinks) to the working directory and the user's
+ * own ~/.claude and ~/.pi config roots. An import that escapes those roots
+ * (absolute paths, ~/.ssh, ../.. traversal, symlinks) is ignored, so a hostile
+ * CLAUDE.md cannot read arbitrary files into the prompt. Imports inside fenced
+ * code blocks are also skipped.
  *
  * Docs: https://code.claude.com/docs/en/memory.md (imports)
  */
@@ -26,13 +32,34 @@ export function expandHome(target: string, home: string): string {
   return target
 }
 
+function isUnder(target: string, roots: string[]): boolean {
+  return roots.some((root) => target === root || target.startsWith(root + path.sep))
+}
+
+/** Realpath the roots that exist; used both to seed and to bound the import search. */
+export function realRoots(candidates: string[]): string[] {
+  const roots: string[] = []
+  for (const candidate of candidates) {
+    try {
+      roots.push(fs.realpathSync(candidate))
+    } catch {
+      // a root that does not exist has nothing under it to allow
+    }
+  }
+  return roots
+}
+
 export interface ImportedFile {
   path: string
   body: string
 }
 
-/** Collect the contents of every file transitively imported via `@path`, in discovery order. */
-export function collectImports(content: string, fromDir: string, home: string, seen: Set<string>, depth = 0): ImportedFile[] {
+/**
+ * Collect the contents of every file transitively imported via `@path`, in
+ * discovery order. Imports are resolved through symlinks and kept within
+ * `allowedRoots` (which must already be realpath'd).
+ */
+export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, depth = 0): ImportedFile[] {
   if (depth >= MAX_IMPORT_DEPTH) return []
   const out: ImportedFile[] = []
   let inFence = false
@@ -44,16 +71,18 @@ export function collectImports(content: string, fromDir: string, home: string, s
     if (inFence) continue
     for (const match of line.matchAll(/(^|\s)@(\S+)/g)) {
       const resolved = path.resolve(fromDir, expandHome(match[2], home))
-      if (seen.has(resolved)) continue
-      seen.add(resolved)
-      let body: string
+      let real: string
       try {
-        body = fs.readFileSync(resolved, 'utf-8')
+        real = fs.realpathSync(resolved)
       } catch {
         continue
       }
-      out.push({ path: resolved, body: body.trim() })
-      out.push(...collectImports(body, path.dirname(resolved), home, seen, depth + 1))
+      if (seen.has(real)) continue
+      seen.add(real)
+      if (!isUnder(real, allowedRoots)) continue
+      const body = fs.readFileSync(real, 'utf-8')
+      out.push({ path: real, body: body.trim() })
+      out.push(...collectImports(body, path.dirname(real), home, allowedRoots, seen, depth + 1))
     }
   }
   return out
@@ -61,15 +90,19 @@ export function collectImports(content: string, fromDir: string, home: string, s
 
 export default function contextImportsExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
-    const contextFiles = event.systemPromptOptions?.contextFiles ?? []
+    const contextFiles: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
     if (contextFiles.length === 0) return
 
     const home = os.homedir()
+    const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
+    const allowedRoots = realRoots([cwd, path.join(home, '.claude'), path.join(home, '.pi')])
     // Seed with the loaded context file paths so pi's own files are never re-imported.
-    const seen = new Set(contextFiles.map((file: { path: string }) => file.path))
+    const seen = realRoots(contextFiles.map((file) => file.path))
+    const seenSet = new Set(seen)
+
     const imported: ImportedFile[] = []
     for (const file of contextFiles) {
-      imported.push(...collectImports(file.content, path.dirname(file.path), home, seen))
+      imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet))
     }
     if (imported.length === 0) return
 

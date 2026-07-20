@@ -7,7 +7,9 @@
  * (streamable with SSE fallback) transports; /mcp shows status.
  *
  * Reads Claude Code's MCP config too. Merge order (later wins): ~/.claude.json,
- * ~/.pi/agent/mcp.json, .mcp.json, then .pi/mcp.json.
+ * ~/.pi/agent/mcp.json, .mcp.json, then .pi/mcp.json. User config connects at
+ * startup; project config (.mcp.json / .pi/mcp.json) can run arbitrary commands,
+ * so it connects only once the project is trusted.
  * Values support ${VAR} environment interpolation.
  */
 
@@ -47,9 +49,19 @@ export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.e
   return value.replace(/\$\{(\w+)\}/g, (_, name) => env[name] ?? '')
 }
 
-/** MCP config files, later winning: Claude user, pi user, Claude project, pi project. */
+/** User-scoped MCP config (the user's own; safe to load without project trust). */
+export function userConfigPaths(home: string): string[] {
+  return [path.join(home, '.claude.json'), path.join(home, '.pi', 'agent', 'mcp.json')]
+}
+
+/** Project-scoped MCP config. Loaded only for trusted projects: a server's `command` runs on connect. */
+export function projectConfigPaths(cwd: string): string[] {
+  return [path.join(cwd, '.mcp.json'), path.join(cwd, '.pi', 'mcp.json')]
+}
+
+/** All config files, later winning: user first, then project. */
 export function configPaths(cwd: string, home: string): string[] {
-  return [path.join(home, '.claude.json'), path.join(home, '.pi', 'agent', 'mcp.json'), path.join(cwd, '.mcp.json'), path.join(cwd, '.pi', 'mcp.json')]
+  return [...userConfigPaths(home), ...projectConfigPaths(cwd)]
 }
 
 export function loadConfig(cwd: string): Record<string, ServerConfig> {
@@ -173,47 +185,58 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
   const registered = new Set<string>()
-  const servers = loadConfig(process.cwd())
 
-  for (const [name, config] of Object.entries(servers)) {
-    try {
-      const client = await connect(name, config)
-      clients.set(name, client)
-      const tools = await withTimeout(listAllTools(client), CONNECT_TIMEOUT_MS, `list tools ${name}`)
-      let count = 0
-      for (const tool of tools) {
-        const toolName = formatToolName(name, tool.name)
-        if (RESERVED_NAMES.has(toolName) || registered.has(toolName)) {
-          console.warn(`pi-code-mcp: skipping colliding tool name ${toolName}`)
-          continue
+  async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
+    for (const [name, config] of Object.entries(servers)) {
+      try {
+        const client = await connect(name, config)
+        clients.set(name, client)
+        const tools = await withTimeout(listAllTools(client), CONNECT_TIMEOUT_MS, `list tools ${name}`)
+        let count = 0
+        for (const tool of tools) {
+          const toolName = formatToolName(name, tool.name)
+          if (RESERVED_NAMES.has(toolName) || registered.has(toolName)) {
+            console.warn(`pi-code-mcp: skipping colliding tool name ${toolName}`)
+            continue
+          }
+          registered.add(toolName)
+          count++
+          pi.registerTool({
+            name: toolName,
+            label: `${name}: ${tool.name}`,
+            description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
+            parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
+            async execute(_id, params) {
+              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }), CALL_TIMEOUT_MS, toolName)
+              const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
+              const details: { error?: string } = {}
+              if (result.isError) {
+                details.error = 'tool_error'
+                const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
+                content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
+              }
+              return { content, details }
+            },
+          })
         }
-        registered.add(toolName)
-        count++
-        pi.registerTool({
-          name: toolName,
-          label: `${name}: ${tool.name}`,
-          description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
-          parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
-          async execute(_id, params) {
-            const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }), CALL_TIMEOUT_MS, toolName)
-            const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
-            const details: { error?: string } = {}
-            if (result.isError) {
-              details.error = 'tool_error'
-              const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
-              content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
-            }
-            return { content, details }
-          },
-        })
+        status.set(name, { state: 'connected', tools: count })
+      } catch (error) {
+        status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
       }
-      status.set(name, { state: 'connected', tools: count })
-    } catch (error) {
-      status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
     }
   }
 
+  // User config is the user's own, so connect it eagerly.
+  await connectServers(loadConfigFrom(userConfigPaths(os.homedir())))
+
+  let projectConnected = false
   pi.on('session_start', async (_event, ctx) => {
+    // A project .mcp.json can run arbitrary commands on connect, so only honor it once the project is trusted.
+    if (!projectConnected && ctx.isProjectTrusted?.()) {
+      projectConnected = true
+      await connectServers(loadConfigFrom(projectConfigPaths(ctx.cwd)))
+    }
+
     const connected = [...status.values()].filter((s) => s.state === 'connected')
     const failed = [...status.entries()].filter(([, s]) => s.state !== 'connected')
     if (connected.length > 0 || failed.length > 0) {

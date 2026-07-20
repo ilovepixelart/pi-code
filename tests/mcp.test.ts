@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { configPaths, formatToolName, interpolateEnv, loadConfigFrom, mapContent, normalizeSchema } from '../extensions/mcp.ts'
+import { configPaths, formatToolName, interpolateEnv, loadConfigFrom, mapContent, normalizeSchema, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
 
 describe('mcp adapter helpers', () => {
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
@@ -35,6 +35,11 @@ describe('mcp adapter helpers', () => {
 
   it('reads Claude MCP config, ordered Claude-then-pi with project last', () => {
     expect(configPaths('/proj', '/home')).toEqual(['/home/.claude.json', '/home/.pi/agent/mcp.json', '/proj/.mcp.json', '/proj/.pi/mcp.json'])
+  })
+
+  it('separates always-loaded user config from trust-gated project config', () => {
+    expect(userConfigPaths('/home')).toEqual(['/home/.claude.json', '/home/.pi/agent/mcp.json'])
+    expect(projectConfigPaths('/proj')).toEqual(['/proj/.mcp.json', '/proj/.pi/mcp.json'])
   })
 
   it('lets pi config override a Claude server of the same name', () => {
