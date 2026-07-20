@@ -17,16 +17,23 @@ An untrusted project can ship any `.claude/` content. These extensions read that
 | subagent | project `.claude/agents` / `.pi/agents` (their own system prompt and tools) |
 | output-styles | project style body, injected verbatim into the system prompt |
 | rules | project rule filenames and `paths:` frontmatter, surfaced in the system prompt |
-| context-imports | `@path` imports, confined via `realpath` to cwd, `~/.claude`, and `~/.pi` |
 
-`web_fetch` refuses loopback, RFC1918, link-local, CGNAT, and the IPv6 equivalents (including IPv4-mapped and NAT64 forms), and caps the response body before parsing.
+That gate is only as good as the trust decision behind it. pi decides whether to ask by looking for entries under `cwd/.pi` and for `.agents/skills`; a repository shipping only `.claude/` and `.mcp.json` matches neither and is trusted without a prompt. `project-trust` closes that: when a project carries Claude-shaped config that pi would not ask about, it prompts and remembers the answer. It stays out of the way when pi already prompts, when a decision is stored, and when there is no UI to ask with, so it never overrides a remembered answer or forces a headless run closed. Only user/global and CLI extensions receive `project_trust`, so this applies to `pi install npm:pi-code`, not to a project-local (`-l`) install.
+
+`context-imports` confines `@path` imports with `realpath`. A file under the user's own config may import from `~/.claude` and `~/.pi`; a project file may import only from the working directory. Without that split a cloned repository's `CLAUDE.md` could read `~/.claude/.credentials.json`, global settings, and other projects' transcripts into the system prompt.
+
+`web_fetch` refuses loopback, RFC1918, link-local, CGNAT, benchmark (198.18/15), protocol-assignment (192.0.0/24), multicast, reserved (240/4) and broadcast addresses, and the IPv6 equivalents including IPv4-mapped, NAT64, unique-local, link-local, site-local and multicast. It fails closed when a host resolves to no address, refuses a redirect that leaves `http(s)`, and caps the response body before parsing.
 
 ## Known limitations
 
 These are not addressed yet. None is a trust-model bypass on macOS/Linux, which are the primary supported platforms.
 
+- **Plan mode's bash allowlist is model steering, not a sandbox.** It validates each subcommand independently, refuses command and process substitution, and excludes commands carrying execution, write or exfiltration primitives. It cannot constrain an allowlisted interpreter that reads or writes files itself, and pi-code has no OS-level isolation to fall back on. Treat it as narrowing the blast radius of a wrong turn, not as containing a determined one.
 - **Windows.** `hooks` runs commands through `sh`; if `sh` is absent it fails open (the tool is allowed rather than blocked). The `subagent` fallback spawn also assumes `pi` is not a `.cmd` shim. Use on Windows is untested.
-- **hooks timeout is fail-open.** A `PreToolUse` hook that hangs past its timeout lets the tool through instead of blocking it.
+- **hooks timeout is not enforced for compound commands.** Only a single-command hook is exec'd directly by `sh` and killed on timeout. A compound hook (`a; b`, a pipeline, a multi-line script) leaves grandchildren holding the stdio pipes, so the run resolves only when the child finishes naturally: the tool call stalls for that full duration and is then allowed through. A hook that tried to block with `exit 2` is reported as exit 0.
+- **hook stdout is not capped.** A hook emitting hundreds of megabytes is buffered whole.
 - **DNS-rebinding TOCTOU (`web`).** The SSRF guard validates the resolved address, then `fetch` resolves the host again independently; the validated IP is not pinned for the connection. A rebinding server with a zero-TTL record can pass the check and then be reached at a private address.
 - **skills / commands are not trust-gated.** Their path handling is safe (fixed `.claude/skills` and `.claude/commands` paths, no filename or content reaches a command), but the directories are handed to pi's loader without a trust check. The residual risk is pi's loader surfacing untrusted skill descriptions or command bodies to the model.
 - **web body cap is a mitigation, not a bound of zero.** `web_fetch` caps the raw response at 200 KB before the HTML regexes run. A hostile page near that cap can still block the event loop for a few seconds; benign pages (which close their tags) are unaffected.
+- **Agent discovery walks above the project root.** `.claude/agents` and `.pi/agents` are searched from the working directory up to the filesystem root, so an agent planted in a world-writable ancestor such as `/tmp` is offered as a project agent. The consent prompt also reports `(unknown)` as the source unless the agents came from `.pi/agents`.
+- **Imports are unbounded in count and size.** The `@path` depth cap and cycle detection hold, but a context file may pull in an unlimited number of files from the working directory.
