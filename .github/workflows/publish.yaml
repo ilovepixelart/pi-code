@@ -100,4 +100,14 @@ jobs:
           name: npm-tarball
 
       - name: Publish to npm
-        run: npm publish "${{ needs.build.outputs.tarball-name }}"
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball-name }}
+        run: |
+          set -euo pipefail
+          version="${TARBALL#pi-code-}"
+          version="${version%.tgz}"
+          if npm view "pi-code@${version}" version >/dev/null 2>&1; then
+            echo "pi-code@${version} is already published; skipping."
+            exit 0
+          fi
+          npm publish "$TARBALL"
