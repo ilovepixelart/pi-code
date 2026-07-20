@@ -1,38 +1,51 @@
 # pi-code
 
-Claude Code experience for the [pi](https://pi.dev) coding agent: one plugin per feature, one monorepo.
+Claude Code experience for the [pi](https://pi.dev) coding agent, in one package. Point pi at a project that already has a `.claude/` directory and it reads your existing config: rules, commands, skills, hooks, output styles, MCP servers, and agents. It also adds the Claude Code features pi lacks: a todo overlay, checkpoints, memory, web search, and subagents.
 
 ![pi-code demo](demos/hero.gif)
 
-| Claude Code | Package | Status |
-|---|---|---|
-| Plan mode | [packages/plan-mode](packages/plan-mode) | adapted: plan_mode_complete tool, exact tool snapshot/restore |
-| Task tool / subagents | [packages/subagents](packages/subagents) | adapted: background runs with completion notify, ~/.claude/agents discovery, workflow prompts |
-| Permission prompts | [packages/permissions](packages/permissions) | rewritten: wildcard allow/ask/deny rules, session/persisted allows |
-| Todo list | [packages/todo](packages/todo) | rewritten: persistent overlay, status machine, compaction-safe |
-| MCP servers | [packages/mcp](packages/mcp) | hand-written: mcp.json config, stdio + HTTP transports |
-| Persistent memory | [packages/memory](packages/memory) | hand-written: per-project memories, index injected each session |
-| WebSearch / WebFetch | [packages/web](packages/web) | hand-written: key-free DuckDuckGo search, SSRF-guarded fetch |
-| Checkpoints / rewind | [packages/checkpoint](packages/checkpoint) | rewritten: shadow-repo snapshots, hard-reset restore, untracked files included |
-| AskUserQuestion | [packages/question](packages/question) | vendored example |
-| Statusline | [packages/statusline](packages/statusline) | rewritten: turn state + session cost |
-| Notifications | [packages/notify](packages/notify) | vendored example |
-| Global + project rules | [packages/rules](packages/rules) | adapted: inlines ~/.claude/rules globally |
-| Git guardrails | [packages/guardrails](packages/guardrails) | hand-written |
+## Install
 
-Vendored bases come from pi's MIT example extensions (see each package's LICENSE). Personal config lives in [dot-pi](https://github.com/ilovepixelart/dot-pi) (`~/.pi/agent`).
+```bash
+pi install pi-code                       # from npm (when published)
+pi install git:github.com/ilovepixelart/pi-code
+pi install ~/Documents/pi-code           # local path, then /reload after edits
+```
+
+One `pi install`, everything below loads. Each feature is an extension under [`extensions/`](extensions).
+
+## What it does
+
+| Feature | Reads / provides | Extension |
+|---|---|---|
+| Global + project rules | `~/.claude/rules`, `.claude/rules` (+ `paths:` frontmatter scoping) | `claude-rules.ts` |
+| Custom slash commands | `.claude/commands/*.md` → pi prompt templates | `commands.ts` |
+| Skills | `.claude/skills` → pi skill discovery | `skills.ts` |
+| Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
+| Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
+| CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
+| MCP servers | `.mcp.json`, `~/.claude.json`, `.pi/mcp.json`; stdio + HTTP | `mcp.ts` |
+| Subagents / Task | `~/.claude/agents` + project `.claude/agents`, background runs | `subagent/` |
+| Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
+| Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
+| Checkpoints / rewind | shadow-repo snapshots, hard-reset restore | `git-checkpoint.ts` |
+| Persistent memory | per-project memories, index injected each session | `memory.ts` |
+| WebSearch / WebFetch | key-free DuckDuckGo search, SSRF-guarded fetch | `web.ts` |
+| AskUserQuestion | vendored example | `question.ts` |
+| Statusline | turn state + session cost | `status-line.ts` |
+| Notifications | vendored example | `notify.ts` |
+
+`CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
+
+Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)). Personal config lives in [dot-pi](https://github.com/ilovepixelart/dot-pi) (`~/.pi/agent`).
 
 ## Development
 
 ```bash
 npm install
-npm run check          # biome + strict tsc + vitest, the whole gate
-scripts/e2e.sh         # drives the real pi TUI via tmux (needs a working model)
+npm run check           # biome + strict tsc + vitest, the whole gate
+scripts/e2e.sh          # drives the real pi TUI via tmux (needs a working model)
 scripts/record-demos.sh # re-records demos/*.tape with vhs at low thinking
 ```
 
-Install a package into pi by local path (`pi install ~/Documents/pi-code/packages/todo`), then `/reload` after edits. npm workspaces publish each package independently when the time comes.
-
-## Going public later
-
-Move `packages/rules` and `packages/guardrails` (personal, config-like) to dot-pi first; everything else is flip-ready (LICENSE, CI, tests in place).
+Extensions live in `extensions/`, tests in `tests/`. Install locally with `pi install ~/Documents/pi-code`, then `/reload` after edits.
