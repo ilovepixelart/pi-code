@@ -18,9 +18,9 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-// NOSONAR: SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers
-// still on the old spec exist, so this stays as a fallback for the migration period.
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+// SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
+// the old spec exist, so this stays as a fallback for the migration period.
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // NOSONAR
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
