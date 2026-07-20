@@ -76,3 +76,25 @@ describe('isSafeCommand blocks exfiltration primitives', () => {
     expect(isSafeCommand(command)).toBe(false)
   })
 })
+
+describe('isSafeCommand respects quoting', () => {
+  it.each([
+    ['a semicolon inside a pattern', 'grep "foo;bar" file.txt'],
+    ['an alternation inside a pattern', "grep 'a|b' file.txt"],
+    ['operators inside an echoed string', 'echo "a && b"'],
+    ['a pipe inside a single-quoted regex', "rg 'foo|bar' src"],
+  ])('allows %s', (_label, command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+
+  it.each([
+    ['a real separator after a quoted argument', 'grep "foo;bar" file.txt; python3 -c "x"'],
+    ['a real pipe after a quoted argument', "grep 'a|b' f | sh"],
+  ])('still blocks %s', (_label, command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  it('fails closed on an unbalanced quote', () => {
+    expect(isSafeCommand('grep "unterminated')).toBe(false)
+  })
+})
