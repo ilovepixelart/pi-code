@@ -34,6 +34,27 @@ describe('memory tool actions', () => {
 
   const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, ui: { notify: () => {} } })
 
+  it('truncates a memory larger than the context budget on read', async () => {
+    const { handlers, tool, cwd } = setup()
+    await start(handlers, cwd)
+
+    // pi's guide: tools MUST truncate their output; the built-in budget is 50KB / 2000 lines.
+    const huge = 'x'.repeat(60_000)
+    await tool.execute('1', { action: 'save', name: 'big', description: 'oversized', content: huge })
+
+    const read = (await tool.execute('2', { action: 'read', name: 'big' })).content[0].text
+    expect(read.length).toBeLessThan(huge.length)
+    expect(read).toContain('truncated')
+  })
+
+  it('returns a small memory whole', async () => {
+    const { handlers, tool, cwd } = setup()
+    await start(handlers, cwd)
+
+    await tool.execute('1', { action: 'save', name: 'small', description: 'fits', content: 'just this' })
+    expect((await tool.execute('2', { action: 'read', name: 'small' })).content[0].text).toBe('just this')
+  })
+
   it('saves, reads, lists, and deletes a memory', async () => {
     const { handlers, tool, cwd, dir } = setup()
     await start(handlers, cwd)

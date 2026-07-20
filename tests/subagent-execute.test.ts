@@ -96,7 +96,7 @@ const say = (text: string) => messageEnd(assistantMessage({ text }))
 // Tool + context harness
 // ---------------------------------------------------------------------------
 
-type ToolResult = AgentToolResult<{ mode: string; agentScope: string; projectAgentsDir: string | null; results: ResultShape[] }> & { isError?: boolean }
+type ToolResult = AgentToolResult<{ mode: string; agentScope: string; projectAgentsDir: string | null; results: ResultShape[] }>
 
 interface ResultShape {
   agent: string
@@ -392,7 +392,6 @@ describe('runSingleAgent process handling', () => {
     const result = await execute('c1', { agent: 'ghost', task: 'find it' }, undefined, undefined, trustedCtx)
 
     expect(spawnMock).not.toHaveBeenCalled()
-    expect(result.isError).toBe(true)
     expect(text(result)).toBe('Agent failed: Unknown agent: "ghost". Available agents: "scout".')
     expect(results(result)[0]).toMatchObject({ agent: 'ghost', agentSource: 'unknown', task: 'find it', exitCode: 1, messages: [], step: undefined })
   })
@@ -583,7 +582,6 @@ describe('single mode', () => {
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('final answer')
-    expect(result.isError).toBeUndefined()
     expect(results(result)[0]).toMatchObject({ agent: 'scout', agentSource: 'user', task: 'inspect', exitCode: 0 })
   })
 
@@ -593,7 +591,6 @@ describe('single mode', () => {
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('(no output)')
-    expect(result.isError).toBeUndefined()
   })
 
   it('names the stop reason in the failure text when one is reported', async () => {
@@ -602,7 +599,6 @@ describe('single mode', () => {
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('Agent error: model overloaded')
-    expect(result.isError).toBe(true)
   })
 
   it('fails an aborted run even though the child exited cleanly', async () => {
@@ -611,7 +607,6 @@ describe('single mode', () => {
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('Agent aborted: partial work')
-    expect(result.isError).toBe(true)
   })
 
   it('succeeds on a benign stop reason', async () => {
@@ -620,7 +615,6 @@ describe('single mode', () => {
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('all done')
-    expect(result.isError).toBeUndefined()
   })
 
   it('prefers the reported error message over stderr and the final output', async () => {
@@ -725,7 +719,6 @@ describe('chain mode', () => {
     const result = await execute('c1', twoStep, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('Chain stopped at step 1 (scout): scout crashed')
-    expect(result.isError).toBe(true)
     expect(spawnMock).toHaveBeenCalledTimes(1)
     expect(results(result)).toHaveLength(1)
   })
