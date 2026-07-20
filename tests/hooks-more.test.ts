@@ -155,12 +155,14 @@ const setupExtension = () => {
 }
 
 describe('runHookCommand process wiring', () => {
-  it('runs the command through /bin/sh by absolute path with all three streams piped', async () => {
+  it('runs the command through /bin/sh by absolute path, streams piped and detached into its own group', async () => {
     await runHookCommand('guard.sh', {}, 5000)
     const record = recordFor('guard.sh')
     expect(record.file).toBe('/bin/sh')
     expect(record.args).toEqual(['-c', 'guard.sh'])
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'] })
+    // `detached` is what makes the shell a process-group leader, so a timeout can kill
+    // the grandchildren a compound command forks.
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true })
   })
 
   it('writes the payload to stdin as JSON', async () => {
@@ -170,17 +172,17 @@ describe('runHookCommand process wiring', () => {
 
   it('concatenates multiple stdout and stderr chunks in arrival order', async () => {
     script('chatty', { stdout: ['one', 'two'], stderr: ['err1', 'err2'], code: 0 })
-    expect(await runHookCommand('chatty', {}, 5000)).toEqual({ code: 0, stdout: 'onetwo', stderr: 'err1err2' })
+    expect(await runHookCommand('chatty', {}, 5000)).toEqual({ code: 0, stdout: 'onetwo', stderr: 'err1err2', timedOut: false })
   })
 
   it('reports the exit code the process closed with', async () => {
     script('fail', { stderr: ['boom'], code: 2 })
-    expect(await runHookCommand('fail', {}, 5000)).toEqual({ code: 2, stdout: '', stderr: 'boom' })
+    expect(await runHookCommand('fail', {}, 5000)).toEqual({ code: 2, stdout: '', stderr: 'boom', timedOut: false })
   })
 
   it('reports a signal-killed close (null exit code) as exit code 0', async () => {
     script('killed', { code: null })
-    expect(await runHookCommand('killed', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(await runHookCommand('killed', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '', timedOut: false })
   })
 
   it('stops accumulating stdout past the cap', async () => {
@@ -194,17 +196,17 @@ describe('runHookCommand process wiring', () => {
 
   it('resolves as a clean run when the process fails to spawn', async () => {
     script('missing', { error: new Error('spawn /bin/sh ENOENT') })
-    expect(await runHookCommand('missing', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(await runHookCommand('missing', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '', timedOut: false })
   })
 
   it('keeps output already received when the process then errors', async () => {
     script('half', { stdout: ['partial'], error: new Error('EIO') })
-    expect(await runHookCommand('half', {}, 5000)).toEqual({ code: 0, stdout: 'partial', stderr: '' })
+    expect(await runHookCommand('half', {}, 5000)).toEqual({ code: 0, stdout: 'partial', stderr: '', timedOut: false })
   })
 
   it('swallows an EPIPE from a hook that exits without reading stdin', async () => {
     script('exit2', { stdinError: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }), stderr: ['denied'], code: 2 })
-    expect(await runHookCommand('exit2', {}, 5000)).toEqual({ code: 2, stdout: '', stderr: 'denied' })
+    expect(await runHookCommand('exit2', {}, 5000)).toEqual({ code: 2, stdout: '', stderr: 'denied', timedOut: false })
   })
 })
 
@@ -228,7 +230,7 @@ describe('runHookCommand timeout', () => {
   it('cancels the kill timer once the process closes on its own', async () => {
     vi.useFakeTimers()
     script('quick', { code: 0 })
-    expect(await runHookCommand('quick', {}, 1000)).toEqual({ code: 0, stdout: '', stderr: '' })
+    expect(await runHookCommand('quick', {}, 1000)).toEqual({ code: 0, stdout: '', stderr: '', timedOut: false })
     await vi.advanceTimersByTimeAsync(10_000)
     expect(recordFor('quick').killSignals).toEqual([])
   })
@@ -238,7 +240,7 @@ describe('hook timeout configuration', () => {
   const runnerRecording = (seen: number[]): HookRunner => {
     return async (_command, _payload, ms) => {
       seen.push(ms)
-      return { code: 0, stdout: '', stderr: '' }
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
   }
 
@@ -311,7 +313,7 @@ describe('runPreToolUse hook sequencing', () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
       run.push(command)
-      return command === 'second' ? { code: 2, stdout: '', stderr: 'denied by second' } : { code: 0, stdout: '', stderr: '' }
+      return command === 'second' ? { code: 2, stdout: '', stderr: 'denied by second', timedOut: false } : { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     const config = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }, { command: 'third' }] }] }
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, reason: 'denied by second' })
@@ -322,7 +324,7 @@ describe('runPreToolUse hook sequencing', () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
       run.push(command)
-      return { code: 0, stdout: '', stderr: '' }
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     const config = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: false })
@@ -330,7 +332,7 @@ describe('runPreToolUse hook sequencing', () => {
   })
 
   it('allows the tool when the config declares no PreToolUse hooks at all', async () => {
-    const runner: HookRunner = async () => ({ code: 2, stdout: '', stderr: 'denied' })
+    const runner: HookRunner = async () => ({ code: 2, stdout: '', stderr: 'denied', timedOut: false })
     expect(await runPreToolUse({}, 'bash', {}, runner)).toEqual({ block: false })
   })
 })

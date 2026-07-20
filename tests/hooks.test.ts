@@ -1,6 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import { describe, expect, it } from 'vitest'
 
@@ -84,7 +85,7 @@ describe('runPreToolUse', () => {
   const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard.sh' }] }] }
 
   it('blocks the tool when a matching hook returns a blocking result', async () => {
-    const runner: HookRunner = async () => ({ code: 2, stdout: '', stderr: 'blocked' })
+    const runner: HookRunner = async () => ({ code: 2, stdout: '', stderr: 'blocked', timedOut: false })
     expect(await runPreToolUse(config, 'bash', { command: 'x' }, runner)).toEqual({ block: true, reason: 'blocked' })
   })
 
@@ -92,7 +93,7 @@ describe('runPreToolUse', () => {
     let calls = 0
     const runner: HookRunner = async () => {
       calls++
-      return { code: 2, stdout: '', stderr: 'blocked' }
+      return { code: 2, stdout: '', stderr: 'blocked', timedOut: false }
     }
     expect(await runPreToolUse(config, 'edit', {}, runner)).toEqual({ block: false })
     expect(calls).toBe(0)
@@ -102,7 +103,7 @@ describe('runPreToolUse', () => {
     let seen: unknown
     const runner: HookRunner = async (_command, payload) => {
       seen = payload
-      return { code: 0, stdout: '', stderr: '' }
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     await runPreToolUse(config, 'bash', { command: 'git status' }, runner)
     expect(seen).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'git status' } })
@@ -130,5 +131,46 @@ describe('runHookCommand (real shell)', () => {
     const result = await runHookCommand('cat', { tool_name: 'bash' }, 5000)
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('"tool_name":"bash"')
+  })
+})
+
+describe('runHookCommand timeout (real shell)', () => {
+  it('resolves at the timeout when a grandchild of the shell holds the stdio pipes open', async () => {
+    // The shell forks for a compound command, so killing only the direct child leaves
+    // `sleep` holding stdout/stderr and `close` never fires.
+    const started = Date.now()
+    const result = await runHookCommand('echo denied >&2; sleep 30', {}, 300)
+
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(result.timedOut).toBe(true)
+  })
+
+  it('kills the shell descendants rather than leaving them running past the timeout', async () => {
+    const flag = join(tempDir(), 'grandchild-survived')
+    await runHookCommand(`(sleep 1; touch ${flag}) & sleep 30`, {}, 200)
+    await delay(2000)
+
+    expect(existsSync(flag)).toBe(false)
+  })
+
+  it('reports a natural completion as not timed out', async () => {
+    expect(await runHookCommand('exit 0', {}, 5000)).toMatchObject({ code: 0, timedOut: false })
+  })
+})
+
+describe('runPreToolUse on a timed-out hook', () => {
+  const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard.sh' }, { command: 'second.sh' }] }] }
+
+  it('blocks the tool rather than treating the killed hook as an allow', async () => {
+    const run: string[] = []
+    const runner: HookRunner = async (command) => {
+      run.push(command)
+      return { code: 0, stdout: '', stderr: '', timedOut: true }
+    }
+    const decision = await runPreToolUse(config, 'bash', {}, runner)
+
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('guard.sh')
+    expect(run).toEqual(['guard.sh'])
   })
 })
