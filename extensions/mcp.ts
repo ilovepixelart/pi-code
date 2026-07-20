@@ -82,7 +82,7 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
 }
 
 export function formatToolName(server: string, tool: string): string {
-  return `${server}_${tool}`.replace(/-/g, '_')
+  return `${server}_${tool}`.replaceAll('-', '_')
 }
 
 export function normalizeSchema(schema: unknown): object {

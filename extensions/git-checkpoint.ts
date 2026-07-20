@@ -65,7 +65,7 @@ function checkpointLabel(checkpoint: Checkpoint, index: number): string {
   return `${index + 1}. ${time}  ${checkpoint.prompt || '(empty prompt)'}${marker}`
 }
 
-export default function (pi: ExtensionAPI) {
+export default function gitCheckpointExtension(pi: ExtensionAPI) {
   const checkpoints = new Map<string, Checkpoint>()
   let pending: { ref: string; createdAt: string } | undefined
   let shadowDir: string | undefined
@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify('No checkpoints recorded yet', 'info')
         return
       }
-      const labels = ordered.map(checkpointLabel)
+      const labels = ordered.map((checkpoint, index) => checkpointLabel(checkpoint, index))
       const choice = await ctx.ui.select('Rewind to checkpoint:', labels)
       if (!choice) return
       const checkpoint = ordered[labels.indexOf(choice)]

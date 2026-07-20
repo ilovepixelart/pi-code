@@ -39,7 +39,7 @@ export function stripTags(html: string): string {
 
 /** Resolve DuckDuckGo's redirect links (/l/?uddg=<encoded>) to the target URL. */
 export function resolveResultUrl(href: string): string {
-  const match = href.match(/[?&]uddg=([^&]+)/)
+  const match = /[?&]uddg=([^&]+)/.exec(href)
   if (match) {
     try {
       return decodeURIComponent(match[1])
@@ -88,9 +88,9 @@ export function isPrivateAddress(ip: string): boolean {
   if (addr.includes(':')) {
     // IPv4-mapped (::ffff:...) and NAT64 (64:ff9b::...) forms embed an IPv4 in the low 32 bits,
     // in either dotted-decimal or hex; the WHATWG URL parser normalizes literals to the hex form.
-    const dotted = addr.match(/^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/)
+    const dotted = /^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/.exec(addr)
     if (dotted) return isPrivateAddress(dotted[1])
-    const hex = addr.match(/^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+    const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(addr)
     if (hex) {
       const hi = Number.parseInt(hex[1], 16)
       const lo = Number.parseInt(hex[2], 16)
