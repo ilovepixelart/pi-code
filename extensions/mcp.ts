@@ -24,11 +24,11 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
+import { capForContext } from './output-guard.js'
 import { isProjectApproved } from './project-approval.js'
 
 const CONNECT_TIMEOUT_MS = 10_000
 const CALL_TIMEOUT_MS = 120_000
-const MAX_INLINE_RESULT = 50_000
 // Tool names an MCP server must never take over. formatToolName always emits
 // `<server>_<tool>`, so only names containing an underscore are actually reachable:
 // pi's own built-ins (read, bash, edit, ...) cannot be produced and are not listed.
@@ -115,8 +115,7 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
   }
   return content.map((block) => {
     if (block.type === 'text') {
-      const text = block.text ?? ''
-      return text.length > MAX_INLINE_RESULT ? { type: 'text', text: `${text.slice(0, MAX_INLINE_RESULT)}\n[truncated ${text.length - MAX_INLINE_RESULT} chars]` } : { type: 'text', text }
+      return { type: 'text', text: capForContext(block.text ?? '') }
     }
     if (block.type === 'image' && block.data) {
       return { type: 'image', data: block.data, mimeType: block.mimeType ?? 'image/png' }
