@@ -18,12 +18,18 @@ Claude Code experience for the [pi](https://pi.dev) coding agent, in one package
 ## Install
 
 ```bash
-pi install pi-code                       # from npm (when published)
-pi install git:github.com/ilovepixelart/pi-code
-pi install ~/Documents/pi-code           # local path, then /reload after edits
+pi install npm:pi-code       # from npm
+pi install -l npm:pi-code    # project-local instead, writes .pi/settings.json
 ```
 
-One `pi install`, everything below loads. Each feature is an extension under [`extensions/`](extensions).
+Other sources:
+
+```bash
+pi install git:github.com/ilovepixelart/pi-code
+pi install ./pi-code         # local checkout, then /reload after edits
+```
+
+One `pi install` and everything below loads on the next start. `pi list` shows what is installed, `pi config` toggles individual resources, and `pi update pi-code` upgrades it. Each feature is an extension under [`extensions/`](extensions).
 
 ## What it does
 
@@ -35,8 +41,8 @@ One `pi install`, everything below loads. Each feature is an extension under [`e
 | Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
-| MCP servers | `.mcp.json`, `~/.claude.json`, `.pi/mcp.json`; stdio + HTTP | `mcp.ts` |
-| Subagents / Task | `~/.claude/agents` + project `.claude/agents`, background runs | `subagent/` |
+| MCP servers | `~/.claude.json`, `~/.pi/agent/mcp.json`, `.mcp.json`, `.pi/mcp.json` (later wins); stdio, HTTP, SSE | `mcp.ts` |
+| Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
 | Checkpoints / rewind | shadow-repo snapshots, hard-reset restore | `git-checkpoint.ts` |
@@ -48,7 +54,7 @@ One `pi install`, everything below loads. Each feature is an extension under [`e
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
 
-Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)). Personal config lives in [dot-pi](https://github.com/ilovepixelart/dot-pi) (`~/.pi/agent`).
+Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)).
 
 ## Development
 
@@ -59,4 +65,4 @@ scripts/e2e.sh          # drives the real pi TUI via tmux (needs a working model
 scripts/record-demos.sh # re-records demos/*.tape with vhs at low thinking
 ```
 
-Extensions live in `extensions/`, tests in `tests/`. Install locally with `pi install ~/Documents/pi-code`, then `/reload` after edits.
+Extensions live in `extensions/`, tests in `tests/`. Install a local checkout with `pi install ./pi-code`, then `/reload` after edits.
