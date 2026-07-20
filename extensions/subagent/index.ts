@@ -22,6 +22,7 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
+import { isProjectApproved } from '../project-approval.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
 import { backgroundStatusText, startBackgroundRun } from './background.js'
 
@@ -484,7 +485,9 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   for (const t of params.tasks ?? []) requestedAgentNames.add(t.agent)
   const requestedProjectAgents = [...requestedAgentNames].map((name) => agents.find((a) => a.name === name)).filter((a): a is AgentConfig => a?.source === 'project')
 
-  const gate = projectAgentGate(requestedProjectAgents.length, ctx.isProjectTrusted?.() ?? false, ctx.hasUI, params.confirmProjectAgents ?? true)
+  // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
+  const approved = await isProjectApproved(ctx)
+  const gate = projectAgentGate(requestedProjectAgents.length, approved, ctx.hasUI, params.confirmProjectAgents ?? true)
   const names = requestedProjectAgents.map((a) => a.name).join(', ')
   if (gate === 'refuse') {
     return { content: [{ type: 'text', text: `Project-local agents (${names}) require a trusted project; refusing in non-interactive mode.` }], details: makeDetails(gateMode)([]) }
