@@ -238,11 +238,16 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
-  // User config is the user's own, so connect it eagerly.
-  await connectServers(loadConfigFrom(userConfigPaths(os.homedir())))
-
+  let userConnected = false
   let projectConnected = false
+
   pi.on('session_start', async (_event, ctx) => {
+    // Connecting spawns processes and opens sockets, so it belongs here rather than in
+    // the factory: pi runs the factory for invocations that never start a session.
+    if (!userConnected) {
+      userConnected = true
+      await connectServers(loadConfigFrom(userConfigPaths(os.homedir())))
+    }
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once the project is trusted.
     if (!projectConnected && ctx.isProjectTrusted?.()) {
       projectConnected = true

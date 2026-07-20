@@ -196,6 +196,13 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
   }
 }
 
+/** setup() plus the session_start that connections now hang off. */
+const setupStarted = async (opts: Parameters<typeof setup>[0] = {}): Promise<Harness> => {
+  const harness = await setup(opts)
+  await harness.sessionStart()
+  return harness
+}
+
 /** The /mcp handler notifies one multi-line blob; split it back into per-server lines. */
 const statusLinesOf = async (harness: Harness): Promise<string[]> => {
   const before = harness.notifications.length
@@ -246,10 +253,26 @@ afterEach(() => {
   }
 })
 
+describe('mcp defers connecting until a session starts', () => {
+  it('connects no transport from the extension factory', async () => {
+    withTools([{ name: 'go' }])
+    // pi runs the factory for invocations that never start a session (pi list, pi config),
+    // so spawning servers here would launch every stdio server for those too.
+    const h = await setup({ user: { local: { command: 'node' } } })
+
+    expect(hoisted.transports).toHaveLength(0)
+    expect(h.toolNames()).toEqual([])
+
+    await h.sessionStart()
+    expect(hoisted.transports).toHaveLength(1)
+    expect(h.toolNames()).toEqual(['local_go'])
+  })
+})
+
 describe('mcp startup config scoping', () => {
-  it('connects user config at startup without waiting for a session', async () => {
+  it('connects user config on the first session without needing project trust', async () => {
     withTools([{ name: 'query' }])
-    const harness = await setup({ user: { db: { command: 'db-server' } } })
+    const harness = await setupStarted({ user: { db: { command: 'db-server' } } })
 
     expect(harness.toolNames()).toEqual(['db_query'])
     expect(hoisted.transports).toHaveLength(1)
@@ -312,7 +335,7 @@ describe('mcp startup config scoping', () => {
 describe('mcp transport selection', () => {
   it('builds a stdio transport from command, args and cwd', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { local: { command: 'node', args: ['server.js'], cwd: '/srv/app' } } })
+    await setupStarted({ user: { local: { command: 'node', args: ['server.js'], cwd: '/srv/app' } } })
 
     const transport = hoisted.transports[0]
     expect(transport.kind).toBe('stdio')
@@ -324,21 +347,21 @@ describe('mcp transport selection', () => {
 
   it('expands a leading ~ in cwd to the home directory', async () => {
     withTools([{ name: 'go' }])
-    const harness = await setup({ user: { local: { command: 'node', cwd: '~/projects' } } })
+    const harness = await setupStarted({ user: { local: { command: 'node', cwd: '~/projects' } } })
 
     expect(hoisted.transports[0].options.cwd).toBe(`${harness.home}/projects`)
   })
 
   it('does not expand a tilde that is not a home-directory prefix', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { local: { command: 'node', cwd: '~backup/data' } } })
+    await setupStarted({ user: { local: { command: 'node', cwd: '~backup/data' } } })
 
     expect(hoisted.transports[0].options.cwd).toBe('~backup/data')
   })
 
   it('defaults args to an empty list when omitted', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { local: { command: 'node' } } })
+    await setupStarted({ user: { local: { command: 'node' } } })
 
     expect(hoisted.transports[0].options.args).toEqual([])
   })
@@ -348,7 +371,7 @@ describe('mcp transport selection', () => {
     setEnv('MCP_TEST_SECRET', 'sekret')
     withTools([{ name: 'go' }])
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what the config interpolation resolves
-    await setup({ user: { local: { command: 'node', env: { API_KEY: 'k-${MCP_TEST_SECRET}', PLAIN: 'literal' } } } })
+    await setupStarted({ user: { local: { command: 'node', env: { API_KEY: 'k-${MCP_TEST_SECRET}', PLAIN: 'literal' } } } })
 
     const env = hoisted.transports[0].options.env as Record<string, string>
     expect(env.API_KEY).toBe('k-sekret')
@@ -358,7 +381,7 @@ describe('mcp transport selection', () => {
   it('gives a stdio server the SDK default environment, not the whole process env', async () => {
     setEnv('MCP_TEST_SECRET', 'sekret')
     withTools([{ name: 'go' }])
-    await setup({ user: { local: { command: 'node', env: { PLAIN: 'literal' } } } })
+    await setupStarted({ user: { local: { command: 'node', env: { PLAIN: 'literal' } } } })
 
     const env = hoisted.transports[0].options.env as Record<string, string>
     // Its own config and the SDK allowlist come through; an unrelated secret does not.
@@ -369,14 +392,14 @@ describe('mcp transport selection', () => {
 
   it('treats a config carrying both command and url as stdio', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { both: { command: 'node', url: 'https://example.com/mcp' } } })
+    await setupStarted({ user: { both: { command: 'node', url: 'https://example.com/mcp' } } })
 
     expect(hoisted.transports[0].kind).toBe('stdio')
   })
 
   it('builds a streamable HTTP transport for a url config', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { remote: { url: 'https://example.com/mcp' } } })
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp' } } })
 
     const transport = hoisted.transports[0]
     expect(transport.kind).toBe('http')
@@ -390,7 +413,7 @@ describe('mcp transport selection', () => {
     setEnv('MCP_TEST_TENANT', 'acme')
     withTools([{ name: 'go' }])
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what the config interpolation resolves
-    await setup({ user: { remote: { url: 'https://${MCP_TEST_HOST}/mcp', headers: { 'X-Tenant': '${MCP_TEST_TENANT}' } } } })
+    await setupStarted({ user: { remote: { url: 'https://${MCP_TEST_HOST}/mcp', headers: { 'X-Tenant': '${MCP_TEST_TENANT}' } } } })
 
     const transport = hoisted.transports[0]
     expect(transport.url?.href).toBe('https://api.example.com/mcp')
@@ -399,7 +422,7 @@ describe('mcp transport selection', () => {
 
   it('sends a literal bearerToken as an Authorization header', async () => {
     withTools([{ name: 'go' }])
-    await setup({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok-123' } } })
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok-123' } } })
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
     expect(headers.Authorization).toBe('Bearer tok-123')
@@ -408,7 +431,7 @@ describe('mcp transport selection', () => {
   it('reads the bearer token from the environment variable named by bearerTokenEnv', async () => {
     setEnv('MCP_TEST_BEARER', 'env-tok')
     withTools([{ name: 'go' }])
-    await setup({ user: { remote: { url: 'https://example.com/mcp', bearerTokenEnv: 'MCP_TEST_BEARER' } } })
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerTokenEnv: 'MCP_TEST_BEARER' } } })
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
     expect(headers.Authorization).toBe('Bearer env-tok')
@@ -417,7 +440,7 @@ describe('mcp transport selection', () => {
   it('prefers an explicit bearerToken over bearerTokenEnv', async () => {
     setEnv('MCP_TEST_BEARER', 'env-tok')
     withTools([{ name: 'go' }])
-    await setup({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'literal-tok', bearerTokenEnv: 'MCP_TEST_BEARER' } } })
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'literal-tok', bearerTokenEnv: 'MCP_TEST_BEARER' } } })
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
     expect(headers.Authorization).toBe('Bearer literal-tok')
@@ -426,7 +449,7 @@ describe('mcp transport selection', () => {
   it('omits Authorization when bearerTokenEnv names an unset variable', async () => {
     unsetEnv('MCP_TEST_ABSENT')
     withTools([{ name: 'go' }])
-    await setup({ user: { remote: { url: 'https://example.com/mcp', bearerTokenEnv: 'MCP_TEST_ABSENT' } } })
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerTokenEnv: 'MCP_TEST_ABSENT' } } })
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
     expect(headers).toEqual({})
@@ -437,7 +460,7 @@ describe('mcp transport selection', () => {
       if (transport.kind === 'http') throw new Error('404 Not Found')
     }
     withTools([{ name: 'go' }])
-    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok' } } })
+    const harness = await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok' } } })
 
     expect(hoisted.transports.map((t) => t.kind)).toEqual(['http', 'sse'])
     const sse = hoisted.transports[1]
@@ -450,14 +473,14 @@ describe('mcp transport selection', () => {
     hoisted.control.connect = async (transport) => {
       if (transport.kind === 'http') throw new Error('Unauthorized')
     }
-    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp' } } })
+    const harness = await setupStarted({ user: { remote: { url: 'https://example.com/mcp' } } })
 
     expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
     expect(await statusLinesOf(harness)).toEqual(['remote: failed: Unauthorized (0 tools)'])
   })
 
   it('reports a malformed url as a failure without constructing any transport', async () => {
-    const harness = await setup({ user: { remote: { url: 'not a url' } } })
+    const harness = await setupStarted({ user: { remote: { url: 'not a url' } } })
 
     expect(hoisted.transports).toEqual([])
     const [line] = await statusLinesOf(harness)
@@ -469,14 +492,14 @@ describe('mcp transport selection', () => {
 describe('mcp tool registration', () => {
   it('namespaces the tool under the server and replaces dashes with underscores', async () => {
     withTools([{ name: 'search-issues' }])
-    const harness = await setup({ user: { 'sonar-qube': { command: 'sonar' } } })
+    const harness = await setupStarted({ user: { 'sonar-qube': { command: 'sonar' } } })
 
     expect(harness.toolNames()).toEqual(['sonar_qube_search_issues'])
   })
 
   it('labels the tool with the undecorated server and tool names', async () => {
     withTools([{ name: 'search-issues', description: 'Find issues' }])
-    const harness = await setup({ user: { 'sonar-qube': { command: 'sonar' } } })
+    const harness = await setupStarted({ user: { 'sonar-qube': { command: 'sonar' } } })
 
     expect(harness.tools[0].label).toBe('sonar-qube: search-issues')
     expect(harness.tools[0].description).toBe('Find issues')
@@ -484,21 +507,21 @@ describe('mcp tool registration', () => {
 
   it('synthesizes a description when the server supplies none', async () => {
     withTools([{ name: 'query' }])
-    const harness = await setup({ user: { db: { command: 'db' } } })
+    const harness = await setupStarted({ user: { db: { command: 'db' } } })
 
     expect(harness.tools[0].description).toBe('MCP tool query from db')
   })
 
   it('exposes the normalized input schema as the tool parameters', async () => {
     withTools([{ name: 'query', inputSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', additionalProperties: false, type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] } }])
-    const harness = await setup({ user: { db: { command: 'db' } } })
+    const harness = await setupStarted({ user: { db: { command: 'db' } } })
 
     expect(JSON.parse(JSON.stringify(harness.tools[0].parameters))).toEqual({ type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] })
   })
 
   it('substitutes an empty object schema when the server declares no input schema', async () => {
     withTools([{ name: 'ping' }])
-    const harness = await setup({ user: { db: { command: 'db' } } })
+    const harness = await setupStarted({ user: { db: { command: 'db' } } })
 
     expect(JSON.parse(JSON.stringify(harness.tools[0].parameters))).toEqual({ type: 'object', properties: {} })
   })
@@ -509,7 +532,7 @@ describe('mcp tool registration', () => {
       if (cursor === 'page-2') return { tools: [{ name: 'two' }], nextCursor: 'page-3' }
       return { tools: [{ name: 'three' }] }
     }
-    const harness = await setup({ user: { db: { command: 'db' } } })
+    const harness = await setupStarted({ user: { db: { command: 'db' } } })
 
     expect(harness.toolNames()).toEqual(['db_one', 'db_two', 'db_three'])
     expect(await statusLinesOf(harness)).toEqual(['db: connected (3 tools)'])
@@ -532,7 +555,7 @@ describe('mcp tool registration', () => {
       const command = client.transport?.options.command
       return command === 'first' ? { tools: [{ name: 'x' }] } : { tools: [{ name: 'qube_x' }, { name: 'other' }] }
     }
-    const harness = await setup({ user: { 'sonar-qube': { command: 'first' }, sonar: { command: 'second' } } })
+    const harness = await setupStarted({ user: { 'sonar-qube': { command: 'first' }, sonar: { command: 'second' } } })
 
     expect(harness.toolNames()).toEqual(['sonar_qube_x', 'sonar_other'])
     expect(harness.warnings).toEqual(['pi-code-mcp: skipping colliding tool name sonar_qube_x'])
@@ -541,7 +564,7 @@ describe('mcp tool registration', () => {
 
   it('registers nothing and reports zero tools for a server that exposes none', async () => {
     withTools([])
-    const harness = await setup({ user: { empty: { command: 'empty' } } })
+    const harness = await setupStarted({ user: { empty: { command: 'empty' } } })
 
     expect(harness.toolNames()).toEqual([])
     expect(await statusLinesOf(harness)).toEqual(['empty: connected (0 tools)'])
@@ -551,7 +574,7 @@ describe('mcp tool registration', () => {
 describe('mcp tool execution', () => {
   const registerOne = async (inputSchema?: unknown): Promise<Harness> => {
     withTools([{ name: 'search-issues', inputSchema }])
-    return setup({ user: { 'sonar-qube': { command: 'sonar' } } })
+    return setupStarted({ user: { 'sonar-qube': { command: 'sonar' } } })
   }
 
   it('forwards the undecorated tool name and the caller arguments to the server', async () => {
@@ -629,7 +652,7 @@ describe('mcp failure reporting', () => {
     hoisted.control.connect = async () => {
       throw new Error('spawn ENOENT')
     }
-    const harness = await setup({ user: { broken: { command: 'missing-binary' } } })
+    const harness = await setupStarted({ user: { broken: { command: 'missing-binary' } } })
 
     expect(await statusLinesOf(harness)).toEqual(['broken: failed: spawn ENOENT (0 tools)'])
     expect(harness.toolNames()).toEqual([])
@@ -639,7 +662,7 @@ describe('mcp failure reporting', () => {
     hoisted.control.connect = async () => {
       throw 'plain string failure'
     }
-    const harness = await setup({ user: { broken: { command: 'x' } } })
+    const harness = await setupStarted({ user: { broken: { command: 'x' } } })
 
     expect(await statusLinesOf(harness)).toEqual(['broken: failed: plain string failure (0 tools)'])
   })
@@ -648,9 +671,10 @@ describe('mcp failure reporting', () => {
     hoisted.control.connect = () => new Promise<void>(() => {})
     vi.useFakeTimers()
 
-    const booting = setup({ user: { hung: { command: 'sleep' } } })
+    const harness = await setup({ user: { hung: { command: 'sleep' } } })
+    const booting = harness.sessionStart()
     await vi.advanceTimersByTimeAsync(10_000)
-    const harness = await booting
+    await booting
 
     expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 10000ms (0 tools)'])
   })
@@ -659,9 +683,10 @@ describe('mcp failure reporting', () => {
     hoisted.control.listTools = () => new Promise<ListPage>(() => {})
     vi.useFakeTimers()
 
-    const booting = setup({ user: { slow: { command: 'x' } } })
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const booting = harness.sessionStart()
     await vi.advanceTimersByTimeAsync(10_000)
-    const harness = await booting
+    await booting
 
     expect(await statusLinesOf(harness)).toEqual(['slow: failed: list tools slow timed out after 10000ms (0 tools)'])
   })
@@ -671,7 +696,7 @@ describe('mcp failure reporting', () => {
       if (transport.options.command === 'bad') throw new Error('nope')
     }
     withTools([{ name: 'go' }])
-    const harness = await setup({ user: { broken: { command: 'bad' }, healthy: { command: 'good' } } })
+    const harness = await setupStarted({ user: { broken: { command: 'bad' }, healthy: { command: 'good' } } })
 
     expect(harness.toolNames()).toEqual(['healthy_go'])
     expect(await statusLinesOf(harness)).toEqual(['broken: failed: nope (0 tools)', 'healthy: connected (1 tools)'])
@@ -680,7 +705,7 @@ describe('mcp failure reporting', () => {
 
 describe('mcp /mcp command', () => {
   it('explains where to configure servers when none are known', async () => {
-    const harness = await setup()
+    const harness = await setupStarted()
 
     await harness.mcpCommand()
 
@@ -692,11 +717,12 @@ describe('mcp /mcp command', () => {
       if (transport.options.command === 'bad') throw new Error('nope')
     }
     hoisted.control.listTools = async () => ({ tools: [{ name: 'a' }, { name: 'b' }] })
-    const harness = await setup({ user: { good: { command: 'ok' }, broken: { command: 'bad' } } })
+    const harness = await setupStarted({ user: { good: { command: 'ok' }, broken: { command: 'bad' } } })
 
     await harness.mcpCommand()
 
-    expect(harness.notifications).toEqual([{ message: 'good: connected (2 tools)\nbroken: failed: nope (0 tools)', level: 'info' }])
+    // session_start notifies its own summary first; /mcp appends the per-server listing.
+    expect(harness.notifications.at(-1)).toEqual({ message: 'good: connected (2 tools)\nbroken: failed: nope (0 tools)', level: 'info' })
   })
 })
 
@@ -747,7 +773,7 @@ describe('mcp session_shutdown', () => {
       closed.push(String(client.transport?.options.command))
     }
     withTools([{ name: 'a' }])
-    const harness = await setup({ user: { first: { command: 'one' }, second: { command: 'two' } } })
+    const harness = await setupStarted({ user: { first: { command: 'one' }, second: { command: 'two' } } })
 
     await harness.shutdown()
 
@@ -763,7 +789,7 @@ describe('mcp session_shutdown', () => {
       closed.push(String(client.transport?.options.command))
     }
     withTools([{ name: 'a' }])
-    const harness = await setup({ user: { broken: { command: 'bad' }, healthy: { command: 'good' } } })
+    const harness = await setupStarted({ user: { broken: { command: 'bad' }, healthy: { command: 'good' } } })
 
     await harness.shutdown()
 
@@ -777,7 +803,7 @@ describe('mcp session_shutdown', () => {
       closed.push('two')
     }
     withTools([{ name: 'a' }])
-    const harness = await setup({ user: { first: { command: 'one' }, second: { command: 'two' } } })
+    const harness = await setupStarted({ user: { first: { command: 'one' }, second: { command: 'two' } } })
 
     await expect(harness.shutdown()).resolves.toBeUndefined()
     expect(closed).toEqual(['two'])
@@ -790,7 +816,7 @@ describe('mcp session_shutdown', () => {
       closed.push('quick')
     }
     withTools([{ name: 'a' }])
-    const harness = await setup({ user: { hung: { command: 'hang' }, quick: { command: 'quick' } } })
+    const harness = await setupStarted({ user: { hung: { command: 'hang' }, quick: { command: 'quick' } } })
     vi.useFakeTimers()
 
     const shutting = harness.shutdown()
