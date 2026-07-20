@@ -112,6 +112,9 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   return { block: false }
 }
 
+/** Memory backstop for a runaway hook. A decision payload is orders of magnitude smaller. */
+const MAX_HOOK_OUTPUT = 1_000_000
+
 export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
@@ -119,11 +122,16 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.stdout?.on('data', (chunk) => {
-      stdout += chunk
+    // Decode on the stream: concatenating Buffers as strings mangles a multi-byte
+    // character split across chunks, and a mangled byte in a hook's deny decision makes
+    // it unparseable, which reads as an allow.
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      if (stdout.length < MAX_HOOK_OUTPUT) stdout += chunk
     })
-    child.stderr?.on('data', (chunk) => {
-      stderr += chunk
+    child.stderr?.on('data', (chunk: string) => {
+      if (stderr.length < MAX_HOOK_OUTPUT) stderr += chunk
     })
     child.on('close', (code) => {
       clearTimeout(timer)
