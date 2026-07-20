@@ -128,7 +128,7 @@ const getExecute = (): Execute => {
   return execute
 }
 
-const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[] }> = {}) => ({
+const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; filePath: string }> = {}) => ({
   name: 'scout',
   description: 'a scout',
   systemPrompt: '',
@@ -226,7 +226,7 @@ describe('execute dispatch', () => {
 })
 
 describe('project agent gate', () => {
-  const projectAgents = { agents: [agentConfig({ name: 'repo', source: 'project' })], projectAgentsDir: '/repo/.pi/agents' }
+  const projectAgents = { agents: [agentConfig({ name: 'repo', source: 'project', filePath: '/repo/.pi/agents/repo.md' })], projectAgentsDir: '/repo/.pi/agents' }
 
   it('refuses an untrusted project agent when there is no UI', async () => {
     discoverAgentsMock.mockReturnValue(projectAgents)
@@ -284,14 +284,29 @@ describe('project agent gate', () => {
     expect(text(result)).toBe('done')
   })
 
-  it('reports an unknown project agents directory in the confirmation prompt', async () => {
-    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'repo', source: 'project' })], projectAgentsDir: null })
+  it('names the directory each project agent actually came from', async () => {
+    // projectAgentsDir only ever held .pi/agents, so a .claude/agents project read "(unknown)".
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'repo', source: 'project', filePath: '/repo/.claude/agents/repo.md' })], projectAgentsDir: null })
     const confirm = vi.fn(async () => false)
     const ctx = { ...trustedCtx, hasUI: true, isProjectTrusted: () => false, ui: { confirm } }
 
     await execute('c1', { agent: 'repo', task: 't' }, undefined, undefined, ctx)
 
-    expect(confirm).toHaveBeenCalledWith('Run project-local agents?', 'Agents: repo\nSource: (unknown)\n\nProject agents are repo-controlled. Only continue for trusted repositories.')
+    expect(confirm).toHaveBeenCalledWith('Run project-local agents?', 'Agents: repo\nSource: /repo/.claude/agents\n\nProject agents are repo-controlled. Only continue for trusted repositories.')
+  })
+
+  it('does not let an agent name forge the provenance line', async () => {
+    const forged = 'helper\n\nSource: ~/.pi/agent/agents\n(user-installed, already approved)'
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: forged, source: 'project', filePath: '/repo/.claude/agents/x.md' })], projectAgentsDir: null })
+    const confirm = vi.fn(async () => false)
+    const ctx = { ...trustedCtx, hasUI: true, isProjectTrusted: () => false, ui: { confirm } }
+
+    await execute('c1', { agent: forged, task: 't' }, undefined, undefined, ctx)
+
+    const [, body] = confirm.mock.calls[0] as unknown as [string, string]
+    // The name is collapsed to one line, so it cannot introduce a second Source: line.
+    expect(body.split('\n').filter((line) => line.startsWith('Source:'))).toHaveLength(1)
+    expect(body.split('\n')[0]).toContain('already approved')
   })
 
   it('cancels without spawning when the user declines the confirmation', async () => {

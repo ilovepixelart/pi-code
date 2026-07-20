@@ -99,12 +99,35 @@ function isDirectory(p: string): boolean {
   }
 }
 
+/** Project root at or above `from`. `.git` is a file in worktrees and submodules. */
+const ROOT_MARKERS = ['.git', 'package.json']
+
+function repoRoot(from: string): string | undefined {
+  let currentDir = from
+  while (true) {
+    if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return currentDir
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) return undefined
+    currentDir = parentDir
+  }
+}
+
+/**
+ * Nearest `relative` directory at or above `cwd`, stopping at the repository root.
+ *
+ * Without the boundary the search runs to the filesystem root, so an agent planted in a
+ * world-writable ancestor such as /tmp is offered as a project agent for every session
+ * beneath it. With no project marker (.git, package.json) the extent is unknown, so only
+ * `cwd` is considered.
+ */
 function findNearestDir(cwd: string, relative: string): string | null {
+  const boundary = repoRoot(cwd) ?? cwd
   let currentDir = cwd
   while (true) {
     const candidate = path.join(currentDir, relative)
     if (isDirectory(candidate)) return candidate
 
+    if (currentDir === boundary) return null
     const parentDir = path.dirname(currentDir)
     if (parentDir === currentDir) return null
     currentDir = parentDir
