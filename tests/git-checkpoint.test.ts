@@ -48,7 +48,7 @@ function setup() {
   tempDirs.push(repo, hoisted.home)
 
   const sessionFile = join(repo, 'session-test.jsonl')
-  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo })
+  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
   writeFileSync(join(repo, 'tracked.txt'), 'v1\n')
   writeFileSync(join(repo, 'untracked.txt'), 'precious\n')
 
@@ -58,7 +58,7 @@ function setup() {
     appendEntry: (customType: string, data: any) => appended.push({ type: 'custom', customType, data }),
     exec: async (cmd: string, args: string[], options?: { cwd?: string }) => {
       try {
-        return { stdout: execFileSync(cmd, args, { cwd: options?.cwd ?? repo, encoding: 'utf8' }), stderr: '', code: 0, killed: false }
+        return { stdout: execFileSync(cmd, args, { cwd: options?.cwd ?? repo, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }), stderr: '', code: 0, killed: false }
       } catch (err: any) {
         return { stdout: err.stdout ?? '', stderr: err.stderr ?? String(err), code: err.status ?? 1, killed: false }
       }

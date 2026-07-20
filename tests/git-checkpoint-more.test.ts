@@ -73,7 +73,7 @@ function setup() {
 
   const shadowHome = hoisted.home
   const sessionFile = join(repo, SESSION_FILE_NAME)
-  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo })
+  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
   writeFileSync(join(repo, 'tracked.txt'), 'v1\n')
 
   gitCheckpoint({
@@ -83,7 +83,7 @@ function setup() {
     exec: async (cmd: string, args: string[], options?: { cwd?: string }) => {
       execArgs.push(args)
       try {
-        return { stdout: execFileSync(cmd, args, { cwd: options?.cwd ?? repo, encoding: 'utf8' }), stderr: '', code: 0, killed: false }
+        return { stdout: execFileSync(cmd, args, { cwd: options?.cwd ?? repo, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }), stderr: '', code: 0, killed: false }
       } catch (err: any) {
         return { stdout: err.stdout ?? '', stderr: err.stderr ?? String(err), code: err.status ?? 1, killed: false }
       }
