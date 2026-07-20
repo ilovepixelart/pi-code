@@ -54,6 +54,41 @@ export interface ImportedFile {
   body: string
 }
 
+/** The `@path` targets of a context file, in document order, skipping fenced code blocks. */
+function importTargets(content: string): string[] {
+  const targets: string[] = []
+  let inFence = false
+  for (const line of content.split('\n')) {
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    for (const match of line.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
+  }
+  return targets
+}
+
+/** Read one `@path` target, or null when it is unresolvable, already seen, outside `allowedRoots`, or unreadable. */
+function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>): { real: string; body: string } | null {
+  const resolved = path.resolve(fromDir, expandHome(target, home))
+  let real: string
+  try {
+    real = fs.realpathSync(resolved)
+  } catch {
+    return null
+  }
+  if (seen.has(real)) return null
+  seen.add(real)
+  if (!isUnder(real, allowedRoots)) return null
+  try {
+    // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
+    return { real, body: fs.readFileSync(real, 'utf-8') }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Collect the contents of every file transitively imported via `@path`, in
  * discovery order. Imports are resolved through symlinks and kept within
@@ -62,34 +97,10 @@ export interface ImportedFile {
 export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, depth = 0): ImportedFile[] {
   if (depth >= MAX_IMPORT_DEPTH) return []
   const out: ImportedFile[] = []
-  let inFence = false
-  for (const line of content.split('\n')) {
-    if (line.trimStart().startsWith('```')) {
-      inFence = !inFence
-      continue
-    }
-    if (inFence) continue
-    for (const match of line.matchAll(/(^|\s)@(\S+)/g)) {
-      const resolved = path.resolve(fromDir, expandHome(match[2], home))
-      let real: string
-      try {
-        real = fs.realpathSync(resolved)
-      } catch {
-        continue
-      }
-      if (seen.has(real)) continue
-      seen.add(real)
-      if (!isUnder(real, allowedRoots)) continue
-      let body: string
-      try {
-        // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
-        body = fs.readFileSync(real, 'utf-8')
-      } catch {
-        continue
-      }
-      out.push({ path: real, body: body.trim() })
-      out.push(...collectImports(body, path.dirname(real), home, allowedRoots, seen, depth + 1))
-    }
+  for (const target of importTargets(content)) {
+    const file = readImport(target, fromDir, home, allowedRoots, seen)
+    if (!file) continue
+    out.push({ path: file.real, body: file.body.trim() }, ...collectImports(file.body, path.dirname(file.real), home, allowedRoots, seen, depth + 1))
   }
   return out
 }

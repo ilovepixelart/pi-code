@@ -123,15 +123,20 @@ export function cleanStepText(text: string): string {
   return cleaned
 }
 
+// Horizontal whitespace before the newline: \s would include \n itself and overlap
+// the following \n, which is what backtracks super-linearly.
+const PLAN_HEADER = /\*{0,2}Plan:\*{0,2}[^\S\n]*\n/i
+
 export function extractTodoItems(message: string): TodoItem[] {
   const items: TodoItem[] = []
-  const headerMatch = /\*{0,2}Plan:\*{0,2}\s*\n/i.exec(message)
+  const headerMatch = PLAN_HEADER.exec(message)
   if (!headerMatch) return items
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length)
-  // Capture starts on a non-whitespace char so the leading \s+ owns all separator
-  // whitespace unambiguously (avoids super-linear backtracking); output is unchanged.
-  const numberedPattern = /^\s*(\d+)[.)]\s+\*{0,2}([^\s*\n][^*\n]*)/gm
+  // Separators are horizontal whitespace only: under /m the anchor already sits at
+  // each line start, so letting \s cross newlines only adds backtracking. The capture
+  // starts on a non-whitespace char so the preceding run owns all separator space.
+  const numberedPattern = /^[^\S\n]*(\d+)[.)][^\S\n]+\*{0,2}([^\s*][^*\n]*)/gm
 
   for (const match of planSection.matchAll(numberedPattern)) {
     const text = match[2]
@@ -172,6 +177,6 @@ export function markCompletedSteps(text: string, items: TodoItem[]): number {
  * the tool input is already known to be the plan itself.
  */
 export function planToTodos(plan: string): TodoItem[] {
-  const withHeader = /\*{0,2}Plan:\*{0,2}\s*\n/i.test(plan) ? plan : `Plan:\n${plan}`
+  const withHeader = PLAN_HEADER.test(plan) ? plan : `Plan:\n${plan}`
   return extractTodoItems(withHeader)
 }

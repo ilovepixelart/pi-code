@@ -32,7 +32,9 @@ export function decodeEntities(text: string): string {
 }
 
 export function stripTags(html: string): string {
-  return decodeEntities(html.replace(/<[^>]*>/g, ''))
+  // [^<>] rather than [^>]: excluding `<` bounds a failed match at the next tag start
+  // instead of rescanning to end of input, which is what makes the strip linear.
+  return decodeEntities(html.replace(/<[^<>]*>/g, ''))
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -72,11 +74,44 @@ export function htmlToText(html: string): string {
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/tr)[^>]*>/gi, '\n')
-  const text = decodeEntities(withoutBlocks.replace(/<[^>]*>/g, ' '))
+  const text = decodeEntities(withoutBlocks.replace(/<[^<>]*>/g, ' '))
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s+/g, '\n')
     .trim()
   return text.length > MAX_FETCH_CHARS ? `${text.slice(0, MAX_FETCH_CHARS)}\n[truncated ${text.length - MAX_FETCH_CHARS} chars]` : text
+}
+
+/**
+ * IPv4-mapped (::ffff:...) and NAT64 (64:ff9b::...) forms embed an IPv4 in the low 32 bits,
+ * in either dotted-decimal or hex; the WHATWG URL parser normalizes literals to the hex form.
+ */
+function embeddedIpv4(addr: string): string | null {
+  const dotted = /^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/.exec(addr)
+  if (dotted) return dotted[1]
+  const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(addr)
+  if (!hex) return null
+  const hi = Number.parseInt(hex[1], 16)
+  const lo = Number.parseInt(hex[2], 16)
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
+}
+
+function isPrivateIpv6(addr: string): boolean {
+  const embedded = embeddedIpv4(addr)
+  if (embedded) return isPrivateAddress(embedded)
+  if (addr === '::1' || addr === '::') return true
+  if (/^fe[89ab]/.test(addr)) return true // link-local fe80::/10
+  return /^f[cd]/.test(addr) // unique local fc00::/7
+}
+
+function isPrivateIpv4(addr: string): boolean {
+  const parts = addr.split('.').map(Number)
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true
+  const [a, b] = parts
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  return a === 100 && b >= 64 && b <= 127
 }
 
 /** SSRF guard: true for loopback, RFC1918, link-local, CGNAT, and private IPv6 ranges. Fails closed on unparseable input. */
@@ -85,31 +120,7 @@ export function isPrivateAddress(ip: string): boolean {
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
     .split('%')[0]
-  if (addr.includes(':')) {
-    // IPv4-mapped (::ffff:...) and NAT64 (64:ff9b::...) forms embed an IPv4 in the low 32 bits,
-    // in either dotted-decimal or hex; the WHATWG URL parser normalizes literals to the hex form.
-    const dotted = /^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/.exec(addr)
-    if (dotted) return isPrivateAddress(dotted[1])
-    const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(addr)
-    if (hex) {
-      const hi = Number.parseInt(hex[1], 16)
-      const lo = Number.parseInt(hex[2], 16)
-      return isPrivateAddress(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`)
-    }
-    if (addr === '::1' || addr === '::') return true
-    if (/^fe[89ab]/.test(addr)) return true // link-local fe80::/10
-    if (/^f[cd]/.test(addr)) return true // unique local fc00::/7
-    return false
-  }
-  const parts = addr.split('.').map(Number)
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true
-  const [a, b] = parts
-  if (a === 0 || a === 10 || a === 127) return true
-  if (a === 169 && b === 254) return true
-  if (a === 172 && b >= 16 && b <= 31) return true
-  if (a === 192 && b === 168) return true
-  if (a === 100 && b >= 64 && b <= 127) return true
-  return false
+  return addr.includes(':') ? isPrivateIpv6(addr) : isPrivateIpv4(addr)
 }
 
 async function assertPublicHost(url: URL): Promise<void> {
