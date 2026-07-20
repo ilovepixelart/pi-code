@@ -26,10 +26,14 @@
     "biome:fix": "npx @biomejs/biome check --write .",
     "type:check": "tsc --noEmit",
     "test": "vitest run --coverage",
-    "check": "npm run biome && npm run type:check && npm run test"
+    "check": "npm run biome && npm run type:check && npm run test",
+    "prepublishOnly": "npm run check"
   },
   "engines": {
     "node": ">=22.19"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
