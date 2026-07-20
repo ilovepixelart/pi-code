@@ -94,9 +94,54 @@ const SAFE_PATTERNS = [
 // outright rather than parsed.
 const SUBSTITUTION = /\$\(|`|<\(|>\(/
 
-// Claude Code's separator set (code.claude.com/docs/en/permissions): every subcommand
-// must qualify on its own, otherwise an allowlisted first token buys the rest of the line.
-const SEPARATORS = /\|\||&&|\|&|[;|&\n]/
+/**
+ * Split on the shell separators Claude Code documents (`&&`, `||`, `;`, `|`, `|&`, `&`,
+ * newline) so every subcommand is checked on its own, ignoring separators inside quotes:
+ * `grep 'a|b'` is one read, not a pipe. Returns nothing on an unbalanced quote, which
+ * fails the caller closed rather than guessing at the intended split.
+ *
+ * A shell AST would be exact; this is the honest approximation for a quoting-only concern.
+ */
+function splitSegments(command: string): string[] {
+  const segments: string[] = []
+  let current = ''
+  let quote: "'" | '"' | undefined
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (quote !== undefined) {
+      current += ch
+      if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      current += ch
+      continue
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      current += ch + command[++i]
+      continue
+    }
+    const pair = command.slice(i, i + 2)
+    if (pair === '&&' || pair === '||' || pair === '|&') {
+      segments.push(current)
+      current = ''
+      i++
+      continue
+    }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n') {
+      segments.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+
+  if (quote !== undefined) return []
+  segments.push(current)
+  return segments.map((segment) => segment.trim()).filter(Boolean)
+}
 
 // find is allowlisted for traversal only; these actions run commands or delete.
 const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf)\b/
@@ -116,10 +161,7 @@ function isSafeSegment(segment: string): boolean {
  */
 export function isSafeCommand(command: string): boolean {
   if (SUBSTITUTION.test(command)) return false
-  const segments = command
-    .split(SEPARATORS)
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const segments = splitSegments(command)
   return segments.length > 0 && segments.every(isSafeSegment)
 }
 
