@@ -130,6 +130,9 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
       clearTimeout(timer)
       resolve({ code: 0, stdout, stderr })
     })
+    // A hook that exits without reading stdin (e.g. `exit 2`) closes the pipe first,
+    // so ignore EPIPE on this write rather than crashing the host process.
+    child.stdin?.on('error', () => {})
     child.stdin?.end(JSON.stringify(payload))
   })
 
