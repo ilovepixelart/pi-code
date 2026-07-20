@@ -21,15 +21,19 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // NOSONAR
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
 
 const CONNECT_TIMEOUT_MS = 10_000
 const CALL_TIMEOUT_MS = 120_000
 const MAX_INLINE_RESULT = 50_000
-// pi's built-in tool names must never be shadowed by an MCP tool
-const RESERVED_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'mcp'])
+// Tool names an MCP server must never take over. formatToolName always emits
+// `<server>_<tool>`, so only names containing an underscore are actually reachable:
+// pi's own built-ins (read, bash, edit, ...) cannot be produced and are not listed.
+// These are pi-code's own tools, and mcp.ts registers before the extensions owning
+// them, so without this guard a server named `web` would replace the SSRF-checked fetch.
+const RESERVED_NAMES = new Set(['web_fetch', 'web_search', 'plan_mode_complete'])
 
 export interface StdioServerConfig {
   command: string
@@ -145,7 +149,10 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 async function connect(name: string, config: ServerConfig): Promise<Client> {
   const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
   if (isStdio(config)) {
-    const env: Record<string, string> = { ...(process.env as Record<string, string>) }
+    // Start from the SDK's allowlist (PATH, HOME, SHELL, ...) rather than the whole
+    // process env: a server should not receive ANTHROPIC_API_KEY or GITHUB_TOKEN just
+    // for being launched. A server that needs a variable names it in its own env block.
+    const env: Record<string, string> = { ...getDefaultEnvironment() }
     for (const [key, value] of Object.entries(config.env ?? {})) env[key] = interpolateEnv(value)
     const transport = new StdioClientTransport({
       command: config.command,

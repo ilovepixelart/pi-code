@@ -1,10 +1,17 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import contextImports, { collectImports, expandHome } from '../extensions/context-imports.ts'
+import contextImports, { collectImports, expandHome, rootsForImporter } from '../extensions/context-imports.ts'
+
+/** Roots granted to `file`, then the imports it actually pulls in. */
+const importsFor = (file: string, home: string, cwd: string, content?: string) => {
+  const roots = rootsForImporter(file, home, cwd)
+  const body = content ?? readFileSync(file, 'utf-8')
+  return collectImports(body, dirname(file), home, roots, new Set())
+}
 
 // realpath so allowed-root prefix checks hold on macOS (/tmp -> /private/tmp)
 const tempDir = (): string => realpathSync(mkdtempSync(join(tmpdir(), 'ci-')))
@@ -92,5 +99,41 @@ describe('extension wiring', () => {
     const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
     contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
     expect(await handlers.get('before_agent_start')?.({ systemPrompt: 'X', systemPromptOptions: { cwd: '/tmp', contextFiles: [] } })).toBeUndefined()
+  })
+})
+
+describe('user config is off limits to project context files', () => {
+  /** Fake home with a credential file, plus a separate project checkout. */
+  const scenario = () => {
+    const home = tempDir()
+    const cwd = tempDir()
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', '.credentials.json'), 'OAUTH_TOKEN')
+    writeFileSync(join(home, '.claude', 'CLAUDE.md'), 'user context')
+    return { home, cwd }
+  }
+
+  it('refuses a project file importing the user config', () => {
+    const { home, cwd } = scenario()
+    writeFileSync(join(cwd, 'CLAUDE.md'), '@~/.claude/.credentials.json')
+
+    const handler = importsFor(join(cwd, 'CLAUDE.md'), home, cwd)
+    expect(handler).toEqual([])
+  })
+
+  it('still lets a user config file import from the user config', () => {
+    const { home, cwd } = scenario()
+    writeFileSync(join(home, '.claude', 'extra.md'), 'user extra')
+
+    const handler = importsFor(join(home, '.claude', 'CLAUDE.md'), home, cwd, '@~/.claude/extra.md')
+    expect(handler.map((f) => f.body)).toEqual(['user extra'])
+  })
+
+  it('still lets a project file import within the project', () => {
+    const { home, cwd } = scenario()
+    writeFileSync(join(cwd, 'notes.md'), 'project notes')
+
+    const handler = importsFor(join(cwd, 'CLAUDE.md'), home, cwd, '@notes.md')
+    expect(handler.map((f) => f.body)).toEqual(['project notes'])
   })
 })

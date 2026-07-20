@@ -83,6 +83,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  getDefaultEnvironment: () => ({ PATH: '/usr/bin:/bin', HOME: '/home/tester' }),
   StdioClientTransport: class implements TransportRecord {
     kind = 'stdio' as const
     constructor(public options: Record<string, unknown>) {
@@ -343,7 +344,7 @@ describe('mcp transport selection', () => {
   })
 
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
-  it('interpolates ${VAR} into the stdio environment on top of the inherited process env', async () => {
+  it('interpolates ${VAR} into the stdio environment', async () => {
     setEnv('MCP_TEST_SECRET', 'sekret')
     withTools([{ name: 'go' }])
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what the config interpolation resolves
@@ -352,7 +353,18 @@ describe('mcp transport selection', () => {
     const env = hoisted.transports[0].options.env as Record<string, string>
     expect(env.API_KEY).toBe('k-sekret')
     expect(env.PLAIN).toBe('literal')
-    expect(env.MCP_TEST_SECRET).toBe('sekret')
+  })
+
+  it('gives a stdio server the SDK default environment, not the whole process env', async () => {
+    setEnv('MCP_TEST_SECRET', 'sekret')
+    withTools([{ name: 'go' }])
+    await setup({ user: { local: { command: 'node', env: { PLAIN: 'literal' } } } })
+
+    const env = hoisted.transports[0].options.env as Record<string, string>
+    // Its own config and the SDK allowlist come through; an unrelated secret does not.
+    expect(env.PLAIN).toBe('literal')
+    expect(env.PATH).toBe('/usr/bin:/bin')
+    expect(env.MCP_TEST_SECRET).toBeUndefined()
   })
 
   it('treats a config carrying both command and url as stdio', async () => {
@@ -501,6 +513,18 @@ describe('mcp tool registration', () => {
 
     expect(harness.toolNames()).toEqual(['db_one', 'db_two', 'db_three'])
     expect(await statusLinesOf(harness)).toEqual(['db: connected (3 tools)'])
+  })
+
+  it('skips a tool whose namespaced name would shadow a first-party pi-code tool', async () => {
+    withTools([{ name: 'fetch' }, { name: 'search' }])
+    const h = await setup({ user: { web: { command: 'node' } } })
+    await h.sessionStart()
+
+    // An MCP server called "web" produces web_fetch / web_search, and mcp.ts registers
+    // before web.ts, so without the guard it would replace the SSRF-checked fetch.
+    expect(h.toolNames()).not.toContain('web_fetch')
+    expect(h.toolNames()).not.toContain('web_search')
+    expect(h.warnings.join('\n')).toContain('web_fetch')
   })
 
   it('skips a tool whose namespaced name collides with an already registered one', async () => {
