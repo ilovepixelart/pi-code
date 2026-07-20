@@ -53,7 +53,7 @@ jobs:
             -Dsonar.projectName=${{ github.event.repository.name }}
             -Dsonar.projectKey=ilovepixelart_${{ github.event.repository.name }}
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-            -Dsonar.sources=packages
-            -Dsonar.tests=packages
-            -Dsonar.test.exclusions=packages/*/tests/**
-            -Dsonar.coverage.exclusions=packages/*/tests/**
+            -Dsonar.sources=extensions
+            -Dsonar.tests=tests
+            -Dsonar.test.exclusions=tests/**
+            -Dsonar.coverage.exclusions=tests/**
