@@ -571,10 +571,12 @@ describe('/todos command', () => {
     await h.runCommand('todos', { hasUI: true, ui: ui.ui })
     const component = ui.customFactories[0](null, theme, null, () => {})
 
-    const first = component.render(60)
-    expect(component.render(60)).toBe(first)
+    const before = component.render(60)
+    await h.call({ action: 'add', text: 'second' })
+    expect(component.render(60)).toEqual(before)
+
     component.invalidate?.()
-    expect(component.render(60)).not.toBe(first)
+    expect(component.render(60).join('\n')).toContain('second')
   })
 
   it('re-lays out when the width changes', async () => {

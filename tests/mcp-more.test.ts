@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -149,6 +149,7 @@ const writeServers = (file: string, servers: Record<string, unknown>): void => {
 const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown> } = {}): Promise<Harness> => {
   const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
   const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
+  tempDirs.push(home, cwd)
   hoisted.home = home
   if (opts.user) writeServers(join(home, '.claude.json'), opts.user)
   if (opts.project) writeServers(join(cwd, '.mcp.json'), opts.project)
@@ -218,6 +219,12 @@ const setEnv = (key: string, value: string): void => {
   savedEnv[key] = process.env[key]
   process.env[key] = value
 }
+const unsetEnv = (key: string): void => {
+  savedEnv[key] = process.env[key]
+  delete process.env[key]
+}
+
+const tempDirs: string[] = []
 
 beforeEach(() => {
   hoisted.transports.length = 0
@@ -228,6 +235,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true })
+  }
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
@@ -286,6 +296,7 @@ describe('mcp startup config scoping', () => {
   it('loadConfig merges the user home and project files with project winning', () => {
     const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
     const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
+    tempDirs.push(home, cwd)
     hoisted.home = home
     writeServers(join(home, '.claude.json'), { shared: { command: 'from-user' }, only: { command: 'user-only' } })
     writeServers(join(cwd, '.mcp.json'), { shared: { command: 'from-project' } })
@@ -401,7 +412,7 @@ describe('mcp transport selection', () => {
   })
 
   it('omits Authorization when bearerTokenEnv names an unset variable', async () => {
-    delete process.env.MCP_TEST_ABSENT
+    unsetEnv('MCP_TEST_ABSENT')
     withTools([{ name: 'go' }])
     await setup({ user: { remote: { url: 'https://example.com/mcp', bearerTokenEnv: 'MCP_TEST_ABSENT' } } })
 

@@ -122,7 +122,7 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.notifications.some((n) => n.includes('Rewind complete'))).toBe(true)
   })
 
-  it('dedupes checkpoints per prompt and reuses HEAD for unchanged trees', async () => {
+  it('dedupes checkpoints per prompt', async () => {
     const t = setup()
     await checkpointOneTurn(t, 0)
 
@@ -130,6 +130,20 @@ describe('shadow-repo checkpoint lifecycle', () => {
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
 
     expect(t.appended).toHaveLength(1)
+  })
+
+  it('reuses the existing HEAD ref when the tree has not changed', async () => {
+    const t = setup()
+    await checkpointOneTurn(t, 0)
+
+    // A distinct prompt gets past the per-entry dedupe, so the snapshot runs
+    // again; with an untouched work tree it must resolve to the same commit.
+    const secondPrompt = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'now add a regression test for it' } }
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
+
+    expect(t.appended).toHaveLength(2)
+    expect(t.appended[1].data.ref).toBe(t.appended[0].data.ref)
   })
 
   it('warns on an unknown ref instead of crashing', async () => {

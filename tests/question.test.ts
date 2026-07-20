@@ -201,14 +201,22 @@ describe('question overlay', () => {
     expect(overlay.render(60)).toContain('> 3. Type something.')
   })
 
-  it('discards its cached lines when the host invalidates', () => {
+  it('re-lays out when the width changes', () => {
     const { overlay } = openOverlay(setup())
-    const wide = overlay.render(60)
-    // Cached output is reused verbatim, so the new width only takes effect after invalidate.
-    expect(overlay.render(20)).toEqual(wide)
-
-    overlay.invalidate()
+    expect(overlay.render(60)[0]).toBe('─'.repeat(60))
+    // A terminal resize only calls requestRender, never invalidate, so the
+    // cache must be keyed on width or the overlay paints at the stale one.
     expect(overlay.render(20)[0]).toBe('─'.repeat(20))
+  })
+
+  it('reuses its cached lines at an unchanged width until the host invalidates', () => {
+    const { overlay } = openOverlay(setup())
+    const first = overlay.render(60)
+    expect(overlay.render(60)).toEqual(first)
+
+    overlay.handleInput(RAW.down)
+    overlay.invalidate()
+    expect(overlay.render(60)).not.toEqual(first)
   })
 
   it('resolves the first option as selection number 1 on enter', async () => {

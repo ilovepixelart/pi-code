@@ -118,7 +118,16 @@ describe('web_fetch responses', () => {
   })
 
   it('treats a missing content-type as non-html and skips html stripping', async () => {
-    fetchMock.mockResolvedValue(respond('<b>raw</b>', { contentType: null }))
+    // Response() synthesizes text/plain for a string body, so a header-less
+    // reply has to be duck-typed to actually reach the `?? ''` fallback.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      url: 'https://example.com/unknown',
+      body: null,
+      text: async () => '<b>raw</b>',
+    } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/unknown')
     expect(result.content[0].text).toBe('<b>raw</b>')
   })

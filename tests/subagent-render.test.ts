@@ -2,7 +2,7 @@ import * as os from 'node:os'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
 import type { Theme } from '@earendil-works/pi-coding-agent'
-import type { Component, Container } from '@earendil-works/pi-tui'
+import { type Component, type Container, Markdown } from '@earendil-works/pi-tui'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import subagentExtension, { formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput, mapWithConcurrencyLimit } from '../extensions/subagent/index.ts'
@@ -26,8 +26,12 @@ const str = (c: Component): string =>
     .render(200)
     .map((line) => line.trimEnd())
     .join('\n')
-const childStr = (c: Container, i: number): string => str(c.children[i])
-const shapeOf = (c: Container): string[] => c.children.map((child) => child.constructor.name)
+/**
+ * Visible content of a container in order. Markdown stands in as a marker because
+ * it cannot render without an initialized theme. Asserting content rather than the
+ * child class sequence keeps these tests from breaking on spacing-only changes.
+ */
+const visibleLines = (c: Container): string[] => c.children.flatMap((child) => (child instanceof Markdown ? ['<output>'] : str(child).split('\n'))).filter((line) => line !== '')
 
 type ToolShape = {
   name: string
@@ -378,22 +382,14 @@ describe('renderResult single mode', () => {
     })
     const container = renderResult(toolResult('single', [r]), { expanded: true }, theme) as Container
 
-    expect(shapeOf(container)).toEqual(['Text', 'Spacer', 'Text', 'Text', 'Spacer', 'Text', 'Text', 'Spacer', 'Markdown'])
-    expect(childStr(container, 0)).toBe('✓ scout (user)')
-    expect(childStr(container, 2)).toBe('─── Task ───')
-    expect(childStr(container, 3)).toBe('do it')
-    expect(childStr(container, 5)).toBe('─── Output ───')
-    expect(childStr(container, 6)).toBe('→ $ ls')
+    expect(visibleLines(container)).toEqual(['✓ scout (user)', '─── Task ───', 'do it', '─── Output ───', '→ $ ls', '<output>'])
   })
 
   it('marks an expanded failure with the stop reason and error message', () => {
     const r = makeResult({ agent: 'scout', agentSource: 'project', task: 't', exitCode: 1, stopReason: 'error', errorMessage: 'boom' })
     const container = renderResult(toolResult('single', [r]), { expanded: true }, theme) as Container
 
-    expect(shapeOf(container)).toEqual(['Text', 'Text', 'Spacer', 'Text', 'Text', 'Spacer', 'Text', 'Text'])
-    expect(childStr(container, 0)).toBe('✗ scout (project) [error]')
-    expect(childStr(container, 1)).toBe('Error: boom')
-    expect(childStr(container, 7)).toBe('(no output)')
+    expect(visibleLines(container)).toEqual(['✗ scout (project) [error]', 'Error: boom', '─── Task ───', 't', '─── Output ───', '(no output)'])
   })
 
   it('treats an aborted stop reason as a failure even with exit code 0', () => {
@@ -405,8 +401,7 @@ describe('renderResult single mode', () => {
     const r = makeResult({ agent: 'scout', usage: { ...noUsage, turns: 2, input: 1500 }, model: 'sonnet' })
     const container = renderResult(toolResult('single', [r]), { expanded: true }, theme) as Container
 
-    expect(shapeOf(container).slice(-2)).toEqual(['Spacer', 'Text'])
-    expect(childStr(container, container.children.length - 1)).toBe('2 turns ↑1.5k sonnet')
+    expect(visibleLines(container).at(-1)).toBe('2 turns ↑1.5k sonnet')
   })
 
   it('clips each text item to three lines when collapsed', () => {
@@ -457,14 +452,7 @@ describe('renderResult chain mode', () => {
   it('builds an expanded container with a per-step block and an aggregate total', () => {
     const container = renderResult(toolResult('chain', steps), { expanded: true }, theme) as Container
 
-    expect(shapeOf(container)).toEqual(['Text', 'Spacer', 'Text', 'Text', 'Text', 'Spacer', 'Markdown', 'Text', 'Spacer', 'Text', 'Text', 'Spacer', 'Text'])
-    expect(childStr(container, 0)).toBe('✓ chain 2/2 steps')
-    expect(childStr(container, 2)).toBe('─── Step 1: alpha ✓')
-    expect(childStr(container, 3)).toBe('Task: first task')
-    expect(childStr(container, 4)).toBe('→ $ ls')
-    expect(childStr(container, 7)).toBe('1 turn ↑500')
-    expect(childStr(container, 9)).toBe('─── Step 2: beta ✓')
-    expect(childStr(container, 12)).toBe('Total: 1 turn ↑500')
+    expect(visibleLines(container)).toEqual(['✓ chain 2/2 steps', '─── Step 1: alpha ✓', 'Task: first task', '→ $ ls', '<output>', '1 turn ↑500', '─── Step 2: beta ✓', 'Task: second task', 'Total: 1 turn ↑500'])
   })
 })
 
@@ -491,13 +479,7 @@ describe('renderResult parallel mode', () => {
     const results = [makeResult({ agent: 'a', task: 'T', messages: [assistant(toolCallPart('bash', { command: 'ls' }), textPart('hello'))], usage: { ...noUsage, turns: 1, input: 100 } })]
     const container = renderResult(toolResult('parallel', results), { expanded: true }, theme) as Container
 
-    expect(shapeOf(container)).toEqual(['Text', 'Spacer', 'Text', 'Text', 'Text', 'Spacer', 'Markdown', 'Text', 'Spacer', 'Text'])
-    expect(childStr(container, 0)).toBe('✓ parallel 1/1 tasks')
-    expect(childStr(container, 2)).toBe('─── a ✓')
-    expect(childStr(container, 3)).toBe('Task: T')
-    expect(childStr(container, 4)).toBe('→ $ ls')
-    expect(childStr(container, 7)).toBe('1 turn ↑100')
-    expect(childStr(container, 9)).toBe('Total: 1 turn ↑100')
+    expect(visibleLines(container)).toEqual(['✓ parallel 1/1 tasks', '─── a ✓', 'Task: T', '→ $ ls', '<output>', '1 turn ↑100', 'Total: 1 turn ↑100'])
   })
 })
 
