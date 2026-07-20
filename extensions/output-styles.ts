@@ -32,7 +32,7 @@ function field(frontmatter: string, key: string): string {
 
 /** Parse an output-style markdown file into its name, description, and body. */
 export function parseStyle(content: string, fallbackName: string): OutputStyle {
-  const match = /^---\n([\s\S]*?)\n---\n?/.exec(content)
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   const frontmatter = match ? match[1] : ''
   const body = match ? content.slice(match[0].length) : content
   return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim() }
@@ -46,9 +46,15 @@ function isDirectory(target: string): boolean {
   }
 }
 
-/** Existing `.claude/output-styles` directories, user first then project. */
-export function styleDirs(cwd: string, home: string): string[] {
-  return [path.join(home, '.claude', 'output-styles'), path.join(cwd, '.claude', 'output-styles')].filter((dir) => isDirectory(dir))
+/**
+ * Existing `.claude/output-styles` directories, user first then project. The project
+ * directory is included only for trusted projects, since its style body is injected
+ * verbatim into the system prompt.
+ */
+export function styleDirs(cwd: string, home: string, trusted: boolean): string[] {
+  const dirs = [path.join(home, '.claude', 'output-styles')]
+  if (trusted) dirs.push(path.join(cwd, '.claude', 'output-styles'))
+  return dirs.filter((dir) => isDirectory(dir))
 }
 
 /** All output styles, project entries overriding user entries of the same name. */
@@ -70,8 +76,11 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
   return [...byName.values()]
 }
 
-export function settingsFiles(cwd: string, home: string): string[] {
-  return [path.join(home, '.claude', 'settings.json'), path.join(cwd, '.claude', 'settings.json'), path.join(cwd, '.claude', 'settings.local.json')]
+/** Settings files that carry `outputStyle`. Project settings apply only when trusted. */
+export function settingsFiles(cwd: string, home: string, trusted: boolean): string[] {
+  const files = [path.join(home, '.claude', 'settings.json')]
+  if (trusted) files.push(path.join(cwd, '.claude', 'settings.json'), path.join(cwd, '.claude', 'settings.local.json'))
+  return files
 }
 
 /** The `outputStyle` recorded in settings, last file winning. */
@@ -111,9 +120,12 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     const home = os.homedir()
-    styles = loadStyles(styleDirs(ctx.cwd, home))
+    // A project style body is injected verbatim into the system prompt, so only honor
+    // project styles / selection once the project is trusted.
+    const trusted = ctx.isProjectTrusted?.() ?? false
+    styles = loadStyles(styleDirs(ctx.cwd, home, trusted))
     localSettingsPath = path.join(ctx.cwd, '.claude', 'settings.local.json')
-    activeName = readActiveStyleName(settingsFiles(ctx.cwd, home))
+    activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
     const active = styleForName(styles, activeName)
     if (active) ctx.ui.notify(`Output style: ${active.name}`, 'info')
   })

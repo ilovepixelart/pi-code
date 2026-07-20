@@ -13,6 +13,10 @@ import { Type } from 'typebox'
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1'
 const MAX_FETCH_CHARS = 30_000
+// Hard cap on raw bytes read before any parsing, so a huge or hostile page can't
+// exhaust memory or feed megabytes into the HTML regexes. Output is capped again
+// at MAX_FETCH_CHARS, so real pages rarely lose text.
+const MAX_RAW_CHARS = 200_000
 const FETCH_TIMEOUT_MS = 20_000
 
 export interface SearchResult {
@@ -77,13 +81,27 @@ export function htmlToText(html: string): string {
 
 /** SSRF guard: true for loopback, RFC1918, link-local, CGNAT, and private IPv6 ranges. Fails closed on unparseable input. */
 export function isPrivateAddress(ip: string): boolean {
-  if (ip.includes(':')) {
-    const v6 = ip.toLowerCase()
-    const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-    if (mapped) return isPrivateAddress(mapped[1])
-    return v6 === '::1' || v6 === '::' || v6.startsWith('fe80:') || v6.startsWith('fc') || v6.startsWith('fd')
+  const addr = ip
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .split('%')[0]
+  if (addr.includes(':')) {
+    // IPv4-mapped (::ffff:...) and NAT64 (64:ff9b::...) forms embed an IPv4 in the low 32 bits,
+    // in either dotted-decimal or hex; the WHATWG URL parser normalizes literals to the hex form.
+    const dotted = addr.match(/^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/)
+    if (dotted) return isPrivateAddress(dotted[1])
+    const hex = addr.match(/^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+    if (hex) {
+      const hi = Number.parseInt(hex[1], 16)
+      const lo = Number.parseInt(hex[2], 16)
+      return isPrivateAddress(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`)
+    }
+    if (addr === '::1' || addr === '::') return true
+    if (/^fe[89ab]/.test(addr)) return true // link-local fe80::/10
+    if (/^f[cd]/.test(addr)) return true // unique local fc00::/7
+    return false
   }
-  const parts = ip.split('.').map(Number)
+  const parts = addr.split('.').map(Number)
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true
   const [a, b] = parts
   if (a === 0 || a === 10 || a === 127) return true
@@ -104,6 +122,21 @@ async function assertPublicHost(url: URL): Promise<void> {
 
 const MAX_REDIRECTS = 5
 
+/** Read a response body up to MAX_RAW_CHARS, then stop the download. Bounds memory and parsing cost. */
+async function readCapped(response: Response): Promise<string> {
+  const reader = response.body?.getReader()
+  if (!reader) return (await response.text()).slice(0, MAX_RAW_CHARS)
+  const decoder = new TextDecoder()
+  let text = ''
+  while (text.length < MAX_RAW_CHARS) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) text += decoder.decode(value, { stream: true })
+  }
+  await reader.cancel().catch(() => {})
+  return text.slice(0, MAX_RAW_CHARS)
+}
+
 async function fetchText(rawUrl: string): Promise<{ text: string; contentType: string }> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -120,7 +153,7 @@ async function fetchText(rawUrl: string): Promise<{ text: string; contentType: s
       continue
     }
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-    return { text: await response.text(), contentType: response.headers.get('content-type') ?? '' }
+    return { text: await readCapped(response), contentType: response.headers.get('content-type') ?? '' }
   }
   throw new Error(`too many redirects for ${rawUrl}`)
 }

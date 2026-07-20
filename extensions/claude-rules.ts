@@ -52,7 +52,7 @@ function parsePaths(frontmatter: string): string[] {
 
 /** Split YAML-ish frontmatter off the front of a rule file, extracting `paths`. */
 export function parseFrontmatter(content: string): Frontmatter {
-  const match = /^---\n([\s\S]*?)\n---\n?/.exec(content)
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content)
   if (!match) return { paths: [], body: content }
   return { paths: parsePaths(match[1]), body: content.slice(match[0].length) }
 }
@@ -107,7 +107,10 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     globalRules = readGlobalRules(globalRulesDir)
-    projectRules = readProjectRules(path.join(ctx.cwd, '.claude', 'rules'))
+    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt,
+    // so read them only for a trusted project.
+    const trusted = ctx.isProjectTrusted?.() ?? false
+    projectRules = trusted ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
 
     if (globalRules.length > 0 || projectRules.length > 0) {
       ctx.ui.notify(`Rules loaded: global ${globalRules.length > 0 ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')

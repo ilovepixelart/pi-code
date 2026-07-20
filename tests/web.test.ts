@@ -45,6 +45,16 @@ describe('web helpers', () => {
     }
   })
 
+  it('blocks IPv4-mapped and NAT64 IPv6 in the hex form the URL parser normalizes to', () => {
+    // ::ffff:127.0.0.1 -> ::ffff:7f00:1, ::ffff:169.254.169.254 -> ::ffff:a9fe:a9fe
+    for (const ip of ['::ffff:7f00:1', '[::ffff:7f00:1]', '::ffff:a9fe:a9fe', '64:ff9b::7f00:1', 'fe80::1%eth0', 'febf::1']) {
+      expect(isPrivateAddress(ip), ip).toBe(true)
+    }
+    for (const ip of ['2606:4700:4700::1111', '2001:4860:4860::8888']) {
+      expect(isPrivateAddress(ip), ip).toBe(false)
+    }
+  })
+
   it('converts html to readable text with structure-preserving newlines', () => {
     const text = htmlToText('<html><script>evil()</script><body><h1>Title</h1><p>One</p><p>Two</p></body></html>')
     expect(text).toContain('Title')

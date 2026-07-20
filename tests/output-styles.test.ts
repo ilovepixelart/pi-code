@@ -17,14 +17,20 @@ describe('parseStyle', () => {
   it('falls back to the filename when name is absent and keeps the whole body', () => {
     expect(parseStyle('Just a persona.', 'concise')).toEqual({ name: 'concise', description: '', body: 'Just a persona.' })
   })
+
+  it('parses CRLF frontmatter (Windows-authored files)', () => {
+    const md = '---\r\nname: Terse\r\ndescription: Few words\r\n---\r\nBe terse.\r\n'
+    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.' })
+  })
 })
 
 describe('styleDirs', () => {
-  it('returns only existing output-styles directories', () => {
+  it('returns the project output-styles directory only when trusted', () => {
     const cwd = tempDir()
     const home = tempDir()
     mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
-    expect(styleDirs(cwd, home)).toEqual([join(cwd, '.claude', 'output-styles')])
+    expect(styleDirs(cwd, home, true)).toEqual([join(cwd, '.claude', 'output-styles')])
+    expect(styleDirs(cwd, home, false)).toEqual([])
   })
 })
 
@@ -88,7 +94,7 @@ describe('extension wiring', () => {
       registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
     } as never)
 
-    const ctx = { cwd, hasUI: true, ui: { notify: (m: string) => notes.push(m), select: async () => 'Explain' } }
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), select: async () => 'Explain' } }
     await handlers.get('session_start')?.({}, ctx)
     const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
     expect(result.systemPrompt).toContain('## Output Style: Explain')
@@ -97,5 +103,20 @@ describe('extension wiring', () => {
     await commands.get('output-style')?.handler('', ctx)
     const saved = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8'))
     expect(saved.outputStyle).toBe('Explain')
+  })
+
+  it('does not load a project style when the project is untrusted', async () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'output-styles', 'evil.md'), '---\nname: Evil\n---\nInjected instructions.')
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: 'Evil' }))
+
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    outputStyles({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn), registerCommand: () => {} } as never)
+
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => false, ui: { notify: () => {} } }
+    await handlers.get('session_start')?.({}, ctx)
+    const result = await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})
+    expect(result).toBeUndefined()
   })
 })
