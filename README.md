@@ -18,12 +18,18 @@ Claude Code experience for the [pi](https://pi.dev) coding agent, in one package
 ## Install
 
 ```bash
-pi install pi-code                       # from npm (when published)
-pi install git:github.com/ilovepixelart/pi-code
-pi install ~/Documents/pi-code           # local path, then /reload after edits
+pi install npm:pi-code       # from npm
+pi install -l npm:pi-code    # project-local instead, writes .pi/settings.json
 ```
 
-One `pi install`, everything below loads. Each feature is an extension under [`extensions/`](extensions).
+Other sources:
+
+```bash
+pi install git:github.com/ilovepixelart/pi-code
+pi install ./pi-code         # local checkout, then /reload after edits
+```
+
+One `pi install` and everything below loads on the next start. `pi list` shows what is installed, `pi config` toggles individual resources, and `pi update pi-code` upgrades it. Each feature is an extension under [`extensions/`](extensions).
 
 ## What it does
 
@@ -48,7 +54,7 @@ One `pi install`, everything below loads. Each feature is an extension under [`e
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
 
-Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)). Personal config lives in [dot-pi](https://github.com/ilovepixelart/dot-pi) (`~/.pi/agent`).
+Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)).
 
 ## Development
 
