@@ -16,6 +16,11 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter(md)).toEqual({ paths: ['src/**/*.ts', '**/*.test.ts'], body: 'Use strict types.' })
   })
 
+  it('ends the block list at a dash entry with no value', () => {
+    const md = '---\npaths:\n  - a.ts\n  -   \n  - b.ts\n---\nbody'
+    expect(parseFrontmatter(md).paths).toEqual(['a.ts'])
+  })
+
   it('parses an inline array of paths', () => {
     expect(parseFrontmatter('---\npaths: ["a.ts", "b.ts"]\n---\nbody').paths).toEqual(['a.ts', 'b.ts'])
   })
