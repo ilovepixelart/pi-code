@@ -43,7 +43,7 @@ function parsePaths(frontmatter: string): string[] {
   if (inline) return splitInline(inline)
   const items: string[] = []
   for (let i = index + 1; i < lines.length; i++) {
-    const match = /^\s*-\s*(.+)$/.exec(lines[i])
+    const match = /^\s*-\s*(\S.*)$/.exec(lines[i])
     if (!match) break
     items.push(unquote(match[1].trim()))
   }
