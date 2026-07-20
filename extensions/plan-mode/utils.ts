@@ -27,7 +27,7 @@ const DESTRUCTIVE_PATTERNS = [
   /\bpip\s+(install|uninstall)/i,
   /\bapt(-get)?\s+(install|remove|purge|update|upgrade)/i,
   /\bbrew\s+(install|uninstall|upgrade)/i,
-  /\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|branch\s+-[dD]|stash|cherry-pick|revert|tag|init|clone)/i,
+  /\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|branch\s+-d|stash|cherry-pick|revert|tag|init|clone)/i,
   /\bsudo\b/i,
   /\bsu\b/i,
   /\bkill\b/i,
@@ -125,7 +125,7 @@ export function cleanStepText(text: string): string {
 
 export function extractTodoItems(message: string): TodoItem[] {
   const items: TodoItem[] = []
-  const headerMatch = message.match(/\*{0,2}Plan:\*{0,2}\s*\n/i)
+  const headerMatch = /\*{0,2}Plan:\*{0,2}\s*\n/i.exec(message)
   if (!headerMatch) return items
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length)

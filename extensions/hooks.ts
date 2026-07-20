@@ -112,7 +112,8 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
 
 export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
   new Promise((resolve) => {
-    const child = spawn('sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] })
+    // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
+    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)

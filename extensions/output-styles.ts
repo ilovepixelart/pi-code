@@ -26,7 +26,7 @@ export interface OutputStyle {
 }
 
 function field(frontmatter: string, key: string): string {
-  const match = new RegExp(`^\\s*${key}\\s*:\\s*(.+)$`, 'm').exec(frontmatter)
+  const match = new RegExp(String.raw`^\s*${key}\s*:\s*(.+)$`, 'm').exec(frontmatter)
   return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
 }
 

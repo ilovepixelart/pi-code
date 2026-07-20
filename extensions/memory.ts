@@ -28,8 +28,8 @@ export function slugifyName(name: string): string {
   return (
     name
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
+      .replaceAll(/[^a-z0-9]+/g, '-')
+      .replaceAll(/^-|-$/g, '')
       .slice(0, 64) || 'memory'
   )
 }

@@ -30,9 +30,11 @@ function notifyOSC99(title: string, body: string): void {
 
 function notifyWindows(title: string, body: string): void {
   const { execFile } = require('node:child_process')
-  // The callback captures a spawn failure (e.g. powershell.exe missing) instead of
-  // letting an unhandled 'error' event crash the host process.
-  execFile('powershell.exe', ['-NoProfile', '-Command', windowsToastScript(title, body)], () => {})
+  // Resolve powershell from a fixed system path rather than through PATH, and let the callback
+  // capture a spawn failure instead of an unhandled 'error' event crashing the host.
+  const root = process.env.SystemRoot ?? 'C:\\Windows'
+  const powershell = `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  execFile(powershell, ['-NoProfile', '-Command', windowsToastScript(title, body)], () => {})
 }
 
 function notify(title: string, body: string): void {
@@ -45,7 +47,7 @@ function notify(title: string, body: string): void {
   }
 }
 
-export default function (pi: ExtensionAPI) {
+export default function notifyExtension(pi: ExtensionAPI) {
   pi.on('agent_end', async () => {
     notify('Pi', 'Ready for input')
   })
