@@ -100,6 +100,8 @@ function isPrivateIpv6(addr: string): boolean {
   if (embedded) return isPrivateAddress(embedded)
   if (addr === '::1' || addr === '::') return true
   if (/^fe[89ab]/.test(addr)) return true // link-local fe80::/10
+  if (/^fe[cdef]/.test(addr)) return true // site-local fec0::/10, deprecated but still routed
+  if (/^ff/.test(addr)) return true // multicast ff00::/8
   return /^f[cd]/.test(addr) // unique local fc00::/7
 }
 
@@ -111,6 +113,9 @@ function isPrivateIpv4(addr: string): boolean {
   if (a === 169 && b === 254) return true
   if (a === 172 && b >= 16 && b <= 31) return true
   if (a === 192 && b === 168) return true
+  if (a === 192 && b === 0 && parts[2] === 0) return true // protocol assignments 192.0.0/24
+  if (a === 198 && (b === 18 || b === 19)) return true // benchmarking 198.18/15
+  if (a >= 224) return true // multicast 224/4, reserved 240/4, broadcast 255.255.255.255
   return a === 100 && b >= 64 && b <= 127
 }
 
@@ -126,6 +131,9 @@ export function isPrivateAddress(ip: string): boolean {
 async function assertPublicHost(url: URL): Promise<void> {
   const host = url.hostname.replace(/^\[|\]$/g, '')
   const addresses = await lookup(host, { all: true, verbatim: true })
+  // An empty list would leave nothing for the loop to reject, so the guard would pass
+  // vacuously. Schemes without a host (data:, file:) reach here the same way.
+  if (addresses.length === 0) throw new Error(`${url.hostname || url.protocol} did not resolve to any address`)
   for (const { address } of addresses) {
     if (isPrivateAddress(address)) throw new Error(`refusing to fetch private/internal address for ${url.hostname} (${address})`)
   }
@@ -161,6 +169,9 @@ async function fetchText(rawUrl: string): Promise<{ text: string; contentType: s
       const location = response.headers.get('location')
       if (!location) throw new Error(`redirect without location from ${url.hostname}`)
       url = new URL(location, url)
+      // Only the caller's URL was scheme-checked; a redirect could hand back data: or
+      // file:, which carry no host for the address guard to inspect.
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${url.protocol} from ${rawUrl}`)
       continue
     }
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
