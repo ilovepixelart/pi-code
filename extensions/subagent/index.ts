@@ -29,14 +29,14 @@ const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
 const COLLAPSED_ITEM_COUNT = 10
 
-function formatTokens(count: number): string {
+export function formatTokens(count: number): string {
   if (count < 1000) return count.toString()
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`
   if (count < 1000000) return `${Math.round(count / 1000)}k`
   return `${(count / 1000000).toFixed(1)}M`
 }
 
-function formatUsageStats(
+export function formatUsageStats(
   usage: {
     input: number
     output: number
@@ -62,7 +62,7 @@ function formatUsageStats(
   return parts.join(' ')
 }
 
-function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: Theme['fg']): string {
+export function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: Theme['fg']): string {
   const shortenPath = (p: string) => {
     const home = os.homedir()
     return p.startsWith(home) ? `~${p.slice(home.length)}` : p
@@ -153,7 +153,7 @@ interface SubagentDetails {
   results: SingleResult[]
 }
 
-function getFinalOutput(messages: Message[]): string {
+export function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg.role === 'assistant') {
@@ -167,7 +167,7 @@ function getFinalOutput(messages: Message[]): string {
 
 type DisplayItem = { type: 'text'; text: string } | { type: 'toolCall'; name: string; args: Record<string, unknown> }
 
-function getDisplayItems(messages: Message[]): DisplayItem[] {
+export function getDisplayItems(messages: Message[]): DisplayItem[] {
   const items: DisplayItem[] = []
   for (const msg of messages) {
     if (msg.role === 'assistant') {
@@ -180,7 +180,7 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
   return items
 }
 
-async function mapWithConcurrencyLimit<TIn, TOut>(items: TIn[], concurrency: number, fn: (item: TIn, index: number) => Promise<TOut>): Promise<TOut[]> {
+export async function mapWithConcurrencyLimit<TIn, TOut>(items: TIn[], concurrency: number, fn: (item: TIn, index: number) => Promise<TOut>): Promise<TOut[]> {
   if (items.length === 0) return []
   const limit = Math.max(1, Math.min(concurrency, items.length))
   const results: TOut[] = new Array(items.length)
