@@ -105,6 +105,21 @@ export function collectImports(content: string, fromDir: string, home: string, a
   return out
 }
 
+/**
+ * Roots an importing file may pull from.
+ *
+ * A context file under the user's own config may reach the whole config; a project
+ * file may not. `~/.claude` holds `.credentials.json`, global settings and every
+ * project's transcripts, so granting those roots to a cloned repo's `CLAUDE.md`
+ * would let it read them into the system prompt.
+ */
+export function rootsForImporter(importer: string, home: string, cwd: string): string[] {
+  const userRoots = realRoots([path.join(home, '.claude'), path.join(home, '.pi')])
+  const [real] = realRoots([importer])
+  const fromUserConfig = real !== undefined && isUnder(real, userRoots)
+  return fromUserConfig ? realRoots([cwd, ...userRoots]) : realRoots([cwd])
+}
+
 export default function contextImportsExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
     const contextFiles: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
@@ -112,13 +127,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
 
     const home = os.homedir()
     const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
-    const allowedRoots = realRoots([cwd, path.join(home, '.claude'), path.join(home, '.pi')])
     // Seed with the loaded context file paths so pi's own files are never re-imported.
     const seen = realRoots(contextFiles.map((file) => file.path))
     const seenSet = new Set(seen)
 
     const imported: ImportedFile[] = []
     for (const file of contextFiles) {
+      // Roots are scoped per importing file: a project file never reaches user config.
+      const allowedRoots = rootsForImporter(file.path, home, cwd)
       imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet))
     }
     if (imported.length === 0) return

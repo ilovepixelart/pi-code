@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import webExtension from '../extensions/web.ts'
+import webExtension, { isPrivateAddress } from '../extensions/web.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
 
@@ -296,5 +296,48 @@ describe('web_search', () => {
   it('surfaces an upstream http failure from the search endpoint', async () => {
     fetchMock.mockResolvedValue(respond('rate limited', { status: 429 }))
     await expect(setup().search({ query: 'pi' })).rejects.toThrow('HTTP 429 for https://html.duckduckgo.com/html/?q=pi')
+  })
+})
+
+describe('web_fetch guard fails closed', () => {
+  it('refuses a host that resolves to no addresses', async () => {
+    lookupMock.mockResolvedValue([] as never)
+    await expect(setup().fetchUrl('https://nowhere.example/x')).rejects.toThrow(/did not resolve/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses a redirect that leaves http(s)', async () => {
+    // data:/file: carry no host, so the address loop has nothing to reject.
+    fetchMock.mockResolvedValue(respond('', { status: 302, location: 'data:text/html,pwned' }))
+    await expect(setup().fetchUrl('https://example.com/a')).rejects.toThrow(/unsupported redirect scheme/)
+  })
+
+  it('refuses a redirect to a file url', async () => {
+    fetchMock.mockResolvedValue(respond('', { status: 302, location: 'file:///etc/passwd' }))
+    await expect(setup().fetchUrl('https://example.com/a')).rejects.toThrow(/unsupported redirect scheme/)
+  })
+})
+
+describe('isPrivateAddress covers special-use ranges', () => {
+  it.each([
+    ['198.18.0.1', 'benchmark 198.18/15'],
+    ['198.19.255.255', 'benchmark upper bound'],
+    ['192.0.0.1', 'protocol assignments 192.0.0/24'],
+    ['224.0.0.1', 'multicast'],
+    ['239.255.255.250', 'SSDP multicast'],
+    ['240.0.0.1', 'reserved 240/4'],
+    ['255.255.255.255', 'broadcast'],
+    ['fec0::1', 'deprecated site-local'],
+    ['ff02::1', 'IPv6 multicast'],
+  ])('refuses %s (%s)', (address) => {
+    expect(isPrivateAddress(address)).toBe(true)
+  })
+
+  it('still allows ordinary public addresses', () => {
+    expect(isPrivateAddress('93.184.216.34')).toBe(false)
+    expect(isPrivateAddress('8.8.8.8')).toBe(false)
+    expect(isPrivateAddress('2606:2800:220:1:248:1893:25c8:1946')).toBe(false)
+    expect(isPrivateAddress('197.255.255.255')).toBe(false)
+    expect(isPrivateAddress('199.0.0.1')).toBe(false)
   })
 })

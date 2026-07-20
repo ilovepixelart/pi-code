@@ -40,7 +40,9 @@ const DESTRUCTIVE_PATTERNS = [
   /\b(vim?|nano|emacs|code|subl)\b/i,
 ]
 
-// Safe read-only commands allowed in plan mode
+// Safe read-only commands allowed in plan mode. Deliberately excludes env/printenv
+// (secret disclosure, and env is an exec wrapper), curl/wget (fetch plus -o writes),
+// awk (system()) and sed (w/W/e write even under -n).
 const SAFE_PATTERNS = [
   /^\s*cat\b/,
   /^\s*head\b/,
@@ -65,8 +67,6 @@ const SAFE_PATTERNS = [
   /^\s*which\b/,
   /^\s*whereis\b/,
   /^\s*type\b/,
-  /^\s*env\b/,
-  /^\s*printenv\b/,
   /^\s*uname\b/,
   /^\s*whoami\b/,
   /^\s*id\b/,
@@ -83,21 +83,44 @@ const SAFE_PATTERNS = [
   /^\s*yarn\s+(list|info|why|audit)/i,
   /^\s*node\s+--version/i,
   /^\s*python\s+--version/i,
-  /^\s*curl\s/i,
-  /^\s*wget\s+-O\s*-/i,
   /^\s*jq\b/,
-  /^\s*sed\s+-n/i,
-  /^\s*awk\b/,
   /^\s*rg\b/,
   /^\s*fd\b/,
   /^\s*bat\b/,
   /^\s*eza\b/,
 ]
 
+// The shell can hide an arbitrary command inside any of these, so they are refused
+// outright rather than parsed.
+const SUBSTITUTION = /\$\(|`|<\(|>\(/
+
+// Claude Code's separator set (code.claude.com/docs/en/permissions): every subcommand
+// must qualify on its own, otherwise an allowlisted first token buys the rest of the line.
+const SEPARATORS = /\|\||&&|\|&|[;|&\n]/
+
+// find is allowlisted for traversal only; these actions run commands or delete.
+const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf)\b/
+
+function isSafeSegment(segment: string): boolean {
+  if (DESTRUCTIVE_PATTERNS.some((p) => p.test(segment))) return false
+  if (!SAFE_PATTERNS.some((p) => p.test(segment))) return false
+  return !(/^\s*find\b/.test(segment) && FIND_ACTIONS.test(segment))
+}
+
+/**
+ * Whether plan mode should let this bash command run.
+ *
+ * Model steering, not a sandbox: an allowlisted interpreter can still read and write
+ * whatever the user can, so this narrows the blast radius of a wrong turn rather than
+ * containing a determined one. Only OS-level isolation would be a boundary.
+ */
 export function isSafeCommand(command: string): boolean {
-  const isDestructive = DESTRUCTIVE_PATTERNS.some((p) => p.test(command))
-  const isSafe = SAFE_PATTERNS.some((p) => p.test(command))
-  return !isDestructive && isSafe
+  if (SUBSTITUTION.test(command)) return false
+  const segments = command
+    .split(SEPARATORS)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return segments.length > 0 && segments.every(isSafeSegment)
 }
 
 export interface TodoItem {
