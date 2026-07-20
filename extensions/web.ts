@@ -101,7 +101,7 @@ function isPrivateIpv6(addr: string): boolean {
   if (addr === '::1' || addr === '::') return true
   if (/^fe[89ab]/.test(addr)) return true // link-local fe80::/10
   if (/^fe[cdef]/.test(addr)) return true // site-local fec0::/10, deprecated but still routed
-  if (/^ff/.test(addr)) return true // multicast ff00::/8
+  if (addr.startsWith('ff')) return true // multicast ff00::/8
   return /^f[cd]/.test(addr) // unique local fc00::/7
 }
 

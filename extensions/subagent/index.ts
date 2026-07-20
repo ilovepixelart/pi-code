@@ -454,8 +454,14 @@ export function projectAgentGate(projectAgentCount: number, trusted: boolean, ha
   return trusted ? 'allow' : 'refuse'
 }
 
-/** The runtime result carries an isError flag that AgentToolResult does not declare. */
-type ToolResult = AgentToolResult<SubagentDetails> & { isError?: boolean }
+/**
+ * pi only sets a tool result's error flag when execute() throws; a returned isError is
+ * ignored (docs/extensions.md, "Signaling errors"). Throwing here would be worse: the
+ * agent loop replaces the result with createErrorToolResult(message), discarding the
+ * details renderResult needs to show the failed agent's transcript. The failure is
+ * carried in the content text instead, which is what reaches the model.
+ */
+type ToolResult = AgentToolResult<SubagentDetails>
 type SubagentMode = 'single' | 'parallel' | 'chain'
 type MakeDetails = (mode: SubagentMode) => (results: SingleResult[]) => SubagentDetails
 type SubagentParamsStatic = Static<typeof SubagentParams>
@@ -590,7 +596,6 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
       return {
         content: [{ type: 'text', text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
         details: makeDetails('chain')(results),
-        isError: true,
       }
     }
     previousOutput = getFinalOutput(result.messages)
@@ -699,7 +704,6 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
     return {
       content: [{ type: 'text', text: `Agent ${result.stopReason || 'failed'}: ${errorMsg}` }],
       details: makeDetails('single')([result]),
-      isError: true,
     }
   }
   return {

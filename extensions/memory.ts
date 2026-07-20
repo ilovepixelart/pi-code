@@ -11,7 +11,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type ExtensionAPI, formatSize, truncateHead } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
 const INDEX_FILE = 'MEMORY.md'
@@ -63,6 +63,17 @@ function readIndex(dir: string): string {
   }
 }
 
+/**
+ * Keep a memory inside pi's context budget. truncateHead keeps whole lines, so a
+ * single oversized line yields nothing; fall back to a hard slice in that case.
+ */
+function capForContext(body: string): string {
+  const cut = truncateHead(body, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES })
+  if (!cut.truncated) return body
+  const kept = cut.content || body.slice(0, DEFAULT_MAX_BYTES)
+  return `${kept}\n\n[truncated: ${formatSize(cut.totalBytes)} total]`
+}
+
 export default function memoryExtension(pi: ExtensionAPI) {
   let dir = memoryDir(process.cwd())
 
@@ -105,7 +116,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (!name) return { content: [{ type: 'text' as const, text: 'read requires name.' }], details: {} }
         try {
           const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
-          return { content: [{ type: 'text' as const, text: body }], details: {} }
+          return { content: [{ type: 'text' as const, text: capForContext(body) }], details: {} }
         } catch {
           return { content: [{ type: 'text' as const, text: `No memory named ${name}.` }], details: {} }
         }
