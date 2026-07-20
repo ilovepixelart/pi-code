@@ -488,12 +488,16 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
   const approved = await isProjectApproved(ctx)
   const gate = projectAgentGate(requestedProjectAgents.length, approved, ctx.hasUI, params.confirmProjectAgents ?? true)
-  const names = requestedProjectAgents.map((a) => a.name).join(', ')
+  // Agent names come from repo-controlled frontmatter; a newline in one would otherwise
+  // let it write its own "Source:" line into the prompt body.
+  const names = requestedProjectAgents.map((a) => a.name.replace(/\s+/g, ' ').trim()).join(', ')
   if (gate === 'refuse') {
     return { content: [{ type: 'text', text: `Project-local agents (${names}) require a trusted project; refusing in non-interactive mode.` }], details: makeDetails(gateMode)([]) }
   }
   if (gate === 'confirm') {
-    const dir = projectAgentsDir ?? '(unknown)'
+    // Each agent knows where it was loaded from; projectAgentsDir only ever held .pi/agents.
+    const dirs = [...new Set(requestedProjectAgents.map((a) => path.dirname(a.filePath)))]
+    const dir = dirs.join(', ') || projectAgentsDir || '(unknown)'
     const ok = await ctx.ui.confirm('Run project-local agents?', `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`)
     if (!ok) return { content: [{ type: 'text', text: 'Canceled: project-local agents not approved.' }], details: makeDetails(gateMode)([]) }
   }

@@ -86,6 +86,8 @@ describe('discoverAgents', () => {
     piProjectDir = join(projectRoot, '.pi', 'agents')
     claudeProjectDir = join(projectRoot, '.claude', 'agents')
     mkdirSync(cwd, { recursive: true })
+    // Marks the project root: discovery walks up only to there, never into an ancestor.
+    writeFileSync(join(projectRoot, 'package.json'), '{}')
 
     fakeHome.path = home
     previousEnv = process.env[AGENT_DIR_ENV]
