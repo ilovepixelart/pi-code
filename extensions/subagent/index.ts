@@ -407,6 +407,19 @@ const SubagentParams = Type.Object({
   status: Type.Optional(Type.Boolean({ description: 'Set true (alone, no other params) to list background runs instead of running anything.' })),
 })
 
+/**
+ * Decide how to gate project-scoped agents, whose system prompt and tools are
+ * repo-controlled. Untrusted projects require interactive confirmation, and are
+ * refused when headless; trusted projects run unless confirmProjectAgents asks
+ * for a prompt anyway.
+ */
+export function projectAgentGate(projectAgentCount: number, trusted: boolean, hasUI: boolean, confirmProjectAgents: boolean): 'allow' | 'confirm' | 'refuse' {
+  if (projectAgentCount === 0) return 'allow'
+  if (trusted && !confirmProjectAgents) return 'allow'
+  if (hasUI) return 'confirm'
+  return trusted ? 'allow' : 'refuse'
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'subagent',
@@ -457,6 +470,26 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Gate repo-controlled project agents before any run (background included).
+      const requestedAgentNames = new Set<string>()
+      if (params.agent) requestedAgentNames.add(params.agent)
+      for (const step of params.chain ?? []) requestedAgentNames.add(step.agent)
+      for (const t of params.tasks ?? []) requestedAgentNames.add(t.agent)
+      const requestedProjectAgents = [...requestedAgentNames].map((name) => agents.find((a) => a.name === name)).filter((a): a is AgentConfig => a?.source === 'project')
+
+      const gateMode = hasChain ? 'chain' : hasTasks ? 'parallel' : 'single'
+      const gate = projectAgentGate(requestedProjectAgents.length, ctx.isProjectTrusted?.() ?? false, ctx.hasUI, confirmProjectAgents)
+      if (gate === 'refuse') {
+        const names = requestedProjectAgents.map((a) => a.name).join(', ')
+        return { content: [{ type: 'text', text: `Project-local agents (${names}) require a trusted project; refusing in non-interactive mode.` }], details: makeDetails(gateMode)([]) }
+      }
+      if (gate === 'confirm') {
+        const names = requestedProjectAgents.map((a) => a.name).join(', ')
+        const dir = discovery.projectAgentsDir ?? '(unknown)'
+        const ok = await ctx.ui.confirm('Run project-local agents?', `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`)
+        if (!ok) return { content: [{ type: 'text', text: 'Canceled: project-local agents not approved.' }], details: makeDetails(gateMode)([]) }
+      }
+
       if (params.background) {
         const task = params.task
         const agentName = params.agent
@@ -496,28 +529,6 @@ export default function (pi: ExtensionAPI) {
         return {
           content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
           details: makeDetails('single')([]),
-        }
-      }
-
-      if ((agentScope === 'project' || agentScope === 'both') && confirmProjectAgents && ctx.hasUI) {
-        const requestedAgentNames = new Set<string>()
-        if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent)
-        if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent)
-        if (params.agent) requestedAgentNames.add(params.agent)
-
-        const projectAgentsRequested = Array.from(requestedAgentNames)
-          .map((name) => agents.find((a) => a.name === name))
-          .filter((a): a is AgentConfig => a?.source === 'project')
-
-        if (projectAgentsRequested.length > 0) {
-          const names = projectAgentsRequested.map((a) => a.name).join(', ')
-          const dir = discovery.projectAgentsDir ?? '(unknown)'
-          const ok = await ctx.ui.confirm('Run project-local agents?', `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`)
-          if (!ok)
-            return {
-              content: [{ type: 'text', text: 'Canceled: project-local agents not approved.' }],
-              details: makeDetails(hasChain ? 'chain' : hasTasks ? 'parallel' : 'single')([]),
-            }
         }
       }
 
