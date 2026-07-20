@@ -24,6 +24,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
+import { isProjectApproved } from './project-approval.js'
 
 const CONNECT_TIMEOUT_MS = 10_000
 const CALL_TIMEOUT_MS = 120_000
@@ -249,7 +250,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       await connectServers(loadConfigFrom(userConfigPaths(os.homedir())))
     }
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once the project is trusted.
-    if (!projectConnected && ctx.isProjectTrusted?.()) {
+    // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
+    if (!projectConnected && (await isProjectApproved(ctx))) {
       projectConnected = true
       await connectServers(loadConfigFrom(projectConfigPaths(ctx.cwd)))
     }

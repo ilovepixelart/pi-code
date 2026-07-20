@@ -135,7 +135,7 @@ interface Harness {
   warnings: string[]
   home: string
   cwd: string
-  sessionStart: (trusted?: boolean | undefined) => Promise<void>
+  sessionStart: (trusted?: boolean | undefined, approve?: boolean) => Promise<void>
   shutdown: () => Promise<void>
   mcpCommand: () => Promise<void>
   toolNames: () => string[]
@@ -165,9 +165,15 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     warnings.push(args.join(' '))
   })
 
-  const makeCtx = (trusted?: boolean): unknown => ({
+  // Project config now needs approval as well as trust: pi reports a .claude-shaped repo
+  // as trusted without ever asking, so project-approval prompts at the point of use.
+  const makeCtx = (trusted?: boolean, approve = true): unknown => ({
     cwd,
-    ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+    hasUI: true,
+    ui: {
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+      confirm: async () => approve,
+    },
     isProjectTrusted: trusted === undefined ? undefined : () => trusted,
   })
 
@@ -183,8 +189,8 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     warnings,
     home,
     cwd,
-    sessionStart: async (trusted?: boolean) => {
-      await handlers.get('session_start')?.({ reason: 'startup' }, makeCtx(trusted))
+    sessionStart: async (trusted?: boolean, approve = true) => {
+      await handlers.get('session_start')?.({ reason: 'startup' }, makeCtx(trusted, approve))
     },
     shutdown: async () => {
       await handlers.get('session_shutdown')?.({}, makeCtx(true))
@@ -304,6 +310,16 @@ describe('mcp startup config scoping', () => {
     await harness.sessionStart(true)
 
     expect(harness.toolNames()).toEqual(['proj_query'])
+  })
+
+  it('does not connect project config when the approval prompt is declined', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setup({ project: { risky: { command: 'arbitrary-command' } } })
+
+    await harness.sessionStart(true, false)
+
+    expect(hoisted.transports).toHaveLength(0)
+    expect(harness.toolNames()).toEqual([])
   })
 
   it('connects project config only once across repeated sessions', async () => {

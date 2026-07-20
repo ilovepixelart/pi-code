@@ -414,9 +414,20 @@ describe('hooks extension session_start', () => {
     writeSettings(project, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'local-pre' }] }] })
 
     const ext = setupExtension()
-    await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true })
+    await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } })
     await ext.toolCall('bash', {})
     expect(commandsRun()).toEqual(['home-session', 'home-pre', 'project-pre', 'local-pre'])
+  })
+
+  it('ignores project settings when the approval prompt is declined', async () => {
+    const project = tempDir('hooks-proj-')
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+    writeSettings(project, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'project-pre' }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => false } })
+    await ext.toolCall('bash', {})
+    expect(commandsRun()).toEqual(['home-session', 'home-pre'])
   })
 
   it('ignores project settings when the project is untrusted', async () => {

@@ -27,6 +27,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isProjectApproved } from './project-approval.js'
+
 const DEFAULT_TIMEOUT_S = 60
 
 interface HookCommand {
@@ -159,7 +161,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
 
   pi.on('session_start', async (event, ctx) => {
-    const trusted = ctx.isProjectTrusted?.() ?? false
+    const trusted = await isProjectApproved(ctx)
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
     // Only fire SessionStart hooks on a genuine session begin, matched by source (Claude uses
     // "startup"/"resume"/...). "reload" and "fork" re-fire in-process and would double-run hooks.
