@@ -59,16 +59,18 @@ export function resolveResultUrl(href: string): string {
 export function parseSearchResults(html: string, limit: number): SearchResult[] {
   const results: SearchResult[] = []
   const anchorPattern = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
-  const snippetPattern = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
-  const snippets = [...html.matchAll(snippetPattern)].map((m) => stripTags(m[1]))
-  let index = 0
-  for (const match of html.matchAll(anchorPattern)) {
-    if (results.length >= limit) break
+  const snippetPattern = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/
+  const anchors = [...html.matchAll(anchorPattern)]
+  for (let i = 0; i < anchors.length && results.length < limit; i++) {
+    const match = anchors[i]
     const url = resolveResultUrl(match[1])
     const title = stripTags(match[2])
     if (!title || url.includes('duckduckgo.com/y.js')) continue
-    results.push({ title, url, snippet: snippets[index] ?? '' })
-    index++
+    // A result's snippet sits between its anchor and the next one; pairing by block
+    // keeps attribution right when an ad anchor (skipped above) carries a snippet too.
+    const block = html.slice((match.index ?? 0) + match[0].length, anchors[i + 1]?.index ?? html.length)
+    const snippet = snippetPattern.exec(block)
+    results.push({ title, url, snippet: snippet ? stripTags(snippet[1]) : '' })
   }
   return results
 }
