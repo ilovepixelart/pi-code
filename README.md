@@ -41,7 +41,8 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
-| MCP servers | `~/.claude.json`, `~/.pi/agent/mcp.json`, `.mcp.json`, `.pi/mcp.json` (later wins); stdio, HTTP, SSE | `mcp.ts` |
+| MCP servers | user `~/.claude.json`, `~/.pi/agent/mcp.json` (loaded on session start); project `.mcp.json`, `.pi/mcp.json` (only once the project is approved); stdio, HTTP, SSE | `mcp.ts` |
+| Project trust | prompts before loading project config (MCP servers, hooks, agents) that pi would otherwise trust silently | `project-approval.ts` |
 | Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
@@ -53,6 +54,8 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Notifications | vendored example | `notify.ts` |
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
+
+`output-guard.ts` and `web-transport.ts` are shared internals (context-budget truncation, DNS-pinned fetch) with no feature of their own; the tools above use them.
 
 Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)).
 

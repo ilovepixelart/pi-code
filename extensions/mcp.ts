@@ -1,16 +1,20 @@
 /**
  * MCP Adapter Extension
  *
- * Connects MCP (Model Context Protocol) servers from mcp.json and registers
- * their tools in pi as `<server>_<tool>`. Async factory connects eagerly at
- * startup (per-server timeout, failures skip with a notice); stdio and HTTP
- * (streamable with SSE fallback) transports; /mcp shows status.
+ * Connects MCP (Model Context Protocol) servers and registers their tools in pi
+ * as `<server>_<tool>`. Connects on `session_start`, not from the factory (pi runs
+ * the factory for invocations that never start a session); per-server timeout,
+ * failures skip with a notice; stdio and HTTP (streamable with SSE fallback)
+ * transports; /mcp shows status.
  *
- * Reads Claude Code's MCP config too. Merge order (later wins): ~/.claude.json,
- * ~/.pi/agent/mcp.json, .mcp.json, then .pi/mcp.json. User config connects at
- * startup; project config (.mcp.json / .pi/mcp.json) can run arbitrary commands,
- * so it connects only once the project is trusted.
- * Values support ${VAR} environment interpolation.
+ * Reads Claude Code's MCP config too. User config (~/.claude.json,
+ * ~/.pi/agent/mcp.json) is the user's own and loads on the first session. Project
+ * config (.mcp.json, .pi/mcp.json) can run arbitrary commands on connect, so it
+ * loads only once the project is approved (see project-approval). The two scopes
+ * are loaded separately, not merged; user config connects first, so a project
+ * server cannot take the name of a user server that connected.
+ * Values support ${VAR} interpolation, and a stdio server receives only the SDK's
+ * default environment plus its own `env` block, not the whole process environment.
  */
 
 import * as fs from 'node:fs'
