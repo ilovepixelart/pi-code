@@ -25,7 +25,9 @@ wait_for() { # wait_for <regex> <timeout-seconds>
   return 1
 }
 
+FIXTURE=0
 if [ -z "$WORKDIR" ]; then
+  FIXTURE=1
   WORKDIR=$(mktemp -d)
   git -C "$WORKDIR" init -qb main
   git -C "$WORKDIR" -c user.name=e2e -c user.email=e2e@local commit -q --allow-empty -m init
@@ -39,6 +41,17 @@ say "workdir: $WORKDIR"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$WORKDIR" "pi"
 trap 'tmux kill-session -t "$SESSION" 2>/dev/null || true' EXIT
+
+# 0. The fixture ships .claude config pi would trust silently, so pi-code must ask.
+#    Session start blocks on the answer; approve before expecting anything else.
+if [ "$FIXTURE" = 1 ]; then
+  if wait_for 'Trust this project\?' 30; then
+    ok "trust: prompted for the claude-shaped fixture"
+    send Enter
+  else
+    bad "trust: no approval prompt"
+  fi
+fi
 
 # 1. Boot: all pi-code extensions load
 if wait_for '\[Extensions\]' 30 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
