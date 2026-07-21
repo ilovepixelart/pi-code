@@ -195,6 +195,13 @@ export default async function mcpExtension(pi: ExtensionAPI) {
 
   async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
     for (const [name, config] of Object.entries(servers)) {
+      // A later scope must not take the name of a server that already connected: it
+      // would evict that client from the map, leaking it at shutdown, and misreport
+      // the earlier server's status.
+      if (clients.has(name)) {
+        console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
+        continue
+      }
       try {
         const client = await connect(name, config)
         clients.set(name, client)
