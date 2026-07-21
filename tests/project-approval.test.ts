@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
 
+import { projectConfigPaths } from '../extensions/mcp.ts'
 import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/project-approval.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'pa-'))
@@ -96,5 +97,26 @@ describe('isProjectApproved', () => {
   it('refuses when there is no UI to ask with', async () => {
     // pi never consulted defaultProjectTrust here, so there is no preference to defer to.
     expect(await isProjectApproved(ctx({ hasUI: false }), deps())).toBe(false)
+  })
+})
+
+describe('the trust trigger stays in sync with what the trust-gated extensions consume', () => {
+  // The approval prompt only fires when hasClaudeShapedConfig sees project config. If a new
+  // project source is added to an extension but not to that list, a repository shipping only
+  // the new source would be trusted without a prompt, which is the auto-trust bug PR #12 fixed.
+  // These derive the expected project sources from the extensions themselves so the list cannot
+  // silently drift.
+
+  it.each(projectConfigPaths('/x').map((abs) => abs.slice('/x/'.length)))('treats a project with only %s as claude-shaped (mcp project config runs commands on connect)', (rel) => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, rel, '..'), { recursive: true })
+    writeFileSync(join(cwd, rel), '{}')
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it.each([join('.claude', 'agents'), join('.pi', 'agents')])('treats a project with only a %s directory as claude-shaped (project agents ship their own prompt and tools)', (dir) => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, dir), { recursive: true })
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 })
