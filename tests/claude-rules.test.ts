@@ -109,17 +109,31 @@ describe('extension wiring', () => {
 
   const globalCtx = () => ({ cwd: mkdtempSync(join(tmpdir(), 'rules-cwd-')), isProjectTrusted: () => true, ui: { notify: () => {} } })
 
-  it('inlines global rule bodies with frontmatter stripped, recursing into subdirectories', async () => {
+  it('inlines unscoped global rule bodies, recursing into subdirectories', async () => {
     const rulesDir = join(hoisted.home, '.claude', 'rules')
     mkdirSync(join(rulesDir, 'backend'), { recursive: true })
-    writeFileSync(join(rulesDir, 'style.md'), '---\npaths: ["src/**"]\n---\nPrefer guard clauses.')
+    writeFileSync(join(rulesDir, 'style.md'), 'Prefer guard clauses.')
     writeFileSync(join(rulesDir, 'backend', 'sql.md'), 'Use parameterized queries.')
 
     const prompt = await sessionPrompt(globalCtx())
 
     expect(prompt).toContain('Prefer guard clauses.')
     expect(prompt).toContain('Use parameterized queries.')
-    expect(prompt).not.toContain('paths:')
+  })
+
+  it('keeps a path-scoped global rule as a scoped pointer instead of inlining it', async () => {
+    // Claude Code attaches scoped rules only when matching files are touched; inlining
+    // one unconditionally applied it everywhere and lost the scope entirely.
+    const rulesDir = join(hoisted.home, '.claude', 'rules')
+    mkdirSync(rulesDir, { recursive: true })
+    writeFileSync(join(rulesDir, 'sql.md'), '---\npaths: ["db/**"]\n---\nUse parameterized queries.')
+    writeFileSync(join(rulesDir, 'always.md'), 'Prefer guard clauses.')
+
+    const prompt = await sessionPrompt(globalCtx())
+
+    expect(prompt).toContain('Prefer guard clauses.')
+    expect(prompt).not.toContain('Use parameterized queries.')
+    expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
   })
 
   it('skips an unreadable global rule instead of failing the session', async () => {

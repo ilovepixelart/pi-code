@@ -63,9 +63,9 @@ export function parseFrontmatter(content: string): Frontmatter {
   return { paths: parsePaths(match[1]), body: content.slice(match[0].length) }
 }
 
-/** A project-rule pointer line, annotated with its path scope when present. */
-export function formatRulePointer(rel: string, paths: string[]): string {
-  const ref = `- .claude/rules/${rel}`
+/** A rule pointer line, annotated with its path scope when present. */
+export function formatRulePointer(rel: string, paths: string[], base = '.claude/rules'): string {
+  const ref = `- ${base}/${rel}`
   return paths.length > 0 ? `${ref} — applies when working on: ${paths.join(', ')}` : ref
 }
 
@@ -111,22 +111,32 @@ function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>
   return results
 }
 
-function readGlobalRules(globalRulesDir: string): string {
-  return findMarkdownFiles(globalRulesDir)
-    .map((file) => {
-      try {
-        return parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim()
-      } catch {
-        return '' // one unreadable rule must not take down session start
-      }
-    })
-    .filter((content) => content.length > 0)
-    .join('\n\n')
-}
-
 interface ProjectRule {
   rel: string
   paths: string[]
+}
+
+interface GlobalRules {
+  inline: string
+  scoped: ProjectRule[]
+}
+
+/** Unscoped global rules are inlined; path-scoped ones keep their scope as pointers,
+ * mirroring Claude Code, where scoped rules attach only to matching files. */
+function readGlobalRules(globalRulesDir: string): GlobalRules {
+  const inline: string[] = []
+  const scoped: ProjectRule[] = []
+  for (const file of findMarkdownFiles(globalRulesDir)) {
+    let parsed: Frontmatter
+    try {
+      parsed = parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8'))
+    } catch {
+      continue // one unreadable rule must not take down session start
+    }
+    if (parsed.paths.length > 0) scoped.push({ rel: file, paths: parsed.paths })
+    else if (parsed.body.trim().length > 0) inline.push(parsed.body.trim())
+  }
+  return { inline: inline.join('\n\n'), scoped }
 }
 
 function readProjectRules(projectRulesDir: string): ProjectRule[] {
@@ -141,7 +151,7 @@ function readProjectRules(projectRulesDir: string): ProjectRule[] {
 
 export default function claudeRulesExtension(pi: ExtensionAPI) {
   const globalRulesDir = path.join(os.homedir(), '.claude', 'rules')
-  let globalRules = ''
+  let globalRules: GlobalRules = { inline: '', scoped: [] }
   let projectRules: ProjectRule[] = []
 
   pi.on('session_start', async (_event, ctx) => {
@@ -151,16 +161,24 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     const approved = await isProjectApproved(ctx)
     projectRules = approved ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
 
-    if (globalRules.length > 0 || projectRules.length > 0) {
-      ctx.ui.notify(`Rules loaded: global ${globalRules.length > 0 ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')
+    const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
+    if (hasGlobal || projectRules.length > 0) {
+      ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')
     }
   })
 
   pi.on('before_agent_start', async (event) => {
     let addition = ''
 
-    if (globalRules.length > 0) {
-      addition += `\n\n## Global Rules\n\nThese rules always apply:\n\n${globalRules}`
+    if (globalRules.inline.length > 0 || globalRules.scoped.length > 0) {
+      addition += `\n\n## Global Rules`
+      if (globalRules.inline.length > 0) {
+        addition += `\n\nThese rules always apply:\n\n${globalRules.inline}`
+      }
+      if (globalRules.scoped.length > 0) {
+        const scopedList = globalRules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, '~/.claude/rules')).join('\n')
+        addition += `\n\nPath-scoped global rules, available in ~/.claude/rules/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
+      }
     }
 
     if (projectRules.length > 0) {
