@@ -42,11 +42,11 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
 | MCP servers | user `~/.claude.json`, `~/.pi/agent/mcp.json` (loaded on session start); project `.mcp.json`, `.pi/mcp.json` (only once the project is approved); stdio, HTTP, SSE | `mcp.ts` |
-| Project trust | prompts before loading project config (MCP servers, hooks, agents) that pi would otherwise trust silently | `project-approval.ts` |
+| Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles) that pi would otherwise trust silently | `internal/project-approval.ts` |
 | Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
-| Checkpoints / rewind | shadow-repo snapshots, hard-reset restore | `git-checkpoint.ts` |
+| Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later | `git-checkpoint.ts` |
 | Persistent memory | per-project memories, index injected each session | `memory.ts` |
 | WebSearch / WebFetch | key-free DuckDuckGo search, SSRF-guarded fetch | `web.ts` |
 | AskUserQuestion | vendored example | `question.ts` |
@@ -55,7 +55,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
 
-`output-guard.ts` and `web-transport.ts` are shared internals (context-budget truncation, DNS-pinned fetch) with no feature of their own; the tools above use them.
+`extensions/internal/` holds shared modules pi's loader must not treat as extensions: `output-guard.ts` (context-budget truncation), `web-transport.ts` (DNS-pinned fetch), and `project-approval.ts` (the trust decision above). The extensions use them; only `internal/` keeps them out of pi's extension scan.
 
 Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)).
 

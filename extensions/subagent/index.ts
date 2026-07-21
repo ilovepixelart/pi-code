@@ -1024,8 +1024,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
       'Single mode also supports background: true for long tasks; a notification arrives on completion and {status: true} lists runs.',
-      'Default agent scope is "user" (from ~/.pi/agent/agents).',
-      'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
+      'Default agent scope is "user" (from ~/.claude/agents and ~/.pi/agent/agents).',
+      'To enable project-local agents in .claude/agents or .pi/agents, set agentScope: "both" (or "project").',
     ].join(' '),
     parameters: SubagentParams,
 

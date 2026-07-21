@@ -1,7 +1,8 @@
 /**
  * Background subagent runs: fire-and-forget children whose completion wakes
- * the parent agent via a notification message. Session-scoped (children die
- * with pi); state lives in an in-memory registry queried via {action:"status"}.
+ * the parent agent via a notification message. State lives in an in-memory
+ * registry queried via {status: true}; it is lost on restart, and a child
+ * still running when pi exits finishes on its own rather than being killed.
  */
 
 import { spawn } from 'node:child_process'

@@ -1,4 +1,4 @@
-# Subagent Example
+# Subagent Extension
 
 Delegate tasks to specialized subagents with isolated context windows.
 
@@ -7,6 +7,8 @@ Delegate tasks to specialized subagents with isolated context windows.
 - **Isolated context**: Each subagent runs in a separate `pi` process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
+- **Background runs**: Fire-and-forget with a completion notification; max 8 running at once
+- **Bounded fan-out**: A subagent cannot spawn subagents of its own
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
 - **Abort support**: Ctrl+C propagates to kill subagent processes
@@ -18,6 +20,7 @@ subagent/
 ├── README.md            # This file
 ├── index.ts             # The extension (entry point)
 ├── agents.ts            # Agent discovery logic
+├── background.ts        # Background run registry and spawning
 ├── agents/              # Sample agent definitions
 │   ├── scout.md         # Fast recon, returns compressed context
 │   ├── planner.md       # Creates implementation plans
@@ -31,26 +34,7 @@ subagent/
 
 ## Installation
 
-From the repository root, symlink the files:
-
-```bash
-# Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.pi/agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
-
-# Symlink agents
-mkdir -p ~/.pi/agent/agents
-for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
-done
-
-# Symlink workflow prompts
-mkdir -p ~/.pi/agent/prompts
-for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/prompts/$(basename "$f")
-done
-```
+Installed with pi-code (`pi install npm:pi-code`); nothing to set up separately.
 
 ## Security Model
 
@@ -58,9 +42,9 @@ This tool executes a separate `pi` subprocess with a delegated system prompt and
 
 **Project-local agents** (`.pi/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
 
-**Default behavior:** Only loads **user-level agents** from `~/.pi/agent/agents`.
+**Default behavior:** Only loads **user-level agents** from `~/.claude/agents` and `~/.pi/agent/agents`.
 
-To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
+To enable project-local agents (`.claude/agents`, `.pi/agents`), pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
 When running interactively, the tool prompts for confirmation before running project-local agents. Set `confirmProjectAgents: false` to disable.
 
@@ -136,8 +120,8 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.pi/agent/agents/*.md` - User-level (always loaded)
-- `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)
+- `.claude/agents/*.md`, `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`; `.pi` wins a name conflict)
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 
