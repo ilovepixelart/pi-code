@@ -19,6 +19,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isProjectApproved } from './internal/project-approval.js'
+
 export interface OutputStyle {
   name: string
   description: string
@@ -121,8 +123,9 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     const home = os.homedir()
     // A project style body is injected verbatim into the system prompt, so only honor
-    // project styles / selection once the project is trusted.
-    const trusted = ctx.isProjectTrusted?.() ?? false
+    // project styles / selection once the project is approved. isProjectTrusted alone
+    // is true for a repo pi never asked about; see project-approval.
+    const trusted = await isProjectApproved(ctx)
     styles = loadStyles(styleDirs(ctx.cwd, home, trusted))
     localSettingsPath = path.join(ctx.cwd, '.claude', 'settings.local.json')
     activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
