@@ -2,8 +2,10 @@ import { lookup } from 'node:dns/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import webExtension, { isPrivateAddress } from '../extensions/web.ts'
+import { httpFetch } from '../extensions/web-transport.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
+vi.mock('../extensions/web-transport.js', () => ({ httpFetch: vi.fn() }))
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown> }
 type Execute = (id: string, params: Record<string, unknown>) => Promise<ToolResult>
@@ -23,8 +25,7 @@ const setup = (): { search: (params: Record<string, unknown>) => Promise<ToolRes
 }
 
 const lookupMock = vi.mocked(lookup)
-const fetchMock = vi.fn()
-const originalFetch = globalThis.fetch
+const fetchMock = vi.mocked(httpFetch)
 
 const respond = (body: string | ReadableStream<Uint8Array> | null, opts: { status?: number; contentType?: string | null; location?: string } = {}): Response => {
   const headers = new Headers()
@@ -41,11 +42,9 @@ beforeEach(() => {
   fetchMock.mockReset()
   lookupMock.mockReset()
   lookupMock.mockResolvedValue(publicAddresses as never)
-  globalThis.fetch = fetchMock as unknown as typeof fetch
 })
 
 afterEach(() => {
-  globalThis.fetch = originalFetch
   vi.restoreAllMocks()
 })
 
@@ -106,7 +105,7 @@ describe('web_fetch responses', () => {
       body: null,
       headers: new Headers({ 'content-type': 'text/plain' }),
       text: async () => 'body-less payload',
-    })
+    } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/nobody')
     expect(result.content[0].text).toBe('body-less payload')
   })
@@ -132,14 +131,16 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe('<b>raw</b>')
   })
 
-  it('sends the pi user agent, a timeout signal, and manual redirect handling', async () => {
+  it('sends the pi user agent, a timeout signal, and a pinned lookup to the transport', async () => {
     fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
     await setup().fetchUrl('https://example.com/a')
-    const init = fetchMock.mock.calls[0][1] as RequestInit
-    expect(init.headers).toEqual({ 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1' })
-    expect(init.redirect).toBe('manual')
-    expect(init.signal).toBeInstanceOf(AbortSignal)
-    expect((init.signal as AbortSignal).aborted).toBe(false)
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.userAgent).toBe('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1')
+    // The transport never follows redirects and never re-resolves: the loop passes a lookup
+    // already pinned to the validated address.
+    expect(typeof opts.lookup).toBe('function')
+    expect(opts.signal).toBeInstanceOf(AbortSignal)
+    expect(opts.signal.aborted).toBe(false)
   })
 })
 
@@ -315,6 +316,26 @@ describe('web_fetch guard fails closed', () => {
   it('refuses a redirect to a file url', async () => {
     fetchMock.mockResolvedValue(respond('', { status: 302, location: 'file:///etc/passwd' }))
     await expect(setup().fetchUrl('https://example.com/a')).rejects.toThrow(/unsupported redirect scheme/)
+  })
+})
+
+describe('web_fetch pins dns against rebinding', () => {
+  it('resolves once and hands the transport a lookup it cannot re-resolve', async () => {
+    lookupMock.mockResolvedValue(publicAddresses as never)
+    fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+
+    await setup().fetchUrl('https://rebind.example/x')
+
+    // One resolution per hop: a rebinding attack needs a second lookup to swap in a private
+    // address, and there is none.
+    expect(lookupMock).toHaveBeenCalledTimes(1)
+
+    // Simulate the record flipping to a private address after validation. The pinned lookup
+    // the transport received must ignore that and still yield only the validated address.
+    lookupMock.mockResolvedValue([{ address: '10.0.0.1', family: 4 }] as never)
+    const pinned = fetchMock.mock.calls[0][1].lookup
+    const yielded = await new Promise((resolve) => pinned('rebind.example', { all: true }, (_e, addrs) => resolve(addrs)))
+    expect(yielded).toEqual(publicAddresses)
   })
 })
 

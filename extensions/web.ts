@@ -6,9 +6,13 @@
  * Honors the local-only setup: no cloud accounts, plain HTTPS to public web.
  */
 
+import type { LookupAddress } from 'node:dns'
 import { lookup } from 'node:dns/promises'
+import type { LookupFunction } from 'node:net'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
+
+import { httpFetch } from './web-transport.js'
 
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1'
@@ -128,15 +132,32 @@ export function isPrivateAddress(ip: string): boolean {
   return addr.includes(':') ? isPrivateIpv6(addr) : isPrivateIpv4(addr)
 }
 
-async function assertPublicHost(url: URL): Promise<void> {
+/** A lookup that always yields `addresses`, so the socket cannot resolve the host again. */
+function pinnedLookup(addresses: LookupAddress[]): LookupFunction {
+  return (_hostname, options, callback) => {
+    const cb = (typeof options === 'function' ? options : callback) as (err: Error | null, address: unknown, family?: number) => void
+    if (typeof options !== 'function' && options.all) return cb(null, addresses)
+    const [first] = addresses
+    cb(null, first.address, first.family)
+  }
+}
+
+/**
+ * Resolve a host once, reject any private address, and return a lookup pinned to exactly
+ * those addresses. Passing that lookup to the transport is what closes the SSRF
+ * time-of-check/time-of-use gap: the connection reuses the validated resolution rather
+ * than issuing a second, unchecked DNS query that a rebinding record could answer privately.
+ */
+async function resolveAndPin(url: URL): Promise<LookupFunction> {
   const host = url.hostname.replace(/^\[|\]$/g, '')
   const addresses = await lookup(host, { all: true, verbatim: true })
-  // An empty list would leave nothing for the loop to reject, so the guard would pass
-  // vacuously. Schemes without a host (data:, file:) reach here the same way.
+  // An empty list would leave nothing to reject, so the guard would pass vacuously.
+  // Schemes without a host (data:, file:) reach here the same way.
   if (addresses.length === 0) throw new Error(`${url.hostname || url.protocol} did not resolve to any address`)
   for (const { address } of addresses) {
     if (isPrivateAddress(address)) throw new Error(`refusing to fetch private/internal address for ${url.hostname} (${address})`)
   }
+  return pinnedLookup(addresses)
 }
 
 const MAX_REDIRECTS = 5
@@ -156,14 +177,15 @@ async function readCapped(response: Response): Promise<string> {
   return text.slice(0, MAX_RAW_CHARS)
 }
 
-async function fetchText(rawUrl: string): Promise<{ text: string; contentType: string }> {
+async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text: string; contentType: string }> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertPublicHost(url)
-    const response = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
+    // Resolve, validate and pin per hop: a redirect target gets the same guarantee.
+    const lookup = await resolveAndPin(url)
+    const response = await transport(url, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      redirect: 'manual',
+      lookup,
+      userAgent: USER_AGENT,
     })
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location')
