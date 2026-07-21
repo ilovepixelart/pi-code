@@ -41,6 +41,7 @@ const CALL_TIMEOUT_MS = 120_000
 const RESERVED_NAMES = new Set(['web_fetch', 'web_search', 'plan_mode_complete'])
 
 export interface StdioServerConfig {
+  type?: 'stdio'
   command: string
   args?: string[]
   env?: Record<string, string>
@@ -48,6 +49,7 @@ export interface StdioServerConfig {
 }
 
 export interface HttpServerConfig {
+  type?: 'http' | 'streamable-http' | 'sse'
   url: string
   headers?: Record<string, string>
   bearerToken?: string
@@ -123,7 +125,8 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
 }
 
 function isStdio(config: ServerConfig): config is StdioServerConfig {
-  return 'command' in config
+  // An explicit type wins; without one, a command field means stdio.
+  return 'command' in config && (config.type === undefined || config.type === 'stdio')
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -164,12 +167,18 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
   const token = config.bearerToken ?? (config.bearerTokenEnv ? process.env[config.bearerTokenEnv] : undefined)
   if (token) headers.Authorization = `Bearer ${token}`
   const url = new URL(interpolateEnv(config.url))
+  if (config.type === 'sse') {
+    const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: explicitly declared legacy transport
+    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)
+    return client
+  }
   try {
     const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } })
     await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name}`)
     return client
   } catch (error) {
-    if (String(error).includes('Unauthorized')) throw error
+    // An explicitly declared streamable transport must not silently degrade to SSE.
+    if (config.type !== undefined || String(error).includes('Unauthorized')) throw error
     const fallback = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
     const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: deliberate legacy fallback
     await withTimeout(fallback.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)

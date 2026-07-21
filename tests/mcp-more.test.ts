@@ -489,6 +489,32 @@ describe('mcp transport selection', () => {
     expect(harness.toolNames()).toEqual(['remote_go'])
   })
 
+  it('connects an explicit type sse server over SSE directly', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { legacy: { type: 'sse', url: 'https://example.com/sse' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['sse'])
+    expect(harness.toolNames()).toEqual(['legacy_go'])
+  })
+
+  it('does not degrade an explicit type http server to SSE on failure', async () => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw new Error('connect refused')
+    }
+    const harness = await setupStarted({ user: { remote: { type: 'http', url: 'https://example.com/mcp' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
+    expect(await statusLinesOf(harness)).toEqual(['remote: failed: connect refused (0 tools)'])
+  })
+
+  it('lets an explicit type override a command field left in the config', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { remote: { type: 'http', command: 'stale', url: 'https://example.com/mcp' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
+    expect(harness.toolNames()).toEqual(['remote_go'])
+  })
+
   it('does not retry over SSE when the streamable transport reports Unauthorized', async () => {
     hoisted.control.connect = async (transport) => {
       if (transport.kind === 'http') throw new Error('Unauthorized')
