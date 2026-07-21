@@ -30,10 +30,32 @@ function normalizeToolName(tool: string): string {
  */
 function parseToolsField(raw: unknown): string[] | undefined | null {
   if (raw === undefined) return undefined
-  const items = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null
-  if (items === null || items.some((item) => typeof item !== 'string')) return null
+  let items: unknown[]
+  if (Array.isArray(raw)) items = raw
+  else if (typeof raw === 'string') items = raw.split(',')
+  else return null
+  if (items.some((item) => typeof item !== 'string')) return null
   const tools = (items as string[]).map((item) => normalizeToolName(item.trim())).filter(Boolean)
   return tools.length > 0 ? tools : undefined
+}
+
+/** Parse one agent markdown file; null when it is not a usable agent definition. */
+function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
+  const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content)
+  const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
+  const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
+  if (!name || !description) return null
+  const tools = parseToolsField(frontmatter.tools)
+  if (tools === null) return null
+  return {
+    name,
+    description,
+    tools,
+    model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
+    systemPrompt: body,
+    source,
+    filePath,
+  }
 }
 
 export type AgentScope = 'user' | 'project' | 'both'
@@ -79,28 +101,8 @@ function loadAgentsFromDir(dir: string, source: 'user' | 'project'): AgentConfig
       continue
     }
 
-    const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content)
-
-    const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
-    const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
-    if (!name || !description) {
-      continue
-    }
-
-    const tools = parseToolsField(frontmatter.tools)
-    if (tools === null) {
-      continue
-    }
-
-    agents.push({
-      name,
-      description,
-      tools,
-      model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
-      systemPrompt: body,
-      source,
-      filePath,
-    })
+    const agent = parseAgentFile(content, source, filePath)
+    if (agent) agents.push(agent)
   }
 
   return agents
