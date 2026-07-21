@@ -22,6 +22,7 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
+import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
 import { backgroundStatusText, startBackgroundRun } from './background.js'
@@ -679,15 +680,15 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
   const successCount = results.filter((r) => r.exitCode === 0).length
   const summaries = results.map((r) => {
     const output = getFinalOutput(r.messages)
-    const preview = output.slice(0, 100) + (output.length > 100 ? '...' : '')
     const status = r.exitCode === 0 ? 'completed' : 'failed'
-    return `[${r.agent}] ${status}: ${preview || '(no output)'}`
+    return `[${r.agent}] ${status}: ${output || '(no output)'}`
   })
   return {
     content: [
       {
         type: 'text',
-        text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n')}`,
+        // Full reports, so a fan-out can be synthesized from; capped at pi's tool-output budget.
+        text: capForContext(`Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n')}`),
       },
     ],
     details: makeDetails('parallel')(results),

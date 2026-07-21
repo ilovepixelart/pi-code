@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
+import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import subagentExtension from '../extensions/subagent/index.ts'
@@ -837,15 +838,24 @@ describe('parallel mode', () => {
     expect(text(result)).toBe('Parallel: 1/2 succeeded\n\n[scout] completed: alpha output\n\n[scout] failed: beta output')
   })
 
-  it('truncates a task preview past 100 characters', async () => {
+  it('returns each task output in full so the caller can synthesize from it', async () => {
     const long = 'z'.repeat(150)
-    const exact = 'y'.repeat(100)
     script('alpha', { stdout: [say(long)] })
-    script('beta', { stdout: [say(exact)] })
+    script('beta', { stdout: [say('short')] })
 
     const result = await execute('c1', { tasks: tasksOf('alpha', 'beta') }, undefined, undefined, trustedCtx)
 
-    expect(text(result)).toBe(`Parallel: 2/2 succeeded\n\n[scout] completed: ${'z'.repeat(100)}...\n\n[scout] completed: ${exact}`)
+    expect(text(result)).toBe(`Parallel: 2/2 succeeded\n\n[scout] completed: ${long}\n\n[scout] completed: short`)
+  })
+
+  it('caps the combined parallel report at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `line ${i}`).join('\n')
+    script('alpha', { stdout: [say(many)] })
+
+    const result = await execute('c1', { tasks: tasksOf('alpha') }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
   })
 
   it('substitutes a no-output marker for a task that said nothing', async () => {
