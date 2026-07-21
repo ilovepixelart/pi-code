@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import webExtension, { isPrivateAddress } from '../extensions/web.ts'
+import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
 import { httpFetch } from '../extensions/web-transport.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
@@ -336,6 +336,32 @@ describe('web_fetch pins dns against rebinding', () => {
     const pinned = fetchMock.mock.calls[0][1].lookup
     const yielded = await new Promise((resolve) => pinned('rebind.example', { all: true }, (_e, addrs) => resolve(addrs)))
     expect(yielded).toEqual(publicAddresses)
+  })
+})
+
+describe('pinnedLookup answers every lookup shape from the frozen addresses', () => {
+  const addresses = [
+    { address: '93.184.216.34', family: 4 },
+    { address: '2606:2800::1', family: 6 },
+  ]
+  // The node socket may call lookup in several shapes; LookupFunction's type only covers
+  // the 3-arg form, so reach the others through a loosely-typed alias.
+  type AnyLookup = (host: string, ...rest: unknown[]) => void
+  const lookupFor = () => pinnedLookup(addresses) as unknown as AnyLookup
+
+  it('returns the full set for the {all:true} shape node sockets use', async () => {
+    const yielded = await new Promise((resolve) => lookupFor()('h', { all: true }, (_e: unknown, a: unknown) => resolve(a)))
+    expect(yielded).toEqual(addresses)
+  })
+
+  it('returns the first address and family for the single-result shape', async () => {
+    const result = await new Promise((resolve) => lookupFor()('h', {}, (_e: unknown, address: unknown, family: unknown) => resolve({ address, family })))
+    expect(result).toEqual({ address: '93.184.216.34', family: 4 })
+  })
+
+  it('accepts the legacy two-argument (hostname, callback) form', async () => {
+    const result = await new Promise((resolve) => lookupFor()('h', (_e: unknown, address: unknown, family: unknown) => resolve({ address, family })))
+    expect(result).toEqual({ address: '93.184.216.34', family: 4 })
   })
 })
 

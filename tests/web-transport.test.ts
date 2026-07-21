@@ -47,4 +47,17 @@ describe('httpFetch pins the connection to the validated address', () => {
     // 127.0.0.1:1 is not listening; the pin sends the socket there and it fails.
     await expect(httpFetch(new URL('http://blocked.internal.test/'), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toThrow()
   })
+
+  it('joins a repeated response header into one value', async () => {
+    const server = createHttpServer((_req, res) => {
+      res.setHeader('set-cookie', ['a=1', 'b=2']) // node keeps repeated headers as an array
+      res.end('ok')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    closers.push(() => server.close())
+    const port = (server.address() as AddressInfo).port
+
+    const response = await httpFetch(new URL(`http://blocked.internal.test:${port}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })
+    expect(response.headers.get('set-cookie')).toBe('a=1, b=2')
+  })
 })

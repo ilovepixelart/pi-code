@@ -133,7 +133,7 @@ export function isPrivateAddress(ip: string): boolean {
 }
 
 /** A lookup that always yields `addresses`, so the socket cannot resolve the host again. */
-function pinnedLookup(addresses: LookupAddress[]): LookupFunction {
+export function pinnedLookup(addresses: LookupAddress[]): LookupFunction {
   return (_hostname, options, callback) => {
     const cb = (typeof options === 'function' ? options : callback) as (err: Error | null, address: unknown, family?: number) => void
     if (typeof options !== 'function' && options.all) return cb(null, addresses)
