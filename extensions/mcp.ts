@@ -63,7 +63,7 @@ export type ServerConfig = StdioServerConfig | HttpServerConfig
 export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
   return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (_, name, hasDefault, fallback) => {
     const current = env[name]
-    if (hasDefault !== undefined) return current ? current : fallback
+    if (hasDefault !== undefined) return current || fallback
     return current ?? ''
   })
 }

@@ -73,6 +73,12 @@ export interface ImportBudget {
 
 export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
 
+function fenceMarker(lineStart: string): string | null {
+  if (lineStart.startsWith('```')) return '`'
+  if (lineStart.startsWith('~~~')) return '~'
+  return null
+}
+
 /** The `@path` targets of a context file, in document order. Claude Code evaluates
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
@@ -81,8 +87,7 @@ function importTargets(content: string): string[] {
   // example may legitimately contain tilde-fence lines, and vice versa.
   let fence: string | null = null
   for (const line of content.split('\n')) {
-    const start = line.trimStart()
-    const marker = start.startsWith('```') ? '`' : start.startsWith('~~~') ? '~' : null
+    const marker = fenceMarker(line.trimStart())
     if (marker !== null && (fence === null || fence === marker)) {
       fence = fence === null ? marker : null
       continue
