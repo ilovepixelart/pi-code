@@ -40,9 +40,11 @@ function parseToolsField(raw: unknown): string[] | undefined | null {
 }
 
 /**
- * Claude Code model aliases name Anthropic tiers pi cannot resolve; a child spawned
- * with one as --model fails to boot. Claude's `inherit` (run on the session model)
- * is the safe degradation for all of them.
+ * Claude Code model aliases name Anthropic tiers. pi's resolver would partial-match
+ * one against an authenticated Anthropic provider, but for every other setup the
+ * child exits at boot on an unresolvable --model. Running on the session model
+ * (Claude's `inherit`) is the degradation that works everywhere; users who want a
+ * tier pinned should name a concrete model id.
  */
 const CLAUDE_MODEL_ALIASES = new Set(['sonnet', 'opus', 'haiku', 'inherit'])
 

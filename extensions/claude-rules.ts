@@ -2,13 +2,14 @@
  * Claude Rules Extension
  *
  * Replicates Claude Code's rules loading:
- * - Global rules (~/.claude/rules/*.md) are inlined in full into the system prompt.
- * - Project rules (.claude/rules/*.md) are listed as pointers the agent can read on demand.
+ * - Unscoped global rules (~/.claude/rules/*.md) are inlined in full into the system prompt.
+ * - Path-scoped global rules and all project rules (.claude/rules/*.md) are listed as
+ *   pointers the agent reads on demand.
  *
  * Path-scoped rules: a rule file may declare `paths:` frontmatter (a glob or
- * list of globs). Project-rule pointers surface that scope so the agent knows
- * to read the rule when working on matching files. Frontmatter is stripped
- * from inlined global rules.
+ * list of globs). Pointers surface that scope so the agent knows to read the
+ * rule when working on matching files. Frontmatter is stripped from inlined
+ * global rules.
  *
  * Adapted from the pi v0.74.2 claude-rules example.
  */
