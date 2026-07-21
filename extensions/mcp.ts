@@ -66,15 +66,6 @@ export function projectConfigPaths(cwd: string): string[] {
   return [path.join(cwd, '.mcp.json'), path.join(cwd, '.pi', 'mcp.json')]
 }
 
-/** All config files, later winning: user first, then project. */
-export function configPaths(cwd: string, home: string): string[] {
-  return [...userConfigPaths(home), ...projectConfigPaths(cwd)]
-}
-
-export function loadConfig(cwd: string): Record<string, ServerConfig> {
-  return loadConfigFrom(configPaths(cwd, os.homedir()))
-}
-
 export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
   const servers: Record<string, ServerConfig> = {}
   for (const file of files) {

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { discoverAgents, formatAgentList } from '../extensions/subagent/agents.ts'
+import { discoverAgents } from '../extensions/subagent/agents.ts'
 
 /**
  * Covers extensions/subagent/agents.ts and extensions/subagent/background.ts.
@@ -258,36 +258,6 @@ describe('discoverAgents', () => {
     writeAgent(piUserDir, 'modelled.md', { name: 'modelled', description: 'pinned model', model: 'opus' })
 
     expect(discoverAgents(cwd, 'user').agents[0].model).toBe('opus')
-  })
-})
-
-describe('formatAgentList', () => {
-  const agent = (name: string, source: 'user' | 'project', description: string) => ({
-    name,
-    description,
-    systemPrompt: '',
-    source,
-    filePath: `/tmp/${name}.md`,
-  })
-
-  it('reports none with no remainder for an empty list', () => {
-    expect(formatAgentList([], 5)).toEqual({ text: 'none', remaining: 0 })
-  })
-
-  it('renders every agent as "name (source): description" joined by semicolons', () => {
-    const result = formatAgentList([agent('alpha', 'user', 'does alpha'), agent('beta', 'project', 'does beta')], 5)
-
-    expect(result).toEqual({ text: 'alpha (user): does alpha; beta (project): does beta', remaining: 0 })
-  })
-
-  it('truncates at maxItems and reports the remaining count', () => {
-    const list = [agent('a', 'user', 'first'), agent('b', 'user', 'second'), agent('c', 'user', 'third')]
-
-    expect(formatAgentList(list, 2)).toEqual({ text: 'a (user): first; b (user): second', remaining: 1 })
-  })
-
-  it('lists nothing and counts every agent as remaining when maxItems is zero', () => {
-    expect(formatAgentList([agent('a', 'user', 'first')], 0)).toEqual({ text: '', remaining: 1 })
   })
 })
 
