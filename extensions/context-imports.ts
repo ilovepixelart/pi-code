@@ -70,17 +70,20 @@ export interface ImportBudget {
 
 export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
 
-/** The `@path` targets of a context file, in document order, skipping fenced code blocks. */
+/** The `@path` targets of a context file, in document order. Claude Code evaluates
+ * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
   const targets: string[] = []
   let inFence = false
   for (const line of content.split('\n')) {
-    if (line.trimStart().startsWith('```')) {
+    const start = line.trimStart()
+    if (start.startsWith('```') || start.startsWith('~~~')) {
       inFence = !inFence
       continue
     }
     if (inFence) continue
-    for (const match of line.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
+    const withoutSpans = line.replace(/`[^`]*`/g, '')
+    for (const match of withoutSpans.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
   }
   return targets
 }

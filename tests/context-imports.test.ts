@@ -59,6 +59,20 @@ describe('collectImports', () => {
     expect(collectImports('```\n@b.md\n```', dir, dir, [dir], new Set())).toEqual([])
   })
 
+  it('skips imports inside tilde-fenced code blocks', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('~~~\n@b.md\n~~~', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('skips imports inside inline code spans, as Claude Code documents', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    writeFileSync(join(dir, 'c.md'), 'C')
+    const out = collectImports('mention `@b.md` in prose but import @c.md', dir, dir, [dir], new Set())
+    expect(out.map((o) => o.body)).toEqual(['C'])
+  })
+
   it('skips an import that resolves to a directory instead of crashing', () => {
     const dir = tempDir()
     mkdirSync(join(dir, 'sub'))
