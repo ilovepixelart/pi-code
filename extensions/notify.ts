@@ -38,6 +38,8 @@ function notifyWindows(title: string, body: string): void {
 }
 
 function notify(title: string, body: string): void {
+  // Piped or headless stdout (pi -p, CI) must not receive raw escape bytes.
+  if (!process.stdout.isTTY) return
   if (process.env.WT_SESSION) {
     notifyWindows(title, body)
   } else if (process.env.KITTY_WINDOW_ID) {
