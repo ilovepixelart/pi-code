@@ -71,9 +71,14 @@ export function formatRulePointer(rel: string, paths: string[]): string {
 
 /** Recursively find all .md files in a directory. */
 function findMarkdownFiles(dir: string, basePath = ''): string[] {
-  if (!fs.existsSync(dir)) return []
   const results: string[] = []
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return results // a missing or unreadable directory must not take down session start
+  }
+  for (const entry of entries) {
     const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name
     if (entry.isDirectory()) {
       results.push(...findMarkdownFiles(path.join(dir, entry.name), relativePath))

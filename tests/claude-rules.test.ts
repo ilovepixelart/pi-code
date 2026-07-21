@@ -134,6 +134,18 @@ describe('extension wiring', () => {
     expect(prompt).toContain('Readable rule.')
     expect(prompt).not.toContain('Secret rule.')
   })
+
+  it('skips an unreadable rules subdirectory instead of failing the session', async () => {
+    const rulesDir = join(hoisted.home, '.claude', 'rules')
+    mkdirSync(join(rulesDir, 'locked-dir'), { recursive: true })
+    chmodSync(join(rulesDir, 'locked-dir'), 0o000)
+    writeFileSync(join(rulesDir, 'open.md'), 'Readable rule.')
+
+    const prompt = await sessionPrompt(globalCtx())
+    chmodSync(join(rulesDir, 'locked-dir'), 0o755)
+
+    expect(prompt).toContain('Readable rule.')
+  })
 })
 
 describe('parseFrontmatter CRLF', () => {
