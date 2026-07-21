@@ -127,6 +127,21 @@ describe('web_fetch responses', () => {
     expect(text).toContain('truncated')
   })
 
+  it('surfaces an incomplete trailing multibyte sequence instead of dropping it', async () => {
+    // A truncated server body can end mid-character; the decoder's final flush turns
+    // the leftover bytes into U+FFFD rather than losing them silently.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x61, 0x62]))
+        controller.enqueue(new Uint8Array([0xc3]))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream, { contentType: 'text/plain' }))
+    const result = await setup().fetchUrl('https://example.com/cut')
+    expect(result.content[0].text).toBe('ab�')
+  })
+
   it('treats a missing content-type as non-html and skips html stripping', async () => {
     // Response() synthesizes text/plain for a string body, so a header-less
     // reply has to be duck-typed to actually reach the `?? ''` fallback.

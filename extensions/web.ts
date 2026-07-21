@@ -176,6 +176,9 @@ async function readCapped(response: Response): Promise<string> {
     if (done) break
     if (value) text += decoder.decode(value, { stream: true })
   }
+  // Flush: bytes of a character cut off by the end of the stream become U+FFFD
+  // instead of vanishing silently.
+  text += decoder.decode()
   await reader.cancel().catch(() => {})
   return text.slice(0, MAX_RAW_CHARS)
 }
