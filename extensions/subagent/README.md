@@ -8,7 +8,7 @@ Delegate tasks to specialized subagents with isolated context windows.
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Background runs**: Fire-and-forget with a completion notification; max 8 running at once
-- **Bounded fan-out**: A subagent cannot spawn subagents of its own
+- **Bounded fan-out**: A subagent refuses to spawn subagents of its own (an env marker the tool honors: steering, not a sandbox)
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
 - **Abort support**: Ctrl+C propagates to kill subagent processes
