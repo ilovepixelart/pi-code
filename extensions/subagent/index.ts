@@ -567,7 +567,8 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
 
   for (let i = 0; i < chain.length; i++) {
     const step = chain[i]
-    const taskWithContext = step.task.replaceAll('{previous}', previousOutput)
+    // Function replacement: a string here would interpret $-patterns in the output.
+    const taskWithContext = step.task.replaceAll('{previous}', () => previousOutput)
 
     // Create update callback that includes all previous results
     const chainUpdate: OnUpdateCallback | undefined = onUpdate

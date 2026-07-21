@@ -699,6 +699,22 @@ describe('chain mode', () => {
     expect(text(result)).toBe('done')
   })
 
+  it('passes previous output containing $-patterns through verbatim', async () => {
+    // String.replaceAll with a string replacement interprets $$, $&, $` and $'; a shell
+    // snippet or awk line in the previous step's report must reach the next step intact.
+    const chain = [
+      { agent: 'scout', task: 'a' },
+      { agent: 'scout', task: 'apply: {previous}' },
+    ]
+    script('a', { stdout: [say("kill $$ && echo '$&'")] })
+    script("apply: kill $$ && echo '$&'", { stdout: [say('done')] })
+
+    const result = await execute('c1', { chain }, undefined, undefined, trustedCtx)
+
+    expect(piArgs(spawnCalls[1]).at(-1)).toBe("Task: apply: kill $$ && echo '$&'")
+    expect(text(result)).toBe('done')
+  })
+
   it('substitutes an empty string for the placeholder in the first step', async () => {
     script('summarize ', { stdout: [say('nothing to summarize')] })
 
