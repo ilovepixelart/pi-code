@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
+import { hookFiles } from '../extensions/hooks.ts'
 import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp.ts'
 
@@ -110,6 +111,23 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
     const cwd = tempDir()
     mkdirSync(join(cwd, rel, '..'), { recursive: true })
     writeFileSync(join(cwd, rel), '{}')
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it.each(
+    hookFiles('/x', '/h', true)
+      .filter((abs) => abs.startsWith('/x/'))
+      .map((abs) => abs.slice('/x/'.length)),
+  )('treats a project with only %s as claude-shaped (hooks run arbitrary shell)', (rel) => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, rel, '..'), { recursive: true })
+    writeFileSync(join(cwd, rel), '{}')
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it('treats a project with only a .claude/output-styles directory as claude-shaped (style bodies are injected verbatim)', () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 
