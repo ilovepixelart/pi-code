@@ -199,8 +199,14 @@ async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner:
   await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
 }
 
+/** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
+const MAX_PENDING_INPUTS = 100
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
+  // tool_execution_end does not carry the tool's input, but Claude's PostToolUse
+  // contract does, so remember it from tool_call keyed by the call id.
+  const pendingInputs = new Map<string, unknown>()
 
   pi.on('session_start', async (event, ctx) => {
     const trusted = await isProjectApproved(ctx)
@@ -212,12 +218,21 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event) => {
+    pendingInputs.set(event.toolCallId, event.input)
+    if (pendingInputs.size > MAX_PENDING_INPUTS) {
+      const oldest = pendingInputs.keys().next().value
+      if (oldest !== undefined) pendingInputs.delete(oldest)
+    }
     const decision = await runPreToolUse(config, event.toolName, event.input, runHookCommand)
-    return decision.block ? { block: true, reason: decision.reason } : undefined
+    if (!decision.block) return undefined
+    pendingInputs.delete(event.toolCallId) // a blocked tool never reaches tool_execution_end
+    return { block: true, reason: decision.reason }
   })
 
   pi.on('tool_execution_end', async (event) => {
+    const toolInput = pendingInputs.get(event.toolCallId)
+    pendingInputs.delete(event.toolCallId)
     if (event.isError) return
-    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName }, runHookCommand)
+    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runHookCommand)
   })
 }
