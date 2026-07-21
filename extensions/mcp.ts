@@ -58,9 +58,14 @@ export interface HttpServerConfig {
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
 
-/** Claude's .mcp.json expansion: ${VAR}, and ${VAR:-default} when VAR is unset. */
+/** Claude's .mcp.json expansion: ${VAR}, and ${VAR:-default}. The syntax borrows
+ * shell's `:-`, which substitutes when the variable is unset OR empty. */
 export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
-  return value.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, fallback) => env[name] ?? fallback ?? '')
+  return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (_, name, hasDefault, fallback) => {
+    const current = env[name]
+    if (hasDefault !== undefined) return current ? current : fallback
+    return current ?? ''
+  })
 }
 
 /** User-scoped MCP config (the user's own; safe to load without project trust). */
