@@ -27,7 +27,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { isProjectApproved } from './project-approval.js'
+import { isProjectApproved } from './internal/project-approval.js'
 
 const DEFAULT_TIMEOUT_S = 60
 

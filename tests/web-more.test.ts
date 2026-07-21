@@ -1,11 +1,10 @@
 import { lookup } from 'node:dns/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { httpFetch } from '../extensions/internal/web-transport.ts'
 import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
-import { httpFetch } from '../extensions/web-transport.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
-vi.mock('../extensions/web-transport.js', () => ({ httpFetch: vi.fn() }))
+vi.mock('../extensions/internal/web-transport.js', () => ({ httpFetch: vi.fn() }))
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown> }
 type Execute = (id: string, params: Record<string, unknown>) => Promise<ToolResult>

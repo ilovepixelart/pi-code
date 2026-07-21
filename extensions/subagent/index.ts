@@ -22,7 +22,7 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
-import { isProjectApproved } from '../project-approval.js'
+import { isProjectApproved } from '../internal/project-approval.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
 import { backgroundStatusText, startBackgroundRun } from './background.js'
 

@@ -28,8 +28,8 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
-import { capForContext } from './output-guard.js'
-import { isProjectApproved } from './project-approval.js'
+import { capForContext } from './internal/output-guard.js'
+import { isProjectApproved } from './internal/project-approval.js'
 
 const CONNECT_TIMEOUT_MS = 10_000
 const CALL_TIMEOUT_MS = 120_000

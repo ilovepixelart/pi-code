@@ -12,7 +12,7 @@ import type { LookupFunction } from 'node:net'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { httpFetch } from './web-transport.js'
+import { httpFetch } from './internal/web-transport.js'
 
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1'

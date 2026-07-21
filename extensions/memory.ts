@@ -13,7 +13,7 @@ import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
-import { capForContext } from './output-guard.js'
+import { capForContext } from './internal/output-guard.js'
 
 const INDEX_FILE = 'MEMORY.md'
 

@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it } from 'vitest'
 
-import { capForContext } from '../extensions/output-guard.ts'
+import { capForContext } from '../extensions/internal/output-guard.ts'
 
 const lines = (count: number): string => Array.from({ length: count }, (_, i) => `line ${i}`).join('\n')
 
