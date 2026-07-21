@@ -1,11 +1,11 @@
 import { lookup } from 'node:dns/promises'
+import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { httpFetch } from '../extensions/internal/web-transport.ts'
 import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
-import { httpFetch } from '../extensions/web-transport.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
-vi.mock('../extensions/web-transport.js', () => ({ httpFetch: vi.fn() }))
+vi.mock('../extensions/internal/web-transport.js', () => ({ httpFetch: vi.fn() }))
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown> }
 type Execute = (id: string, params: Record<string, unknown>) => Promise<ToolResult>
@@ -114,6 +114,32 @@ describe('web_fetch responses', () => {
     fetchMock.mockResolvedValue(respond('', { contentType: 'text/plain' }))
     const result = await setup().fetchUrl('https://example.com/empty')
     expect(result.content[0].text).toBe('(empty response)')
+  })
+
+  it('caps a body with thousands of short lines at pi tool-output line budget', async () => {
+    // The 30k char cap alone lets thousands of short lines through; pi's tool-output
+    // contract also bounds lines, which the shared output guard enforces.
+    const manyLines = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `<p>l${i}</p>`).join('')
+    fetchMock.mockResolvedValue(respond(manyLines))
+    const result = await setup().fetchUrl('https://example.com/lines')
+    const text = result.content[0].text as string
+    expect(text.split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text).toContain('truncated')
+  })
+
+  it('surfaces an incomplete trailing multibyte sequence instead of dropping it', async () => {
+    // A truncated server body can end mid-character; the decoder's final flush turns
+    // the leftover bytes into U+FFFD rather than losing them silently.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x61, 0x62]))
+        controller.enqueue(new Uint8Array([0xc3]))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream, { contentType: 'text/plain' }))
+    const result = await setup().fetchUrl('https://example.com/cut')
+    expect(result.content[0].text).toBe('ab�')
   })
 
   it('treats a missing content-type as non-html and skips html stripping', async () => {

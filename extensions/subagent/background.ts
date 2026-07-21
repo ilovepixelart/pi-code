@@ -1,7 +1,8 @@
 /**
  * Background subagent runs: fire-and-forget children whose completion wakes
- * the parent agent via a notification message. Session-scoped (children die
- * with pi); state lives in an in-memory registry queried via {action:"status"}.
+ * the parent agent via a notification message. State lives in an in-memory
+ * registry queried via {status: true}; it is lost on restart, and a child
+ * still running when pi exits finishes on its own rather than being killed.
  */
 
 import { spawn } from 'node:child_process'
@@ -24,6 +25,13 @@ export interface BackgroundSpawn {
 }
 
 const runs = new Map<string, BackgroundRun>()
+
+/** Cap on simultaneously running background children. */
+export const MAX_BACKGROUND_RUNS = 8
+
+export function activeBackgroundRuns(): number {
+  return [...runs.values()].filter((run) => run.state === 'running').length
+}
 
 /** Extract the final assistant text and turn count from a pi --mode json stdout stream. */
 export function parseFinalOutputFromJsonl(jsonl: string): { text: string; turns: number } {
@@ -58,7 +66,11 @@ export function backgroundStatusText(): string {
   return formatStatus(runs.values())
 }
 
-export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string {
+export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string | null {
+  // Checked here, synchronously with registration: callers await temp-file writes
+  // between any check of their own and this call, so a parallel tool-call batch
+  // could otherwise all pass that earlier check and overshoot the cap.
+  if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) return null
   const id = `bg-${randomUUID().slice(0, 8)}`
   const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0 }
   runs.set(id, run)
@@ -67,6 +79,8 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     cwd: invocation.cwd,
     shell: false,
     stdio: ['ignore', 'pipe', 'ignore'],
+    // The marker lets the child's subagent tool refuse to nest further.
+    env: { ...process.env, PI_CODE_SUBAGENT: '1' },
   })
   let stdout = ''
   proc.stdout.on('data', (data) => {

@@ -31,6 +31,27 @@ describe('web helpers', () => {
     expect(parseSearchResults(FIXTURE, 1)).toHaveLength(1)
   })
 
+  it('keeps snippets aligned when an ad result is skipped', () => {
+    const withAd = `
+<div class="result">
+  <a class="result__a" href="https://example.com/a">First</a>
+  <a class="result__snippet" href="#">Snippet A.</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://duckduckgo.com/y.js?ad_domain=x">Sponsored</a>
+  <a class="result__snippet" href="#">Ad copy.</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://example.com/c">Third</a>
+  <a class="result__snippet" href="#">Snippet C.</a>
+</div>
+`
+    const results = parseSearchResults(withAd, 5)
+    expect(results).toHaveLength(2)
+    expect(results[0]).toEqual({ title: 'First', url: 'https://example.com/a', snippet: 'Snippet A.' })
+    expect(results[1]).toEqual({ title: 'Third', url: 'https://example.com/c', snippet: 'Snippet C.' })
+  })
+
   it('strips tags and decodes entities', () => {
     expect(stripTags('<b>a &amp; b</b>')).toBe('a & b')
     expect(decodeEntities('&lt;x&gt;')).toBe('<x>')

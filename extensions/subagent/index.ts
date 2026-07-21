@@ -22,9 +22,10 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
-import { isProjectApproved } from '../project-approval.js'
+import { capForContext } from '../internal/output-guard.js'
+import { isProjectApproved } from '../internal/project-approval.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
-import { backgroundStatusText, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, backgroundStatusText, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -319,6 +320,8 @@ async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
         cwd: cwd ?? defaultCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // The marker lets the child's subagent tool refuse to nest further.
+        env: { ...process.env, PI_CODE_SUBAGENT: '1' },
       })
       let buffer = ''
 
@@ -504,6 +507,27 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   return null
 }
 
+function backgroundCapResult(makeDetails: MakeDetails): ToolResult {
+  return {
+    content: [{ type: 'text', text: `Too many background runs (max ${MAX_BACKGROUND_RUNS} running). Wait for one to finish; check progress with {status: true}.` }],
+    details: makeDetails('single')([]),
+  }
+}
+
+function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefined): void {
+  if (!tmpPrompt) return
+  try {
+    fs.unlinkSync(tmpPrompt.filePath)
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.rmdirSync(tmpPrompt.dir)
+  } catch {
+    /* ignore */
+  }
+}
+
 async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails): Promise<ToolResult> {
   const task = params.task
   const agentName = params.agent
@@ -521,6 +545,9 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
       details: makeDetails('single')([]),
     }
   }
+  if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
+    return backgroundCapResult(makeDetails)
+  }
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
   if (agent.model) args.push('--model', agent.model)
   if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
@@ -532,19 +559,8 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   args.push(`Task: ${task}`)
   const invocation = getPiInvocation(args)
   const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd }, (run) => {
-    if (tmpPrompt) {
-      try {
-        fs.unlinkSync(tmpPrompt.filePath)
-      } catch {
-        /* ignore */
-      }
-      try {
-        fs.rmdirSync(tmpPrompt.dir)
-      } catch {
-        /* ignore */
-      }
-    }
-    const output = run.output || '(no output)'
+    removeTmpPrompt(tmpPrompt)
+    const output = capForContext(run.output ?? '') || '(no output)'
     pi.sendMessage(
       {
         customType: 'subagent-background',
@@ -554,6 +570,11 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
       { triggerTurn: true },
     )
   })
+  if (id === null) {
+    // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
+    removeTmpPrompt(tmpPrompt)
+    return backgroundCapResult(makeDetails)
+  }
   return {
     content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
     details: makeDetails('single')([]),
@@ -567,7 +588,8 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
 
   for (let i = 0; i < chain.length; i++) {
     const step = chain[i]
-    const taskWithContext = step.task.replaceAll('{previous}', previousOutput)
+    // Function replacement: a string here would interpret $-patterns in the output.
+    const taskWithContext = step.task.replaceAll('{previous}', () => previousOutput)
 
     // Create update callback that includes all previous results
     const chainUpdate: OnUpdateCallback | undefined = onUpdate
@@ -601,14 +623,14 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
     if (isError) {
       const errorMsg = result.errorMessage || result.stderr || getFinalOutput(result.messages) || '(no output)'
       return {
-        content: [{ type: 'text', text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+        content: [{ type: 'text', text: capForContext(`Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}`) }],
         details: makeDetails('chain')(results),
       }
     }
     previousOutput = getFinalOutput(result.messages)
   }
   return {
-    content: [{ type: 'text', text: getFinalOutput(results.at(-1)?.messages ?? []) || '(no output)' }],
+    content: [{ type: 'text', text: capForContext(getFinalOutput(results.at(-1)?.messages ?? [])) || '(no output)' }],
     details: makeDetails('chain')(results),
   }
 }
@@ -678,15 +700,15 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
   const successCount = results.filter((r) => r.exitCode === 0).length
   const summaries = results.map((r) => {
     const output = getFinalOutput(r.messages)
-    const preview = output.slice(0, 100) + (output.length > 100 ? '...' : '')
     const status = r.exitCode === 0 ? 'completed' : 'failed'
-    return `[${r.agent}] ${status}: ${preview || '(no output)'}`
+    return `[${r.agent}] ${status}: ${output || '(no output)'}`
   })
   return {
     content: [
       {
         type: 'text',
-        text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n')}`,
+        // Full reports, so a fan-out can be synthesized from; capped at pi's tool-output budget.
+        text: capForContext(`Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n')}`),
       },
     ],
     details: makeDetails('parallel')(results),
@@ -709,12 +731,12 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
   if (isError) {
     const errorMsg = result.errorMessage || result.stderr || getFinalOutput(result.messages) || '(no output)'
     return {
-      content: [{ type: 'text', text: `Agent ${result.stopReason || 'failed'}: ${errorMsg}` }],
+      content: [{ type: 'text', text: capForContext(`Agent ${result.stopReason || 'failed'}: ${errorMsg}`) }],
       details: makeDetails('single')([result]),
     }
   }
   return {
-    content: [{ type: 'text', text: getFinalOutput(result.messages) || '(no output)' }],
+    content: [{ type: 'text', text: capForContext(getFinalOutput(result.messages)) || '(no output)' }],
     details: makeDetails('single')([result]),
   }
 }
@@ -1014,13 +1036,21 @@ export default function subagentExtension(pi: ExtensionAPI) {
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
       'Single mode also supports background: true for long tasks; a notification arrives on completion and {status: true} lists runs.',
-      'Default agent scope is "user" (from ~/.pi/agent/agents).',
-      'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
+      'Default agent scope is "user" (from ~/.claude/agents and ~/.pi/agent/agents).',
+      'To enable project-local agents in .claude/agents or .pi/agents, set agentScope: "both" (or "project").',
     ].join(' '),
     parameters: SubagentParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? 'user'
+      // Children carry PI_CODE_SUBAGENT; without this check they could spawn
+      // grandchildren without limit.
+      if (process.env.PI_CODE_SUBAGENT) {
+        return {
+          content: [{ type: 'text', text: 'Nested subagent runs are not allowed: this session is already a subagent.' }],
+          details: { mode: 'single', agentScope, projectAgentsDir: null, results: [] },
+        }
+      }
       const discovery = discoverAgents(ctx.cwd, agentScope)
       const agents = discovery.agents
 

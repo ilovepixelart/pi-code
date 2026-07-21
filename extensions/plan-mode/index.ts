@@ -161,6 +161,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
       pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
     } else if (choice === 'Refine the plan') {
+      // The refined turn may answer in prose; without this reset agent_end would skip
+      // deriveTodosFromProse and re-display the superseded todo list.
+      planFromTool = false
       const refinement = await ctx.ui.editor('Refine the plan:', '')
       if (refinement?.trim()) {
         pi.sendUserMessage(refinement.trim())
@@ -240,6 +243,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       messages: event.messages.filter((m) => {
         const msg = m as AgentMessage & { customType?: string }
         if (msg.customType === 'plan-mode-context') return false
+        if (msg.customType === 'plan-execution-context' && !executionMode) return false
         if (msg.role !== 'user') return true
 
         const content = msg.content

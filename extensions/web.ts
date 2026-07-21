@@ -12,7 +12,8 @@ import type { LookupFunction } from 'node:net'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { httpFetch } from './web-transport.js'
+import { capForContext } from './internal/output-guard.js'
+import { httpFetch } from './internal/web-transport.js'
 
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1'
@@ -59,16 +60,18 @@ export function resolveResultUrl(href: string): string {
 export function parseSearchResults(html: string, limit: number): SearchResult[] {
   const results: SearchResult[] = []
   const anchorPattern = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
-  const snippetPattern = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
-  const snippets = [...html.matchAll(snippetPattern)].map((m) => stripTags(m[1]))
-  let index = 0
-  for (const match of html.matchAll(anchorPattern)) {
-    if (results.length >= limit) break
+  const snippetPattern = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/
+  const anchors = [...html.matchAll(anchorPattern)]
+  for (let i = 0; i < anchors.length && results.length < limit; i++) {
+    const match = anchors[i]
     const url = resolveResultUrl(match[1])
     const title = stripTags(match[2])
     if (!title || url.includes('duckduckgo.com/y.js')) continue
-    results.push({ title, url, snippet: snippets[index] ?? '' })
-    index++
+    // A result's snippet sits between its anchor and the next one; pairing by block
+    // keeps attribution right when an ad anchor (skipped above) carries a snippet too.
+    const block = html.slice((match.index ?? 0) + match[0].length, anchors[i + 1]?.index ?? html.length)
+    const snippet = snippetPattern.exec(block)
+    results.push({ title, url, snippet: snippet ? stripTags(snippet[1]) : '' })
   }
   return results
 }
@@ -173,6 +176,9 @@ async function readCapped(response: Response): Promise<string> {
     if (done) break
     if (value) text += decoder.decode(value, { stream: true })
   }
+  // Flush: bytes of a character cut off by the end of the stream become U+FFFD
+  // instead of vanishing silently.
+  text += decoder.decode()
   await reader.cancel().catch(() => {})
   return text.slice(0, MAX_RAW_CHARS)
 }
@@ -233,7 +239,9 @@ export default function webExtension(pi: ExtensionAPI) {
       }
       const { text, contentType } = await fetchText(params.url)
       const body = contentType.includes('html') ? htmlToText(text) : text.slice(0, MAX_FETCH_CHARS)
-      return { content: [{ type: 'text' as const, text: body || '(empty response)' }], details: {} }
+      // The char cap alone admits thousands of short lines; pi's tool-output budget
+      // bounds lines too, which the shared guard enforces.
+      return { content: [{ type: 'text' as const, text: capForContext(body) || '(empty response)' }], details: {} }
     },
   })
 }

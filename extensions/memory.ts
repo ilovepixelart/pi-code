@@ -13,7 +13,7 @@ import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
-import { capForContext } from './output-guard.js'
+import { capForContext } from './internal/output-guard.js'
 
 const INDEX_FILE = 'MEMORY.md'
 
@@ -35,17 +35,22 @@ export function slugifyName(name: string): string {
   )
 }
 
+/** The exact key prefix of a memory's index line; matching on a substring would also
+ * hit another entry whose description merely mentions this memory. */
+const entryPrefix = (name: string): string => `- [${name}](${name}.md):`
+
 /** Add or replace this memory's line in the index, keyed by its markdown link target. */
 export function upsertIndexLine(index: string, name: string, description: string): string {
-  const line = `- [${name}](${name}.md): ${description}`
-  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.includes(`](${name}.md)`))
+  // One line per memory: a newline in the description would break line-based matching.
+  const line = `${entryPrefix(name)} ${description.replace(/\s+/g, ' ').trim()}`
+  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.startsWith(entryPrefix(name)))
   if (lines.length === 0 || !lines[0].startsWith('#')) lines.unshift('# Memory index')
   lines.push(line)
   return `${lines.join('\n')}\n`
 }
 
 export function removeIndexLine(index: string, name: string): string {
-  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.includes(`](${name}.md)`))
+  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.startsWith(entryPrefix(name)))
   return lines.length > 0 ? `${lines.join('\n')}\n` : ''
 }
 

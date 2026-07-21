@@ -23,6 +23,47 @@ function normalizeToolName(tool: string): string {
   return CLAUDE_TOOL_MAP[lower] ?? lower
 }
 
+/**
+ * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
+ * list. Anything else returns null: a restriction that failed to parse must not run
+ * the agent unrestricted.
+ */
+function parseToolsField(raw: unknown): string[] | undefined | null {
+  if (raw === undefined) return undefined
+  let items: unknown[]
+  if (Array.isArray(raw)) items = raw
+  else if (typeof raw === 'string') items = raw.split(',')
+  else return null
+  if (items.some((item) => typeof item !== 'string')) return null
+  const tools = (items as string[]).map((item) => normalizeToolName(item.trim())).filter(Boolean)
+  return tools.length > 0 ? tools : undefined
+}
+
+/** Parse one agent markdown file; null when it is not a usable agent definition. */
+function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
+  let parsed: { frontmatter: Record<string, unknown>; body: string }
+  try {
+    parsed = parseFrontmatter<Record<string, unknown>>(content)
+  } catch {
+    return null // malformed YAML must not abort discovery for the whole directory
+  }
+  const { frontmatter, body } = parsed
+  const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
+  const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
+  if (!name || !description) return null
+  const tools = parseToolsField(frontmatter.tools)
+  if (tools === null) return null
+  return {
+    name,
+    description,
+    tools,
+    model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
+    systemPrompt: body,
+    source,
+    filePath,
+  }
+}
+
 export type AgentScope = 'user' | 'project' | 'both'
 
 export interface AgentConfig {
@@ -66,26 +107,8 @@ function loadAgentsFromDir(dir: string, source: 'user' | 'project'): AgentConfig
       continue
     }
 
-    const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content)
-
-    if (!frontmatter.name || !frontmatter.description) {
-      continue
-    }
-
-    const tools = frontmatter.tools
-      ?.split(',')
-      .map((t: string) => normalizeToolName(t.trim()))
-      .filter(Boolean)
-
-    agents.push({
-      name: frontmatter.name,
-      description: frontmatter.description,
-      tools: tools && tools.length > 0 ? tools : undefined,
-      model: frontmatter.model,
-      systemPrompt: body,
-      source,
-      filePath,
-    })
+    const agent = parseAgentFile(content, source, filePath)
+    if (agent) agents.push(agent)
   }
 
   return agents

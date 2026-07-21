@@ -4,9 +4,8 @@ import { join } from 'node:path'
 
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
-
+import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp.ts'
-import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/project-approval.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'pa-'))
 
@@ -117,6 +116,12 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
   it.each([join('.claude', 'agents'), join('.pi', 'agents')])('treats a project with only a %s directory as claude-shaped (project agents ship their own prompt and tools)', (dir) => {
     const cwd = tempDir()
     mkdirSync(join(cwd, dir), { recursive: true })
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it('treats a project with only a .claude/rules directory as claude-shaped (rule filenames and scopes are surfaced in the system prompt)', () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 })

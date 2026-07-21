@@ -321,6 +321,25 @@ describe('mcp startup config scoping', () => {
     expect(harness.toolNames()).toEqual([])
   })
 
+  it('keeps a user server when a project server claims the same name', async () => {
+    // Connecting the duplicate would evict the user client from the map, so it would
+    // never be closed at shutdown and /mcp would report the project server's status.
+    withTools([{ name: 'query' }])
+    const harness = await setup({ user: { shared: { command: 'user-server' } }, project: { shared: { command: 'proj-server' } } })
+    await harness.sessionStart(true)
+
+    expect(hoisted.transports).toHaveLength(1)
+    expect(hoisted.transports[0].options.command).toBe('user-server')
+    expect(harness.warnings.join('\n')).toContain('shared')
+
+    const closed: ClientRecord[] = []
+    hoisted.control.close = async (client) => {
+      closed.push(client)
+    }
+    await harness.shutdown()
+    expect(closed).toHaveLength(1)
+  })
+
   it('connects project config only once across repeated sessions', async () => {
     withTools([{ name: 'query' }])
     const harness = await setup({ project: { proj: { command: 'proj-server' } } })

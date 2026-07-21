@@ -2,9 +2,17 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import outputStyles, { loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+
+// The extension reads user-scope styles and settings from the home directory; point it
+// at a throwaway dir so the developer's real ~/.claude cannot influence assertions.
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home }
+})
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'os-'))
 
@@ -46,6 +54,14 @@ describe('loadStyles', () => {
     expect(styles.find((s) => s.name === 'shared')?.body).toBe('PROJECT')
     expect(styles.map((s) => s.name).sort()).toEqual(['extra', 'shared'])
   })
+
+  it('skips a directory named like a style file instead of failing the session', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'not-a-file.md'))
+    writeFileSync(join(dir, 'real.md'), '---\nname: Real\n---\nBODY')
+
+    expect(loadStyles([dir]).map((s) => s.name)).toEqual(['Real'])
+  })
 })
 
 describe('readActiveStyleName', () => {
@@ -80,11 +96,29 @@ describe('styleForName', () => {
 })
 
 describe('extension wiring', () => {
-  it('appends the active style body and the command persists a new choice', async () => {
+  // Isolate pi's trust store so isProjectApproved never reads or writes the
+  // developer's real ~/.pi/agent decisions.
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    hoisted.home = tempDir()
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'os-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  const projectWithStyle = (name: string, body: string): string => {
     const cwd = tempDir()
     mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
-    writeFileSync(join(cwd, '.claude', 'output-styles', 'explain.md'), '---\nname: Explain\n---\nExplain everything.')
-    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: 'Explain' }))
+    writeFileSync(join(cwd, '.claude', 'output-styles', 'style.md'), `---\nname: ${name}\n---\n${body}`)
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: name }))
+    return cwd
+  }
+
+  it('appends the active style body and the command persists a new choice', async () => {
+    const cwd = projectWithStyle('Explain', 'Explain everything.')
 
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
@@ -94,7 +128,7 @@ describe('extension wiring', () => {
       registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
     } as never)
 
-    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), select: async () => 'Explain' } }
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), confirm: async () => true, select: async () => 'Explain' } }
     await handlers.get('session_start')?.({}, ctx)
     const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
     expect(result.systemPrompt).toContain('## Output Style: Explain')
@@ -105,18 +139,30 @@ describe('extension wiring', () => {
     expect(saved.outputStyle).toBe('Explain')
   })
 
-  it('does not load a project style when the project is untrusted', async () => {
-    const cwd = tempDir()
-    mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
-    writeFileSync(join(cwd, '.claude', 'output-styles', 'evil.md'), '---\nname: Evil\n---\nInjected instructions.')
-    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: 'Evil' }))
-
+  const wireSession = async (ctx: Record<string, unknown>): Promise<unknown> => {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     outputStyles({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn), registerCommand: () => {} } as never)
-
-    const ctx = { cwd, hasUI: true, isProjectTrusted: () => false, ui: { notify: () => {} } }
     await handlers.get('session_start')?.({}, ctx)
-    const result = await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})
+    return handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})
+  }
+
+  it('does not load a project style when the project is untrusted', async () => {
+    const cwd = projectWithStyle('Evil', 'Injected instructions.')
+    const result = await wireSession({ cwd, hasUI: true, isProjectTrusted: () => false, ui: { notify: () => {} } })
+    expect(result).toBeUndefined()
+  })
+
+  it('does not load a project style when pi trusted silently and there is no UI to ask', async () => {
+    // pi's own trust check ignores .claude-only repos, so isProjectTrusted() is true
+    // for a clone nobody approved; the approval layer must still refuse without a UI.
+    const cwd = projectWithStyle('Evil', 'Injected instructions.')
+    const result = await wireSession({ cwd, hasUI: false, isProjectTrusted: () => true, ui: { notify: () => {} } })
+    expect(result).toBeUndefined()
+  })
+
+  it('does not load a project style when the approval prompt is declined', async () => {
+    const cwd = projectWithStyle('Evil', 'Injected instructions.')
+    const result = await wireSession({ cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {}, confirm: async () => false } })
     expect(result).toBeUndefined()
   })
 })

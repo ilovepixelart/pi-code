@@ -27,7 +27,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { isProjectApproved } from './project-approval.js'
+import { isProjectApproved } from './internal/project-approval.js'
 
 const DEFAULT_TIMEOUT_S = 60
 
@@ -87,11 +87,17 @@ function matcherApplies(matcher: string | undefined, name: string): boolean {
   }
 }
 
+/** Claude settings may carry prompt/agent hook types with no command; running one
+ * through `sh -c undefined` would throw out of the tool_call handler. */
+function isRunnableHook(hook: HookCommand): boolean {
+  return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
+}
+
 /** Command specs whose matcher applies to the given tool/source name. */
 export function matchingCommands(matchers: HookMatcher[] | undefined, name: string): HookCommand[] {
   const result: HookCommand[] = []
   for (const entry of matchers ?? []) {
-    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []))
+    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
   }
   return result
 }
@@ -178,8 +184,15 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
     child.stdin?.end(JSON.stringify(payload))
   })
 
+/** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
+const MAX_TIMEOUT_S = 2_147_483
+
 function timeoutMs(command: HookCommand): number {
-  return (command.timeout ?? DEFAULT_TIMEOUT_S) * 1000
+  // Non-positive values fall back to the default: a 0ms timer would fire before the
+  // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
+  const declared = command.timeout
+  const seconds = typeof declared === 'number' && declared > 0 ? Math.min(declared, MAX_TIMEOUT_S) : DEFAULT_TIMEOUT_S
+  return seconds * 1000
 }
 
 /** Run PreToolUse hooks for a tool; the first blocking verdict wins. */
@@ -199,8 +212,14 @@ async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner:
   await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
 }
 
+/** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
+const MAX_PENDING_INPUTS = 100
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
+  // tool_execution_end does not carry the tool's input, but Claude's PostToolUse
+  // contract does, so remember it from tool_call keyed by the call id.
+  const pendingInputs = new Map<string, unknown>()
 
   pi.on('session_start', async (event, ctx) => {
     const trusted = await isProjectApproved(ctx)
@@ -212,12 +231,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event) => {
+    pendingInputs.set(event.toolCallId, event.input)
+    if (pendingInputs.size > MAX_PENDING_INPUTS) {
+      const oldest = pendingInputs.keys().next().value
+      if (oldest !== undefined) pendingInputs.delete(oldest)
+    }
     const decision = await runPreToolUse(config, event.toolName, event.input, runHookCommand)
-    return decision.block ? { block: true, reason: decision.reason } : undefined
+    if (!decision.block) return undefined
+    // pi still emits tool_execution_end (isError) for a blocked call, which also
+    // cleans up; deleting here just avoids relying on that host detail.
+    pendingInputs.delete(event.toolCallId)
+    return { block: true, reason: decision.reason }
   })
 
   pi.on('tool_execution_end', async (event) => {
+    const toolInput = pendingInputs.get(event.toolCallId)
+    pendingInputs.delete(event.toolCallId)
     if (event.isError) return
-    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName }, runHookCommand)
+    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runHookCommand)
   })
 }

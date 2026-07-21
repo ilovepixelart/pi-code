@@ -1,20 +1,24 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
+import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import subagentExtension from '../extensions/subagent/index.ts'
 
 const spawnMock = vi.hoisted(() => vi.fn())
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
-const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string => 'bg-deadbeef'))
+const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string | null => 'bg-deadbeef'))
 const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background runs in this session.'))
+const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
 vi.mock('../extensions/subagent/agents.js', () => ({ discoverAgents: discoverAgentsMock }))
 vi.mock('../extensions/subagent/background.js', () => ({
   backgroundStatusText: backgroundStatusTextMock,
   startBackgroundRun: startBackgroundRunMock,
+  activeBackgroundRuns: activeBackgroundRunsMock,
+  MAX_BACKGROUND_RUNS: 8,
 }))
 
 // ---------------------------------------------------------------------------
@@ -175,6 +179,7 @@ beforeEach(() => {
   startBackgroundRunMock.mockClear()
   startBackgroundRunMock.mockReturnValue('bg-deadbeef')
   backgroundStatusTextMock.mockClear()
+  activeBackgroundRunsMock.mockReturnValue(0)
   sendMessageMock.mockClear()
   trustedCtx.ui.confirm.mockClear()
   discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
@@ -332,7 +337,49 @@ describe('project agent gate', () => {
   })
 })
 
+describe('recursion guard', () => {
+  it('refuses to run inside a subagent session', async () => {
+    process.env.PI_CODE_SUBAGENT = '1'
+    try {
+      const result = await execute('c1', { agent: 'scout', task: 'x' }, undefined, undefined, trustedCtx)
+      expect(text(result)).toContain('already a subagent')
+      expect(spawnCalls).toHaveLength(0)
+    } finally {
+      delete process.env.PI_CODE_SUBAGENT
+    }
+  })
+
+  it('marks spawned children as subagent runs', async () => {
+    script('inspect', { stdout: [say('ok')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+    expect((spawnCalls[0].options as { env?: Record<string, string> }).env?.PI_CODE_SUBAGENT).toBe('1')
+  })
+})
+
 describe('background mode', () => {
+  it('refuses to start another background run at the concurrency cap', async () => {
+    activeBackgroundRunsMock.mockReturnValue(8)
+
+    const result = await execute('c1', { background: true, agent: 'scout', task: 'x' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('Too many background runs')
+    expect(startBackgroundRunMock).not.toHaveBeenCalled()
+  })
+
+  it('reports the cap and removes the temp prompt when the spawn-time check refuses', async () => {
+    // The pre-check can be raced by a parallel tool-call batch; startBackgroundRun's
+    // own atomic refusal (null) must surface the same error and leak nothing.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'You audit.' })], projectAgentsDir: null })
+    startBackgroundRunMock.mockReturnValue(null)
+
+    const result = await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('Too many background runs')
+    const invocation = startBackgroundRunMock.mock.calls[0][2]
+    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    expect(fs.existsSync(promptPath)).toBe(false)
+  })
+
   it('refuses a background run that is not single mode', async () => {
     const result = await execute('c1', { background: true, chain: [{ agent: 'scout', task: 't' }] }, undefined, undefined, trustedCtx)
 
@@ -699,6 +746,22 @@ describe('chain mode', () => {
     expect(text(result)).toBe('done')
   })
 
+  it('passes previous output containing $-patterns through verbatim', async () => {
+    // String.replaceAll with a string replacement interprets $$, $&, $` and $'; a shell
+    // snippet or awk line in the previous step's report must reach the next step intact.
+    const chain = [
+      { agent: 'scout', task: 'a' },
+      { agent: 'scout', task: 'apply: {previous}' },
+    ]
+    script('a', { stdout: [say("kill $$ && echo '$&'")] })
+    script("apply: kill $$ && echo '$&'", { stdout: [say('done')] })
+
+    const result = await execute('c1', { chain }, undefined, undefined, trustedCtx)
+
+    expect(piArgs(spawnCalls[1]).at(-1)).toBe("Task: apply: kill $$ && echo '$&'")
+    expect(text(result)).toBe('done')
+  })
+
   it('substitutes an empty string for the placeholder in the first step', async () => {
     script('summarize ', { stdout: [say('nothing to summarize')] })
 
@@ -821,15 +884,57 @@ describe('parallel mode', () => {
     expect(text(result)).toBe('Parallel: 1/2 succeeded\n\n[scout] completed: alpha output\n\n[scout] failed: beta output')
   })
 
-  it('truncates a task preview past 100 characters', async () => {
+  it('returns each task output in full so the caller can synthesize from it', async () => {
     const long = 'z'.repeat(150)
-    const exact = 'y'.repeat(100)
     script('alpha', { stdout: [say(long)] })
-    script('beta', { stdout: [say(exact)] })
+    script('beta', { stdout: [say('short')] })
 
     const result = await execute('c1', { tasks: tasksOf('alpha', 'beta') }, undefined, undefined, trustedCtx)
 
-    expect(text(result)).toBe(`Parallel: 2/2 succeeded\n\n[scout] completed: ${'z'.repeat(100)}...\n\n[scout] completed: ${exact}`)
+    expect(text(result)).toBe(`Parallel: 2/2 succeeded\n\n[scout] completed: ${long}\n\n[scout] completed: short`)
+  })
+
+  it('caps the combined parallel report at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `line ${i}`).join('\n')
+    script('alpha', { stdout: [say(many)] })
+
+    const result = await execute('c1', { tasks: tasksOf('alpha') }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
+  })
+
+  it('caps single-mode output at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+    script('inspect', { stdout: [say(many)] })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
+  })
+
+  it('caps chain final output at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+    script('solo', { stdout: [say(many)] })
+
+    const result = await execute('c1', { chain: [{ agent: 'scout', task: 'solo' }] }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
+  })
+
+  it('caps the background completion notification at pi tool-output budget', async () => {
+    await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    const onComplete = startBackgroundRunMock.mock.calls[0][3]
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+
+    onComplete({ id: 'bg-9', agent: 'scout', state: 'done', turns: 1, output: many })
+
+    const lastCall = sendMessageMock.mock.calls.at(-1) as [{ content: string }]
+    const content = lastCall[0].content
+    expect(content.split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(content).toContain('truncated')
   })
 
   it('substitutes a no-output marker for a task that said nothing', async () => {

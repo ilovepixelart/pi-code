@@ -18,6 +18,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isProjectApproved } from './internal/project-approval.js'
+
 export interface Frontmatter {
   paths: string[]
   body: string
@@ -69,9 +71,14 @@ export function formatRulePointer(rel: string, paths: string[]): string {
 
 /** Recursively find all .md files in a directory. */
 function findMarkdownFiles(dir: string, basePath = ''): string[] {
-  if (!fs.existsSync(dir)) return []
   const results: string[] = []
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return results // a missing or unreadable directory must not take down session start
+  }
+  for (const entry of entries) {
     const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name
     if (entry.isDirectory()) {
       results.push(...findMarkdownFiles(path.join(dir, entry.name), relativePath))
@@ -84,7 +91,13 @@ function findMarkdownFiles(dir: string, basePath = ''): string[] {
 
 function readGlobalRules(globalRulesDir: string): string {
   return findMarkdownFiles(globalRulesDir)
-    .map((file) => parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim())
+    .map((file) => {
+      try {
+        return parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim()
+      } catch {
+        return '' // one unreadable rule must not take down session start
+      }
+    })
     .filter((content) => content.length > 0)
     .join('\n\n')
 }
@@ -111,10 +124,10 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     globalRules = readGlobalRules(globalRulesDir)
-    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt,
-    // so read them only for a trusted project.
-    const trusted = ctx.isProjectTrusted?.() ?? false
-    projectRules = trusted ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
+    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt.
+    // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
+    const approved = await isProjectApproved(ctx)
+    projectRules = approved ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
 
     if (globalRules.length > 0 || projectRules.length > 0) {
       ctx.ui.notify(`Rules loaded: global ${globalRules.length > 0 ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')

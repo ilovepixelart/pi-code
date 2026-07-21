@@ -3,7 +3,7 @@ import type { AddressInfo, LookupFunction } from 'node:net'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { httpFetch } from '../extensions/web-transport.ts'
+import { httpFetch } from '../extensions/internal/web-transport.ts'
 
 /** A lookup pinned to one address, exercising both the {all:true} and single-result shapes. */
 const pinTo = (ip: string): LookupFunction =>

@@ -31,4 +31,24 @@ describe('memory helpers', () => {
     const emptied = removeIndexLine(removeIndexLine(index, 'a'), 'b')
     expect(emptied).toBe('# Memory index\n')
   })
+
+  it('saving a memory does not delete an entry that merely mentions it', () => {
+    const index = '# Memory index\n- [notes](notes.md): see [build](build.md): for context\n- [build](build.md): old steps\n'
+    const updated = upsertIndexLine(index, 'build', 'new steps')
+    expect(updated).toContain('- [notes](notes.md):')
+    expect(updated).toContain('- [build](build.md): new steps')
+    expect(updated.split('\n').filter((l) => l.startsWith('- [build](build.md)'))).toHaveLength(1)
+  })
+
+  it('removing a memory keeps an entry that merely mentions it', () => {
+    const index = '# Memory index\n- [notes](notes.md): see [build](build.md): for context\n- [build](build.md): steps\n'
+    const remaining = removeIndexLine(index, 'build')
+    expect(remaining).toContain('- [notes](notes.md):')
+    expect(remaining).not.toContain('- [build](build.md)')
+  })
+
+  it('flattens a multi-line description into one index line', () => {
+    // A newline in the description would break every later line-based match.
+    expect(upsertIndexLine('', 'a', 'line one\nline two')).toBe('# Memory index\n- [a](a.md): line one line two\n')
+  })
 })

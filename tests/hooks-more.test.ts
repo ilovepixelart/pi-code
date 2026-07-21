@@ -149,8 +149,8 @@ const setupExtension = () => {
   return {
     registered: [...handlers.keys()],
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
-    toolCall: (toolName: string, input: unknown) => handler('tool_call')({ toolName, input }),
-    toolEnd: (toolName: string, isError = false) => handler('tool_execution_end')({ toolName, isError }),
+    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
+    toolEnd: (toolName: string, isError = false, end: { toolCallId?: string; result?: unknown } = {}) => handler('tool_execution_end')({ toolName, isError, toolCallId: end.toolCallId ?? 't1', result: end.result }),
   }
 }
 
@@ -256,10 +256,38 @@ describe('hook timeout configuration', () => {
     expect(seen).toEqual([5000])
   })
 
-  it('honors an explicit timeout of 0 rather than falling back to the default', async () => {
+  it.each([0, -5, Number.NaN])('falls back to the default for a non-positive timeout (%s)', async (timeout) => {
+    // A 0ms timer fires before the hook can run, and a timed-out PreToolUse hook fails
+    // closed, so honoring `timeout: 0` would permanently block every matched tool.
     const seen: number[] = []
-    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout: 0 }] }] }, 'bash', {}, runnerRecording(seen))
-    expect(seen).toEqual([0])
+    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout }] }] }, 'bash', {}, runnerRecording(seen))
+    expect(seen).toEqual([60_000])
+  })
+
+  it('clamps a timeout above the 32-bit timer limit', async () => {
+    // Node clamps setTimeout delays past 2^31-1 ms to 1ms, which would kill the hook
+    // instantly and fail closed, the same bricked-tool outcome as timeout: 0.
+    const seen: number[] = []
+    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout: 3_000_000_000 }] }] }, 'bash', {}, runnerRecording(seen))
+    expect(seen).toEqual([2_147_483_000])
+  })
+})
+
+describe('non-command hook types', () => {
+  it('runs only command hooks and skips prompt/agent typed entries', async () => {
+    // Claude settings may carry prompt or agent hooks with no command field; running
+    // one through sh -c undefined would throw out of the tool_call handler.
+    const seen: string[] = []
+    const runner: HookRunner = async (command) => {
+      seen.push(command)
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
+    }
+    const config = {
+      PreToolUse: [{ hooks: [{ type: 'prompt', prompt: 'judge this' } as never, { command: 'real-hook' }, { type: 'command', command: 'typed-hook' }] }],
+    }
+    const decision = await runPreToolUse(config, 'bash', {}, runner)
+    expect(decision).toEqual({ block: false })
+    expect(seen).toEqual(['real-hook', 'typed-hook'])
   })
 })
 
@@ -548,11 +576,26 @@ describe('hooks extension tool_execution_end', () => {
     return ext
   }
 
-  it('runs PostToolUse hooks with the tool name in the payload', async () => {
+  it('runs PostToolUse hooks with the tool name, input and response in the payload', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('bash')
+    await ext.toolCall('bash', { command: 'ls' })
+    await ext.toolEnd('bash', false, { result: 'file.txt' })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: 'file.txt' })
+  })
+
+  it('pairs tool_input with the call it belongs to, not the latest call', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    await ext.toolCall('bash', { command: 'first' }, 'c1')
+    await ext.toolCall('bash', { command: 'second' }, 'c2')
+    await ext.toolEnd('bash', false, { toolCallId: 'c1', result: 'r1' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'first' }, tool_response: 'r1' })
+  })
+
+  it('omits tool_input when no matching tool_call was seen', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    await ext.toolEnd('bash', false, { toolCallId: 'never-called', result: 'r' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_response: 'r' })
   })
 
   it('skips PostToolUse hooks when the tool execution failed', async () => {
