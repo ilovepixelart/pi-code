@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -133,6 +133,34 @@ describe('extension wiring', () => {
 
     expect(prompt).toContain('Readable rule.')
     expect(prompt).not.toContain('Secret rule.')
+  })
+
+  it('follows symlinked rule files and directories', async () => {
+    // Claude Code documents symlinking shared rule dirs into .claude/rules.
+    const rulesDir = join(hoisted.home, '.claude', 'rules')
+    mkdirSync(rulesDir, { recursive: true })
+    const shared = mkdtempSync(join(tmpdir(), 'shared-rules-'))
+    writeFileSync(join(shared, 'team.md'), 'Rule from linked dir.')
+    const single = mkdtempSync(join(tmpdir(), 'single-rule-'))
+    writeFileSync(join(single, 'one.md'), 'Rule from linked file.')
+    symlinkSync(shared, join(rulesDir, 'team'))
+    symlinkSync(join(single, 'one.md'), join(rulesDir, 'one.md'))
+
+    const prompt = await sessionPrompt(globalCtx())
+
+    expect(prompt).toContain('Rule from linked dir.')
+    expect(prompt).toContain('Rule from linked file.')
+  })
+
+  it('survives a circular symlink between rule directories', async () => {
+    const rulesDir = join(hoisted.home, '.claude', 'rules')
+    mkdirSync(join(rulesDir, 'sub'), { recursive: true })
+    symlinkSync(rulesDir, join(rulesDir, 'sub', 'loop'))
+    writeFileSync(join(rulesDir, 'open.md'), 'Readable rule.')
+
+    const prompt = await sessionPrompt(globalCtx())
+
+    expect(prompt).toContain('Readable rule.')
   })
 
   it('skips an unreadable rules subdirectory instead of failing the session', async () => {

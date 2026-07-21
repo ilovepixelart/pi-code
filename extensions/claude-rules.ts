@@ -69,9 +69,28 @@ export function formatRulePointer(rel: string, paths: string[]): string {
   return paths.length > 0 ? `${ref} — applies when working on: ${paths.join(', ')}` : ref
 }
 
-/** Recursively find all .md files in a directory. */
-function findMarkdownFiles(dir: string, basePath = ''): string[] {
+/** A dirent's kind with symlinks resolved; nulls a dangling link. */
+function classifyEntry(entry: fs.Dirent, fullPath: string): { isDir: boolean; isFile: boolean } | null {
+  if (!entry.isSymbolicLink()) return { isDir: entry.isDirectory(), isFile: entry.isFile() }
+  try {
+    const stat = fs.statSync(fullPath)
+    return { isDir: stat.isDirectory(), isFile: stat.isFile() }
+  } catch {
+    return null
+  }
+}
+
+/** Recursively find all .md files, following symlinks (Claude Code documents symlinked
+ * shared rule dirs); `visited` realpaths keep a circular link from recursing forever. */
+function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>()): string[] {
   const results: string[] = []
+  try {
+    const real = fs.realpathSync(dir)
+    if (visited.has(real)) return results
+    visited.add(real)
+  } catch {
+    return results
+  }
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -80,9 +99,12 @@ function findMarkdownFiles(dir: string, basePath = ''): string[] {
   }
   for (const entry of entries) {
     const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name
-    if (entry.isDirectory()) {
-      results.push(...findMarkdownFiles(path.join(dir, entry.name), relativePath))
-    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+    const fullPath = path.join(dir, entry.name)
+    const kind = classifyEntry(entry, fullPath)
+    if (!kind) continue
+    if (kind.isDir) {
+      results.push(...findMarkdownFiles(fullPath, relativePath, visited))
+    } else if (kind.isFile && entry.name.endsWith('.md')) {
       results.push(relativePath)
     }
   }
