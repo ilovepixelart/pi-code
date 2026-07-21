@@ -254,6 +254,23 @@ describe('discoverAgents', () => {
     expect(discoverAgents(cwd, 'user').agents[0].tools).toBeUndefined()
   })
 
+  it('accepts a YAML block list for tools, as Claude Code agent files commonly use', () => {
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'listed.md'), '---\nname: listed\ndescription: block list tools\ntools:\n  - Read\n  - Glob\n---\nprompt')
+
+    expect(discoverAgents(cwd, 'user').agents[0].tools).toEqual(['read', 'find'])
+  })
+
+  it('skips an agent whose tools field is unusable instead of aborting discovery', () => {
+    // A tools value that is neither a string nor a string list must not run the agent
+    // unrestricted, and must not take the rest of the directory down with it.
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'broken.md'), '---\nname: broken\ndescription: numeric tools\ntools: 7\n---\nprompt')
+    writeAgent(piUserDir, 'fine.md', { name: 'fine', description: 'ok' })
+
+    expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine'])
+  })
+
   it('carries the model field through from frontmatter', () => {
     writeAgent(piUserDir, 'modelled.md', { name: 'modelled', description: 'pinned model', model: 'opus' })
 

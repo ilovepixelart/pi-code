@@ -23,6 +23,19 @@ function normalizeToolName(tool: string): string {
   return CLAUDE_TOOL_MAP[lower] ?? lower
 }
 
+/**
+ * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
+ * list. Anything else returns null: a restriction that failed to parse must not run
+ * the agent unrestricted.
+ */
+function parseToolsField(raw: unknown): string[] | undefined | null {
+  if (raw === undefined) return undefined
+  const items = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null
+  if (items === null || items.some((item) => typeof item !== 'string')) return null
+  const tools = (items as string[]).map((item) => normalizeToolName(item.trim())).filter(Boolean)
+  return tools.length > 0 ? tools : undefined
+}
+
 export type AgentScope = 'user' | 'project' | 'both'
 
 export interface AgentConfig {
@@ -66,22 +79,24 @@ function loadAgentsFromDir(dir: string, source: 'user' | 'project'): AgentConfig
       continue
     }
 
-    const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content)
+    const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content)
 
-    if (!frontmatter.name || !frontmatter.description) {
+    const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
+    const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
+    if (!name || !description) {
       continue
     }
 
-    const tools = frontmatter.tools
-      ?.split(',')
-      .map((t: string) => normalizeToolName(t.trim()))
-      .filter(Boolean)
+    const tools = parseToolsField(frontmatter.tools)
+    if (tools === null) {
+      continue
+    }
 
     agents.push({
-      name: frontmatter.name,
-      description: frontmatter.description,
-      tools: tools && tools.length > 0 ? tools : undefined,
-      model: frontmatter.model,
+      name,
+      description,
+      tools,
+      model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
       systemPrompt: body,
       source,
       filePath,
