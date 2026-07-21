@@ -113,11 +113,21 @@ Agents are markdown files with YAML frontmatter:
 name: my-agent
 description: What this agent does
 tools: read, grep, find, ls
-model: claude-haiku-4-5
+disallowedTools: write, edit
+model: gpt-oss:20b
+effort: high
 ---
 
 System prompt for the agent goes here.
 ```
+
+Claude Code fields map onto pi where a sensible seam exists: `tools` and
+`disallowedTools` (comma string or YAML list) become pi's `--tools` /
+`--exclude-tools`; `effort` becomes the `:thinking` suffix on a pinned model;
+`permissionMode: plan` selects a read-only toolset unless `tools` is set. Model
+aliases (`sonnet`, `opus`, `haiku`, `inherit`) run on the session's default
+model. Fields with no pi equivalent are ignored: `skills`, `memory`,
+`mcpServers`, `maxTurns`.
 
 **Locations:**
 - `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)
