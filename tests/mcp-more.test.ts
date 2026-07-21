@@ -353,6 +353,17 @@ describe('mcp startup config scoping', () => {
 })
 
 describe('mcp transport selection', () => {
+  it('interpolates env vars in the command and args', async () => {
+    setEnv('MCP_BIN', '/opt/bin/server')
+    withTools([{ name: 'go' }])
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
+    await setupStarted({ user: { local: { command: '${MCP_BIN}', args: ['--port', '${MCP_PORT:-9000}'] } } })
+
+    const transport = hoisted.transports[0]
+    expect(transport.options.command).toBe('/opt/bin/server')
+    expect(transport.options.args).toEqual(['--port', '9000'])
+  })
+
   it('builds a stdio transport from command, args and cwd', async () => {
     withTools([{ name: 'go' }])
     await setupStarted({ user: { local: { command: 'node', args: ['server.js'], cwd: '/srv/app' } } })

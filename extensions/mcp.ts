@@ -58,8 +58,9 @@ export interface HttpServerConfig {
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
 
+/** Claude's .mcp.json expansion: ${VAR}, and ${VAR:-default} when VAR is unset. */
 export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
-  return value.replace(/\$\{(\w+)\}/g, (_, name) => env[name] ?? '')
+  return value.replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, fallback) => env[name] ?? fallback ?? '')
 }
 
 /** User-scoped MCP config (the user's own; safe to load without project trust). */
@@ -153,8 +154,8 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
     const env: Record<string, string> = { ...getDefaultEnvironment() }
     for (const [key, value] of Object.entries(config.env ?? {})) env[key] = interpolateEnv(value)
     const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args ?? [],
+      command: interpolateEnv(config.command),
+      args: (config.args ?? []).map((arg) => interpolateEnv(arg)),
       env,
       cwd: config.cwd?.replace(/^~(?=\/|$)/, os.homedir()),
       stderr: 'ignore',

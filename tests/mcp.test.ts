@@ -15,6 +15,16 @@ describe('mcp adapter helpers', () => {
     expect(interpolateEnv('${MISSING}', {} as NodeJS.ProcessEnv)).toBe('')
   })
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR:-default} syntax Claude's .mcp.json supports
+  it('expands ${VAR:-default} to the fallback only when unset', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal syntax under test
+    expect(interpolateEnv('${MISSING:-fallback}', {} as NodeJS.ProcessEnv)).toBe('fallback')
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
+    expect(interpolateEnv('${SET:-fallback}', { SET: 'real' } as NodeJS.ProcessEnv)).toBe('real')
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
+    expect(interpolateEnv('${MISSING:-}', {} as NodeJS.ProcessEnv)).toBe('')
+  })
+
   it('merges config files with later files winning', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'))
     const global = join(dir, 'global.json')
