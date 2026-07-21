@@ -162,7 +162,7 @@ describe('runHookCommand process wiring', () => {
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
     // the grandchildren a compound command forks.
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: process.env })
   })
 
   it('writes the payload to stdin as JSON', async () => {
@@ -458,6 +458,20 @@ describe('hooks extension session_start', () => {
     expect(commandsRun()).toEqual([])
     await ext.toolCall('bash', {})
     expect(commandsRun()).toEqual(['home-pre'])
+  })
+
+  it('exposes CLAUDE_PROJECT_DIR to hook commands', async () => {
+    // Claude's documented pattern is "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh".
+    const project = tempDir('hooks-proj-')
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project })
+    await ext.toolCall('bash', {})
+
+    const options = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR).toBe(project)
+    expect(options.env?.PATH).toBeDefined()
   })
 
   it('loads project settings after user settings when the project is trusted', async () => {
