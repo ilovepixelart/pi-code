@@ -263,6 +263,32 @@ describe('hook timeout configuration', () => {
     await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout }] }] }, 'bash', {}, runnerRecording(seen))
     expect(seen).toEqual([60_000])
   })
+
+  it('clamps a timeout above the 32-bit timer limit', async () => {
+    // Node clamps setTimeout delays past 2^31-1 ms to 1ms, which would kill the hook
+    // instantly and fail closed, the same bricked-tool outcome as timeout: 0.
+    const seen: number[] = []
+    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout: 3_000_000_000 }] }] }, 'bash', {}, runnerRecording(seen))
+    expect(seen).toEqual([2_147_483_000])
+  })
+})
+
+describe('non-command hook types', () => {
+  it('runs only command hooks and skips prompt/agent typed entries', async () => {
+    // Claude settings may carry prompt or agent hooks with no command field; running
+    // one through sh -c undefined would throw out of the tool_call handler.
+    const seen: string[] = []
+    const runner: HookRunner = async (command) => {
+      seen.push(command)
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
+    }
+    const config = {
+      PreToolUse: [{ hooks: [{ type: 'prompt', prompt: 'judge this' } as never, { command: 'real-hook' }, { type: 'command', command: 'typed-hook' }] }],
+    }
+    const decision = await runPreToolUse(config, 'bash', {}, runner)
+    expect(decision).toEqual({ block: false })
+    expect(seen).toEqual(['real-hook', 'typed-hook'])
+  })
 })
 
 describe('interpretHookResult defaults and precedence', () => {

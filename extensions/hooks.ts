@@ -87,11 +87,17 @@ function matcherApplies(matcher: string | undefined, name: string): boolean {
   }
 }
 
+/** Claude settings may carry prompt/agent hook types with no command; running one
+ * through `sh -c undefined` would throw out of the tool_call handler. */
+function isRunnableHook(hook: HookCommand): boolean {
+  return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
+}
+
 /** Command specs whose matcher applies to the given tool/source name. */
 export function matchingCommands(matchers: HookMatcher[] | undefined, name: string): HookCommand[] {
   const result: HookCommand[] = []
   for (const entry of matchers ?? []) {
-    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []))
+    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
   }
   return result
 }
@@ -178,11 +184,15 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
     child.stdin?.end(JSON.stringify(payload))
   })
 
+/** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
+const MAX_TIMEOUT_S = 2_147_483
+
 function timeoutMs(command: HookCommand): number {
   // Non-positive values fall back to the default: a 0ms timer would fire before the
   // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
   const declared = command.timeout
-  return (typeof declared === 'number' && declared > 0 ? declared : DEFAULT_TIMEOUT_S) * 1000
+  const seconds = typeof declared === 'number' && declared > 0 ? Math.min(declared, MAX_TIMEOUT_S) : DEFAULT_TIMEOUT_S
+  return seconds * 1000
 }
 
 /** Run PreToolUse hooks for a tool; the first blocking verdict wins. */
@@ -228,7 +238,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     }
     const decision = await runPreToolUse(config, event.toolName, event.input, runHookCommand)
     if (!decision.block) return undefined
-    pendingInputs.delete(event.toolCallId) // a blocked tool never reaches tool_execution_end
+    // pi still emits tool_execution_end (isError) for a blocked call, which also
+    // cleans up; deleting here just avoids relying on that host detail.
+    pendingInputs.delete(event.toolCallId)
     return { block: true, reason: decision.reason }
   })
 
