@@ -66,7 +66,11 @@ export function backgroundStatusText(): string {
   return formatStatus(runs.values())
 }
 
-export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string {
+export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string | null {
+  // Checked here, synchronously with registration: callers await temp-file writes
+  // between any check of their own and this call, so a parallel tool-call batch
+  // could otherwise all pass that earlier check and overshoot the cap.
+  if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) return null
   const id = `bg-${randomUUID().slice(0, 8)}`
   const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0 }
   runs.set(id, run)

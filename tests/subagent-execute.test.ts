@@ -8,7 +8,7 @@ import subagentExtension from '../extensions/subagent/index.ts'
 
 const spawnMock = vi.hoisted(() => vi.fn())
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
-const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string => 'bg-deadbeef'))
+const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string | null => 'bg-deadbeef'))
 const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background runs in this session.'))
 const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 
@@ -364,6 +364,20 @@ describe('background mode', () => {
 
     expect(text(result)).toContain('Too many background runs')
     expect(startBackgroundRunMock).not.toHaveBeenCalled()
+  })
+
+  it('reports the cap and removes the temp prompt when the spawn-time check refuses', async () => {
+    // The pre-check can be raced by a parallel tool-call batch; startBackgroundRun's
+    // own atomic refusal (null) must surface the same error and leak nothing.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'You audit.' })], projectAgentsDir: null })
+    startBackgroundRunMock.mockReturnValue(null)
+
+    const result = await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('Too many background runs')
+    const invocation = startBackgroundRunMock.mock.calls[0][2]
+    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    expect(fs.existsSync(promptPath)).toBe(false)
   })
 
   it('refuses a background run that is not single mode', async () => {
@@ -888,6 +902,39 @@ describe('parallel mode', () => {
 
     expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
     expect(text(result)).toContain('truncated')
+  })
+
+  it('caps single-mode output at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+    script('inspect', { stdout: [say(many)] })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
+  })
+
+  it('caps chain final output at pi tool-output budget', async () => {
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+    script('solo', { stdout: [say(many)] })
+
+    const result = await execute('c1', { chain: [{ agent: 'scout', task: 'solo' }] }, undefined, undefined, trustedCtx)
+
+    expect(text(result).split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text(result)).toContain('truncated')
+  })
+
+  it('caps the background completion notification at pi tool-output budget', async () => {
+    await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    const onComplete = startBackgroundRunMock.mock.calls[0][3]
+    const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
+
+    onComplete({ id: 'bg-9', agent: 'scout', state: 'done', turns: 1, output: many })
+
+    const lastCall = sendMessageMock.mock.calls.at(-1) as [{ content: string }]
+    const content = lastCall[0].content
+    expect(content.split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(content).toContain('truncated')
   })
 
   it('substitutes a no-output marker for a task that said nothing', async () => {

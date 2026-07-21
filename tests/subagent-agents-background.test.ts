@@ -261,6 +261,14 @@ describe('discoverAgents', () => {
     expect(discoverAgents(cwd, 'user').agents[0].tools).toEqual(['read', 'find'])
   })
 
+  it('skips a file with malformed YAML frontmatter instead of aborting discovery', () => {
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'broken-yaml.md'), '---\nname: [unclosed\ndescription: d\n---\nprompt')
+    writeAgent(piUserDir, 'fine2.md', { name: 'fine2', description: 'ok' })
+
+    expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine2'])
+  })
+
   it('skips an agent whose tools field is unusable instead of aborting discovery', () => {
     // A tools value that is neither a string nor a string list must not run the agent
     // unrestricted, and must not take the rest of the directory down with it.
@@ -409,6 +417,17 @@ describe('startBackgroundRun', () => {
         options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'ignore'], env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
       },
     ])
+  })
+
+  it('refuses a new run at the cap, atomically with registration', async () => {
+    // Callers await temp-file writes between their own check and this call, so
+    // concurrent tool calls could all pass an earlier check; this one cannot be raced.
+    const { startBackgroundRun, activeBackgroundRuns, MAX_BACKGROUND_RUNS } = await loadBackground()
+    for (let i = 0; i < MAX_BACKGROUND_RUNS; i++) startBackgroundRun('scout', `t${i}`, invocation, () => {})
+    expect(activeBackgroundRuns()).toBe(MAX_BACKGROUND_RUNS)
+
+    expect(startBackgroundRun('scout', 'over', invocation, () => {})).toBeNull()
+    expect(spawned.calls).toHaveLength(MAX_BACKGROUND_RUNS)
   })
 
   it('counts only running runs as active', async () => {

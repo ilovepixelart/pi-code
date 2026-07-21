@@ -41,7 +41,13 @@ function parseToolsField(raw: unknown): string[] | undefined | null {
 
 /** Parse one agent markdown file; null when it is not a usable agent definition. */
 function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
-  const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content)
+  let parsed: { frontmatter: Record<string, unknown>; body: string }
+  try {
+    parsed = parseFrontmatter<Record<string, unknown>>(content)
+  } catch {
+    return null // malformed YAML must not abort discovery for the whole directory
+  }
+  const { frontmatter, body } = parsed
   const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
