@@ -37,7 +37,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 |---|---|---|
 | Global + project rules | `~/.claude/rules`, `.claude/rules` (+ `paths:` frontmatter scoping) | `claude-rules.ts` |
 | Custom slash commands | `.claude/commands/*.md` → pi prompt templates | `commands.ts` |
-| Skills | `.claude/skills` → pi skill discovery (pi parses SKILL.md; note pi expects space-delimited `allowed-tools`, Claude's comma form is not pre-approved) | `skills.ts` |
+| Skills | `.claude/skills` → pi skill discovery (pi reads `name`, `description`, `disable-model-invocation`; `allowed-tools` is inert in pi's loader) | `skills.ts` |
 | Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
