@@ -86,7 +86,13 @@ function findMarkdownFiles(dir: string, basePath = ''): string[] {
 
 function readGlobalRules(globalRulesDir: string): string {
   return findMarkdownFiles(globalRulesDir)
-    .map((file) => parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim())
+    .map((file) => {
+      try {
+        return parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim()
+      } catch {
+        return '' // one unreadable rule must not take down session start
+      }
+    })
     .filter((content) => content.length > 0)
     .join('\n\n')
 }
