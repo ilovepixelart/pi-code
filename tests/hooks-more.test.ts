@@ -256,10 +256,12 @@ describe('hook timeout configuration', () => {
     expect(seen).toEqual([5000])
   })
 
-  it('honors an explicit timeout of 0 rather than falling back to the default', async () => {
+  it.each([0, -5, Number.NaN])('falls back to the default for a non-positive timeout (%s)', async (timeout) => {
+    // A 0ms timer fires before the hook can run, and a timed-out PreToolUse hook fails
+    // closed, so honoring `timeout: 0` would permanently block every matched tool.
     const seen: number[] = []
-    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout: 0 }] }] }, 'bash', {}, runnerRecording(seen))
-    expect(seen).toEqual([0])
+    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: 'a', timeout }] }] }, 'bash', {}, runnerRecording(seen))
+    expect(seen).toEqual([60_000])
   })
 })
 

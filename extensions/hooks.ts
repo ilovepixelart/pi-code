@@ -179,7 +179,10 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
   })
 
 function timeoutMs(command: HookCommand): number {
-  return (command.timeout ?? DEFAULT_TIMEOUT_S) * 1000
+  // Non-positive values fall back to the default: a 0ms timer would fire before the
+  // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
+  const declared = command.timeout
+  return (typeof declared === 'number' && declared > 0 ? declared : DEFAULT_TIMEOUT_S) * 1000
 }
 
 /** Run PreToolUse hooks for a tool; the first blocking verdict wins. */
