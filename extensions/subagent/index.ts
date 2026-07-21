@@ -275,9 +275,7 @@ async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
     }
   }
 
-  const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  if (agent.model) args.push('--model', agent.model)
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+  const args = agentInvocationArgs(agent)
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
@@ -507,6 +505,17 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   return null
 }
 
+/** CLI args shared by foreground and background children, from the agent's config. */
+function agentInvocationArgs(agent: AgentConfig): string[] {
+  const args: string[] = ['--mode', 'json', '-p', '--no-session']
+  // pi reads a thinking level from the model pattern's :suffix, so Claude's effort
+  // has a seam only when the agent pins a concrete model.
+  if (agent.model) args.push('--model', agent.effort ? `${agent.model}:${agent.effort}` : agent.model)
+  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+  if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', agent.disallowedTools.join(','))
+  return args
+}
+
 function backgroundCapResult(makeDetails: MakeDetails): ToolResult {
   return {
     content: [{ type: 'text', text: `Too many background runs (max ${MAX_BACKGROUND_RUNS} running). Wait for one to finish; check progress with {status: true}.` }],
@@ -548,9 +557,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
     return backgroundCapResult(makeDetails)
   }
-  const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  if (agent.model) args.push('--model', agent.model)
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+  const args = agentInvocationArgs(agent)
   let tmpPrompt: { dir: string; filePath: string } | undefined
   if (agent.systemPrompt.trim()) {
     tmpPrompt = await writePromptToTempFile(agent.name, agent.systemPrompt)

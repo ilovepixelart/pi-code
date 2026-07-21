@@ -285,6 +285,45 @@ describe('discoverAgents', () => {
     expect(discoverAgents(cwd, 'user').agents[0].model).toBe('gpt-oss:20b')
   })
 
+  it('normalizes disallowedTools from a comma string or YAML list', () => {
+    writeAgent(piUserDir, 'denyer.md', { name: 'denyer', description: 'denies tools', disallowedTools: 'Write, Glob' })
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'denyer2.md'), '---\nname: denyer2\ndescription: d\ndisallowedTools:\n  - Edit\n---\nprompt')
+
+    const byName = new Map(discoverAgents(cwd, 'user').agents.map((a) => [a.name, a]))
+    expect(byName.get('denyer')?.disallowedTools).toEqual(['write', 'find'])
+    expect(byName.get('denyer2')?.disallowedTools).toEqual(['edit'])
+  })
+
+  it('skips an agent whose disallowedTools field is unusable', () => {
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'broken-deny.md'), '---\nname: broken-deny\ndescription: d\ndisallowedTools: 7\n---\nprompt')
+    writeAgent(piUserDir, 'fine3.md', { name: 'fine3', description: 'ok' })
+
+    expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine3'])
+  })
+
+  it('carries a valid effort level and drops an unknown one', () => {
+    // Claude's effort values are a subset of pi's thinking levels, so they map 1:1.
+    writeAgent(piUserDir, 'hard.md', { name: 'hard', description: 'thinks hard', effort: 'max' })
+    writeAgent(piUserDir, 'soft.md', { name: 'soft', description: 'thinks little', effort: 'low' })
+    writeAgent(piUserDir, 'odd.md', { name: 'odd', description: 'bad effort', effort: 'enormous' })
+
+    const byName = new Map(discoverAgents(cwd, 'user').agents.map((a) => [a.name, a]))
+    expect(byName.get('hard')?.effort).toBe('max')
+    expect(byName.get('soft')?.effort).toBe('low')
+    expect(byName.get('odd')?.effort).toBeUndefined()
+  })
+
+  it('maps permissionMode plan to a read-only toolset when tools are unspecified', () => {
+    writeAgent(piUserDir, 'planner.md', { name: 'planner', description: 'plans', permissionMode: 'plan' })
+    writeAgent(piUserDir, 'planner-tooled.md', { name: 'planner-tooled', description: 'plans with tools', permissionMode: 'plan', tools: 'Read, Bash' })
+
+    const byName = new Map(discoverAgents(cwd, 'user').agents.map((a) => [a.name, a]))
+    expect(byName.get('planner')?.tools).toEqual(['read', 'grep', 'find', 'ls'])
+    expect(byName.get('planner-tooled')?.tools).toEqual(['read', 'bash'])
+  })
+
   it.each(['inherit', 'sonnet', 'Opus', 'haiku'])('runs a Claude model alias (%s) on the session default model', (model) => {
     // pi cannot resolve Anthropic tier aliases; passing one as --model would make the
     // child fail to boot. Claude's `inherit` semantics (session model) degrade safely.

@@ -52,6 +52,19 @@ function parseModelField(raw: unknown): string | undefined {
   return model && !CLAUDE_MODEL_ALIASES.has(model.toLowerCase()) ? model : undefined
 }
 
+/** pi's extended thinking levels; Claude's effort values are a subset, so they map 1:1. */
+const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+function parseEffortField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const effort = raw.trim().toLowerCase()
+  return THINKING_LEVELS.has(effort) ? effort : undefined
+}
+
+/** permissionMode has no pi equivalent; 'plan' means a research agent, so translate
+ * the intent into a read-only toolset unless the file pins tools itself. */
+const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls']
+
 /** Parse one agent markdown file; null when it is not a usable agent definition. */
 function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
   let parsed: { frontmatter: Record<string, unknown>; body: string }
@@ -66,11 +79,15 @@ function parseAgentFile(content: string, source: 'user' | 'project', filePath: s
   if (!name || !description) return null
   const tools = parseToolsField(frontmatter.tools)
   if (tools === null) return null
+  const disallowedTools = parseToolsField(frontmatter.disallowedTools)
+  if (disallowedTools === null) return null
   return {
     name,
     description,
-    tools,
+    tools: tools ?? (frontmatter.permissionMode === 'plan' ? [...READ_ONLY_TOOLS] : undefined),
+    disallowedTools,
     model: parseModelField(frontmatter.model),
+    effort: parseEffortField(frontmatter.effort),
     systemPrompt: body,
     source,
     filePath,
@@ -83,7 +100,9 @@ export interface AgentConfig {
   name: string
   description: string
   tools?: string[]
+  disallowedTools?: string[]
   model?: string
+  effort?: string
   systemPrompt: string
   source: 'user' | 'project'
   filePath: string
