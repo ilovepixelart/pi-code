@@ -17,6 +17,7 @@ An untrusted project can ship any `.claude/` content. These extensions read that
 | subagent | project `.claude/agents` / `.pi/agents` (their own system prompt and tools) |
 | output-styles | project style body, injected verbatim into the system prompt |
 | rules | project rule filenames and `paths:` frontmatter, surfaced in the system prompt |
+| context-imports | `CLAUDE.local.md` body and its `@imports`, injected into the system prompt |
 
 That gate is only as good as the trust decision behind it. pi decides whether to ask by looking for entries under `cwd/.pi` and for `.agents/skills`; a repository shipping only `.claude/` and `.mcp.json` matches neither, so `resolveProjectTrusted` returns `true` for it without prompting and without a stored decision. Extensions therefore see `isProjectTrusted()` as true for a repository nobody was asked about. `project-approval` asks for those projects at the point the project config is consumed, and remembers the answer; it defers when pi genuinely prompted, and refuses when there is no UI to ask with.
 

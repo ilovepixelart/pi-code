@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeF
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import contextImports, { collectImports, createImportBudget, expandHome, IMPORT_TRUNCATED_MARKER, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, rootsForImporter } from '../extensions/context-imports.ts'
 
@@ -21,6 +21,47 @@ describe('expandHome', () => {
     expect(expandHome('~', '/home/x')).toBe('/home/x')
     expect(expandHome('~/a.md', '/home/x')).toBe('/home/x/a.md')
     expect(expandHome('rel.md', '/home/x')).toBe('rel.md')
+  })
+})
+
+describe('CLAUDE.local.md', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  const wire = async (cwd: string, ctx: Record<string, unknown>): Promise<string> => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    await handlers.get('session_start')?.({}, ctx)
+    const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: [] } }, {})) as { systemPrompt: string } | undefined
+    return result?.systemPrompt ?? 'BASE'
+  }
+
+  it('appends approved local context and resolves its imports', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'CLAUDE.local.md'), 'LOCAL NOTES\n\n@extra.md')
+    writeFileSync(join(cwd, 'extra.md'), 'EXTRA CONTENT')
+
+    const prompt = await wire(cwd, { cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+
+    expect(prompt).toContain('LOCAL NOTES')
+    expect(prompt).toContain('EXTRA CONTENT')
+  })
+
+  it('ignores local context when the project is not approved', async () => {
+    // A cloned repo can ship CLAUDE.local.md; without approval it must not reach the prompt.
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'CLAUDE.local.md'), 'LOCAL NOTES')
+
+    const prompt = await wire(cwd, { cwd, isProjectTrusted: () => true, hasUI: false, ui: { notify: () => {} } })
+
+    expect(prompt).not.toContain('LOCAL NOTES')
   })
 })
 
@@ -57,6 +98,35 @@ describe('collectImports', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'b.md'), 'B')
     expect(collectImports('```\n@b.md\n```', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('skips imports inside tilde-fenced code blocks', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('~~~\n@b.md\n~~~', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('skips imports inside inline code spans, as Claude Code documents', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    writeFileSync(join(dir, 'c.md'), 'C')
+    const out = collectImports('mention `@b.md` in prose but import @c.md', dir, dir, [dir], new Set())
+    expect(out.map((o) => o.body)).toEqual(['C'])
+  })
+
+  it('skips imports inside double-backtick code spans', () => {
+    // Multi-backtick spans are the standard way to quote literal backticks.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('see ``@b.md`` for details', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('does not let a tilde line close a backtick fence', () => {
+    // A fence only closes with the character that opened it; a backtick-fenced
+    // example showing a tilde fence must stay fenced throughout.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('```\n~~~\n@b.md\n~~~\n```', dir, dir, [dir], new Set())).toEqual([])
   })
 
   it('skips an import that resolves to a directory instead of crashing', () => {

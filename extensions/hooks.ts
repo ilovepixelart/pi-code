@@ -53,7 +53,7 @@ export interface HookRunResult {
   /** The hook was killed at its timeout, so its exit code carries no verdict. */
   timedOut: boolean
 }
-export type HookRunner = (command: string, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
+export type HookRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string) => Promise<HookRunResult>
 
 /** Settings files to read, newest-winning. Project files load only when trusted. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
@@ -143,12 +143,14 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
-export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
+export const runHookCommand: HookRunner = (command, payload, timeoutMs, projectDir) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
     // `detached` makes the shell its own process group leader so the timeout can kill
-    // the descendants too.
-    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+    // the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
+    // reference project files regardless of the shell's cwd.
+    const env = projectDir ? { ...process.env, CLAUDE_PROJECT_DIR: projectDir } : process.env
+    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env })
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -217,17 +219,20 @@ const MAX_PENDING_INPUTS = 100
 
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
+  let projectDir = ''
   // tool_execution_end does not carry the tool's input, but Claude's PostToolUse
   // contract does, so remember it from tool_call keyed by the call id.
   const pendingInputs = new Map<string, unknown>()
+  const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
 
   pi.on('session_start', async (event, ctx) => {
     const trusted = await isProjectApproved(ctx)
+    projectDir = ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
     // Only fire SessionStart hooks on a genuine session begin, matched by source (Claude uses
     // "startup"/"resume"/...). "reload" and "fork" re-fire in-process and would double-run hooks.
     if (event.reason === 'reload' || event.reason === 'fork') return
-    await runNotifyHooks(matchingCommands(config.SessionStart, event.reason), { hook_event_name: 'SessionStart', source: event.reason }, runHookCommand)
+    await runNotifyHooks(matchingCommands(config.SessionStart, event.reason), { hook_event_name: 'SessionStart', source: event.reason }, runner)
   })
 
   pi.on('tool_call', async (event) => {
@@ -236,7 +241,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const oldest = pendingInputs.keys().next().value
       if (oldest !== undefined) pendingInputs.delete(oldest)
     }
-    const decision = await runPreToolUse(config, event.toolName, event.input, runHookCommand)
+    const decision = await runPreToolUse(config, event.toolName, event.input, runner)
     if (!decision.block) return undefined
     // pi still emits tool_execution_end (isError) for a blocked call, which also
     // cleans up; deleting here just avoids relying on that host detail.
@@ -248,6 +253,6 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const toolInput = pendingInputs.get(event.toolCallId)
     pendingInputs.delete(event.toolCallId)
     if (event.isError) return
-    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runHookCommand)
+    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
   })
 }

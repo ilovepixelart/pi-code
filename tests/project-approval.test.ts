@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
+import { hookFiles } from '../extensions/hooks.ts'
 import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp.ts'
 
@@ -113,6 +114,23 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 
+  it.each(
+    hookFiles('/x', '/h', true)
+      .filter((abs) => abs.startsWith('/x/'))
+      .map((abs) => abs.slice('/x/'.length)),
+  )('treats a project with only %s as claude-shaped (hooks run arbitrary shell)', (rel) => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, rel, '..'), { recursive: true })
+    writeFileSync(join(cwd, rel), '{}')
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it('treats a project with only a .claude/output-styles directory as claude-shaped (style bodies are injected verbatim)', () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
   it.each([join('.claude', 'agents'), join('.pi', 'agents')])('treats a project with only a %s directory as claude-shaped (project agents ship their own prompt and tools)', (dir) => {
     const cwd = tempDir()
     mkdirSync(join(cwd, dir), { recursive: true })
@@ -122,6 +140,12 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
   it('treats a project with only a .claude/rules directory as claude-shaped (rule filenames and scopes are surfaced in the system prompt)', () => {
     const cwd = tempDir()
     mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
+  it('treats a project with only CLAUDE.local.md as claude-shaped (its body is injected into the system prompt)', () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'CLAUDE.local.md'), 'notes')
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 })

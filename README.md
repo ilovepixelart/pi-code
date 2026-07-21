@@ -37,10 +37,10 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 |---|---|---|
 | Global + project rules | `~/.claude/rules`, `.claude/rules` (+ `paths:` frontmatter scoping) | `claude-rules.ts` |
 | Custom slash commands | `.claude/commands/*.md` → pi prompt templates | `commands.ts` |
-| Skills | `.claude/skills` → pi skill discovery | `skills.ts` |
+| Skills | `.claude/skills` → pi skill discovery (pi reads `name`, `description`, `disable-model-invocation`; `allowed-tools` is inert in pi's loader) | `skills.ts` |
 | Hooks | `.claude/settings.json` hooks on pi lifecycle events | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
-| CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips | `context-imports.ts` |
+| CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
 | MCP servers | user `~/.claude.json`, `~/.pi/agent/mcp.json` (loaded on session start); project `.mcp.json`, `.pi/mcp.json` (only once the project is approved); stdio, HTTP, SSE | `mcp.ts` |
 | Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles) that pi would otherwise trust silently | `internal/project-approval.ts` |
 | Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
@@ -64,7 +64,8 @@ Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example 
 ```bash
 npm install
 npm run check           # biome + strict tsc + vitest, the whole gate
-scripts/e2e.sh          # drives the real pi TUI via tmux (needs a working model)
+scripts/e2e.sh          # quick smoke of the real pi TUI via tmux (needs a working model)
+scripts/e2e-full.sh     # every README feature end to end, model turns included (5-15 min)
 scripts/record-demos.sh # re-records demos/*.tape with vhs at low thinking
 ```
 

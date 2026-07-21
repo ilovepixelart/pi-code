@@ -2,12 +2,13 @@
  * Context Imports Extension
  *
  * pi loads CLAUDE.md / AGENTS.md context files natively but does not resolve
- * Claude Code's `@path` imports inside them. This fills that one gap: on
- * before_agent_start it reads the already-loaded context files from
- * systemPromptOptions, resolves any `@path` imports (recursive, depth-capped,
- * cycle-safe, budget-capped; ~ expands to home, relative paths resolve against
- * the importing file), and appends ONLY the imported content. pi already
- * injected the base files, so nothing is duplicated.
+ * Claude Code's `@path` imports inside them, and skips CLAUDE.local.md
+ * entirely. This fills both gaps: on before_agent_start it reads the
+ * already-loaded context files from systemPromptOptions, resolves any `@path`
+ * imports (recursive, depth-capped, cycle-safe, budget-capped; ~ expands to
+ * home, relative paths resolve against the importing file), and appends the
+ * imported content plus the approval-gated CLAUDE.local.md body. The base
+ * files pi already injected are never re-appended.
  *
  * Security: context files can come from an untrusted project, so imports are
  * confined (after resolving symlinks) to the working directory and the user's
@@ -25,6 +26,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+
+import { isProjectApproved } from './internal/project-approval.js'
 
 const MAX_IMPORT_DEPTH = 5
 export const MAX_IMPORT_FILES = 50
@@ -70,17 +73,29 @@ export interface ImportBudget {
 
 export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
 
-/** The `@path` targets of a context file, in document order, skipping fenced code blocks. */
+function fenceMarker(lineStart: string): string | null {
+  if (lineStart.startsWith('```')) return '`'
+  if (lineStart.startsWith('~~~')) return '~'
+  return null
+}
+
+/** The `@path` targets of a context file, in document order. Claude Code evaluates
+ * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
   const targets: string[] = []
-  let inFence = false
+  // A fence only closes with the character that opened it: a backtick-fenced
+  // example may legitimately contain tilde-fence lines, and vice versa.
+  let fence: string | null = null
   for (const line of content.split('\n')) {
-    if (line.trimStart().startsWith('```')) {
-      inFence = !inFence
+    const marker = fenceMarker(line.trimStart())
+    if (marker !== null && (fence === null || fence === marker)) {
+      fence = fence === null ? marker : null
       continue
     }
-    if (inFence) continue
-    for (const match of line.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
+    if (fence !== null) continue
+    // Backreference so a multi-backtick span (``literal `@x` backticks``) strips whole.
+    const withoutSpans = line.replace(/(`+)[^`]*?\1/g, '')
+    for (const match of withoutSpans.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
   }
   return targets
 }
@@ -146,8 +161,25 @@ export function rootsForImporter(importer: string, home: string, cwd: string): s
 }
 
 export default function contextImportsExtension(pi: ExtensionAPI) {
+  let localContext: { path: string; content: string } | null = null
+
+  pi.on('session_start', async (_event, ctx) => {
+    // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
+    // skips it. A cloned repo can ship one, so it is gated like other project config.
+    localContext = null
+    const candidate = path.join(ctx.cwd, 'CLAUDE.local.md')
+    if (!fs.existsSync(candidate)) return
+    if (!(await isProjectApproved(ctx))) return
+    try {
+      localContext = { path: candidate, content: fs.readFileSync(candidate, 'utf-8') }
+    } catch {
+      // unreadable: treat as absent
+    }
+  })
+
   pi.on('before_agent_start', async (event) => {
-    const contextFiles: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
+    const contextFiles: Array<{ path: string; content: string }> = [...(event.systemPromptOptions?.contextFiles ?? [])]
+    if (localContext) contextFiles.push(localContext)
     if (contextFiles.length === 0) return
 
     const home = os.homedir()
@@ -164,10 +196,18 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       const allowedRoots = rootsForImporter(file.path, home, cwd)
       imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, budget))
     }
-    if (imported.length === 0) return
 
-    const section = imported.map((entry) => `### ${entry.path}\n\n${entry.body}`).join('\n\n')
-    const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
-    return { systemPrompt: `${event.systemPrompt}\n\n## Imported context (@)\n\n${section}${notice}` }
+    let addition = ''
+    if (localContext && localContext.content.trim().length > 0) {
+      addition += `\n\n## CLAUDE.local.md\n\n${localContext.content.trim()}`
+    }
+    if (imported.length > 0) {
+      const section = imported.map((entry) => `### ${entry.path}\n\n${entry.body}`).join('\n\n')
+      const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
+      addition += `\n\n## Imported context (@)\n\n${section}${notice}`
+    }
+    if (addition.length === 0) return
+
+    return { systemPrompt: event.systemPrompt + addition }
   })
 }

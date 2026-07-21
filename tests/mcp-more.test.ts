@@ -353,6 +353,17 @@ describe('mcp startup config scoping', () => {
 })
 
 describe('mcp transport selection', () => {
+  it('interpolates env vars in the command and args', async () => {
+    setEnv('MCP_BIN', '/opt/bin/server')
+    withTools([{ name: 'go' }])
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
+    await setupStarted({ user: { local: { command: '${MCP_BIN}', args: ['--port', '${MCP_PORT:-9000}'] } } })
+
+    const transport = hoisted.transports[0]
+    expect(transport.options.command).toBe('/opt/bin/server')
+    expect(transport.options.args).toEqual(['--port', '9000'])
+  })
+
   it('builds a stdio transport from command, args and cwd', async () => {
     withTools([{ name: 'go' }])
     await setupStarted({ user: { local: { command: 'node', args: ['server.js'], cwd: '/srv/app' } } })
@@ -486,6 +497,32 @@ describe('mcp transport selection', () => {
     const sse = hoisted.transports[1]
     expect(sse.url?.href).toBe('https://example.com/mcp')
     expect((sse.options.requestInit as { headers: Record<string, string> }).headers.Authorization).toBe('Bearer tok')
+    expect(harness.toolNames()).toEqual(['remote_go'])
+  })
+
+  it('connects an explicit type sse server over SSE directly', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { legacy: { type: 'sse', url: 'https://example.com/sse' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['sse'])
+    expect(harness.toolNames()).toEqual(['legacy_go'])
+  })
+
+  it('does not degrade an explicit type http server to SSE on failure', async () => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw new Error('connect refused')
+    }
+    const harness = await setupStarted({ user: { remote: { type: 'http', url: 'https://example.com/mcp' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
+    expect(await statusLinesOf(harness)).toEqual(['remote: failed: connect refused (0 tools)'])
+  })
+
+  it('lets an explicit type override a command field left in the config', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { remote: { type: 'http', command: 'stale', url: 'https://example.com/mcp' } } })
+
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
     expect(harness.toolNames()).toEqual(['remote_go'])
   })
 

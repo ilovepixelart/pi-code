@@ -41,6 +41,7 @@ const CALL_TIMEOUT_MS = 120_000
 const RESERVED_NAMES = new Set(['web_fetch', 'web_search', 'plan_mode_complete'])
 
 export interface StdioServerConfig {
+  type?: 'stdio'
   command: string
   args?: string[]
   env?: Record<string, string>
@@ -48,6 +49,7 @@ export interface StdioServerConfig {
 }
 
 export interface HttpServerConfig {
+  type?: 'http' | 'streamable-http' | 'sse'
   url: string
   headers?: Record<string, string>
   bearerToken?: string
@@ -56,8 +58,14 @@ export interface HttpServerConfig {
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
 
+/** Claude's .mcp.json expansion: ${VAR}, and ${VAR:-default}. The syntax borrows
+ * shell's `:-`, which substitutes when the variable is unset OR empty. */
 export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
-  return value.replace(/\$\{(\w+)\}/g, (_, name) => env[name] ?? '')
+  return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (_, name, hasDefault, fallback) => {
+    const current = env[name]
+    if (hasDefault !== undefined) return current || fallback
+    return current ?? ''
+  })
 }
 
 /** User-scoped MCP config (the user's own; safe to load without project trust). */
@@ -123,7 +131,8 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
 }
 
 function isStdio(config: ServerConfig): config is StdioServerConfig {
-  return 'command' in config
+  // An explicit type wins; without one, a command field means stdio.
+  return 'command' in config && (config.type === undefined || config.type === 'stdio')
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -150,8 +159,8 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
     const env: Record<string, string> = { ...getDefaultEnvironment() }
     for (const [key, value] of Object.entries(config.env ?? {})) env[key] = interpolateEnv(value)
     const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args ?? [],
+      command: interpolateEnv(config.command),
+      args: (config.args ?? []).map((arg) => interpolateEnv(arg)),
       env,
       cwd: config.cwd?.replace(/^~(?=\/|$)/, os.homedir()),
       stderr: 'ignore',
@@ -164,12 +173,18 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
   const token = config.bearerToken ?? (config.bearerTokenEnv ? process.env[config.bearerTokenEnv] : undefined)
   if (token) headers.Authorization = `Bearer ${token}`
   const url = new URL(interpolateEnv(config.url))
+  if (config.type === 'sse') {
+    const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: explicitly declared legacy transport
+    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)
+    return client
+  }
   try {
     const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } })
     await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name}`)
     return client
   } catch (error) {
-    if (String(error).includes('Unauthorized')) throw error
+    // An explicitly declared streamable transport must not silently degrade to SSE.
+    if (config.type !== undefined || String(error).includes('Unauthorized')) throw error
     const fallback = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
     const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: deliberate legacy fallback
     await withTimeout(fallback.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)

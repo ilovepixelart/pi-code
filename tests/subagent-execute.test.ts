@@ -132,7 +132,7 @@ const getExecute = (): Execute => {
   return execute
 }
 
-const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; filePath: string }> = {}) => ({
+const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; disallowedTools: string[]; effort: string; filePath: string }> = {}) => ({
   name: 'scout',
   description: 'a scout',
   systemPrompt: '',
@@ -466,6 +466,25 @@ describe('runSingleAgent process handling', () => {
 
     expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', '--model', 'opus', '--tools', 'read,grep', 'Task: inspect'])
     expect(spawnCalls[0].options.shell).toBe(false)
+  })
+
+  it('passes disallowedTools as an exclude list and effort as a thinking suffix', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ model: 'gpt-oss:20b', effort: 'high', disallowedTools: ['write', 'edit'] })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', '--model', 'gpt-oss:20b:high', '--exclude-tools', 'write,edit', 'Task: inspect'])
+  })
+
+  it('applies effort only when a concrete model is pinned', async () => {
+    // pi reads the thinking level from the model pattern; without a model there is no seam.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ effort: 'high' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', 'Task: inspect'])
   })
 
   it('omits the model and tools flags when the agent declares neither', async () => {

@@ -22,7 +22,18 @@ import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
 /** Project files pi-code acts on that pi's own trust check does not look for. */
-const CLAUDE_SHAPED = [path.join('.claude', 'settings.json'), path.join('.claude', 'settings.local.json'), path.join('.claude', 'agents'), path.join('.claude', 'hooks'), path.join('.claude', 'output-styles'), path.join('.claude', 'rules'), '.mcp.json', path.join('.pi', 'mcp.json'), path.join('.pi', 'agents')]
+const CLAUDE_SHAPED = [
+  path.join('.claude', 'settings.json'),
+  path.join('.claude', 'settings.local.json'),
+  path.join('.claude', 'agents'),
+  path.join('.claude', 'hooks'),
+  path.join('.claude', 'output-styles'),
+  path.join('.claude', 'rules'),
+  'CLAUDE.local.md',
+  '.mcp.json',
+  path.join('.pi', 'mcp.json'),
+  path.join('.pi', 'agents'),
+]
 
 export function hasClaudeShapedConfig(cwd: string): boolean {
   return CLAUDE_SHAPED.some((entry) => fs.existsSync(path.join(cwd, entry)))

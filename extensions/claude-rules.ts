@@ -2,13 +2,14 @@
  * Claude Rules Extension
  *
  * Replicates Claude Code's rules loading:
- * - Global rules (~/.claude/rules/*.md) are inlined in full into the system prompt.
- * - Project rules (.claude/rules/*.md) are listed as pointers the agent can read on demand.
+ * - Unscoped global rules (~/.claude/rules/*.md) are inlined in full into the system prompt.
+ * - Path-scoped global rules and all project rules (.claude/rules/*.md) are listed as
+ *   pointers the agent reads on demand.
  *
  * Path-scoped rules: a rule file may declare `paths:` frontmatter (a glob or
- * list of globs). Project-rule pointers surface that scope so the agent knows
- * to read the rule when working on matching files. Frontmatter is stripped
- * from inlined global rules.
+ * list of globs). Pointers surface that scope so the agent knows to read the
+ * rule when working on matching files. Frontmatter is stripped from inlined
+ * global rules.
  *
  * Adapted from the pi v0.74.2 claude-rules example.
  */
@@ -63,15 +64,34 @@ export function parseFrontmatter(content: string): Frontmatter {
   return { paths: parsePaths(match[1]), body: content.slice(match[0].length) }
 }
 
-/** A project-rule pointer line, annotated with its path scope when present. */
-export function formatRulePointer(rel: string, paths: string[]): string {
-  const ref = `- .claude/rules/${rel}`
+/** A rule pointer line, annotated with its path scope when present. */
+export function formatRulePointer(rel: string, paths: string[], base = '.claude/rules'): string {
+  const ref = `- ${base}/${rel}`
   return paths.length > 0 ? `${ref} — applies when working on: ${paths.join(', ')}` : ref
 }
 
-/** Recursively find all .md files in a directory. */
-function findMarkdownFiles(dir: string, basePath = ''): string[] {
+/** A dirent's kind with symlinks resolved; nulls a dangling link. */
+function classifyEntry(entry: fs.Dirent, fullPath: string): { isDir: boolean; isFile: boolean } | null {
+  if (!entry.isSymbolicLink()) return { isDir: entry.isDirectory(), isFile: entry.isFile() }
+  try {
+    const stat = fs.statSync(fullPath)
+    return { isDir: stat.isDirectory(), isFile: stat.isFile() }
+  } catch {
+    return null
+  }
+}
+
+/** Recursively find all .md files, following symlinks (Claude Code documents symlinked
+ * shared rule dirs); `visited` realpaths keep a circular link from recursing forever. */
+function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>()): string[] {
   const results: string[] = []
+  try {
+    const real = fs.realpathSync(dir)
+    if (visited.has(real)) return results
+    visited.add(real)
+  } catch {
+    return results
+  }
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -80,31 +100,44 @@ function findMarkdownFiles(dir: string, basePath = ''): string[] {
   }
   for (const entry of entries) {
     const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name
-    if (entry.isDirectory()) {
-      results.push(...findMarkdownFiles(path.join(dir, entry.name), relativePath))
-    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+    const fullPath = path.join(dir, entry.name)
+    const kind = classifyEntry(entry, fullPath)
+    if (!kind) continue
+    if (kind.isDir) {
+      results.push(...findMarkdownFiles(fullPath, relativePath, visited))
+    } else if (kind.isFile && entry.name.endsWith('.md')) {
       results.push(relativePath)
     }
   }
   return results
 }
 
-function readGlobalRules(globalRulesDir: string): string {
-  return findMarkdownFiles(globalRulesDir)
-    .map((file) => {
-      try {
-        return parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8')).body.trim()
-      } catch {
-        return '' // one unreadable rule must not take down session start
-      }
-    })
-    .filter((content) => content.length > 0)
-    .join('\n\n')
-}
-
 interface ProjectRule {
   rel: string
   paths: string[]
+}
+
+interface GlobalRules {
+  inline: string
+  scoped: ProjectRule[]
+}
+
+/** Unscoped global rules are inlined; path-scoped ones keep their scope as pointers,
+ * mirroring Claude Code, where scoped rules attach only to matching files. */
+function readGlobalRules(globalRulesDir: string): GlobalRules {
+  const inline: string[] = []
+  const scoped: ProjectRule[] = []
+  for (const file of findMarkdownFiles(globalRulesDir)) {
+    let parsed: Frontmatter
+    try {
+      parsed = parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8'))
+    } catch {
+      continue // one unreadable rule must not take down session start
+    }
+    if (parsed.paths.length > 0) scoped.push({ rel: file, paths: parsed.paths })
+    else if (parsed.body.trim().length > 0) inline.push(parsed.body.trim())
+  }
+  return { inline: inline.join('\n\n'), scoped }
 }
 
 function readProjectRules(projectRulesDir: string): ProjectRule[] {
@@ -119,7 +152,7 @@ function readProjectRules(projectRulesDir: string): ProjectRule[] {
 
 export default function claudeRulesExtension(pi: ExtensionAPI) {
   const globalRulesDir = path.join(os.homedir(), '.claude', 'rules')
-  let globalRules = ''
+  let globalRules: GlobalRules = { inline: '', scoped: [] }
   let projectRules: ProjectRule[] = []
 
   pi.on('session_start', async (_event, ctx) => {
@@ -129,16 +162,24 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     const approved = await isProjectApproved(ctx)
     projectRules = approved ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
 
-    if (globalRules.length > 0 || projectRules.length > 0) {
-      ctx.ui.notify(`Rules loaded: global ${globalRules.length > 0 ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')
+    const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
+    if (hasGlobal || projectRules.length > 0) {
+      ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')
     }
   })
 
   pi.on('before_agent_start', async (event) => {
     let addition = ''
 
-    if (globalRules.length > 0) {
-      addition += `\n\n## Global Rules\n\nThese rules always apply:\n\n${globalRules}`
+    if (globalRules.inline.length > 0 || globalRules.scoped.length > 0) {
+      addition += `\n\n## Global Rules`
+      if (globalRules.inline.length > 0) {
+        addition += `\n\nThese rules always apply:\n\n${globalRules.inline}`
+      }
+      if (globalRules.scoped.length > 0) {
+        const scopedList = globalRules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, '~/.claude/rules')).join('\n')
+        addition += `\n\nPath-scoped global rules, available in ~/.claude/rules/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
+      }
     }
 
     if (projectRules.length > 0) {
