@@ -2,12 +2,13 @@
  * Context Imports Extension
  *
  * pi loads CLAUDE.md / AGENTS.md context files natively but does not resolve
- * Claude Code's `@path` imports inside them. This fills that one gap: on
- * before_agent_start it reads the already-loaded context files from
- * systemPromptOptions, resolves any `@path` imports (recursive, depth-capped,
- * cycle-safe, budget-capped; ~ expands to home, relative paths resolve against
- * the importing file), and appends ONLY the imported content. pi already
- * injected the base files, so nothing is duplicated.
+ * Claude Code's `@path` imports inside them, and skips CLAUDE.local.md
+ * entirely. This fills both gaps: on before_agent_start it reads the
+ * already-loaded context files from systemPromptOptions, resolves any `@path`
+ * imports (recursive, depth-capped, cycle-safe, budget-capped; ~ expands to
+ * home, relative paths resolve against the importing file), and appends the
+ * imported content plus the approval-gated CLAUDE.local.md body. The base
+ * files pi already injected are never re-appended.
  *
  * Security: context files can come from an untrusted project, so imports are
  * confined (after resolving symlinks) to the working directory and the user's
@@ -76,15 +77,19 @@ export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
   const targets: string[] = []
-  let inFence = false
+  // A fence only closes with the character that opened it: a backtick-fenced
+  // example may legitimately contain tilde-fence lines, and vice versa.
+  let fence: string | null = null
   for (const line of content.split('\n')) {
     const start = line.trimStart()
-    if (start.startsWith('```') || start.startsWith('~~~')) {
-      inFence = !inFence
+    const marker = start.startsWith('```') ? '`' : start.startsWith('~~~') ? '~' : null
+    if (marker !== null && (fence === null || fence === marker)) {
+      fence = fence === null ? marker : null
       continue
     }
-    if (inFence) continue
-    const withoutSpans = line.replace(/`[^`]*`/g, '')
+    if (fence !== null) continue
+    // Backreference so a multi-backtick span (``literal `@x` backticks``) strips whole.
+    const withoutSpans = line.replace(/(`+)[^`]*?\1/g, '')
     for (const match of withoutSpans.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
   }
   return targets

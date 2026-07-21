@@ -114,6 +114,21 @@ describe('collectImports', () => {
     expect(out.map((o) => o.body)).toEqual(['C'])
   })
 
+  it('skips imports inside double-backtick code spans', () => {
+    // Multi-backtick spans are the standard way to quote literal backticks.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('see ``@b.md`` for details', dir, dir, [dir], new Set())).toEqual([])
+  })
+
+  it('does not let a tilde line close a backtick fence', () => {
+    // A fence only closes with the character that opened it; a backtick-fenced
+    // example showing a tilde fence must stay fenced throughout.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('```\n~~~\n@b.md\n~~~\n```', dir, dir, [dir], new Set())).toEqual([])
+  })
+
   it('skips an import that resolves to a directory instead of crashing', () => {
     const dir = tempDir()
     mkdirSync(join(dir, 'sub'))
