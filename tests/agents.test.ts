@@ -2,9 +2,29 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { discoverAgents } from '../extensions/subagent/agents.ts'
+
+// The 'both' scope also scans the user's agent dirs; point them at throwaway dirs so
+// an agent in the developer's real ~/.claude/agents or ~/.pi/agent/agents cannot
+// influence assertions.
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home }
+})
+
+let savedAgentDir: string | undefined
+beforeEach(() => {
+  hoisted.home = mkdtempSync(join(tmpdir(), 'agents-home-'))
+  savedAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'agents-agentdir-'))
+})
+afterEach(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+})
 
 const agentFile = (name: string, body = 'do things'): string => `---\nname: ${name}\ndescription: ${name} agent\n---\n${body}`
 
