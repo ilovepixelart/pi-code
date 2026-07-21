@@ -397,7 +397,7 @@ describe('startBackgroundRun', () => {
     expect(first).not.toBe(second)
   })
 
-  it('spawns the invocation without a shell and with stdout piped', async () => {
+  it('spawns the invocation without a shell, stdout piped, marked as a subagent run', async () => {
     const { startBackgroundRun } = await loadBackground()
 
     startBackgroundRun('scout', 'survey', invocation, () => {})
@@ -406,9 +406,20 @@ describe('startBackgroundRun', () => {
       {
         command: 'pi',
         args: ['--mode', 'json'],
-        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'ignore'] },
+        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'ignore'], env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
       },
     ])
+  })
+
+  it('counts only running runs as active', async () => {
+    const { startBackgroundRun, activeBackgroundRuns } = await loadBackground()
+
+    startBackgroundRun('scout', 'one', invocation, () => {})
+    startBackgroundRun('scout', 'two', invocation, () => {})
+    expect(activeBackgroundRuns()).toBe(2)
+
+    spawned.children[0].emit('close', 0)
+    expect(activeBackgroundRuns()).toBe(1)
   })
 
   it('registers the run as running before the child exits', async () => {

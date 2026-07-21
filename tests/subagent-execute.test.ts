@@ -10,12 +10,15 @@ const spawnMock = vi.hoisted(() => vi.fn())
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
 const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string => 'bg-deadbeef'))
 const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background runs in this session.'))
+const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
 vi.mock('../extensions/subagent/agents.js', () => ({ discoverAgents: discoverAgentsMock }))
 vi.mock('../extensions/subagent/background.js', () => ({
   backgroundStatusText: backgroundStatusTextMock,
   startBackgroundRun: startBackgroundRunMock,
+  activeBackgroundRuns: activeBackgroundRunsMock,
+  MAX_BACKGROUND_RUNS: 8,
 }))
 
 // ---------------------------------------------------------------------------
@@ -176,6 +179,7 @@ beforeEach(() => {
   startBackgroundRunMock.mockClear()
   startBackgroundRunMock.mockReturnValue('bg-deadbeef')
   backgroundStatusTextMock.mockClear()
+  activeBackgroundRunsMock.mockReturnValue(0)
   sendMessageMock.mockClear()
   trustedCtx.ui.confirm.mockClear()
   discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
@@ -333,7 +337,35 @@ describe('project agent gate', () => {
   })
 })
 
+describe('recursion guard', () => {
+  it('refuses to run inside a subagent session', async () => {
+    process.env.PI_CODE_SUBAGENT = '1'
+    try {
+      const result = await execute('c1', { agent: 'scout', task: 'x' }, undefined, undefined, trustedCtx)
+      expect(text(result)).toContain('already a subagent')
+      expect(spawnCalls).toHaveLength(0)
+    } finally {
+      delete process.env.PI_CODE_SUBAGENT
+    }
+  })
+
+  it('marks spawned children as subagent runs', async () => {
+    script('inspect', { stdout: [say('ok')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+    expect((spawnCalls[0].options as { env?: Record<string, string> }).env?.PI_CODE_SUBAGENT).toBe('1')
+  })
+})
+
 describe('background mode', () => {
+  it('refuses to start another background run at the concurrency cap', async () => {
+    activeBackgroundRunsMock.mockReturnValue(8)
+
+    const result = await execute('c1', { background: true, agent: 'scout', task: 'x' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('Too many background runs')
+    expect(startBackgroundRunMock).not.toHaveBeenCalled()
+  })
+
   it('refuses a background run that is not single mode', async () => {
     const result = await execute('c1', { background: true, chain: [{ agent: 'scout', task: 't' }] }, undefined, undefined, trustedCtx)
 

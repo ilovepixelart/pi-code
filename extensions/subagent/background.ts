@@ -25,6 +25,13 @@ export interface BackgroundSpawn {
 
 const runs = new Map<string, BackgroundRun>()
 
+/** Cap on simultaneously running background children. */
+export const MAX_BACKGROUND_RUNS = 8
+
+export function activeBackgroundRuns(): number {
+  return [...runs.values()].filter((run) => run.state === 'running').length
+}
+
 /** Extract the final assistant text and turn count from a pi --mode json stdout stream. */
 export function parseFinalOutputFromJsonl(jsonl: string): { text: string; turns: number } {
   let text = ''
@@ -67,6 +74,8 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     cwd: invocation.cwd,
     shell: false,
     stdio: ['ignore', 'pipe', 'ignore'],
+    // The marker lets the child's subagent tool refuse to nest further.
+    env: { ...process.env, PI_CODE_SUBAGENT: '1' },
   })
   let stdout = ''
   proc.stdout.on('data', (data) => {

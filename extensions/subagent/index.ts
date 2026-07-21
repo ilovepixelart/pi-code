@@ -25,7 +25,7 @@ import { type Static, Type } from 'typebox'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
-import { backgroundStatusText, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, backgroundStatusText, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -320,6 +320,8 @@ async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
         cwd: cwd ?? defaultCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // The marker lets the child's subagent tool refuse to nest further.
+        env: { ...process.env, PI_CODE_SUBAGENT: '1' },
       })
       let buffer = ''
 
@@ -519,6 +521,12 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
     const available = agents.map((a) => `"${a.name}"`).join(', ') || 'none'
     return {
       content: [{ type: 'text', text: `Unknown agent: "${agentName}". Available agents: ${available}.` }],
+      details: makeDetails('single')([]),
+    }
+  }
+  if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
+    return {
+      content: [{ type: 'text', text: `Too many background runs (max ${MAX_BACKGROUND_RUNS} running). Wait for one to finish; check progress with {status: true}.` }],
       details: makeDetails('single')([]),
     }
   }
@@ -1023,6 +1031,14 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? 'user'
+      // Children carry PI_CODE_SUBAGENT; without this check they could spawn
+      // grandchildren without limit.
+      if (process.env.PI_CODE_SUBAGENT) {
+        return {
+          content: [{ type: 'text', text: 'Nested subagent runs are not allowed: this session is already a subagent.' }],
+          details: { mode: 'single', agentScope, projectAgentsDir: null, results: [] },
+        }
+      }
       const discovery = discoverAgents(ctx.cwd, agentScope)
       const agents = discovery.agents
 
