@@ -54,6 +54,14 @@ describe('loadStyles', () => {
     expect(styles.find((s) => s.name === 'shared')?.body).toBe('PROJECT')
     expect(styles.map((s) => s.name).sort()).toEqual(['extra', 'shared'])
   })
+
+  it('skips a directory named like a style file instead of failing the session', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'not-a-file.md'))
+    writeFileSync(join(dir, 'real.md'), '---\nname: Real\n---\nBODY')
+
+    expect(loadStyles([dir]).map((s) => s.name)).toEqual(['Real'])
+  })
 })
 
 describe('readActiveStyleName', () => {

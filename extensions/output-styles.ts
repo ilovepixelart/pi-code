@@ -71,7 +71,13 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
     }
     for (const entry of entries) {
       if (!entry.endsWith('.md')) continue
-      const style = parseStyle(fs.readFileSync(path.join(dir, entry), 'utf-8'), entry.replace(/\.md$/, ''))
+      let content: string
+      try {
+        content = fs.readFileSync(path.join(dir, entry), 'utf-8')
+      } catch {
+        continue // a directory named *.md or an unreadable file must not take down session start
+      }
+      const style = parseStyle(content, entry.replace(/\.md$/, ''))
       byName.set(style.name, style)
     }
   }
