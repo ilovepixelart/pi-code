@@ -228,6 +228,31 @@ describe('stale plan context filtering', () => {
     await s.runCommand('plan')
     expect(await s.emit('context', { messages })).toBeUndefined()
   })
+
+  it('strips stale execution scaffolding once execution is over', async () => {
+    const s = setup()
+    const withExecution = [
+      { role: 'user', customType: 'plan-execution-context', content: '[EXECUTING PLAN]' },
+      { role: 'user', content: 'a real question' },
+    ]
+    const result = (await s.emit('context', { messages: withExecution })) as { messages: Array<{ content: unknown }> }
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0].content).toBe('a real question')
+  })
+
+  it('keeps execution scaffolding while the plan is executing', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: 'Plan:\n1. Inspect the parser' })
+    await s.emit('agent_end', { messages: [] })
+
+    const withExecution = [
+      { role: 'user', customType: 'plan-execution-context', content: '[EXECUTING PLAN]' },
+      { role: 'user', content: 'q' },
+    ]
+    const result = (await s.emit('context', { messages: withExecution })) as { messages: unknown[] }
+    expect(result.messages).toHaveLength(2)
+  })
 })
 
 describe('execution progress tracking', () => {
@@ -306,6 +331,24 @@ describe('plan review prompt', () => {
     await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader')] })
 
     expect(s.userMessages).toEqual(['focus on the parser'])
+  })
+
+  it('re-extracts the plan from prose after a tool-submitted plan is refined', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: 'Plan:\n1. Old step one\n2. Old step two' })
+
+    s.ctx.ui.select = async (_q: string, choices: string[]) => choices[2]
+    s.ctx.ui.editor = async () => 'take a different approach'
+    await s.emit('agent_end', { messages: [] })
+
+    // The refined turn answers in prose; its plan must replace the tool-submitted todos.
+    s.ctx.ui.select = async (_q: string, choices: string[]) => choices[0]
+    await s.emit('agent_end', { messages: [assistant('Plan:\n1. New step')] })
+
+    const last = s.sent.filter((m) => m.customType === 'plan-todo-list').at(-1)
+    expect(last?.content).toContain('New step')
+    expect(last?.content).not.toContain('Old step')
   })
 
   it('ignores an empty refinement', async () => {
