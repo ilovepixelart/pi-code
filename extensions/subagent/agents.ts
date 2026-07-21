@@ -39,6 +39,19 @@ function parseToolsField(raw: unknown): string[] | undefined | null {
   return tools.length > 0 ? tools : undefined
 }
 
+/**
+ * Claude Code model aliases name Anthropic tiers pi cannot resolve; a child spawned
+ * with one as --model fails to boot. Claude's `inherit` (run on the session model)
+ * is the safe degradation for all of them.
+ */
+const CLAUDE_MODEL_ALIASES = new Set(['sonnet', 'opus', 'haiku', 'inherit'])
+
+function parseModelField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const model = raw.trim()
+  return model && !CLAUDE_MODEL_ALIASES.has(model.toLowerCase()) ? model : undefined
+}
+
 /** Parse one agent markdown file; null when it is not a usable agent definition. */
 function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
   let parsed: { frontmatter: Record<string, unknown>; body: string }
@@ -57,7 +70,7 @@ function parseAgentFile(content: string, source: 'user' | 'project', filePath: s
     name,
     description,
     tools,
-    model: typeof frontmatter.model === 'string' ? frontmatter.model : undefined,
+    model: parseModelField(frontmatter.model),
     systemPrompt: body,
     source,
     filePath,

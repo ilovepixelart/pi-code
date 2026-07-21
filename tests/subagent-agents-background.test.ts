@@ -279,10 +279,18 @@ describe('discoverAgents', () => {
     expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine'])
   })
 
-  it('carries the model field through from frontmatter', () => {
-    writeAgent(piUserDir, 'modelled.md', { name: 'modelled', description: 'pinned model', model: 'opus' })
+  it('carries a concrete model id through from frontmatter', () => {
+    writeAgent(piUserDir, 'modelled.md', { name: 'modelled', description: 'pinned model', model: 'gpt-oss:20b' })
 
-    expect(discoverAgents(cwd, 'user').agents[0].model).toBe('opus')
+    expect(discoverAgents(cwd, 'user').agents[0].model).toBe('gpt-oss:20b')
+  })
+
+  it.each(['inherit', 'sonnet', 'Opus', 'haiku'])('runs a Claude model alias (%s) on the session default model', (model) => {
+    // pi cannot resolve Anthropic tier aliases; passing one as --model would make the
+    // child fail to boot. Claude's `inherit` semantics (session model) degrade safely.
+    writeAgent(piUserDir, 'aliased.md', { name: 'aliased', description: 'alias model', model })
+
+    expect(discoverAgents(cwd, 'user').agents[0].model).toBeUndefined()
   })
 })
 
