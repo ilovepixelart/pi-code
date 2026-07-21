@@ -1,4 +1,5 @@
 import { lookup } from 'node:dns/promises'
+import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { httpFetch } from '../extensions/internal/web-transport.ts'
 import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
@@ -113,6 +114,17 @@ describe('web_fetch responses', () => {
     fetchMock.mockResolvedValue(respond('', { contentType: 'text/plain' }))
     const result = await setup().fetchUrl('https://example.com/empty')
     expect(result.content[0].text).toBe('(empty response)')
+  })
+
+  it('caps a body with thousands of short lines at pi tool-output line budget', async () => {
+    // The 30k char cap alone lets thousands of short lines through; pi's tool-output
+    // contract also bounds lines, which the shared output guard enforces.
+    const manyLines = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `<p>l${i}</p>`).join('')
+    fetchMock.mockResolvedValue(respond(manyLines))
+    const result = await setup().fetchUrl('https://example.com/lines')
+    const text = result.content[0].text as string
+    expect(text.split('\n').length).toBeLessThan(DEFAULT_MAX_LINES + 10)
+    expect(text).toContain('truncated')
   })
 
   it('treats a missing content-type as non-html and skips html stripping', async () => {

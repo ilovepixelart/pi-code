@@ -12,6 +12,7 @@ import type { LookupFunction } from 'node:net'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
+import { capForContext } from './internal/output-guard.js'
 import { httpFetch } from './internal/web-transport.js'
 
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
@@ -235,7 +236,9 @@ export default function webExtension(pi: ExtensionAPI) {
       }
       const { text, contentType } = await fetchText(params.url)
       const body = contentType.includes('html') ? htmlToText(text) : text.slice(0, MAX_FETCH_CHARS)
-      return { content: [{ type: 'text' as const, text: body || '(empty response)' }], details: {} }
+      // The char cap alone admits thousands of short lines; pi's tool-output budget
+      // bounds lines too, which the shared guard enforces.
+      return { content: [{ type: 'text' as const, text: capForContext(body) || '(empty response)' }], details: {} }
     },
   })
 }
