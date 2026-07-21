@@ -21,7 +21,7 @@
  * Docs: https://code.claude.com/docs/en/hooks.md
  */
 
-import { spawn } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -50,6 +50,8 @@ export interface HookRunResult {
   code: number
   stdout: string
   stderr: string
+  /** The hook was killed at its timeout, so its exit code carries no verdict. */
+  timedOut: boolean
 }
 export type HookRunner = (command: string, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
 
@@ -115,13 +117,48 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
 /** Memory backstop for a runaway hook. A decision payload is orders of magnitude smaller. */
 const MAX_HOOK_OUTPUT = 1_000_000
 
+/** Conventional exit code for a killed-on-timeout command, as `timeout(1)` reports it. */
+const TIMEOUT_EXIT_CODE = 124
+
+/**
+ * Kill the shell and everything it spawned. `sh -c 'a; b'` forks, so signalling the
+ * direct child alone leaves a grandchild alive holding stdout/stderr.
+ */
+function killTree(child: ChildProcess): void {
+  try {
+    // Negative pid targets the whole process group, which `detached` gave the shell.
+    if (child.pid) {
+      process.kill(-child.pid, 'SIGKILL')
+      return
+    }
+  } catch {
+    // Group already reaped, or the platform refused it; fall through to the direct kill.
+  }
+  child.kill('SIGKILL')
+}
+
 export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
-    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] })
+    // `detached` makes the shell its own process group leader so the timeout can kill
+    // the descendants too.
+    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'], detached: true })
     let stdout = ''
     let stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
+    let settled = false
+    const finish = (result: HookRunResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    // Resolve from the timer itself rather than waiting for `close`: `close` fires only
+    // once every stdio pipe is closed, and a grandchild that inherited them can hold the
+    // promise pending long past the timeout, stalling the tool call that awaits it.
+    const timer = setTimeout(() => {
+      killTree(child)
+      finish({ code: TIMEOUT_EXIT_CODE, stdout, stderr, timedOut: true })
+    }, timeoutMs)
     // Decode on the stream: concatenating Buffers as strings mangles a multi-byte
     // character split across chunks, and a mangled byte in a hook's deny decision makes
     // it unparseable, which reads as an allow.
@@ -133,14 +170,8 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs) =>
     child.stderr?.on('data', (chunk: string) => {
       if (stderr.length < MAX_HOOK_OUTPUT) stderr += chunk
     })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({ code: code ?? 0, stdout, stderr })
-    })
-    child.on('error', () => {
-      clearTimeout(timer)
-      resolve({ code: 0, stdout, stderr })
-    })
+    child.on('close', (code) => finish({ code: code ?? 0, stdout, stderr, timedOut: false }))
+    child.on('error', () => finish({ code: 0, stdout, stderr, timedOut: false }))
     // A hook that exits without reading stdin (e.g. `exit 2`) closes the pipe first,
     // so ignore EPIPE on this write rather than crashing the host process.
     child.stdin?.on('error', () => {})
@@ -155,6 +186,9 @@ function timeoutMs(command: HookCommand): number {
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner): Promise<HookDecision> {
   for (const command of matchingCommands(config.PreToolUse, toolName)) {
     const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }, timeoutMs(command))
+    // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
+    // would otherwise read as a clean allow. Fail closed instead.
+    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return decision
   }

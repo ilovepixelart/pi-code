@@ -5,16 +5,18 @@
  * Claude Code's `@path` imports inside them. This fills that one gap: on
  * before_agent_start it reads the already-loaded context files from
  * systemPromptOptions, resolves any `@path` imports (recursive, depth-capped,
- * cycle-safe; ~ expands to home, relative paths resolve against the importing
- * file), and appends ONLY the imported content. pi already injected the base
- * files, so nothing is duplicated.
+ * cycle-safe, budget-capped; ~ expands to home, relative paths resolve against
+ * the importing file), and appends ONLY the imported content. pi already
+ * injected the base files, so nothing is duplicated.
  *
  * Security: context files can come from an untrusted project, so imports are
  * confined (after resolving symlinks) to the working directory and the user's
  * own ~/.claude and ~/.pi config roots. An import that escapes those roots
  * (absolute paths, ~/.ssh, ../.. traversal, symlinks) is ignored, so a hostile
  * CLAUDE.md cannot read arbitrary files into the prompt. Imports inside fenced
- * code blocks are also skipped.
+ * code blocks are also skipped. One byte-and-file budget is shared by the whole
+ * run, so a context file cannot flood the prompt by importing breadth-first;
+ * what the budget refused is stated in the prompt rather than dropped silently.
  *
  * Docs: https://code.claude.com/docs/en/memory.md (imports)
  */
@@ -25,6 +27,8 @@ import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 const MAX_IMPORT_DEPTH = 5
+export const MAX_IMPORT_FILES = 50
+export const MAX_IMPORT_BYTES = 256 * 1024
 
 export function expandHome(target: string, home: string): string {
   if (target === '~') return home
@@ -53,6 +57,18 @@ export interface ImportedFile {
   path: string
   body: string
 }
+
+/** Appended to the last body the byte budget could only partly pay for. */
+export const IMPORT_TRUNCATED_MARKER = '[truncated: import byte budget exhausted]'
+
+/** Remaining import allowance, shared across every context file of one run. */
+export interface ImportBudget {
+  files: number
+  bytes: number
+  dropped: number
+}
+
+export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
 
 /** The `@path` targets of a context file, in document order, skipping fenced code blocks. */
 function importTargets(content: string): string[] {
@@ -94,13 +110,22 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
  * discovery order. Imports are resolved through symlinks and kept within
  * `allowedRoots` (which must already be realpath'd).
  */
-export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, depth = 0): ImportedFile[] {
+export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, budget: ImportBudget = createImportBudget(), depth = 0): ImportedFile[] {
   if (depth >= MAX_IMPORT_DEPTH) return []
   const out: ImportedFile[] = []
   for (const target of importTargets(content)) {
+    // Checked before the read so an exhausted budget costs no I/O.
+    if (budget.files === 0 || budget.bytes === 0) {
+      budget.dropped += 1
+      continue
+    }
     const file = readImport(target, fromDir, home, allowedRoots, seen)
     if (!file) continue
-    out.push({ path: file.real, body: file.body.trim() }, ...collectImports(file.body, path.dirname(file.real), home, allowedRoots, seen, depth + 1))
+    budget.files -= 1
+    const kept = file.body.slice(0, budget.bytes)
+    budget.bytes -= kept.length
+    const body = kept.length < file.body.length ? `${kept.trim()}\n${IMPORT_TRUNCATED_MARKER}` : kept.trim()
+    out.push({ path: file.real, body }, ...collectImports(kept, path.dirname(file.real), home, allowedRoots, seen, budget, depth + 1))
   }
   return out
 }
@@ -132,14 +157,17 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const seenSet = new Set(seen)
 
     const imported: ImportedFile[] = []
+    // One budget for the whole run, so N context files cannot each spend a full one.
+    const budget = createImportBudget()
     for (const file of contextFiles) {
       // Roots are scoped per importing file: a project file never reaches user config.
       const allowedRoots = rootsForImporter(file.path, home, cwd)
-      imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet))
+      imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, budget))
     }
     if (imported.length === 0) return
 
     const section = imported.map((entry) => `### ${entry.path}\n\n${entry.body}`).join('\n\n')
-    return { systemPrompt: `${event.systemPrompt}\n\n## Imported context (@)\n\n${section}` }
+    const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
+    return { systemPrompt: `${event.systemPrompt}\n\n## Imported context (@)\n\n${section}${notice}` }
   })
 }
