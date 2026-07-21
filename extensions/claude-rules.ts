@@ -18,6 +18,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isProjectApproved } from './internal/project-approval.js'
+
 export interface Frontmatter {
   paths: string[]
   body: string
@@ -111,10 +113,10 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     globalRules = readGlobalRules(globalRulesDir)
-    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt,
-    // so read them only for a trusted project.
-    const trusted = ctx.isProjectTrusted?.() ?? false
-    projectRules = trusted ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
+    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt.
+    // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
+    const approved = await isProjectApproved(ctx)
+    projectRules = approved ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
 
     if (globalRules.length > 0 || projectRules.length > 0) {
       ctx.ui.notify(`Rules loaded: global ${globalRules.length > 0 ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')

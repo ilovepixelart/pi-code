@@ -118,4 +118,10 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
     mkdirSync(join(cwd, dir), { recursive: true })
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
+
+  it('treats a project with only a .claude/rules directory as claude-shaped (rule filenames and scopes are surfaced in the system prompt)', () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
 })
