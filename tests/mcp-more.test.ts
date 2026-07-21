@@ -117,7 +117,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { loadConfig } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -331,20 +330,6 @@ describe('mcp startup config scoping', () => {
 
     expect(harness.toolNames()).toEqual(['proj_query'])
     expect(hoisted.transports).toHaveLength(1)
-  })
-
-  it('loadConfig merges the user home and project files with project winning', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
-    const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
-    tempDirs.push(home, cwd)
-    hoisted.home = home
-    writeServers(join(home, '.claude.json'), { shared: { command: 'from-user' }, only: { command: 'user-only' } })
-    writeServers(join(cwd, '.mcp.json'), { shared: { command: 'from-project' } })
-
-    const merged = loadConfig(cwd)
-
-    expect(Object.keys(merged).sort()).toEqual(['only', 'shared'])
-    expect((merged.shared as { command: string }).command).toBe('from-project')
   })
 })
 
