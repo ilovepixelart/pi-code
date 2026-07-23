@@ -137,9 +137,10 @@ describe('formatUsageStats', () => {
 })
 
 describe('getFinalOutput', () => {
-  it('returns the first text part of the last assistant message', () => {
+  it('joins every text part of the last assistant message', () => {
+    // The whole final message, not just the first part; this matches the background parser.
     const messages = [assistant(textPart('early')), user('ignored'), assistant(toolCallPart('bash', {}), textPart('first'), textPart('second'))]
-    expect(getFinalOutput(messages)).toBe('first')
+    expect(getFinalOutput(messages)).toBe('first\nsecond')
   })
 
   it('falls back to an earlier assistant message when the last one has no text part', () => {
