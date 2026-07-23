@@ -9,9 +9,11 @@ interface Option {
 }
 interface Details {
   question: string
+  header?: string
   options: string[]
   answer: string | null
   wasCustom?: boolean
+  multiSelect?: boolean
 }
 type ToolResult = { content: Array<{ type: string; text?: string }>; details?: Details }
 
@@ -37,7 +39,7 @@ const theme = { fg: (_color: string, s: string) => s, bold: (s: string) => s }
 const fakeTui = () => ({ requestRender: () => {}, terminal: { rows: 24 } })
 
 /** Raw terminal byte sequences, as the host feeds them to handleInput. */
-const RAW = { up: '\x1b[A', down: '\x1b[B', enter: '\r', escape: '\x1b' }
+const RAW = { up: '\x1b[A', down: '\x1b[B', enter: '\r', escape: '\x1b', space: ' ' }
 
 const setup = (): QuestionTool => {
   let tool: QuestionTool | undefined
@@ -71,6 +73,23 @@ const openOverlay = (tool: QuestionTool, options: Option[] = OPTIONS) => {
     },
   }
   const result = tool.execute('call-1', { question: 'Pick one', options }, undefined, undefined, ctx)
+  if (!overlay) throw new Error('ui.custom factory was never invoked')
+  return { overlay, result }
+}
+
+/** openOverlay with arbitrary params (header, multiSelect, ...). */
+const openOverlayWith = (tool: QuestionTool, params: Record<string, unknown>) => {
+  let overlay: Overlay | undefined
+  const ctx = {
+    hasUI: true,
+    ui: {
+      custom: (factory: CustomFactory) =>
+        new Promise((resolve) => {
+          overlay = factory(fakeTui(), theme, {}, resolve)
+        }),
+    },
+  }
+  const result = tool.execute('call-1', params as never, undefined, undefined, ctx)
   if (!overlay) throw new Error('ui.custom factory was never invoked')
   return { overlay, result }
 }
@@ -302,5 +321,56 @@ describe('question overlay', () => {
 
     overlay.handleInput(RAW.escape)
     expect((await result).content).toEqual([{ type: 'text', text: 'User cancelled the selection' }])
+  })
+})
+
+describe('question header and multiSelect', () => {
+  const multiParams = { question: 'Pick some', header: 'Scope', options: OPTIONS, multiSelect: true }
+
+  it('shows the header and the multi-select hint, and no free-text option', () => {
+    const { overlay } = openOverlayWith(setup(), multiParams)
+    const out = overlay.render(80)
+    expect(out).toContain(' [Scope]')
+    expect(out).toContain(' Pick some')
+    expect(out).toContain('> 1. [ ] Alpha')
+    expect(out).toContain('  2. [ ] Beta')
+    expect(out.some((l) => l.includes('Type something.'))).toBe(false)
+    expect(out).toContain(' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel')
+  })
+
+  it('toggles a checkbox with space', () => {
+    const { overlay } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.space)
+    expect(overlay.render(60)).toContain('> 1. [x] Alpha')
+    overlay.handleInput(RAW.space)
+    expect(overlay.render(60)).toContain('> 1. [x] Alpha'.replace('[x]', '[ ]'))
+  })
+
+  it('confirms every toggled option, comma-joined, on enter', async () => {
+    const { overlay, result } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.space) // Alpha
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.space) // Beta
+    overlay.handleInput(RAW.enter)
+    expect(await result).toEqual({
+      content: [{ type: 'text', text: 'User selected: Alpha, Beta' }],
+      details: { question: 'Pick some', header: 'Scope', options: ['Alpha', 'Beta'], answer: 'Alpha, Beta', wasCustom: false, multiSelect: true },
+    })
+  })
+
+  it('reports (none) when nothing is toggled', async () => {
+    const { overlay, result } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.enter)
+    expect((await result).content).toEqual([{ type: 'text', text: 'User selected: (none)' }])
+  })
+
+  it('renders the header and multi tag in the call, without the free-text entry', () => {
+    const rendered = setup().renderCall(multiParams, theme)
+    expect(lines(rendered)).toEqual(['question [Scope] Pick some', '  Options (multi): 1. Alpha, 2. Beta'])
+  })
+
+  it('renders a multi-select result as the joined answer', () => {
+    const rendered = setup().renderResult({ content: [], details: { question: 'q', options: ['Alpha', 'Beta'], answer: 'Alpha, Beta', wasCustom: false, multiSelect: true } }, {}, theme)
+    expect(lines(rendered)).toEqual(['✓ Alpha, Beta'])
   })
 })

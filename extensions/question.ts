@@ -1,7 +1,9 @@
 /**
- * Question Tool - Single question with options
- * Full custom UI: options list + inline editor for "Type something..."
- * Escape in editor returns to options, Escape in options cancels
+ * Question Tool - a question with options, single- or multi-select.
+ * Full custom UI: options list + inline editor for "Type something..." (single-select
+ * only), or space-toggled checkboxes when `multiSelect` is set. An optional `header`
+ * labels the question. Escape in the editor returns to options; Escape in options cancels.
+ * Multiple questions per call are not batched; ask sequentially.
  */
 
 import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent'
@@ -17,9 +19,11 @@ type DisplayOption = OptionWithDesc & { isOther?: boolean }
 
 interface QuestionDetails {
   question: string
+  header?: string
   options: string[]
   answer: string | null
   wasCustom?: boolean
+  multiSelect?: boolean
 }
 
 // Options with labels and optional descriptions
@@ -30,11 +34,14 @@ const OptionSchema = Type.Object({
 
 const QuestionParams = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
+  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it' })),
   options: Type.Array(OptionSchema, { description: 'Options for the user to choose from' }),
+  multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
 
-function optionLine(opt: DisplayOption, index: number, selected: boolean, editMode: boolean, theme: Theme): string {
-  const label = `${index + 1}. ${opt.label}`
+function optionLine(opt: DisplayOption, index: number, selected: boolean, editMode: boolean, checked: boolean | undefined, theme: Theme): string {
+  const box = checked === undefined ? '' : `${checked ? '[x] ' : '[ ] '}`
+  const label = `${index + 1}. ${box}${opt.label}`
   const prefix = selected ? theme.fg('accent', '> ') : '  '
   if (opt.isOther === true && editMode) {
     return prefix + theme.fg('accent', `${label} ✎`)
@@ -48,25 +55,30 @@ function optionLine(opt: DisplayOption, index: number, selected: boolean, editMo
 interface QuestionView {
   width: number
   question: string
+  header?: string
   options: DisplayOption[]
   optionIndex: number
   editMode: boolean
+  multiSelect: boolean
+  checked: boolean[]
   editor: Editor
   theme: Theme
 }
 
 function buildQuestionLines(view: QuestionView): string[] {
-  const { width, question, options, optionIndex, editMode, editor, theme } = view
+  const { width, question, header, options, optionIndex, editMode, multiSelect, checked, editor, theme } = view
   const lines: string[] = []
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
   add(theme.fg('accent', '─'.repeat(width)))
+  if (header) add(theme.fg('muted', ` [${header}]`))
   add(theme.fg('text', ` ${question}`))
   lines.push('')
 
   for (let i = 0; i < options.length; i++) {
     const opt = options[i]
-    add(optionLine(opt, i, i === optionIndex, editMode, theme))
+    const box = multiSelect && opt.isOther !== true ? checked[i] : undefined
+    add(optionLine(opt, i, i === optionIndex, editMode, box, theme))
     if (opt.description) {
       add(`     ${theme.fg('muted', opt.description)}`)
     }
@@ -81,7 +93,8 @@ function buildQuestionLines(view: QuestionView): string[] {
   }
 
   lines.push('')
-  add(theme.fg('dim', editMode ? ' Enter to submit • Esc to go back' : ' ↑↓ navigate • Enter to select • Esc to cancel'))
+  const hint = editMode ? ' Enter to submit • Esc to go back' : multiSelect ? ' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel' : ' ↑↓ navigate • Enter to select • Esc to cancel'
+  add(theme.fg('dim', hint))
   add(theme.fg('accent', '─'.repeat(width)))
 
   return lines
@@ -113,11 +126,14 @@ export default function question(pi: ExtensionAPI) {
         }
       }
 
-      const allOptions: DisplayOption[] = [...params.options, { label: 'Type something.', isOther: true }]
+      const multiSelect = params.multiSelect === true
+      // The free-text option does not compose with checkbox selection, so it is single-select only.
+      const allOptions: DisplayOption[] = multiSelect ? [...params.options] : [...params.options, { label: 'Type something.', isOther: true }]
 
       const result = await ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui, theme, _kb, done) => {
         let optionIndex = 0
         let editMode = false
+        const checked: boolean[] = allOptions.map(() => false)
         let cachedLines: string[] | undefined
         let cachedWidth: number | undefined
 
@@ -173,7 +189,21 @@ export default function question(pi: ExtensionAPI) {
             return
           }
 
+          if (multiSelect && data === ' ') {
+            checked[optionIndex] = !checked[optionIndex]
+            refresh()
+            return
+          }
+
           if (matchesKey(data, Key.enter)) {
+            if (multiSelect) {
+              const answer = allOptions
+                .filter((_, i) => checked[i])
+                .map((o) => o.label)
+                .join(', ')
+              done({ answer, wasCustom: false })
+              return
+            }
             const selected = allOptions[optionIndex]
             if (selected.isOther) {
               editMode = true
@@ -192,7 +222,7 @@ export default function question(pi: ExtensionAPI) {
         function render(width: number): string[] {
           if (cachedLines && cachedWidth === width) return cachedLines
           cachedWidth = width
-          cachedLines = buildQuestionLines({ width, question: params.question, options: allOptions, optionIndex, editMode, editor, theme })
+          cachedLines = buildQuestionLines({ width, question: params.question, header: params.header, options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
           return cachedLines
         }
 
@@ -206,45 +236,41 @@ export default function question(pi: ExtensionAPI) {
         }
       })
 
-      // Build simple options list for details
+      // Build simple options list for details; header/multiSelect appear only when set,
+      // so single-select details are unchanged.
       const simpleOptions = params.options.map((o) => o.label)
+      const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: params.header } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
 
       if (!result) {
         return {
           content: [{ type: 'text', text: 'User cancelled the selection' }],
-          details: { question: params.question, options: simpleOptions, answer: null } as QuestionDetails,
+          details: { ...base, answer: null } as QuestionDetails,
         }
       }
 
       if (result.wasCustom) {
         return {
           content: [{ type: 'text', text: `User wrote: ${result.answer}` }],
-          details: {
-            question: params.question,
-            options: simpleOptions,
-            answer: result.answer,
-            wasCustom: true,
-          } as QuestionDetails,
+          details: { ...base, answer: result.answer, wasCustom: true } as QuestionDetails,
         }
       }
+      const selectionText = multiSelect ? `User selected: ${result.answer || '(none)'}` : `User selected: ${result.index}. ${result.answer}`
       return {
-        content: [{ type: 'text', text: `User selected: ${result.index}. ${result.answer}` }],
-        details: {
-          question: params.question,
-          options: simpleOptions,
-          answer: result.answer,
-          wasCustom: false,
-        } as QuestionDetails,
+        content: [{ type: 'text', text: selectionText }],
+        details: { ...base, answer: result.answer, wasCustom: false } as QuestionDetails,
       }
     },
 
     renderCall(args, theme, _context) {
-      let text = theme.fg('toolTitle', theme.bold('question ')) + theme.fg('muted', args.question)
+      const multi = args.multiSelect === true
+      const heading = args.header ? `[${args.header}] ` : ''
+      let text = theme.fg('toolTitle', theme.bold('question ')) + theme.fg('muted', heading + String(args.question ?? ''))
       const opts = Array.isArray(args.options) ? args.options : []
       if (opts.length) {
         const labels = opts.map((o: OptionWithDesc) => o.label)
-        const numbered = [...labels, 'Type something.'].map((o, i) => `${i + 1}. ${o}`)
-        const optionsLine = `  Options: ${numbered.join(', ')}`
+        const shown = multi ? labels : [...labels, 'Type something.']
+        const numbered = shown.map((o, i) => `${i + 1}. ${o}`)
+        const optionsLine = `  Options${multi ? ' (multi)' : ''}: ${numbered.join(', ')}`
         text += `\n${theme.fg('dim', optionsLine)}`
       }
       return new Text(text, 0, 0)
@@ -263,6 +289,9 @@ export default function question(pi: ExtensionAPI) {
 
       if (details.wasCustom) {
         return new Text(theme.fg('success', '✓ ') + theme.fg('muted', '(wrote) ') + theme.fg('accent', details.answer), 0, 0)
+      }
+      if (details.multiSelect) {
+        return new Text(theme.fg('success', '✓ ') + theme.fg('accent', details.answer || '(none)'), 0, 0)
       }
       const idx = details.options.indexOf(details.answer) + 1
       const display = idx > 0 ? `${idx}. ${details.answer}` : details.answer
