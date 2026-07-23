@@ -790,6 +790,21 @@ describe('chain mode', () => {
     expect(text(result)).toBe('done')
   })
 
+  it('bounds a large previous-step output before it rides the next step argv', async () => {
+    // Without a cap the whole prior report becomes one argv string and the OS spawn fails.
+    const huge = 'z'.repeat(200_000)
+    const chain = [
+      { agent: 'scout', task: 'a' },
+      { agent: 'scout', task: 'use: {previous}' },
+    ]
+    script('a', { stdout: [say(huge)] })
+    const result = await execute('c1', { chain }, undefined, undefined, trustedCtx)
+
+    const secondArg = piArgs(spawnCalls[1]).at(-1) as string
+    expect(secondArg.length).toBeLessThan(60_000)
+    expect(secondArg.startsWith('Task: use: zzz')).toBe(true)
+  })
+
   it('passes previous output containing $-patterns through verbatim', async () => {
     // String.replaceAll with a string replacement interprets $$, $&, $` and $'; a shell
     // snippet or awk line in the previous step's report must reach the next step intact.

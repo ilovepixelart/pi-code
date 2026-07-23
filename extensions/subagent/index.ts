@@ -638,7 +638,7 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
         details: makeDetails('chain')(results),
       }
     }
-    previousOutput = getFinalOutput(result.messages)
+    previousOutput = capForContext(getFinalOutput(result.messages))
   }
   return {
     content: [{ type: 'text', text: capForContext(getFinalOutput(results.at(-1)?.messages ?? [])) || '(no output)' }],
