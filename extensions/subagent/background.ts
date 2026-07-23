@@ -47,9 +47,10 @@ export function parseFinalOutputFromJsonl(jsonl: string): { text: string; turns:
     }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant') continue
     turns++
-    for (const part of event.message.content ?? []) {
-      if (part.type === 'text' && part.text) text = part.text
-    }
+    // The complete text of the last assistant message, matching getFinalOutput on the
+    // foreground path so a multi-part message reads the same in both.
+    const parts = (event.message.content ?? []).filter((p) => p.type === 'text' && p.text).map((p) => p.text as string)
+    if (parts.length > 0) text = parts.join('\n')
   }
   return { text, turns }
 }

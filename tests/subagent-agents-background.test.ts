@@ -347,10 +347,11 @@ const loadBackground = async (): Promise<typeof import('../extensions/subagent/b
 }
 
 describe('parseFinalOutputFromJsonl', () => {
-  it('keeps the last text part when one assistant message has several', async () => {
+  it('joins every text part when one assistant message has several', async () => {
     const { parseFinalOutputFromJsonl } = await loadBackground()
 
-    expect(parseFinalOutputFromJsonl(messageEnd('assistant', 'draft', 'polished'))).toEqual({ text: 'polished', turns: 1 })
+    // The whole final message, matching getFinalOutput on the foreground path.
+    expect(parseFinalOutputFromJsonl(messageEnd('assistant', 'draft', 'polished'))).toEqual({ text: 'draft\npolished', turns: 1 })
   })
 
   it('counts an assistant turn even when the message carries no content', async () => {

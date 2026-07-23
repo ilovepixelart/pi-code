@@ -160,9 +160,10 @@ export function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg.role === 'assistant') {
-      for (const part of msg.content) {
-        if (part.type === 'text') return part.text
-      }
+      // The complete text of the last assistant message: a message can carry more than one
+      // text part, and taking only the first diverged from the background parser.
+      const parts = msg.content.filter((part) => part.type === 'text').map((part) => part.text)
+      if (parts.length > 0) return parts.join('\n')
     }
   }
   return ''
