@@ -52,4 +52,14 @@ describe('status-line', () => {
     await handlers.get('agent_end')?.({}, makeCtx())
     expect(status.at(-1)).toContain('turn 1')
   })
+
+  it('resets the turn count on a new session', async () => {
+    // One extension instance serves every session; a fresh session (/new) must start
+    // from ready, not continue the prior session's counter.
+    const { handlers, status, makeCtx } = setup()
+    await handlers.get('turn_start')?.({}, makeCtx())
+    await handlers.get('session_start')?.({}, makeCtx())
+    expect(status.at(-1)).toContain('ready')
+    expect(status.at(-1)).not.toContain('turn 1')
+  })
 })

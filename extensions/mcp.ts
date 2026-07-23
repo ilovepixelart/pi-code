@@ -113,20 +113,24 @@ interface McpContentBlock {
 export type ToolContent = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
 
 export function mapContent(content: McpContentBlock[] | undefined, structured?: unknown): ToolContent[] {
+  // capForContext every text output, whatever its source: a server can blow the tool-output
+  // budget through a resource block, a JSON-stringified block, or the structured fallback,
+  // not only a text block.
+  const text = (value: string): ToolContent => ({ type: 'text', text: capForContext(value) })
   if (!content || content.length === 0) {
-    return [{ type: 'text', text: structured !== undefined ? JSON.stringify(structured, null, 2) : '(empty result)' }]
+    return [text(structured !== undefined ? JSON.stringify(structured, null, 2) : '(empty result)')]
   }
   return content.map((block) => {
     if (block.type === 'text') {
-      return { type: 'text', text: capForContext(block.text ?? '') }
+      return text(block.text ?? '')
     }
     if (block.type === 'image' && block.data) {
       return { type: 'image', data: block.data, mimeType: block.mimeType ?? 'image/png' }
     }
     if (block.type === 'resource' && block.resource) {
-      return { type: 'text', text: `[Resource: ${block.resource.uri ?? 'unknown'}]\n${block.resource.text ?? ''}` }
+      return text(`[Resource: ${block.resource.uri ?? 'unknown'}]\n${block.resource.text ?? ''}`)
     }
-    return { type: 'text', text: JSON.stringify(block) }
+    return text(JSON.stringify(block))
   })
 }
 
@@ -165,30 +169,50 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
       cwd: config.cwd?.replace(/^~(?=\/|$)/, os.homedir()),
       stderr: 'ignore',
     })
-    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name}`)
+    await connectWithTimeout(client, transport, `connect ${name}`)
     return client
   }
   const headers: Record<string, string> = {}
   for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = interpolateEnv(value)
-  const token = config.bearerToken ?? (config.bearerTokenEnv ? process.env[config.bearerTokenEnv] : undefined)
+  const token = config.bearerToken ? interpolateEnv(config.bearerToken) : config.bearerTokenEnv ? process.env[config.bearerTokenEnv] : undefined
   if (token) headers.Authorization = `Bearer ${token}`
   const url = new URL(interpolateEnv(config.url))
   if (config.type === 'sse') {
     const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: explicitly declared legacy transport
-    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)
+    await connectWithTimeout(client, transport, `connect ${name} (sse)`)
     return client
   }
   try {
     const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } })
-    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name}`)
+    await connectWithTimeout(client, transport, `connect ${name}`)
     return client
   } catch (error) {
     // An explicitly declared streamable transport must not silently degrade to SSE.
     if (config.type !== undefined || String(error).includes('Unauthorized')) throw error
     const fallback = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
     const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: deliberate legacy fallback
-    await withTimeout(fallback.connect(transport), CONNECT_TIMEOUT_MS, `connect ${name} (sse)`)
+    await connectWithTimeout(fallback, transport, `connect ${name} (sse)`)
     return fallback
+  }
+}
+
+/**
+ * Connect with a deadline, closing the client if the deadline (not a connect error) wins.
+ * Without this, a slow-but-successful server finishes connecting after the race is lost and
+ * lingers unreferenced: process/socket alive, never in `clients`, invisible to shutdown.
+ */
+async function connectWithTimeout(client: Client, transport: Parameters<Client['connect']>[0], label: string): Promise<void> {
+  const connecting = client.connect(transport)
+  try {
+    await withTimeout(connecting, CONNECT_TIMEOUT_MS, label)
+  } catch (error) {
+    // Only a timeout can orphan a still-opening transport; a connect rejection means the
+    // SDK already tore it down, so closing again would be redundant.
+    if (String(error).includes('timed out after')) {
+      connecting.catch(() => {}) // a late rejection must not surface as unhandled
+      void client.close().catch(() => {})
+    }
+    throw error
   }
 }
 
@@ -236,7 +260,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
             parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
             async execute(_id, params) {
-              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }), CALL_TIMEOUT_MS, toolName)
+              // Pass the timeout to the SDK too: its own default request timeout is 60s and
+              // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
+              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: CALL_TIMEOUT_MS }), CALL_TIMEOUT_MS, toolName)
               const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
               const details: { error?: string } = {}
               if (result.isError) {

@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -287,6 +289,29 @@ describe('project agent gate', () => {
 
     expect(confirm).toHaveBeenCalledWith('Run project-local agents?', 'Agents: repo\nSource: /repo/.pi/agents\n\nProject agents are repo-controlled. Only continue for trusted repositories.')
     expect(text(result)).toBe('done')
+  })
+
+  it('does not consult project approval when the run uses no project agents', async () => {
+    // isProjectApproved can prompt and persist a decision; a user-scope run that
+    // consumes no project config must not trigger that, even in a claude-shaped repo.
+    const cwd = fs.mkdtempSync(join(tmpdir(), 'sa-noproj-'))
+    fs.mkdirSync(join(cwd, '.claude'), { recursive: true })
+    fs.writeFileSync(join(cwd, '.claude', 'settings.json'), '{}')
+    const savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(join(tmpdir(), 'sa-agentdir-'))
+    try {
+      discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
+      const confirm = vi.fn(async () => true)
+      const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { confirm } }
+      script('inspect', { stdout: [say('ok')] })
+
+      await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, ctx)
+
+      expect(confirm).not.toHaveBeenCalled()
+    } finally {
+      if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+    }
   })
 
   it('names the directory each project agent actually came from', async () => {
@@ -981,8 +1006,22 @@ describe('parallel mode', () => {
 
     await execute('c1', { tasks: tasksOf('alpha', 'beta') }, undefined, (partial) => updates.push({ text: text(partial), exitCodes: results(partial).map((r) => r.exitCode), sources: results(partial).map((r) => r.agentSource) }), trustedCtx)
 
-    expect(updates[0]).toEqual({ text: 'Parallel: 1/2 done, 1 running...', exitCodes: [0, -1], sources: ['user', 'unknown'] })
+    // alpha has emitted its message but not yet closed, so it is still running.
+    expect(updates[0]).toEqual({ text: 'Parallel: 0/2 done, 2 running...', exitCodes: [-1, -1], sources: ['user', 'unknown'] })
     expect(updates.at(-1)).toEqual({ text: 'Parallel: 2/2 done, 0 running...', exitCodes: [0, 0], sources: ['user', 'user'] })
+  })
+
+  it('does not count a task done while it is still streaming', async () => {
+    // A child that has emitted a message but not closed is still running; the streamed
+    // update must not flip it to done (which would show ✓ and overcount).
+    script('alpha', { stdout: [say('first turn'), say('second turn')] })
+    const updates: { text: string; exitCodes: number[] }[] = []
+
+    await execute('c1', { tasks: tasksOf('alpha') }, undefined, (partial) => updates.push({ text: text(partial), exitCodes: results(partial).map((r) => r.exitCode) }), trustedCtx)
+
+    // Updates before the child closes report the task as running.
+    expect(updates[0]).toEqual({ text: 'Parallel: 0/1 done, 1 running...', exitCodes: [-1] })
+    expect(updates.at(-1)).toEqual({ text: 'Parallel: 1/1 done, 0 running...', exitCodes: [0] })
   })
 
   it('keeps results aligned with the input task order', async () => {

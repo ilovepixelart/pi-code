@@ -102,7 +102,7 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, name: stri
   return result
 }
 
-function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string }; decision?: string; reason?: string } | undefined {
+function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
   try {
     return JSON.parse(text)
   } catch {
@@ -115,8 +115,11 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   if (code === 2) return { block: true, reason: stderr.trim() || 'Blocked by hook' }
   const parsed = tryParseJson(stdout)
   const specific = parsed?.hookSpecificOutput
-  if (specific?.permissionDecision === 'deny') return { block: true, reason: specific.permissionDecisionReason ?? 'Blocked by hook' }
+  // pi's tool_call return is allow-or-block, so "ask" (confirm) maps to block-with-reason
+  // rather than a silent allow, which is the least-safe reading on a trust-gated path.
+  if (specific?.permissionDecision === 'deny' || specific?.permissionDecision === 'ask') return { block: true, reason: specific.permissionDecisionReason ?? 'Blocked by hook' }
   if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Blocked by hook' }
+  if (parsed?.continue === false) return { block: true, reason: parsed.stopReason ?? 'Blocked by hook' }
   return { block: false }
 }
 

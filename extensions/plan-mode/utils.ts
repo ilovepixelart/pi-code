@@ -191,9 +191,11 @@ export function cleanStepText(text: string): string {
   return cleaned
 }
 
-// Horizontal whitespace before the newline: \s would include \n itself and overlap
-// the following \n, which is what backtracks super-linearly.
-const PLAN_HEADER = /\*{0,2}Plan:\*{0,2}[^\S\n]*\n/i
+// Anchored to line start (m flag) so a prose line merely ending in "plan:" is not taken
+// for the header, which would slice the plan section mid-list and drop earlier steps.
+// Horizontal whitespace only ([^\S\n]): \s would include \n itself and overlap the
+// following \n, which is what backtracks super-linearly.
+const PLAN_HEADER = /^[^\S\n]*\*{0,2}Plan:\*{0,2}[^\S\n]*\n/im
 
 const isBlank = (ch: string | undefined): boolean => ch !== undefined && ch !== '\n' && ch.trim() === ''
 

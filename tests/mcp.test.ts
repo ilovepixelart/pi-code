@@ -89,4 +89,9 @@ describe('mcp adapter helpers', () => {
     const big = mapContent([{ type: 'text', text: 'x'.repeat(60_000) }])
     expect((big[0] as { text: string }).text).toContain('[truncated')
   })
+
+  it('caps a huge resource block, not just text blocks', () => {
+    const mapped = mapContent([{ type: 'resource', resource: { uri: 'file:///big', text: 'y'.repeat(60_000) } }])
+    expect((mapped[0] as { text: string }).text).toContain('[truncated')
+  })
 })

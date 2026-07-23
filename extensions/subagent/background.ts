@@ -83,6 +83,13 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     env: { ...process.env, PI_CODE_SUBAGENT: '1' },
   })
   let stdout = ''
+  // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
+  let completed = false
+  const complete = (): void => {
+    if (completed) return
+    completed = true
+    onComplete(run)
+  }
   proc.stdout.on('data', (data) => {
     stdout += data.toString()
   })
@@ -92,12 +99,12 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     run.exitCode = code ?? 0
     run.output = text
     run.turns = turns
-    onComplete(run)
+    complete()
   })
   proc.on('error', () => {
     run.state = 'failed'
     run.exitCode = 1
-    onComplete(run)
+    complete()
   })
   return id
 }

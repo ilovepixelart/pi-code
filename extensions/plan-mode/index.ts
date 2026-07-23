@@ -114,6 +114,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       restoreTools()
       ctx.ui.notify('Plan mode disabled. Full access restored.')
     }
+    // Persist the toggle so a resume does not restore a state the user left.
+    persistState()
     updateStatus(ctx)
   }
 
@@ -158,6 +160,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       restoreTools()
       updateStatus(ctx)
 
+      // Persist before the turn: a crash before the first turn_end must resume into
+      // execution, not back into plan mode.
+      persistState()
       const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
       pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
     } else if (choice === 'Refine the plan') {
@@ -351,6 +356,13 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
   // Restore state on session start/resume
   pi.on('session_start', async (_event, ctx) => {
+    // One extension instance serves every session, so clear prior state first: a fresh
+    // session (/new, no plan entry) must not inherit the last session's plan or execution.
+    planModeEnabled = false
+    executionMode = false
+    todoItems = []
+    planFromTool = false
+
     if (pi.getFlag('plan') === true) {
       planModeEnabled = true
     }
@@ -375,6 +387,10 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
     if (planModeEnabled) {
       enterPlanTools()
+    } else {
+      // A prior session in this instance may have shrunk the tool set; undo that when
+      // the restored/fresh state is not plan mode.
+      restoreTools()
     }
     updateStatus(ctx)
   })

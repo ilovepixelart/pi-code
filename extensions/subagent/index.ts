@@ -486,6 +486,10 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   for (const t of params.tasks ?? []) requestedAgentNames.add(t.agent)
   const requestedProjectAgents = [...requestedAgentNames].map((name) => agents.find((a) => a.name === name)).filter((a): a is AgentConfig => a?.source === 'project')
 
+  // No project agents means nothing repo-controlled to gate; skip the approval check so a
+  // user-scope run never prompts or persists a trust decision it does not need.
+  if (requestedProjectAgents.length === 0) return null
+
   // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
   const approved = await isProjectApproved(ctx)
   const gate = projectAgentGate(requestedProjectAgents.length, approved, ctx.hasUI, params.confirmProjectAgents ?? true)
@@ -692,8 +696,11 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
       signal,
       // Per-task update callback
       onUpdate: (partial) => {
-        if (partial.details?.results[0]) {
-          allResults[index] = partial.details.results[0]
+        const live = partial.details?.results[0]
+        if (live) {
+          // Keep the running sentinel until the child closes: the streamed result carries
+          // exitCode 0 mid-run, which would otherwise count and render the task as done.
+          allResults[index] = { ...live, exitCode: -1 }
           emitParallelUpdate()
         }
       },

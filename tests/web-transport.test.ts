@@ -48,6 +48,23 @@ describe('httpFetch pins the connection to the validated address', () => {
     await expect(httpFetch(new URL('http://blocked.internal.test/'), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toThrow()
   })
 
+  it.each([204, 205, 304])('returns a bodyless response for null-body status %i without crashing', async (status) => {
+    // The WHATWG Response constructor throws for a non-null body on these statuses; the
+    // throw fires in the http callback, off the executor, so it would escape as an
+    // uncaughtException and pi's handler would exit the process.
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(status)
+      res.end()
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    closers.push(() => server.close())
+    const port = (server.address() as AddressInfo).port
+
+    const response = await httpFetch(new URL(`http://blocked.internal.test:${port}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })
+    expect(response.status).toBe(status)
+    expect(await response.text()).toBe('')
+  })
+
   it('joins a repeated response header into one value', async () => {
     const server = createHttpServer((_req, res) => {
       res.setHeader('set-cookie', ['a=1', 'b=2']) // node keeps repeated headers as an array
