@@ -7,14 +7,15 @@
  * failures skip with a notice; stdio and HTTP (streamable with SSE fallback)
  * transports; /mcp shows status.
  *
- * Reads Claude Code's MCP config too. User config (~/.claude.json,
- * ~/.pi/agent/mcp.json) is the user's own and loads on the first session. Project
- * config (.mcp.json, .pi/mcp.json) can run arbitrary commands on connect, so it
- * loads only once the project is approved (see project-approval). The two scopes
- * are loaded separately, not merged; user config connects first, so a project
- * server cannot take the name of a user server that connected.
- * Values support ${VAR} interpolation, and a stdio server receives only the SDK's
- * default environment plus its own `env` block, not the whole process environment.
+ * Reads Claude Code's MCP config too. User config (~/.claude.json top-level plus its
+ * per-project `projects[cwd].mcpServers` local scope, and ~/.pi/agent/mcp.json) is the
+ * user's own and loads on the first session. Project config (.mcp.json, .pi/mcp.json)
+ * can run arbitrary commands on connect, so it loads only once the project is approved
+ * (see project-approval). The two scopes are loaded separately, not merged; user config
+ * connects first, so a project server cannot take the name of a user server that connected.
+ * Values support ${VAR} / ${VAR:-default} interpolation, connect and per-call timeouts
+ * honor MCP_TIMEOUT / MCP_TOOL_TIMEOUT, and a stdio server receives only the SDK's default
+ * environment plus its own `env` block, not the whole process environment.
  */
 
 import * as fs from 'node:fs'
@@ -31,8 +32,20 @@ import { Type } from 'typebox'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApproved } from './internal/project-approval.js'
 
-const CONNECT_TIMEOUT_MS = 10_000
-const CALL_TIMEOUT_MS = 120_000
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
+const DEFAULT_CALL_TIMEOUT_MS = 120_000
+
+/** A positive-integer env override, or the default when unset or unparseable. */
+function envTimeout(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
+  const value = Number.parseInt(raw, 10)
+  return Number.isInteger(value) && value > 0 ? value : fallback
+}
+
+// Claude honors MCP_TIMEOUT (connect) and MCP_TOOL_TIMEOUT (per-call), both in ms.
+const connectTimeoutMs = (): number => envTimeout('MCP_TIMEOUT', DEFAULT_CONNECT_TIMEOUT_MS)
+const callTimeoutMs = (): number => envTimeout('MCP_TOOL_TIMEOUT', DEFAULT_CALL_TIMEOUT_MS)
 // Tool names an MCP server must never take over. formatToolName always emits
 // `<server>_<tool>`, so only names containing an underscore are actually reachable:
 // pi's own built-ins (read, bash, edit, ...) cannot be produced and are not listed.
@@ -87,6 +100,23 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
     } catch {
       // missing or invalid file: skip silently, /mcp reports what loaded
     }
+  }
+  return servers
+}
+
+/**
+ * All user-owned servers for this session: the global user servers plus Claude's "local"
+ * scope, the per-project user servers under `projects[cwd].mcpServers` in ~/.claude.json.
+ * Both are the user's own config, so neither needs project trust; local wins on a name
+ * clash (Claude's precedence is local over user).
+ */
+export function loadUserScope(home: string, cwd: string): Record<string, ServerConfig> {
+  const servers = loadConfigFrom(userConfigPaths(home))
+  try {
+    const claudeJson = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8'))
+    Object.assign(servers, claudeJson.projects?.[cwd]?.mcpServers ?? {})
+  } catch {
+    // missing or invalid ~/.claude.json: the top-level user servers already loaded
   }
   return servers
 }
@@ -204,7 +234,7 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
 async function connectWithTimeout(client: Client, transport: Parameters<Client['connect']>[0], label: string): Promise<void> {
   const connecting = client.connect(transport)
   try {
-    await withTimeout(connecting, CONNECT_TIMEOUT_MS, label)
+    await withTimeout(connecting, connectTimeoutMs(), label)
   } catch (error) {
     // Only a timeout can orphan a still-opening transport; a connect rejection means the
     // SDK already tore it down, so closing again would be redundant.
@@ -244,7 +274,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       try {
         const client = await connect(name, config)
         clients.set(name, client)
-        const tools = await withTimeout(listAllTools(client), CONNECT_TIMEOUT_MS, `list tools ${name}`)
+        const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
         let count = 0
         for (const tool of tools) {
           const toolName = formatToolName(name, tool.name)
@@ -262,7 +292,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             async execute(_id, params) {
               // Pass the timeout to the SDK too: its own default request timeout is 60s and
               // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
-              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: CALL_TIMEOUT_MS }), CALL_TIMEOUT_MS, toolName)
+              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: callTimeoutMs() }), callTimeoutMs(), toolName)
               const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
               const details: { error?: string } = {}
               if (result.isError) {
@@ -289,7 +319,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // the factory: pi runs the factory for invocations that never start a session.
     if (!userConnected) {
       userConnected = true
-      await connectServers(loadConfigFrom(userConfigPaths(os.homedir())))
+      await connectServers(loadUserScope(os.homedir(), ctx.cwd))
     }
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once the project is trusted.
     // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
