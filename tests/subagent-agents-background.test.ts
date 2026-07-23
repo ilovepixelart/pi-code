@@ -558,6 +558,21 @@ describe('startBackgroundRun', () => {
     expect(completed).toEqual([{ id, agent: 'scout', task: 'survey', state: 'failed', exitCode: 1, turns: 0 }])
   })
 
+  it('completes once when a spawn failure emits both error and close', async () => {
+    // Node fires error then close on ENOENT; the completion callback (which triggers a
+    // turn) must run a single time, not once per event.
+    const { startBackgroundRun } = await loadBackground()
+    const completed: Array<Record<string, unknown>> = []
+
+    startBackgroundRun('scout', 'survey', invocation, (run) => completed.push({ ...run }))
+    const child = spawned.children[0]
+    child.emit('error', new Error('ENOENT'))
+    child.emit('close', null)
+
+    expect(completed).toHaveLength(1)
+    expect(completed[0].state).toBe('failed')
+  })
+
   it('reflects the finished state in the session status text', async () => {
     const { startBackgroundRun, backgroundStatusText } = await loadBackground()
 
