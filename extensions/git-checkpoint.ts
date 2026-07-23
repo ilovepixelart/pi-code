@@ -106,16 +106,27 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     const createdAt = new Date().toISOString()
     const add = await gitShadow(['add', '-A'])
     if (add.code !== 0) return undefined
-    const commit = await gitShadow(['commit', '-m', 'checkpoint'])
-    if (commit.code !== 0) {
-      // nothing changed since the last snapshot: reuse HEAD, or create the first empty commit
+    // Decide "nothing changed" from the index, not from the commit exit code: a commit can
+    // also fail on the user's global signing or hooks config, and reusing HEAD then would
+    // record a ref that predates the current tree, so /rewind restores the wrong state.
+    const status = await gitShadow(['status', '--porcelain'])
+    const nothingChanged = status.code === 0 && status.stdout.trim() === ''
+    if (nothingChanged) {
       const head = await gitShadow(['rev-parse', 'HEAD'])
       if (head.code === 0) return { ref: head.stdout.trim(), createdAt }
-      const empty = await gitShadow(['commit', '--allow-empty', '-m', 'checkpoint'])
+      const empty = await commitShadow(['--allow-empty'])
       if (empty.code !== 0) return undefined
+    } else {
+      const commit = await commitShadow([])
+      if (commit.code !== 0) return undefined // real failure: do not record a stale ref
     }
     const sha = await gitShadow(['rev-parse', 'HEAD'])
     return sha.code === 0 ? { ref: sha.stdout.trim(), createdAt } : undefined
+  }
+
+  /** Commit in the shadow repo, isolated from the user's global signing and hook config. */
+  function commitShadow(extra: string[]): ReturnType<ExtensionAPI['exec']> {
+    return gitShadow(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', ...extra, '-m', 'checkpoint'])
   }
 
   async function restoreCode(ctx: ExtensionCommandContext, checkpoint: Checkpoint): Promise<boolean> {

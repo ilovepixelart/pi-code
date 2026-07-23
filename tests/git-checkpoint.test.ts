@@ -107,6 +107,30 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
   })
 
+  it('captures the tree even when the user global config forces commit signing', async () => {
+    // A global commit.gpgsign=true (with no usable gpg) would fail the shadow commit;
+    // the snapshot must isolate itself from the user config and still record the change.
+    const globalCfg = mkdtempSync(join(tmpdir(), 'gcs-cfg-'))
+    tempDirs.push(globalCfg)
+    writeFileSync(join(globalCfg, 'config'), '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent-gpg-binary\n')
+    const savedGlobal = process.env.GIT_CONFIG_GLOBAL
+    process.env.GIT_CONFIG_GLOBAL = join(globalCfg, 'config')
+    try {
+      const t = setup()
+      await checkpointOneTurn(t)
+
+      expect(t.appended).toHaveLength(1)
+      expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
+      // The recorded ref's tree must actually contain the working-tree file.
+      writeFileSync(join(t.repo, 'tracked.txt'), 'changed after checkpoint\n')
+      await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [rewindLabel(t.appended[0].data), 'Code only']))
+      expect(readFileSync(join(t.repo, 'tracked.txt'), 'utf8')).toBe('v1\n')
+    } finally {
+      if (savedGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = savedGlobal
+    }
+  })
+
   it('restore resets edits made after the checkpoint and resurrects deleted untracked files', async () => {
     const t = setup()
     await checkpointOneTurn(t)
