@@ -18,4 +18,11 @@ describe('planToTodos', () => {
   it('returns empty for unstructured prose', () => {
     expect(planToTodos('Just do the thing quickly')).toEqual([])
   })
+
+  it('does not treat a prose line ending in "plan:" as the header', () => {
+    // Without a header line, a step whose text ends in "plan:" must not be mistaken for
+    // the header and drop every earlier step.
+    const todos = planToTodos('1. Read the config loader\n2. Revise the deployment plan:\n3. Update the tests')
+    expect(todos).toHaveLength(3)
+  })
 })
