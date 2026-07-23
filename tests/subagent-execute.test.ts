@@ -1006,8 +1006,22 @@ describe('parallel mode', () => {
 
     await execute('c1', { tasks: tasksOf('alpha', 'beta') }, undefined, (partial) => updates.push({ text: text(partial), exitCodes: results(partial).map((r) => r.exitCode), sources: results(partial).map((r) => r.agentSource) }), trustedCtx)
 
-    expect(updates[0]).toEqual({ text: 'Parallel: 1/2 done, 1 running...', exitCodes: [0, -1], sources: ['user', 'unknown'] })
+    // alpha has emitted its message but not yet closed, so it is still running.
+    expect(updates[0]).toEqual({ text: 'Parallel: 0/2 done, 2 running...', exitCodes: [-1, -1], sources: ['user', 'unknown'] })
     expect(updates.at(-1)).toEqual({ text: 'Parallel: 2/2 done, 0 running...', exitCodes: [0, 0], sources: ['user', 'user'] })
+  })
+
+  it('does not count a task done while it is still streaming', async () => {
+    // A child that has emitted a message but not closed is still running; the streamed
+    // update must not flip it to done (which would show ✓ and overcount).
+    script('alpha', { stdout: [say('first turn'), say('second turn')] })
+    const updates: { text: string; exitCodes: number[] }[] = []
+
+    await execute('c1', { tasks: tasksOf('alpha') }, undefined, (partial) => updates.push({ text: text(partial), exitCodes: results(partial).map((r) => r.exitCode) }), trustedCtx)
+
+    // Updates before the child closes report the task as running.
+    expect(updates[0]).toEqual({ text: 'Parallel: 0/1 done, 1 running...', exitCodes: [-1] })
+    expect(updates.at(-1)).toEqual({ text: 'Parallel: 1/1 done, 0 running...', exitCodes: [0] })
   })
 
   it('keeps results aligned with the input task order', async () => {

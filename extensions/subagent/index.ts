@@ -696,8 +696,11 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
       signal,
       // Per-task update callback
       onUpdate: (partial) => {
-        if (partial.details?.results[0]) {
-          allResults[index] = partial.details.results[0]
+        const live = partial.details?.results[0]
+        if (live) {
+          // Keep the running sentinel until the child closes: the streamed result carries
+          // exitCode 0 mid-run, which would otherwise count and render the task as done.
+          allResults[index] = { ...live, exitCode: -1 }
           emitParallelUpdate()
         }
       },
