@@ -38,6 +38,17 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Verify the tag matches package.json
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "$RELEASE_TAG" ]; then
+            echo "Release tag $RELEASE_TAG does not match package.json ($pkg); bump the version before tagging." >&2
+            exit 1
+          fi
+
       - name: Pack tarball
         id: pack
         run: |

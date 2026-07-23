@@ -83,10 +83,41 @@ printf '{"mcpServers": {"e2e": {"command": "node", "args": ["mcp-server.mjs"]}}}
 SLUG=$(print -r -- "$FX" | sed 's#[/\\]#-#g' | sed 's#^--*#-#')
 rm -rf "$HOME/.pi/agent/memory/$SLUG"
 
+# This harness only means anything if pi is loading THIS checkout. A developer with a
+# published pi-code installed would otherwise get a green run for the wrong code.
+if ! pi list 2>/dev/null | grep -qF "$REPO"; then
+  say "%F{red}pi is not loading this checkout ($REPO); run 'pi install ./' first%f"
+  exit 2
+fi
+
 say "fixture: $FX"
+# Snapshot the trust store and the checkpoint listing so the run's writes to the
+# developer's ~/.pi state can be undone on exit; pi has no CLI to remove either.
+CKPT_DIR="$HOME/.pi/agent/checkpoints"
+TRUST_FILE="$HOME/.pi/agent/trust.json"
+TRUST_BAK=$(mktemp)
+[ -f "$TRUST_FILE" ] && cp "$TRUST_FILE" "$TRUST_BAK"
+CKPT_BEFORE=$(mktemp)
+ls -1 "$CKPT_DIR" 2>/dev/null > "$CKPT_BEFORE" || true
+
+# Clean up everything the run wrote outside the fixture: the fixture itself, its memory
+# slug, the trust decision pi persisted for it, and its per-session checkpoint repos.
+cleanup() {
+  tmux kill-session -t "$SESSION" 2>/dev/null
+  rm -rf "$HOME/.pi/agent/memory/$SLUG" "$FX"
+  [ -f "$TRUST_BAK" ] && mv "$TRUST_BAK" "$TRUST_FILE"
+  # Remove only checkpoint repos that appeared during this run. -x -F keeps the match
+  # literal and whole-line; the -s guard means a snapshot that captured nothing (a read
+  # failure) leaks rather than risks deleting the developer's real checkpoints.
+  if [ -d "$CKPT_DIR" ] && [ -s "$CKPT_BEFORE" ]; then
+    ls -1 "$CKPT_DIR" 2>/dev/null | grep -vxF -f "$CKPT_BEFORE" | while IFS= read -r new; do rm -rf "$CKPT_DIR/${new:?}"; done
+  fi
+  rm -f "$CKPT_BEFORE"
+}
+trap cleanup EXIT
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "pi"
-trap 'tmux kill-session -t "$SESSION" 2>/dev/null; rm -rf "$HOME/.pi/agent/memory/$SLUG"' EXIT
 
 # --- Deterministic checks -------------------------------------------------------------
 if wait_for 'Trust this project\?' 30; then
