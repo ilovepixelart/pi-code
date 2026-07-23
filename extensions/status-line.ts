@@ -40,6 +40,8 @@ export default function statusLine(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // One instance serves every session, so a fresh session must not inherit the count.
+    turnCount = 0
     showIdle(ctx, ctx.ui.theme.fg('dim', '○'))
   })
 
