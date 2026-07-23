@@ -45,6 +45,8 @@ const hoisted = vi.hoisted(() => {
     home: '',
     transports: [] as TransportRecord[],
     clients: [] as ClientRecord[],
+    callOptions: [] as Array<unknown>,
+    closed: [] as ClientRecord[],
     control: {} as {
       connect: (transport: TransportRecord, client: ClientRecord) => Promise<void>
       listTools: (args: { cursor?: string }, client: ClientRecord) => Promise<ListPage>
@@ -73,10 +75,12 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     listTools(args: { cursor?: string }): Promise<ListPage> {
       return hoisted.control.listTools(args, this)
     }
-    callTool(args: { name: string; arguments: unknown }): Promise<CallResult> {
+    callTool(args: { name: string; arguments: unknown }, _schema?: unknown, options?: unknown): Promise<CallResult> {
+      hoisted.callOptions.push(options)
       return hoisted.control.callTool(args, this)
     }
     close(): Promise<void> {
+      hoisted.closed.push(this)
       return hoisted.control.close(this)
     }
   },
@@ -242,6 +246,8 @@ const tempDirs: string[] = []
 beforeEach(() => {
   hoisted.transports.length = 0
   hoisted.clients.length = 0
+  hoisted.callOptions.length = 0
+  hoisted.closed.length = 0
   hoisted.control = defaultControl()
 })
 
@@ -457,6 +463,16 @@ describe('mcp transport selection', () => {
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
     expect(headers.Authorization).toBe('Bearer tok-123')
+  })
+
+  it('interpolates an env var inside a literal bearerToken', async () => {
+    setEnv('MCP_TEST_TOKEN', 'sekret')
+    withTools([{ name: 'go' }])
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'Bearer-${MCP_TEST_TOKEN}' } } })
+
+    const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
+    expect(headers.Authorization).toBe('Bearer Bearer-sekret')
   })
 
   it('reads the bearer token from the environment variable named by bearerTokenEnv', async () => {
@@ -702,6 +718,15 @@ describe('mcp tool execution', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     await assertion
   })
+
+  it('passes the call timeout to the SDK so its shorter default cannot fire first', async () => {
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerOne()
+
+    await harness.tools[0].execute('call-1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 120_000 })
+  })
 })
 
 it('truncates a result with too many lines even when it is under the byte budget', async () => {
@@ -748,6 +773,22 @@ describe('mcp failure reporting', () => {
     await booting
 
     expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 10000ms (0 tools)'])
+  })
+
+  it('closes a client whose connect exceeded the budget so it cannot orphan', async () => {
+    // The connect resolves just after the deadline; without a close the transport would
+    // finish connecting unreferenced (process/socket alive, invisible to shutdown).
+    let resolveConnect: (() => void) | undefined
+    hoisted.control.connect = () => new Promise<void>((r) => (resolveConnect = r))
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const booting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(10_000)
+    resolveConnect?.() // the server finishes connecting after the deadline
+    await booting
+
+    expect(hoisted.closed).toHaveLength(1)
   })
 
   it('times out a tool listing that never settles', async () => {
