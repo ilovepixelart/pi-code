@@ -41,7 +41,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Hooks | `.claude/settings.json` hooks: PreToolUse, PostToolUse, SessionStart, UserPromptSubmit (blocks and injects context), Stop, PreCompact, SessionEnd | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`, `/output-style` switcher | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
-| MCP servers | user `~/.claude.json`, `~/.pi/agent/mcp.json` (loaded on session start); project `.mcp.json`, `.pi/mcp.json` (only once the project is approved); stdio, HTTP, SSE | `mcp.ts` |
+| MCP servers | user `~/.claude.json` (incl. per-project `projects[cwd]` local scope), `~/.pi/agent/mcp.json`; project `.mcp.json`, `.pi/mcp.json` (once approved); stdio/HTTP/SSE by `type`; `${VAR:-default}` expansion; `MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT` | `mcp.ts` |
 | Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles) that pi would otherwise trust silently | `internal/project-approval.ts` |
 | Subagents / Task | `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; background runs | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
