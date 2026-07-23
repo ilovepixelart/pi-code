@@ -39,9 +39,13 @@ const QuestionParams = Type.Object({
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
 
+function checkbox(checked: boolean | undefined): string {
+  if (checked === undefined) return ''
+  return checked ? '[x] ' : '[ ] '
+}
+
 function optionLine(opt: DisplayOption, index: number, selected: boolean, editMode: boolean, checked: boolean | undefined, theme: Theme): string {
-  const box = checked === undefined ? '' : `${checked ? '[x] ' : '[ ] '}`
-  const label = `${index + 1}. ${box}${opt.label}`
+  const label = `${index + 1}. ${checkbox(checked)}${opt.label}`
   const prefix = selected ? theme.fg('accent', '> ') : '  '
   if (opt.isOther === true && editMode) {
     return prefix + theme.fg('accent', `${label} ✎`)
@@ -93,11 +97,24 @@ function buildQuestionLines(view: QuestionView): string[] {
   }
 
   lines.push('')
-  const hint = editMode ? ' Enter to submit • Esc to go back' : multiSelect ? ' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel' : ' ↑↓ navigate • Enter to select • Esc to cancel'
-  add(theme.fg('dim', hint))
+  add(theme.fg('dim', navHint(editMode, multiSelect)))
   add(theme.fg('accent', '─'.repeat(width)))
 
   return lines
+}
+
+function navHint(editMode: boolean, multiSelect: boolean): string {
+  if (editMode) return ' Enter to submit • Esc to go back'
+  if (multiSelect) return ' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel'
+  return ' ↑↓ navigate • Enter to select • Esc to cancel'
+}
+
+/** The comma-joined labels of the checked options, in order. */
+function selectedLabels(options: DisplayOption[], checked: boolean[]): string {
+  return options
+    .filter((_, i) => checked[i])
+    .map((o) => o.label)
+    .join(', ')
 }
 
 export default function question(pi: ExtensionAPI) {
@@ -197,11 +214,7 @@ export default function question(pi: ExtensionAPI) {
 
           if (matchesKey(data, Key.enter)) {
             if (multiSelect) {
-              const answer = allOptions
-                .filter((_, i) => checked[i])
-                .map((o) => o.label)
-                .join(', ')
-              done({ answer, wasCustom: false })
+              done({ answer: selectedLabels(allOptions, checked), wasCustom: false })
               return
             }
             const selected = allOptions[optionIndex]
