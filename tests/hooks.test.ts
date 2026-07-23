@@ -76,6 +76,17 @@ describe('interpretHookResult', () => {
     expect(interpretHookResult(0, JSON.stringify({ decision: 'block', reason: 'stop' }), '')).toEqual({ block: true, reason: 'stop' })
   })
 
+  it('blocks on a permissionDecision ask, since pi has no ask channel', () => {
+    // Claude's "ask" means confirm-with-user; pi's tool_call return is allow-or-block,
+    // so the safe mapping on a trust-gated path is block-with-reason, not a silent allow.
+    const out = JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm first' } })
+    expect(interpretHookResult(0, out, '')).toEqual({ block: true, reason: 'confirm first' })
+  })
+
+  it('blocks on a top-level continue false', () => {
+    expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, reason: 'halt' })
+  })
+
   it('allows on a clean exit', () => {
     expect(interpretHookResult(0, 'ok', '')).toEqual({ block: false })
   })
