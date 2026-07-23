@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -287,6 +289,29 @@ describe('project agent gate', () => {
 
     expect(confirm).toHaveBeenCalledWith('Run project-local agents?', 'Agents: repo\nSource: /repo/.pi/agents\n\nProject agents are repo-controlled. Only continue for trusted repositories.')
     expect(text(result)).toBe('done')
+  })
+
+  it('does not consult project approval when the run uses no project agents', async () => {
+    // isProjectApproved can prompt and persist a decision; a user-scope run that
+    // consumes no project config must not trigger that, even in a claude-shaped repo.
+    const cwd = fs.mkdtempSync(join(tmpdir(), 'sa-noproj-'))
+    fs.mkdirSync(join(cwd, '.claude'), { recursive: true })
+    fs.writeFileSync(join(cwd, '.claude', 'settings.json'), '{}')
+    const savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(join(tmpdir(), 'sa-agentdir-'))
+    try {
+      discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
+      const confirm = vi.fn(async () => true)
+      const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { confirm } }
+      script('inspect', { stdout: [say('ok')] })
+
+      await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, ctx)
+
+      expect(confirm).not.toHaveBeenCalled()
+    } finally {
+      if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+    }
   })
 
   it('names the directory each project agent actually came from', async () => {

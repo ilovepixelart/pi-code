@@ -486,6 +486,10 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
   for (const t of params.tasks ?? []) requestedAgentNames.add(t.agent)
   const requestedProjectAgents = [...requestedAgentNames].map((name) => agents.find((a) => a.name === name)).filter((a): a is AgentConfig => a?.source === 'project')
 
+  // No project agents means nothing repo-controlled to gate; skip the approval check so a
+  // user-scope run never prompts or persists a trust decision it does not need.
+  if (requestedProjectAgents.length === 0) return null
+
   // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
   const approved = await isProjectApproved(ctx)
   const gate = projectAgentGate(requestedProjectAgents.length, approved, ctx.hasUI, params.confirmProjectAgents ?? true)
