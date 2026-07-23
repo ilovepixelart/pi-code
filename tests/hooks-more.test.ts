@@ -146,11 +146,18 @@ const setupExtension = () => {
     if (!found) throw new Error(`hooks extension did not register ${name}`)
     return found
   }
+  const notes: Array<{ msg: string; level: string }> = []
+  const defaultCtx = { ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) } }
   return {
     registered: [...handlers.keys()],
+    notes,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
     toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
     toolEnd: (toolName: string, isError = false, end: { toolCallId?: string; result?: unknown } = {}) => handler('tool_execution_end')({ toolName, isError, toolCallId: end.toolCallId ?? 't1', result: end.result }),
+    input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
+    agentEnd: () => handler('agent_end')({ messages: [] }),
+    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
+    shutdown: (reason: string) => handler('session_shutdown')({ reason }),
   }
 }
 
@@ -427,8 +434,8 @@ describe('loadHooks malformed config shapes', () => {
 })
 
 describe('hooks extension registration', () => {
-  it('subscribes to the three lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_execution_end'])
+  it('subscribes to the lifecycle events it bridges', () => {
+    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_execution_end', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
   })
 })
 
@@ -640,5 +647,81 @@ describe('hooks extension tool_execution_end', () => {
     expect(commandsRun()).toEqual(['post-a', 'post-b'])
     for (const child of hoisted.live) child.emit('close', 0)
     await expect(pending).resolves.toBeUndefined()
+  })
+})
+
+describe('hooks extension UserPromptSubmit', () => {
+  const withPromptHooks = async (hooks: Array<{ command: string }>) => {
+    writeSettings(hoisted.home, 'settings.json', { UserPromptSubmit: [{ hooks }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('continues an ordinary prompt, passing it in the payload', async () => {
+    const ext = await withPromptHooks([{ command: 'audit' }])
+    expect(await ext.input('ship it')).toEqual({ action: 'continue' })
+    expect(JSON.parse(recordFor('audit').stdin)).toEqual({ hook_event_name: 'UserPromptSubmit', prompt: 'ship it' })
+  })
+
+  it('does not run on extension-injected input', async () => {
+    const ext = await withPromptHooks([{ command: 'audit' }])
+    expect(await ext.input('injected', 'extension')).toEqual({ action: 'continue' })
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('injects a hook additionalContext ahead of the prompt via transform', async () => {
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'repo is frozen' } })] })
+    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'repo is frozen\n\ndeploy' })
+  })
+
+  it('injects plain stdout as context', async () => {
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: ['remember the changelog'] })
+    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'remember the changelog\n\ndeploy' })
+  })
+
+  it('blocks a prompt a hook denies and surfaces the reason', async () => {
+    const ext = await withPromptHooks([{ command: 'guard' }])
+    script('guard', { stderr: ['no secrets in prompts'], code: 2 })
+    expect(await ext.input('here is my api key')).toEqual({ action: 'handled' })
+    expect(ext.notes.at(-1)).toEqual({ msg: 'no secrets in prompts', level: 'error' })
+  })
+})
+
+describe('hooks extension notify-style events', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('runs Stop hooks on agent end', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
+    await ext.agentEnd()
+    expect(commandsRun()).toEqual(['stopped'])
+    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop' })
+  })
+
+  it('runs PreCompact hooks matching the compaction trigger', async () => {
+    const ext = await withHooks({ PreCompact: [{ matcher: 'manual', hooks: [{ command: 'pc' }] }] })
+    await ext.beforeCompact('manual')
+    expect(commandsRun()).toEqual(['pc'])
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ hook_event_name: 'PreCompact', trigger: 'manual' })
+  })
+
+  it('does not run PreCompact hooks whose matcher misses the trigger', async () => {
+    const ext = await withHooks({ PreCompact: [{ matcher: 'manual', hooks: [{ command: 'pc' }] }] })
+    await ext.beforeCompact('threshold')
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('runs SessionEnd hooks with the shutdown reason', async () => {
+    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'bye' }] }] })
+    await ext.shutdown('quit')
+    expect(commandsRun()).toEqual(['bye'])
+    expect(JSON.parse(recordFor('bye').stdin)).toEqual({ hook_event_name: 'SessionEnd', reason: 'quit' })
   })
 })
