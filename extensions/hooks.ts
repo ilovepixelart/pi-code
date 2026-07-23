@@ -3,9 +3,17 @@
  *
  * Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events, so
  * a project's existing hooks work under pi:
- * - PreToolUse  -> pi `tool_call` (can block the tool)
- * - PostToolUse -> pi `tool_execution_end` (fire-and-forget)
- * - SessionStart-> pi `session_start` (fire-and-forget)
+ * - PreToolUse      -> pi `tool_call` (can block the tool)
+ * - PostToolUse     -> pi `tool_execution_end` (fire-and-forget)
+ * - SessionStart    -> pi `session_start` (fire-and-forget)
+ * - UserPromptSubmit-> pi `input` (can block the prompt via `handled`, or inject
+ *                      additional context by transforming the submitted text)
+ * - Stop            -> pi `agent_end` (fire-and-forget; cannot prevent stopping)
+ * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
+ * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
+ *
+ * Claude's SubagentStop has no pi lifecycle seam (the subagent tool spawns child pi
+ * processes, and pi emits no subagent-completion event), so it is not bridged.
  *
  * Hook commands run via `sh -c` with the event JSON on stdin. A PreToolUse
  * hook blocks the tool by exiting 2 (stderr becomes the reason) or by printing
@@ -102,7 +110,7 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, name: stri
   return result
 }
 
-function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
+function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
   try {
     return JSON.parse(text)
   } catch {
@@ -217,6 +225,35 @@ async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner:
   await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
 }
 
+export interface PromptDecision {
+  block: boolean
+  reason?: string
+  context: string
+}
+
+/** Additional context a UserPromptSubmit hook contributes: an explicit
+ * hookSpecificOutput.additionalContext, or the raw stdout of a plain exit-0 hook. */
+function promptContext(stdout: string): string {
+  const parsed = tryParseJson(stdout)
+  if (parsed) return parsed.hookSpecificOutput?.additionalContext ?? ''
+  return stdout.trim()
+}
+
+/** Run UserPromptSubmit hooks: the first blocking verdict wins; otherwise their
+ * additional context is concatenated for injection ahead of the prompt. */
+export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner): Promise<PromptDecision> {
+  const contexts: string[] = []
+  for (const command of matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')) {
+    const result = await runner(command.command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))
+    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}`, context: '' }
+    const decision = interpretHookResult(result.code, result.stdout, result.stderr)
+    if (decision.block) return { block: true, reason: decision.reason, context: '' }
+    const context = promptContext(result.stdout)
+    if (context) contexts.push(context)
+  }
+  return { block: false, context: contexts.join('\n') }
+}
+
 /** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
 const MAX_PENDING_INPUTS = 100
 
@@ -257,5 +294,35 @@ export default function hooksExtension(pi: ExtensionAPI) {
     pendingInputs.delete(event.toolCallId)
     if (event.isError) return
     await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
+  })
+
+  pi.on('input', async (event, ctx) => {
+    // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
+    // prompts the user submitted.
+    if (event.source === 'extension') return { action: 'continue' }
+    const decision = await runUserPromptSubmit(config, event.text, runner)
+    if (decision.block) {
+      // pi's input result has no reason channel, so surface why before consuming it.
+      ctx.ui.notify(decision.reason ?? 'Prompt blocked by hook', 'error')
+      return { action: 'handled' }
+    }
+    // Claude injects a UserPromptSubmit hook's context ahead of the prompt; transform is
+    // pi's seam for rewriting the submitted text.
+    if (decision.context) return { action: 'transform', text: `${decision.context}\n\n${event.text}` }
+    return { action: 'continue' }
+  })
+
+  // Notify-style Claude events with a matching pi lifecycle seam. None can block: pi's
+  // agent_end, session_before_compact and session_shutdown are fire-and-forget here.
+  pi.on('agent_end', async () => {
+    await runNotifyHooks(matchingCommands(config.Stop, 'Stop'), { hook_event_name: 'Stop' }, runner)
+  })
+
+  pi.on('session_before_compact', async (event) => {
+    await runNotifyHooks(matchingCommands(config.PreCompact, event.reason), { hook_event_name: 'PreCompact', trigger: event.reason }, runner)
+  })
+
+  pi.on('session_shutdown', async (event) => {
+    await runNotifyHooks(matchingCommands(config.SessionEnd, event.reason), { hook_event_name: 'SessionEnd', reason: event.reason }, runner)
   })
 }

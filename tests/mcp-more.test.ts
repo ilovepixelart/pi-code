@@ -719,6 +719,19 @@ describe('mcp tool execution', () => {
     await assertion
   })
 
+  it('honors MCP_TOOL_TIMEOUT for the per-call budget', async () => {
+    setEnv('MCP_TOOL_TIMEOUT', '5000')
+    hoisted.control.callTool = () => new Promise<CallResult>(() => {})
+    const harness = await registerOne()
+    vi.useFakeTimers()
+
+    const pending = harness.tools[0].execute('call-1', {})
+    const assertion = expect(pending).rejects.toThrow('timed out after 5000ms')
+    await vi.advanceTimersByTimeAsync(5_000)
+    await assertion
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 5000 })
+  })
+
   it('passes the call timeout to the SDK so its shorter default cannot fire first', async () => {
     hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
     const harness = await registerOne()
@@ -773,6 +786,19 @@ describe('mcp failure reporting', () => {
     await booting
 
     expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 10000ms (0 tools)'])
+  })
+
+  it('honors MCP_TIMEOUT for the connect budget', async () => {
+    setEnv('MCP_TIMEOUT', '2000')
+    hoisted.control.connect = () => new Promise<void>(() => {})
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { hung: { command: 'sleep' } } })
+    const booting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await booting
+
+    expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 2000ms (0 tools)'])
   })
 
   it('closes a client whose connect exceeded the budget so it cannot orphan', async () => {

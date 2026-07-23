@@ -1,10 +1,33 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { formatToolName, interpolateEnv, loadConfigFrom, mapContent, normalizeSchema, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
+import { formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, mapContent, normalizeSchema, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
+
+describe('loadUserScope', () => {
+  it('merges local-scope per-project servers over the global user servers', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
+    const cwd = '/work/project'
+    writeFileSync(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: { global: { command: 'g' }, shared: { command: 'user-shared' } },
+        projects: { '/work/project': { mcpServers: { local: { command: 'l' }, shared: { command: 'local-shared' } } } },
+      }),
+    )
+    const servers = loadUserScope(home, cwd)
+    expect(Object.keys(servers).sort()).toEqual(['global', 'local', 'shared'])
+    expect((servers.shared as { command: string }).command).toBe('local-shared')
+  })
+
+  it('returns the global user servers when the project has no local scope', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { g: { command: 'g' } } }))
+    expect(Object.keys(loadUserScope(home, '/some/other'))).toEqual(['g'])
+  })
+})
 
 describe('mcp adapter helpers', () => {
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
