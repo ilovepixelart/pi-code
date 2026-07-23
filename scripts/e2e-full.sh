@@ -96,7 +96,9 @@ else
   bad "trust: no approval prompt"
 fi
 
-if wait_for '\[Extensions\]' 40 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
+# pi 0.81 flushes the resource block only after session_start handlers complete,
+# which serial MCP connect timeouts can push well past an eager window.
+if wait_for '\[Extensions\]' 120 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
   ok "boot: extensions loaded"
 else
   bad "boot: extensions missing"
@@ -216,7 +218,7 @@ sleep 2
 # --- Second session: persistence checks -----------------------------------------------
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "pi"
-if wait_for '\[Extensions\]' 40; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
+if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
 # Known pi TUI interaction: this banner renders standalone but not always in the full
 # extension load; the memory feature itself is asserted above via the on-disk file.
 if wait_for 'Memory: 1 memories loaded' 20; then ok "memory: index banner on next session"; else warn "memory: index banner not rendered (known pi TUI interaction)"; fi
