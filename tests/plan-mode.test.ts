@@ -421,4 +421,30 @@ describe('session restore', () => {
     await s.emit('session_start', {}, restoreCtx(s, entries))
     expect(s.widgets.at(-1)).toEqual(['☐ Config loader'])
   })
+
+  it('stays off after a plan is submitted and then plan mode is toggled off', async () => {
+    // plan_mode_complete persists enabled:true; toggling off must persist the reversal
+    // so a resume does not silently re-restrict tools.
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: 'Plan:\n1. Inspect the parser' })
+    await s.runCommand('plan') // toggle off
+
+    const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
+    const s2 = setup()
+    await s2.emit('session_start', {}, restoreCtx(s2, entries))
+    expect(s2.getActiveTools()).toContain('write')
+  })
+
+  it('does not carry plan state into a fresh session with no plan entry', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: 'Plan:\n1. Inspect the parser' })
+    // A brand-new session (empty entries) reuses the same extension instance.
+    await s.emit('session_start', {}, restoreCtx(s, []))
+
+    expect(s.getActiveTools()).toContain('write')
+    const injected = (await s.emit('before_agent_start')) as { message?: { content: string } } | undefined
+    expect(injected?.message?.content ?? '').not.toContain('EXECUTING PLAN')
+  })
 })
