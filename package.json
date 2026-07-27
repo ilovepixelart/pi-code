@@ -3,7 +3,21 @@
   "version": "0.4.0",
   "description": "Claude Code experience for the pi coding agent: reads your .claude config (rules, commands, skills, hooks, output styles, MCP servers, agents) and adds todo, checkpoints, memory, web, and subagents",
   "keywords": [
-    "pi-package"
+    "pi",
+    "pi-package",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "claude",
+    "claude-code",
+    "coding-agent",
+    "ai",
+    "mcp",
+    "hooks",
+    "skills",
+    "subagents",
+    "memory",
+    "todo"
   ],
   "license": "MIT",
   "type": "module",
