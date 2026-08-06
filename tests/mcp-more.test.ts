@@ -980,3 +980,51 @@ describe('MCP tool alias publication', () => {
     })
   })
 })
+
+describe('per-server project approvals', () => {
+  const writeClaudeSettings = (root: string, name: string, settings: Record<string, unknown>): void => {
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude', name), JSON.stringify(settings))
+  }
+
+  it('never connects a server listed in disabledMcpjsonServers, even when the project is approved', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { keep: { command: 'k' }, blocked: { command: 'b' } } })
+    writeClaudeSettings(harness.cwd, 'settings.json', { disabledMcpjsonServers: ['blocked'] })
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames()).toEqual(['keep_a'])
+  })
+
+  it('connects an enabledMcpjsonServers entry from settings.local.json without the project confirm', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { consented: { command: 'c' }, other: { command: 'o' } } })
+    writeClaudeSettings(harness.cwd, 'settings.local.json', { enabledMcpjsonServers: ['consented'] })
+    await harness.sessionStart(true, false)
+    expect(harness.toolNames()).toEqual(['consented_a'])
+  })
+
+  it('connects every project server under enableAllProjectMcpServers from settings.local.json', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { one: { command: '1' }, two: { command: '2' } } })
+    writeClaudeSettings(harness.cwd, 'settings.local.json', { enableAllProjectMcpServers: true })
+    await harness.sessionStart(true, false)
+    expect(harness.toolNames().sort()).toEqual(['one_a', 'two_a'])
+  })
+
+  it('ignores consent keys from the repo-controlled project settings.json', async () => {
+    // A checked-in file must not approve its own servers; only the restrictive key counts.
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { sneaky: { command: 's' } } })
+    writeClaudeSettings(harness.cwd, 'settings.json', { enableAllProjectMcpServers: true, enabledMcpjsonServers: ['sneaky'] })
+    await harness.sessionStart(true, false)
+    expect(harness.toolNames()).toEqual([])
+  })
+
+  it('lets disabled win over enabled for the same server', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { contested: { command: 'c' } } })
+    writeClaudeSettings(harness.cwd, 'settings.local.json', { enabledMcpjsonServers: ['contested'], disabledMcpjsonServers: ['contested'] })
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames()).toEqual([])
+  })
+})
