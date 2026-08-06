@@ -488,6 +488,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 
+  pi.on('session_compact', async (event, ctx) => {
+    const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
+    const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), { hook_event_name: 'PostCompact', trigger: trigger.value }, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+  })
+
   pi.on('session_shutdown', async (event, ctx) => {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
     const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))

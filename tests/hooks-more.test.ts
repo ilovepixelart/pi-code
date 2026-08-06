@@ -173,6 +173,7 @@ const setupExtension = () => {
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: () => handler('agent_end')({ messages: [] }, defaultCtx),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
+    compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
@@ -500,7 +501,7 @@ describe('loadHooks malformed config shapes', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
   })
 })
 
@@ -915,6 +916,19 @@ describe('hooks extension notify-style events', () => {
     await ext.beforeCompact('threshold')
     expect(commandsRun()).toEqual(['pc'])
     expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'auto' })
+  })
+
+  it('runs PostCompact hooks after compaction with the Claude trigger', async () => {
+    const ext = await withHooks({ PostCompact: [{ matcher: 'auto', hooks: [{ command: 'pc-post' }] }] })
+    await ext.compacted('threshold')
+    expect(commandsRun()).toEqual(['pc-post'])
+    expect(JSON.parse(recordFor('pc-post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostCompact', trigger: 'auto' })
+  })
+
+  it('does not run PostCompact hooks whose matcher misses the trigger', async () => {
+    const ext = await withHooks({ PostCompact: [{ matcher: 'manual', hooks: [{ command: 'pc-post' }] }] })
+    await ext.compacted('overflow')
+    expect(commandsRun()).toEqual([])
   })
 
   it("runs SessionEnd hooks with the Claude spelling of pi's shutdown reason", async () => {
