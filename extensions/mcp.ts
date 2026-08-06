@@ -92,6 +92,37 @@ export function projectConfigPaths(cwd: string): string[] {
   return [path.join(cwd, '.mcp.json'), path.join(cwd, '.pi', 'mcp.json')]
 }
 
+export interface ProjectServerPolicy {
+  disabled: Set<string>
+  consented: Set<string>
+  consentAll: boolean
+}
+
+/** Claude's per-server approvals for project .mcp.json servers. Consent-granting keys
+ * (enabledMcpjsonServers, enableAllProjectMcpServers) count only from files the repo
+ * does not control (user settings and settings.local.json), so a checked-in
+ * settings.json cannot approve its own servers. disabledMcpjsonServers counts from
+ * every file and wins over consent. Lists union across files: for denies the union is
+ * the restrictive reading, and consent is the union of the user's own two files. */
+export function projectServerPolicy(cwd: string, home: string): ProjectServerPolicy {
+  const read = (file: string): Record<string, unknown> => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf-8'))
+    } catch {
+      return {}
+    }
+  }
+  const names = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [])
+  const userSettings = read(path.join(home, '.claude', 'settings.json'))
+  const projectSettings = read(path.join(cwd, '.claude', 'settings.json'))
+  const localSettings = read(path.join(cwd, '.claude', 'settings.local.json'))
+  const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...names(localSettings.disabledMcpjsonServers)])
+  const consentSources = [userSettings, localSettings]
+  const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
+  const consentAll = consentSources.some((settings) => settings.enableAllProjectMcpServers === true)
+  return { disabled, consented, consentAll }
+}
+
 export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
   const servers: Record<string, ServerConfig> = {}
   for (const file of files) {
@@ -325,11 +356,27 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       userConnected = true
       await connectServers(loadUserScope(os.homedir(), ctx.cwd))
     }
-    // A project .mcp.json can run arbitrary commands on connect, so only honor it once the project is trusted.
-    // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
-    if (!projectConnected && (await isProjectApproved(ctx))) {
-      projectConnected = true
-      await connectServers(loadConfigFrom(projectConfigPaths(ctx.cwd)))
+    // A project .mcp.json can run arbitrary commands on connect, so only honor it once
+    // the project is trusted. Per-server settings refine that: disabled servers never
+    // connect, servers the user consented to individually connect without the
+    // whole-project confirm, and the rest stay behind it. Reconnect attempts after a
+    // refusal are safe: connectServers skips names that already connected.
+    if (!projectConnected) {
+      const policy = projectServerPolicy(ctx.cwd, os.homedir())
+      const candidates = loadConfigFrom(projectConfigPaths(ctx.cwd))
+      const consented: Record<string, ServerConfig> = {}
+      const gated: Record<string, ServerConfig> = {}
+      for (const [name, config] of Object.entries(candidates)) {
+        if (policy.disabled.has(name)) continue
+        if (policy.consentAll || policy.consented.has(name)) consented[name] = config
+        else gated[name] = config
+      }
+      if (Object.keys(consented).length > 0) await connectServers(consented)
+      if (Object.keys(gated).length === 0) projectConnected = true
+      else if (await isProjectApproved(ctx)) {
+        projectConnected = true
+        await connectServers(gated)
+      }
     }
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
