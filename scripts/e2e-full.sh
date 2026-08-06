@@ -162,10 +162,12 @@ type_prompt "/hello"
 if wait_for 'HELLO_MARKER' 200; then ok "commands: /hello template drove the turn"; else bad "commands: no HELLO_MARKER"; fi
 if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusline: no turn segment"; fi
 
-type_prompt "Two questions. 1: What is the codeword in the imported context? 2: What marker does the CLAUDE.local.md section contain? Answer both."
+# One question per turn: the two-question form let the model answer without ever
+# emitting the literal codeword, failing a healthy import (three misses in a row).
+type_prompt "What is the codeword in the imported context? Answer with just the codeword."
 if wait_for 'ZANZIBAR' 200; then ok "context-imports: @import content reached the model"; else bad "context-imports: codeword missing"; fi
-# The codeword streams before the second answer; keep waiting for the marker.
-if wait_for 'PERSONAL LOCAL NOTE MARKER' 60; then ok "context-imports: CLAUDE.local.md loaded"; else bad "context-imports: local marker missing"; fi
+type_prompt "What marker does the CLAUDE.local.md section contain? Answer with just the marker."
+if wait_for 'PERSONAL LOCAL NOTE MARKER' 200; then ok "context-imports: CLAUDE.local.md loaded"; else bad "context-imports: local marker missing"; fi
 
 type_prompt "Call the e2e_ping tool now and repeat its output verbatim."
 if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "mcp: no E2EPONG"; fi
