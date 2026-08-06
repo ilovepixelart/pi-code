@@ -178,6 +178,7 @@ const setupExtension = () => {
     beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
     emitPlanMode: (state: unknown) => busHandlers.get('pi-code:plan-mode')?.(state),
+    emitSubagent: (event: unknown) => busHandlers.get('pi-code:subagent')?.(event),
   }
 }
 
@@ -943,6 +944,36 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ SessionEnd: [{ matcher: 'quit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
+  })
+})
+
+describe('hooks subagent lifecycle', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    const proj = tempDir('hooks-proj-')
+    await ext.sessionStart('startup', { cwd: proj })
+    return { ext, proj }
+  }
+
+  it('runs SubagentStart hooks matching the agent type', async () => {
+    const { ext, proj } = await withHooks({ SubagentStart: [{ matcher: 'scout', hooks: [{ command: 'sub-start' }] }] })
+    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
+    expect(commandsRun()).toEqual(['sub-start'])
+    expect(JSON.parse(recordFor('sub-start').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStart', agent_type: 'scout', agent_id: 'fg-abc' })
+  })
+
+  it('runs SubagentStop hooks when the child run completes', async () => {
+    const { ext, proj } = await withHooks({ SubagentStop: [{ matcher: 'scout', hooks: [{ command: 'sub-stop' }] }] })
+    await ext.emitSubagent({ phase: 'stop', agentType: 'scout', agentId: 'bg-1234' })
+    expect(commandsRun()).toEqual(['sub-stop'])
+    expect(JSON.parse(recordFor('sub-stop').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'bg-1234' })
+  })
+
+  it('does not run subagent hooks whose matcher misses the agent type', async () => {
+    const { ext } = await withHooks({ SubagentStart: [{ matcher: 'reviewer', hooks: [{ command: 'sub-start' }] }] })
+    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
+    expect(commandsRun()).toEqual([])
   })
 })
 

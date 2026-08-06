@@ -19,8 +19,9 @@
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
  *
- * Claude's SubagentStop has no pi lifecycle seam (the subagent tool spawns child pi
- * processes, and pi emits no subagent-completion event), so it is not bridged.
+ * SubagentStart/SubagentStop ride pi-code's own subagent extension, which publishes
+ * child-run lifecycle on the shared bus (notify-style: a child has already exited by
+ * the time SubagentStop fires, so its exit-2 block semantics cannot be honored).
  *
  * Hook commands run via `sh -c` with the event JSON on stdin. A PreToolUse
  * hook blocks the tool by exiting 2 (stderr becomes the reason) or by printing
@@ -47,6 +48,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApproved } from './internal/project-approval.js'
+import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.js'
 
 const DEFAULT_TIMEOUT_S = 60
 
@@ -344,6 +346,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let projectDir = ''
   let pendingSessionContext: string[] = []
   let stopHookActive = false
+  let sessionCtx: ExtensionContext | undefined
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
@@ -371,8 +374,19 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.events.on(PLAN_MODE_CHANNEL, (data) => {
     if (isPlanModeState(data)) permissionMode = data.active ? 'plan' : 'default'
   })
+  // Subagent lifecycle arrives over the bus without a pi context; the session context
+  // captured at session_start supplies the common payload fields.
+  pi.events.on(SUBAGENT_CHANNEL, async (data) => {
+    if (!isSubagentPhaseEvent(data) || !sessionCtx) return
+    const ctx = sessionCtx
+    const eventName = data.phase === 'start' ? 'SubagentStart' : 'SubagentStop'
+    const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId }
+    const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+  })
 
   pi.on('session_start', async (event, ctx) => {
+    sessionCtx = ctx
     const trusted = await isProjectApproved(ctx)
     projectDir = ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
