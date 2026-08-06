@@ -8,8 +8,11 @@
  * tone and role. `/output-style` lists the styles and persists a choice to the
  * project's settings.local.json.
  *
- * pi keeps its own base system prompt (tools, safety); the style is layered on
- * top rather than replacing it wholesale.
+ * Claude semantics: a style replaces the built-in coding instructions unless its
+ * frontmatter sets `keep-coding-instructions: true`. The replacement excises pi's
+ * default coding prose up to a stable marker line and keeps everything after it
+ * (append text, project context, skills, other extensions' additions); when the
+ * marker is absent (custom SYSTEM.md), the style falls back to appending.
  *
  * Docs: https://code.claude.com/docs/en/output-styles.md
  */
@@ -25,6 +28,7 @@ export interface OutputStyle {
   name: string
   description: string
   body: string
+  keepCodingInstructions: boolean
 }
 
 function field(frontmatter: string, key: string): string {
@@ -37,7 +41,23 @@ export function parseStyle(content: string, fallbackName: string): OutputStyle {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   const frontmatter = match ? match[1] : ''
   const body = match ? content.slice(match[0].length) : content
-  return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim() }
+  return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim(), keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true' }
+}
+
+/** The last line of pi's default coding instructions. Everything after it (append
+ * text, project context, skills, cwd, other extensions' additions) survives a style
+ * replacement. Tracks pi's dist/core/system-prompt.js; a canary test pins it. */
+export const CODING_BASE_MARKER = '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)'
+
+/** Apply a style per Claude semantics: replace the coding instructions unless the
+ * style keeps them; fall back to appending when the marker is absent. */
+export function applyStyle(systemPrompt: string, style: OutputStyle): string {
+  const styleSection = `## Output Style: ${style.name}\n\n${style.body}`
+  if (!style.keepCodingInstructions) {
+    const idx = systemPrompt.indexOf(CODING_BASE_MARKER)
+    if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
+  }
+  return `${systemPrompt}\n\n${styleSection}`
 }
 
 function isDirectory(target: string): boolean {
@@ -142,7 +162,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
     const active = styleForName(styles, activeName)
     if (!active || active.body.length === 0) return
-    return { systemPrompt: `${event.systemPrompt}\n\n## Output Style: ${active.name}\n\n${active.body}` }
+    return { systemPrompt: applyStyle(event.systemPrompt, active) }
   })
 
   pi.registerCommand('output-style', {
