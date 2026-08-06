@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import outputStyles, { applyStyle, CODING_BASE_MARKER, loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
 
 // The extension reads user-scope styles and settings from the home directory; point it
 // at a throwaway dir so the developer's real ~/.claude cannot influence assertions.
@@ -102,6 +102,24 @@ describe('loadStyles', () => {
   })
 })
 
+describe('builtin styles', () => {
+  it('ships Explanatory, Learning and Proactive as lowest-precedence styles', () => {
+    const styles = loadStyles([BUILTIN_STYLES_DIR])
+    const names = styles.map((style) => style.name).sort()
+    expect(names).toEqual(['Explanatory', 'Learning', 'Proactive'])
+    // Claude's built-ins are coding styles: they keep the software engineering instructions.
+    expect(styles.every((style) => style.keepCodingInstructions)).toBe(true)
+  })
+
+  it('lets a user style of the same name override a builtin', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'explanatory.md'), '---\nname: Explanatory\ndescription: mine\n---\nCustom body.')
+    const styles = loadStyles([BUILTIN_STYLES_DIR, dir])
+    const explanatory = styles.find((style) => style.name === 'Explanatory')
+    expect(explanatory?.description).toBe('mine')
+  })
+})
+
 describe('readActiveStyleName', () => {
   it('returns the outputStyle from the last file that sets it', () => {
     const dir = tempDir()
@@ -154,6 +172,26 @@ describe('extension wiring', () => {
     writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: name }))
     return cwd
   }
+
+  it('sets a style directly when /output-style is given a name', async () => {
+    const cwd = projectWithStyle('Explain', 'Explain everything.')
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: string[] = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), confirm: async () => true, select: async () => undefined } }
+    await handlers.get('session_start')?.({}, ctx)
+
+    await commands.get('output-style')?.handler('proactive', ctx)
+    const saved = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8'))
+    expect(saved.outputStyle).toBe('Proactive')
+
+    await commands.get('output-style')?.handler('no-such-style', ctx)
+    expect(notes.some((n) => n.includes('Unknown output style: no-such-style'))).toBe(true)
+  })
 
   it('appends the active style body and the command persists a new choice', async () => {
     const cwd = projectWithStyle('Explain', 'Explain everything.')

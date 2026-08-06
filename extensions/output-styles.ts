@@ -44,6 +44,10 @@ export function parseStyle(content: string, fallbackName: string): OutputStyle {
   return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim(), keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true' }
 }
 
+/** Equivalents of Claude's built-in styles, shipped with pi-code as the
+ * lowest-precedence source: a user or project style of the same name wins. */
+export const BUILTIN_STYLES_DIR = path.join(import.meta.dirname, 'internal', 'builtin-styles')
+
 /** The last line of pi's default coding instructions. Everything after it (append
  * text, project context, skills, cwd, other extensions' additions) survives a style
  * replacement. Tracks pi's dist/core/system-prompt.js; a canary test pins it. */
@@ -152,7 +156,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     // project styles / selection once the project is approved. isProjectTrusted alone
     // is true for a repo pi never asked about; see project-approval.
     const trusted = await isProjectApproved(ctx)
-    styles = loadStyles(styleDirs(ctx.cwd, home, trusted))
+    styles = loadStyles([BUILTIN_STYLES_DIR, ...styleDirs(ctx.cwd, home, trusted)])
     localSettingsPath = path.join(ctx.cwd, '.claude', 'settings.local.json')
     activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
     const active = styleForName(styles, activeName)
@@ -166,8 +170,20 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
   })
 
   pi.registerCommand('output-style', {
-    description: 'Choose the active Claude output style',
-    handler: async (_args, ctx) => {
+    description: 'Choose the active Claude output style (or /output-style <name>)',
+    handler: async (args, ctx) => {
+      const requested = args.trim()
+      if (requested) {
+        const picked = styles.find((style) => style.name.toLowerCase() === requested.toLowerCase())
+        if (!picked) {
+          ctx.ui.notify(`Unknown output style: ${requested}. Available: ${styles.map((style) => style.name).join(', ')}`, 'error')
+          return
+        }
+        activeName = picked.name
+        persistActiveStyle(localSettingsPath, picked.name)
+        ctx.ui.notify(`Output style set to ${picked.name} (applies next turn)`, 'info')
+        return
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify('/output-style requires interactive mode', 'error')
         return
