@@ -141,9 +141,11 @@ type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) =
 const setupExtension = () => {
   const handlers = new Map<string, Handler>()
   const busHandlers = new Map<string, (data: unknown) => void>()
+  const sent: Array<{ message: unknown; options: unknown }> = []
   hooksExtension({
     on: (name: string, fn: Handler) => handlers.set(name, fn),
     events: { on: (channel: string, fn: (data: unknown) => void) => busHandlers.set(channel, fn), emit: () => {} },
+    sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
   } as never)
   const handler = (name: string): Handler => {
     const found = handlers.get(name)
@@ -155,6 +157,7 @@ const setupExtension = () => {
   return {
     registered: [...handlers.keys()],
     notes,
+    sent,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
     toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) => handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }),
@@ -795,11 +798,46 @@ describe('hooks extension notify-style events', () => {
     return ext
   }
 
-  it('runs Stop hooks on agent end', async () => {
+  it('runs Stop hooks on agent end with stop_hook_active false', async () => {
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
     await ext.agentEnd()
     expect(commandsRun()).toEqual(['stopped'])
-    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop' })
+    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+    expect(ext.sent).toEqual([])
+  })
+
+  it('continues the conversation when a Stop hook blocks, with the reason', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+    script('keep-going', { stdout: [JSON.stringify({ decision: 'block', reason: 'tests are still red' })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'tests are still red', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('reports stop_hook_active true while continuing from a stop hook, then resets', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+    script('keep-going', { stderr: ['not done'], code: 2 })
+    await ext.agentEnd()
+    expect(ext.sent).toHaveLength(1)
+
+    script('keep-going', { code: 0, stderr: [] })
+    await ext.agentEnd()
+    const second = hoisted.calls.filter((call) => call.command === 'keep-going')[1]
+    expect(JSON.parse(second.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: true })
+    expect(ext.sent).toHaveLength(1)
+
+    await ext.agentEnd()
+    const third = hoisted.calls.filter((call) => call.command === 'keep-going')[2]
+    expect(JSON.parse(third.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+  })
+
+  it('does not treat a timed-out Stop hook as a block', async () => {
+    const ext = await withHooks({ Stop: [{ matcher: undefined, hooks: [{ command: 'hung', timeout: 1 }] }] })
+    script('hung', { hang: true })
+    vi.useFakeTimers()
+    const pending = ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(1500)
+    await pending
+    expect(ext.sent).toEqual([])
   })
 
   it('runs PreCompact hooks matching the compaction trigger', async () => {

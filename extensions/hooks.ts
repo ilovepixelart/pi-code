@@ -324,6 +324,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
   let pendingSessionContext: string[] = []
+  let stopHookActive = false
   const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
@@ -409,10 +410,29 @@ export default function hooksExtension(pi: ExtensionAPI) {
     return { action: 'continue' }
   })
 
-  // Notify-style Claude events with a matching pi lifecycle seam. None can block: pi's
-  // agent_end, session_before_compact and session_shutdown are fire-and-forget here.
+  // Claude's Stop hook can prevent stopping: a block feeds its reason back as a new
+  // turn, and stop_hook_active in the payload tells the next firing it is already
+  // continuing from a stop hook, which is the hook script's documented loop guard.
+  // Only exit 2 and decision:"block" continue; continue:false means "stay stopped".
   pi.on('agent_end', async () => {
-    await runNotifyHooks(matchingCommands(config.Stop, 'Stop'), { hook_event_name: 'Stop' }, runner)
+    const commands = matchingCommands(config.Stop, 'Stop')
+    if (commands.length === 0) {
+      stopHookActive = false
+      return
+    }
+    const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive }
+    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const block = results
+      .filter((result) => !result.timedOut)
+      .map((result) => {
+        if (result.code === 2) return { block: true, reason: result.stderr.trim() || 'Stop blocked by hook' }
+        const parsed = tryParseJson(result.stdout)
+        if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Stop blocked by hook' }
+        return { block: false, reason: '' }
+      })
+      .find((verdict) => verdict.block)
+    stopHookActive = block !== undefined
+    if (block) pi.sendMessage({ customType: 'claude-stop-hook', content: block.reason, display: true }, { triggerTurn: true })
   })
 
   pi.on('session_before_compact', async (event) => {
