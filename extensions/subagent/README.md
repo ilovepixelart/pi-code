@@ -21,15 +21,10 @@ subagent/
 ├── index.ts             # The extension (entry point)
 ├── agents.ts            # Agent discovery logic
 ├── background.ts        # Background run registry and spawning
-├── agents/              # Sample agent definitions
-│   ├── scout.md         # Fast recon, returns compressed context
-│   ├── planner.md       # Creates implementation plans
-│   ├── reviewer.md      # Code review
-│   └── worker.md        # General-purpose (full capabilities)
-└── prompts/             # Workflow presets (prompt templates)
-    ├── implement.md     # scout -> planner -> worker
-    ├── scout-and-plan.md    # scout -> planner (no implementation)
-    └── implement-and-review.md  # worker -> reviewer -> worker
+├── agents/              # Bundled builtin agents, always available (lowest precedence)
+│   ├── explore.md       # Explore: fast read-only codebase exploration
+│   ├── plan.md          # Plan: read-only implementation planning
+│   └── general-purpose.md   # general-purpose: full capabilities
 ```
 
 ## Installation
@@ -42,7 +37,7 @@ This tool executes a separate `pi` subprocess with a delegated system prompt and
 
 **Project-local agents** (`.pi/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
 
-**Default behavior:** Only loads **user-level agents** from `~/.claude/agents` and `~/.pi/agent/agents`.
+**Default behavior:** Loads the bundled builtin agents (Explore, Plan, general-purpose) plus **user-level agents** from `~/.claude/agents` and `~/.pi/agent/agents`. A user or project agent with the same name overrides a builtin. Discovered agents and their descriptions are listed in the system prompt each turn, so the model can pick one itself; project agent descriptions appear only once the project is approved.
 
 To enable project-local agents (`.claude/agents`, `.pi/agents`), pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
@@ -52,24 +47,17 @@ When running interactively, the tool prompts for confirmation before running pro
 
 ### Single agent
 ```
-Use scout to find all authentication code
+Use Explore to find all authentication code
 ```
 
 ### Parallel execution
 ```
-Run 2 scouts in parallel: one to find models, one to find providers
+Run 2 Explore agents in parallel: one to find models, one to find providers
 ```
 
 ### Chained workflow
 ```
-Use a chain: first have scout find the read tool, then have planner suggest improvements
-```
-
-### Workflow prompts
-```
-/implement add Redis caching to the session store
-/scout-and-plan refactor auth to support OAuth
-/implement-and-review add input validation to API endpoints
+Use a chain: first have Explore find the read tool, then have Plan suggest improvements
 ```
 
 ## Tool Modes
@@ -135,22 +123,15 @@ model. Fields with no pi equivalent are ignored: `skills`, `memory`,
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 
-## Sample Agents
+## Builtin Agents
 
-| Agent | Purpose | Model | Tools |
-|-------|---------|-------|-------|
-| `scout` | Fast codebase recon | Haiku | read, grep, find, ls, bash |
-| `planner` | Implementation plans | Sonnet | read, grep, find, ls |
-| `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
-| `worker` | General-purpose | Sonnet | (all default) |
+| Agent | Purpose | Tools |
+|-------|---------|-------|
+| `Explore` | Fast read-only codebase exploration | read, grep, find, ls |
+| `Plan` | Read-only implementation planning | read, grep, find, ls |
+| `general-purpose` | Full capabilities, isolated context | (all default) |
 
-## Workflow Prompts
-
-| Prompt | Flow |
-|--------|------|
-| `/implement <query>` | scout → planner → worker |
-| `/scout-and-plan <query>` | scout → planner |
-| `/implement-and-review <query>` | worker → reviewer → worker |
+No model is pinned: each runs on the session's default model.
 
 ## Error Handling
 

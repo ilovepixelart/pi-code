@@ -24,7 +24,7 @@ import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme,
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
 import { capForContext } from '../internal/output-guard.js'
-import { isProjectApproved } from '../internal/project-approval.js'
+import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
 import { activeBackgroundRuns, backgroundStatusText, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
@@ -139,7 +139,7 @@ interface UsageStats {
 
 interface SingleResult {
   agent: string
-  agentSource: 'user' | 'project' | 'unknown'
+  agentSource: 'user' | 'project' | 'builtin' | 'unknown'
   task: string
   exitCode: number
   messages: Message[]
@@ -1068,6 +1068,19 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
+  // Claude surfaces each agent's description so the model can pick one autonomously.
+  // Rebuilt per turn (agents are rediscovered per invocation too); project agents are
+  // included only when the project is already approved, read without prompting, since
+  // a trust dialog must not appear mid-turn and their descriptions are project text.
+  pi.on('before_agent_start', async (event, ctx) => {
+    const scope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
+    const { agents } = discoverAgents(ctx.cwd, scope)
+    if (agents.length === 0) return
+    const line = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 200)
+    const roster = agents.map((agent) => `- ${agent.name} (${agent.source}): ${line(agent.description)}`).join('\n')
+    return { systemPrompt: `${event.systemPrompt}\n\n## Subagents\n\nDelegate isolated tasks with the subagent tool ({agent, task}). Available agents:\n${roster}` }
+  })
+
   pi.registerTool({
     name: 'subagent',
     label: 'Subagent',
