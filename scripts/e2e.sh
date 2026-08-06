@@ -38,9 +38,32 @@ if [ -z "$WORKDIR" ]; then
 fi
 
 say "workdir: $WORKDIR"
+
+# Isolated HOME: keeps the developer's global MCP servers, rules and skills out of the
+# boot (they inflate the prompt and stall session_start on failing servers) and lands
+# the trust decision in a throwaway store. See e2e-full.sh for the measured impact.
+REPO=$(cd "$(dirname "$0")/.." && pwd -P)
+FAKEHOME=$(mktemp -d)
+mkdir -p "$FAKEHOME/.pi/agent"
+for f in auth.json models.json models-store.json; do
+  [ -f "$HOME/.pi/agent/$f" ] && cp "$HOME/.pi/agent/$f" "$FAKEHOME/.pi/agent/$f"
+done
+python3 - "$HOME/.pi/agent/settings.json" "$FAKEHOME/.pi/agent/settings.json" "$REPO" <<'PY'
+import json, sys
+src, dst, repo = sys.argv[1:4]
+try:
+    settings = json.load(open(src))
+except Exception:
+    settings = {}
+settings["packages"] = [repo]
+for key in ("extensions", "skills", "prompts"):
+    settings.pop(key, None)
+json.dump(settings, open(dst, "w"))
+PY
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$WORKDIR" "pi"
-trap 'tmux kill-session -t "$SESSION" 2>/dev/null || true' EXIT
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$WORKDIR" "HOME=$FAKEHOME pi"
+trap 'tmux kill-session -t "$SESSION" 2>/dev/null || true; rm -rf "$FAKEHOME"' EXIT
 
 # 0. The fixture ships .claude config pi would trust silently, so pi-code must ask.
 #    Session start blocks on the answer; approve before expecting anything else.
