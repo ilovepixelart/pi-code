@@ -158,13 +158,14 @@ const setupExtension = () => {
     registered: [...handlers.keys()],
     notes,
     sent,
-    sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
-    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
-    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) => handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }),
+    sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, { ...defaultCtx, ...ctx }),
+    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }, defaultCtx),
+    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
+      handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
-    agentEnd: () => handler('agent_end')({ messages: [] }),
-    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
-    shutdown: (reason: string) => handler('session_shutdown')({ reason }),
+    agentEnd: () => handler('agent_end')({ messages: [] }, defaultCtx),
+    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
+    shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
   }
@@ -828,6 +829,34 @@ describe('hooks extension notify-style events', () => {
     await ext.agentEnd()
     const third = hoisted.calls.filter((call) => call.command === 'keep-going')[2]
     expect(JSON.parse(third.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+  })
+
+  it('surfaces a systemMessage from any hook as a user warning', async () => {
+    const warn = JSON.stringify({ systemMessage: 'heads up' })
+    const ext = await withHooks({
+      PreToolUse: [{ hooks: [{ command: 'pre' }] }],
+      PostToolUse: [{ hooks: [{ command: 'post' }] }],
+      UserPromptSubmit: [{ hooks: [{ command: 'prompt' }] }],
+      Stop: [{ hooks: [{ command: 'stop' }] }],
+      PreCompact: [{ hooks: [{ command: 'compact' }] }],
+    })
+    for (const name of ['pre', 'post', 'prompt', 'stop', 'compact']) script(name, { stdout: [warn], code: 0 })
+
+    await ext.toolCall('bash', {})
+    await ext.toolResult('bash')
+    await ext.input('hello')
+    await ext.agentEnd()
+    await ext.beforeCompact('manual')
+    expect(ext.notes).toEqual(Array(5).fill({ msg: 'heads up', level: 'warning' }))
+  })
+
+  it('surfaces a SessionStart systemMessage without treating it as context', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'greet' }] }] })
+    script('greet', { stdout: [JSON.stringify({ systemMessage: 'welcome' })], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(ext.notes).toEqual([{ msg: 'welcome', level: 'warning' }])
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
   })
 
   it('does not treat a timed-out Stop hook as a block', async () => {

@@ -145,7 +145,7 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
   return result
 }
 
-function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
+function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string; systemMessage?: string } | undefined {
   try {
     return JSON.parse(text)
   } catch {
@@ -259,13 +259,14 @@ function replaceRecord(target: Record<string, unknown>, next: Record<string, unk
  * which is the name a Claude-written hook script expects in tool_name. A hook's
  * hookSpecificOutput.updatedInput replaces the tool input in place before the permission
  * decision applies, and later hooks see the rewritten input in their payload. */
-export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string): Promise<HookDecision> {
+export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink): Promise<HookDecision> {
   const names = claudeName ? [toolName, claudeName] : [toolName]
   for (const command of matchingCommands(config.PreToolUse, names)) {
     const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command))
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
+    if (onSystemMessage) surfaceSystemMessages([result], onSystemMessage)
     const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
     if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
@@ -274,8 +275,18 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   return { block: false }
 }
 
-async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner: HookRunner): Promise<void> {
-  await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner: HookRunner): Promise<HookRunResult[]> {
+  return await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+}
+
+type SystemMessageSink = (message: string) => void
+
+/** Claude's universal systemMessage output field: a warning surfaced to the user. */
+function surfaceSystemMessages(results: HookRunResult[], notify: SystemMessageSink): void {
+  for (const result of results) {
+    const message = tryParseJson(result.stdout)?.systemMessage
+    if (message) notify(message)
+  }
 }
 
 export interface PromptDecision {
@@ -294,11 +305,12 @@ function promptContext(stdout: string): string {
 
 /** Run UserPromptSubmit hooks: the first blocking verdict wins; otherwise their
  * additional context is concatenated for injection ahead of the prompt. */
-export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner): Promise<PromptDecision> {
+export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner, onSystemMessage?: SystemMessageSink): Promise<PromptDecision> {
   const contexts: string[] = []
   for (const command of matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')) {
     const result = await runner(command.command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}`, context: '' }
+    if (onSystemMessage) surfaceSystemMessages([result], onSystemMessage)
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return { block: true, reason: decision.reason, context: '' }
     const context = promptContext(result.stdout)
@@ -346,6 +358,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const commands = matchingCommands(config.SessionStart, source.names)
     const payload = { hook_event_name: 'SessionStart', source: source.value }
     const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     pendingSessionContext = results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
 
@@ -359,8 +372,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     return { message: { customType: 'claude-hook-context', content, display: false } }
   })
 
-  pi.on('tool_call', async (event) => {
-    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName))
+  pi.on('tool_call', async (event, ctx) => {
+    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
     if (!decision.block) return undefined
     return { block: true, reason: decision.reason }
   })
@@ -369,7 +382,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // a decision:block reason (or exit-2 stderr) and additionalContext are appended next
   // to the tool result, which is where Claude documents they land. Failed executions
   // are skipped (Claude routes those to PostToolUseFailure, not bridged yet).
-  pi.on('tool_result', async (event) => {
+  pi.on('tool_result', async (event, ctx) => {
     if (event.isError) return
     const alias = mcpAliases.get(event.toolName)
     const names = alias ? [event.toolName, alias] : [event.toolName]
@@ -382,6 +395,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       tool_response: { content: event.content, details: event.details, isError: event.isError },
     }
     const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const feedback: string[] = []
     for (const result of results) {
       const parsed = tryParseJson(result.stdout)
@@ -398,7 +412,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
     // prompts the user submitted.
     if (event.source === 'extension') return { action: 'continue' }
-    const decision = await runUserPromptSubmit(config, event.text, runner)
+    const decision = await runUserPromptSubmit(config, event.text, runner, (message) => ctx.ui.notify(message, 'warning'))
     if (decision.block) {
       // pi's input result has no reason channel, so surface why before consuming it.
       ctx.ui.notify(decision.reason ?? 'Prompt blocked by hook', 'error')
@@ -414,7 +428,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // turn, and stop_hook_active in the payload tells the next firing it is already
   // continuing from a stop hook, which is the hook script's documented loop guard.
   // Only exit 2 and decision:"block" continue; continue:false means "stay stopped".
-  pi.on('agent_end', async () => {
+  pi.on('agent_end', async (_event, ctx) => {
     const commands = matchingCommands(config.Stop, 'Stop')
     if (commands.length === 0) {
       stopHookActive = false
@@ -422,6 +436,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     }
     const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive }
     const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const block = results
       .filter((result) => !result.timedOut)
       .map((result) => {
@@ -435,13 +450,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (block) pi.sendMessage({ customType: 'claude-stop-hook', content: block.reason, display: true }, { triggerTurn: true })
   })
 
-  pi.on('session_before_compact', async (event) => {
+  pi.on('session_before_compact', async (event, ctx) => {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
-    await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 
-  pi.on('session_shutdown', async (event) => {
+  pi.on('session_shutdown', async (event, ctx) => {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
-    await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 }
