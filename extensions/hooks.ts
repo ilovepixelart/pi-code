@@ -22,9 +22,11 @@
  *
  * Config is merged from ~/.claude/settings.json (always) plus the project's
  * .claude/settings.json and settings.local.json (only when the project is
- * trusted, since hooks execute arbitrary shell). Claude tool matchers are
- * PascalCase (`Bash`); pi tool names are lowercase (`bash`), so matchers are
- * applied case-insensitively.
+ * trusted, since hooks execute arbitrary shell). Matchers follow Claude's rule:
+ * `*`/empty match all, plain names are exact (with `|`/`,` list separators), and
+ * anything with other regex characters is an unanchored regex. Claude matchers
+ * are PascalCase (`Bash`); pi tool names are lowercase (`bash`), so comparison
+ * is case-insensitive and folds `-` to `_`.
  *
  * Docs: https://code.claude.com/docs/en/hooks.md
  */
@@ -86,12 +88,32 @@ export function loadHooks(files: string[]): HooksConfig {
   return config
 }
 
-function matcherApplies(matcher: string | undefined, name: string): boolean {
+/** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
+ * is a list of exact names; anything else is an unanchored regex. */
+const EXACT_MATCHER = /^[\w\- ,|]*$/
+
+/** Claude names are PascalCase and keep dashes (`Bash`, `mcp__brave-search__x`);
+ * pi names are lowercase with underscores, so comparison folds both. */
+function foldName(name: string): string {
+  return name.toLowerCase().replaceAll('-', '_')
+}
+
+function exactListApplies(matcher: string, names: readonly string[]): boolean {
+  const tokens = matcher
+    .split(/[|,]/)
+    .map((token) => foldName(token.trim()))
+    .filter(Boolean)
+  return names.some((name) => tokens.includes(foldName(name)))
+}
+
+function matcherApplies(matcher: string | undefined, names: readonly string[]): boolean {
   if (!matcher || matcher === '*') return true
+  if (EXACT_MATCHER.test(matcher)) return exactListApplies(matcher, names)
   try {
-    return new RegExp(`^(?:${matcher})$`, 'i').test(name)
+    const regex = new RegExp(matcher, 'i')
+    return names.some((name) => regex.test(name))
   } catch {
-    return matcher.toLowerCase() === name.toLowerCase()
+    return exactListApplies(matcher, names)
   }
 }
 
@@ -101,11 +123,13 @@ function isRunnableHook(hook: HookCommand): boolean {
   return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
 }
 
-/** Command specs whose matcher applies to the given tool/source name. */
-export function matchingCommands(matchers: HookMatcher[] | undefined, name: string): HookCommand[] {
+/** Command specs whose matcher applies to any of the given tool/source names.
+ * Multiple candidates let one event offer both the pi name and its Claude alias. */
+export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
+  const candidates = typeof names === 'string' ? [names] : names
   const result: HookCommand[] = []
   for (const entry of matchers ?? []) {
-    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
+    if (matcherApplies(entry.matcher, candidates)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
   }
   return result
 }

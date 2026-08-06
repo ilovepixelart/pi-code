@@ -54,6 +54,32 @@ describe('matchingCommands', () => {
     expect(matchingCommands([hook], 'read')).toEqual([])
   })
 
+  it('treats a comma-separated matcher as a list of exact names, like Claude', () => {
+    const hook = { matcher: 'Edit, Write', hooks: [{ command: 'fmt' }] }
+    expect(matchingCommands([hook], 'edit')).toEqual([{ command: 'fmt' }])
+    expect(matchingCommands([hook], 'write')).toEqual([{ command: 'fmt' }])
+    expect(matchingCommands([hook], 'read')).toEqual([])
+  })
+
+  it('applies a matcher with regex characters unanchored, like Claude', () => {
+    // Claude documents `Edit.*` as matching NotebookEdit: the regex tests anywhere in the name.
+    const hook = { matcher: 'Edit.*', hooks: [{ command: 'fmt' }] }
+    expect(matchingCommands([hook], 'notebookedit')).toEqual([{ command: 'fmt' }])
+    expect(matchingCommands([hook], 'read')).toEqual([])
+  })
+
+  it('treats dashes and underscores alike when matching exact names', () => {
+    const hook = { matcher: 'mcp__brave-search__web_search', hooks: [{ command: 'x' }] }
+    expect(matchingCommands([hook], 'mcp__brave_search__web-search')).toEqual([{ command: 'x' }])
+    expect(matchingCommands([hook], 'mcp__brave_search__other')).toEqual([])
+  })
+
+  it('matches when any candidate name satisfies the matcher', () => {
+    const hook = { matcher: 'mcp__github__create_issue', hooks: [{ command: 'x' }] }
+    expect(matchingCommands([hook], ['github_create_issue', 'mcp__github__create_issue'])).toEqual([{ command: 'x' }])
+    expect(matchingCommands([hook], ['github_create_issue'])).toEqual([])
+  })
+
   it('matches a SessionStart matcher against the session source, not an empty string', () => {
     const hook = { matcher: 'startup', hooks: [{ command: 'setup.sh' }] }
     expect(matchingCommands([hook], 'startup')).toEqual([{ command: 'setup.sh' }])

@@ -387,7 +387,7 @@ describe('matchingCommands edge shapes', () => {
     expect(matchingCommands([hook], 'bash')).toEqual([])
   })
 
-  it('anchors the matcher so a partial tool-name match does not fire', () => {
+  it('does not partial-match an exact-name matcher', () => {
     const hook = { matcher: 'Bash', hooks: [{ command: 'guard' }] }
     expect(matchingCommands([hook], 'bashful')).toEqual([])
     expect(matchingCommands([hook], 'rebash')).toEqual([])
