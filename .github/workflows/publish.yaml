@@ -4,6 +4,15 @@ on:
   release:
     types:
       - published
+  # Recovery path for undelivered release events (observed 2026-08-06: GitHub dropped
+  # the published event for v0.6.0 and its republish). Dispatch runs against the
+  # default branch; the tag-matches-package.json check keeps a stale dispatch from
+  # publishing content that does not belong to the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.6.0)"
+        required: true
 
 # Read by default; jobs upgrade to the minimal scopes they need.
 permissions:
@@ -40,7 +49,7 @@ jobs:
 
       - name: Verify the tag matches package.json
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           pkg="v$(node -p "require('./package.json').version")"
@@ -73,7 +82,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
           TARBALL: ${{ steps.pack.outputs.tarball-name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
           sigstore="${TARBALL}.sigstore.json"
