@@ -13,9 +13,14 @@
  * - Stop            -> pi `agent_end` (a block feeds its reason back as a new turn,
  *                      with stop_hook_active as the loop guard)
  * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
+ * - PostCompact     -> pi `session_compact` (fire-and-forget)
+ * - PostToolUseFailure -> pi `tool_result` error branch (fire-and-forget)
  * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
  *
- * Every event honors the universal `systemMessage` output (a user-facing warning).
+ * Every payload carries session_id, transcript_path (pi's session file), cwd,
+ * permission_mode (plan-mode state off the shared bus) and effort; tool events add
+ * tool_use_id. Every event honors the universal `systemMessage` output (a
+ * user-facing warning).
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
  *
