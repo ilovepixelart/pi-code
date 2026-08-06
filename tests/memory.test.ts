@@ -1,3 +1,4 @@
+import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { memoryDir, projectSlug, removeIndexLine, slugifyName, upsertIndexLine } from '../extensions/memory.ts'
@@ -5,7 +6,8 @@ import { memoryDir, projectSlug, removeIndexLine, slugifyName, upsertIndexLine }
 describe('memory helpers', () => {
   it('slugs project paths into directory names', () => {
     expect(projectSlug('/Users/alex/Documents/pi-code')).toBe('-Users-alex-Documents-pi-code')
-    expect(memoryDir('/tmp/x')).toContain('.pi/agent/memory/-tmp-x')
+    expect(projectSlug('C:\\Users\\alex\\Documents\\pi-code')).toBe('C-Users-alex-Documents-pi-code')
+    expect(memoryDir('/tmp/x')).toContain(path.join('.pi', 'agent', 'memory', '-tmp-x'))
   })
 
   it('slugifies memory names', () => {

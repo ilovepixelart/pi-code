@@ -18,7 +18,10 @@ import { capForContext } from './internal/output-guard.js'
 const INDEX_FILE = 'MEMORY.md'
 
 export function projectSlug(cwd: string): string {
-  return cwd.replace(/[/\\]/g, '-').replace(/^-+/, '-')
+  return cwd
+    .replace(/^([A-Za-z]):(?=[/\\])/, '$1')
+    .replace(/[/\\]/g, '-')
+    .replace(/^-+/, '-')
 }
 
 export function memoryDir(cwd: string): string {
