@@ -157,7 +157,7 @@ const setupExtension = () => {
     notes,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
     toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
-    toolEnd: (toolName: string, isError = false, end: { toolCallId?: string; result?: unknown } = {}) => handler('tool_execution_end')({ toolName, isError, toolCallId: end.toolCallId ?? 't1', result: end.result }),
+    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) => handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: () => handler('agent_end')({ messages: [] }),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
@@ -487,7 +487,7 @@ describe('loadHooks malformed config shapes', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_execution_end', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
   })
 })
 
@@ -655,52 +655,53 @@ describe('hooks extension tool_call', () => {
   })
 })
 
-describe('hooks extension tool_execution_end', () => {
+describe('hooks extension tool_result (PostToolUse)', () => {
   const withPostHooks = async (hooks: Array<{ command: string }>) => {
     writeSettings(hoisted.home, 'settings.json', { PostToolUse: [{ matcher: 'Bash', hooks }] })
     const ext = setupExtension()
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     return ext
   }
+  const okText = [{ type: 'text', text: 'file.txt' }]
 
   it('runs PostToolUse hooks with the tool name, input and response in the payload', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolCall('bash', { command: 'ls' })
-    await ext.toolEnd('bash', false, { result: 'file.txt' })
+    await ext.toolResult('bash', { input: { command: 'ls' }, content: okText })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: 'file.txt' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: { content: okText, isError: false } })
   })
 
-  it('pairs tool_input with the call it belongs to, not the latest call', async () => {
+  it('returns no patch when every hook stays silent', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolCall('bash', { command: 'first' }, 'c1')
-    await ext.toolCall('bash', { command: 'second' }, 'c2')
-    await ext.toolEnd('bash', false, { toolCallId: 'c1', result: 'r1' })
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'first' }, tool_response: 'r1' })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toBeUndefined()
   })
 
-  it('omits tool_input when no matching tool_call was seen', async () => {
+  it('appends an exit-2 hook stderr to the tool result as feedback', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('bash', false, { toolCallId: 'never-called', result: 'r' })
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_response: 'r' })
+    script('post', { stderr: ['angry'], code: 2 })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toEqual({
+      content: [...okText, { type: 'text', text: 'PostToolUse hook: angry' }],
+    })
+  })
+
+  it('appends a decision-block reason and additionalContext to the tool result', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    script('post', { stdout: [JSON.stringify({ decision: 'block', reason: 'lint failed', hookSpecificOutput: { additionalContext: 'run npm lint' } })], code: 0 })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toEqual({
+      content: [...okText, { type: 'text', text: 'PostToolUse hook: lint failed' }, { type: 'text', text: 'run npm lint' }],
+    })
   })
 
   it('skips PostToolUse hooks when the tool execution failed', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('bash', true)
+    await ext.toolResult('bash', { isError: true })
     expect(commandsRun()).toEqual([])
   })
 
   it('skips PostToolUse hooks whose matcher misses the tool', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('edit')
+    await ext.toolResult('edit')
     expect(commandsRun()).toEqual([])
-  })
-
-  it('does not block on a PostToolUse hook that exits 2', async () => {
-    const ext = await withPostHooks([{ command: 'post' }])
-    script('post', { stderr: ['angry'], code: 2 })
-    await expect(ext.toolEnd('bash')).resolves.toBeUndefined()
   })
 
   it('starts every matching PostToolUse hook before waiting on any of them', async () => {
@@ -708,7 +709,7 @@ describe('hooks extension tool_execution_end', () => {
     script('post-a', { hang: true })
     script('post-b', { hang: true })
 
-    const pending = ext.toolEnd('bash')
+    const pending = ext.toolResult('bash')
     await Promise.resolve()
     expect(commandsRun()).toEqual(['post-a', 'post-b'])
     for (const child of hoisted.live) child.emit('close', 0)
@@ -830,10 +831,9 @@ describe('hooks MCP tool aliases', () => {
   it('reports the Claude name in PostToolUse payloads for aliased tools', async () => {
     const ext = await withHooks({ PostToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'post' }] }] })
     ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
-    await ext.toolCall('github_create_issue', { title: 't' })
-    await ext.toolEnd('github_create_issue', false, { result: 'ok' })
+    await ext.toolResult('github_create_issue', { input: { title: 't' }, content: [{ type: 'text', text: 'ok' }] })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: 'ok' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: { content: [{ type: 'text', text: 'ok' }], isError: false } })
   })
 
   it('ignores a malformed alias payload from the bus', async () => {

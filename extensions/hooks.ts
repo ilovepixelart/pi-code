@@ -3,8 +3,9 @@
  *
  * Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events, so
  * a project's existing hooks work under pi:
- * - PreToolUse      -> pi `tool_call` (can block the tool)
- * - PostToolUse     -> pi `tool_execution_end` (fire-and-forget)
+ * - PreToolUse      -> pi `tool_call` (can block the tool or rewrite its input)
+ * - PostToolUse     -> pi `tool_result` (block reasons and additionalContext are
+ *                      appended next to the tool result, as Claude documents)
  * - SessionStart    -> pi `session_start` (fire-and-forget)
  * - UserPromptSubmit-> pi `input` (can block the prompt via `handled`, or inject
  *                      additional context by transforming the submitted text)
@@ -306,9 +307,6 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
   return { block: false, context: contexts.join('\n') }
 }
 
-/** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
-const MAX_PENDING_INPUTS = 100
-
 /** pi's lifecycle vocabularies differ from Claude's documented ones. The matcher is
  * offered both spellings so existing configs keep firing either way, and the payload
  * reports the Claude value, which is what a Claude-written hook script parses. */
@@ -325,9 +323,6 @@ function claudeSpelling(map: Record<string, string>, raw: string): { names: stri
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
-  // tool_execution_end does not carry the tool's input, but Claude's PostToolUse
-  // contract does, so remember it from tool_call keyed by the call id.
-  const pendingInputs = new Map<string, unknown>()
   const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
@@ -350,26 +345,38 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event) => {
-    pendingInputs.set(event.toolCallId, event.input)
-    if (pendingInputs.size > MAX_PENDING_INPUTS) {
-      const oldest = pendingInputs.keys().next().value
-      if (oldest !== undefined) pendingInputs.delete(oldest)
-    }
     const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName))
     if (!decision.block) return undefined
-    // pi still emits tool_execution_end (isError) for a blocked call, which also
-    // cleans up; deleting here just avoids relying on that host detail.
-    pendingInputs.delete(event.toolCallId)
     return { block: true, reason: decision.reason }
   })
 
-  pi.on('tool_execution_end', async (event) => {
-    const toolInput = pendingInputs.get(event.toolCallId)
-    pendingInputs.delete(event.toolCallId)
+  // Claude's PostToolUse runs after a successful call and feeds back into the result:
+  // a decision:block reason (or exit-2 stderr) and additionalContext are appended next
+  // to the tool result, which is where Claude documents they land. Failed executions
+  // are skipped (Claude routes those to PostToolUseFailure, not bridged yet).
+  pi.on('tool_result', async (event) => {
     if (event.isError) return
     const alias = mcpAliases.get(event.toolName)
     const names = alias ? [event.toolName, alias] : [event.toolName]
-    await runNotifyHooks(matchingCommands(config.PostToolUse, names), { hook_event_name: 'PostToolUse', tool_name: alias ?? event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
+    const commands = matchingCommands(config.PostToolUse, names)
+    if (commands.length === 0) return
+    const payload = {
+      hook_event_name: 'PostToolUse',
+      tool_name: alias ?? event.toolName,
+      tool_input: event.input,
+      tool_response: { content: event.content, details: event.details, isError: event.isError },
+    }
+    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const feedback: string[] = []
+    for (const result of results) {
+      const parsed = tryParseJson(result.stdout)
+      if (!result.timedOut && result.code === 2) feedback.push(`PostToolUse hook: ${result.stderr.trim() || 'Blocked by hook'}`)
+      else if (parsed?.decision === 'block') feedback.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
+      const context = parsed?.hookSpecificOutput?.additionalContext
+      if (context) feedback.push(context)
+    }
+    if (feedback.length === 0) return
+    return { content: [...event.content, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
   })
 
   pi.on('input', async (event, ctx) => {
