@@ -136,6 +136,7 @@ interface Harness {
   tools: RegisteredTool[]
   notifications: Notification[]
   warnings: string[]
+  emitted: Array<{ channel: string; data: unknown }>
   home: string
   cwd: string
   sessionStart: (trusted?: boolean | undefined, approve?: boolean) => Promise<void>
@@ -161,6 +162,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
   const tools: RegisteredTool[] = []
   const notifications: Notification[] = []
   const warnings: string[] = []
+  const emitted: Array<{ channel: string; data: unknown }> = []
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>()
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
 
@@ -184,12 +186,14 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, fn),
     registerCommand: (name: string, opts2: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts2),
     registerTool: (tool: RegisteredTool) => tools.push(tool),
+    events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
   } as never)
 
   return {
     tools,
     notifications,
     warnings,
+    emitted,
     home,
     cwd,
     sessionStart: async (trusted?: boolean, approve = true) => {
@@ -962,5 +966,17 @@ describe('mcp session_shutdown', () => {
 
     await expect(shutting).resolves.toBeUndefined()
     expect(closed).toEqual(['quick'])
+  })
+})
+
+describe('MCP tool alias publication', () => {
+  it('publishes pi-to-Claude tool name aliases on the shared bus with original names', async () => {
+    withTools([{ name: 'web-search' }])
+    const harness = await setup({ user: { 'brave-search': { command: 'srv' } } })
+    await harness.sessionStart()
+    expect(harness.emitted).toContainEqual({
+      channel: 'pi-code:mcp-tools',
+      data: [{ pi: 'brave_search_web_search', claude: 'mcp__brave-search__web-search' }],
+    })
   })
 })

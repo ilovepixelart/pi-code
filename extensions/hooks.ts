@@ -37,6 +37,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
 import { isProjectApproved } from './internal/project-approval.js'
 
 const DEFAULT_TIMEOUT_S = 60
@@ -232,10 +233,13 @@ function timeoutMs(command: HookCommand): number {
   return seconds * 1000
 }
 
-/** Run PreToolUse hooks for a tool; the first blocking verdict wins. */
-export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner): Promise<HookDecision> {
-  for (const command of matchingCommands(config.PreToolUse, toolName)) {
-    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }, timeoutMs(command))
+/** Run PreToolUse hooks for a tool; the first blocking verdict wins. For MCP tools the
+ * matcher sees both the pi name and the Claude alias, and the payload reports the alias,
+ * which is the name a Claude-written hook script expects in tool_name. */
+export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string): Promise<HookDecision> {
+  const names = claudeName ? [toolName, claudeName] : [toolName]
+  for (const command of matchingCommands(config.PreToolUse, names)) {
+    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command))
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
@@ -301,6 +305,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // contract does, so remember it from tool_call keyed by the call id.
   const pendingInputs = new Map<string, unknown>()
   const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
+  // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
+  // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
+  const mcpAliases = new Map<string, string>()
+  pi.events.on(MCP_TOOLS_CHANNEL, (data) => {
+    if (!isMcpToolAliases(data)) return
+    mcpAliases.clear()
+    for (const entry of data) mcpAliases.set(entry.pi, entry.claude)
+  })
 
   pi.on('session_start', async (event, ctx) => {
     const trusted = await isProjectApproved(ctx)
@@ -319,7 +331,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const oldest = pendingInputs.keys().next().value
       if (oldest !== undefined) pendingInputs.delete(oldest)
     }
-    const decision = await runPreToolUse(config, event.toolName, event.input, runner)
+    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName))
     if (!decision.block) return undefined
     // pi still emits tool_execution_end (isError) for a blocked call, which also
     // cleans up; deleting here just avoids relying on that host detail.
@@ -331,7 +343,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const toolInput = pendingInputs.get(event.toolCallId)
     pendingInputs.delete(event.toolCallId)
     if (event.isError) return
-    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
+    const alias = mcpAliases.get(event.toolName)
+    const names = alias ? [event.toolName, alias] : [event.toolName]
+    await runNotifyHooks(matchingCommands(config.PostToolUse, names), { hook_event_name: 'PostToolUse', tool_name: alias ?? event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
   })
 
   pi.on('input', async (event, ctx) => {

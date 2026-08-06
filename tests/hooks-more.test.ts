@@ -140,7 +140,11 @@ type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) =
 /** Register the extension against a stub API and expose its three lifecycle handlers. */
 const setupExtension = () => {
   const handlers = new Map<string, Handler>()
-  hooksExtension({ on: (name: string, fn: Handler) => handlers.set(name, fn) } as never)
+  const busHandlers = new Map<string, (data: unknown) => void>()
+  hooksExtension({
+    on: (name: string, fn: Handler) => handlers.set(name, fn),
+    events: { on: (channel: string, fn: (data: unknown) => void) => busHandlers.set(channel, fn), emit: () => {} },
+  } as never)
   const handler = (name: string): Handler => {
     const found = handlers.get(name)
     if (!found) throw new Error(`hooks extension did not register ${name}`)
@@ -158,6 +162,7 @@ const setupExtension = () => {
     agentEnd: () => handler('agent_end')({ messages: [] }),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }),
+    emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
   }
 }
 
@@ -750,5 +755,45 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ SessionEnd: [{ matcher: 'quit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
+  })
+})
+
+describe('hooks MCP tool aliases', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it("fires a Claude mcp__ matcher against pi's server_tool name and reports the Claude name", async () => {
+    const ext = await withHooks({ PreToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'guard' }] }] })
+    ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
+    await ext.toolCall('github_create_issue', { title: 't' })
+    expect(commandsRun()).toEqual(['guard'])
+    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' } })
+  })
+
+  it('does not fire the mcp__ matcher when no alias was published', async () => {
+    const ext = await withHooks({ PreToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'guard' }] }] })
+    await ext.toolCall('github_create_issue', {})
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('reports the Claude name in PostToolUse payloads for aliased tools', async () => {
+    const ext = await withHooks({ PostToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'post' }] }] })
+    ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
+    await ext.toolCall('github_create_issue', { title: 't' })
+    await ext.toolEnd('github_create_issue', false, { result: 'ok' })
+    expect(commandsRun()).toEqual(['post'])
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: 'ok' })
+  })
+
+  it('ignores a malformed alias payload from the bus', async () => {
+    const ext = await withHooks({ PreToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'guard' }] }] })
+    ext.emitMcpTools([{ pi: 'github_create_issue' }])
+    ext.emitMcpTools('junk')
+    await ext.toolCall('github_create_issue', {})
+    expect(commandsRun()).toEqual([])
   })
 })
