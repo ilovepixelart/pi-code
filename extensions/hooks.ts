@@ -129,8 +129,15 @@ function isRunnableHook(hook: HookCommand): boolean {
 export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
   const candidates = typeof names === 'string' ? [names] : names
   const result: HookCommand[] = []
+  const seen = new Set<string>()
   for (const entry of matchers ?? []) {
-    if (matcherApplies(entry.matcher, candidates)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
+    if (!matcherApplies(entry.matcher, candidates)) continue
+    for (const hook of (entry.hooks ?? []).filter(isRunnableHook)) {
+      // Claude runs a handler defined in more than one settings file once.
+      if (seen.has(hook.command)) continue
+      seen.add(hook.command)
+      result.push(hook)
+    }
   }
   return result
 }

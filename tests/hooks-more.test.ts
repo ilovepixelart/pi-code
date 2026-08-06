@@ -386,6 +386,15 @@ describe('matchingCommands edge shapes', () => {
     expect(matchingCommands([{ matcher: 'Bash' } as never], 'bash')).toEqual([])
   })
 
+  it('runs a handler defined identically in more than one settings file once', () => {
+    // Claude: "If you define the same handler in more than one settings file, it runs once."
+    const entries = [
+      { matcher: 'Bash', hooks: [{ command: 'guard.sh' }] },
+      { matcher: '*', hooks: [{ command: 'guard.sh' }, { command: 'other.sh' }] },
+    ]
+    expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh' }, { command: 'other.sh' }])
+  })
+
   it('falls back to case-insensitive literal equality when the matcher is an invalid regex', () => {
     const hook = { matcher: 'Bash(', hooks: [{ command: 'lit' }] }
     expect(matchingCommands([hook], 'bash(')).toEqual([{ command: 'lit' }])
