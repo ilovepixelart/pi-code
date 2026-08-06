@@ -53,8 +53,9 @@ if [ "$FIXTURE" = 1 ]; then
   fi
 fi
 
-# 1. Boot: all pi-code extensions load
-if wait_for '\[Extensions\]' 30 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
+# 1. Boot: all pi-code extensions load. First boot after a pi upgrade also renders the
+# changelog, and failing MCP servers block session_start serially, so allow the full budget.
+if wait_for '\[Extensions\]' 120 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
   ok "boot: extensions loaded"
 else
   bad "boot: extensions missing"
@@ -65,7 +66,7 @@ if capture | grep -q 'Rules loaded'; then ok "rules: loaded"; else bad "rules: n
 
 # 3. Plan mode toggles on and off with status badge
 send "/plan" Enter
-if wait_for 'plan' 15 && capture | grep -q '⏸ plan'; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
+if wait_for '⏸ plan' 15; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
 send "/plan" Enter
 sleep 2
 if capture | grep -q '⏸ plan'; then bad "plan-mode: badge stuck"; else ok "plan-mode: badge off"; fi
