@@ -8,7 +8,7 @@
  * start, after turns, after compaction, on plan-mode changes (the permission-mode
  * analogue, off the shared bus), and on the optional `refreshInterval` timer
  * (minimum 1s). A project-defined command is arbitrary shell, so project settings
- * count only once the project is approved, like hooks.
+ * count only once the project is already approved, read without prompting.
  *
  * Without a configured statusLine, the built-in segment shows turn state plus
  * running session cost, summed from per-message usage on the current branch so it
@@ -25,7 +25,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 
 import { hookFiles, runHookCommand } from './hooks.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
-import { isProjectApproved } from './internal/project-approval.js'
+import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
 
 const COMMAND_TIMEOUT_MS = 5_000
@@ -164,7 +164,10 @@ export default function statusLine(pi: ExtensionAPI) {
     commandLine = undefined
     sessionCtx = ctx
     clearInterval(refreshTimer)
-    const trusted = await isProjectApproved(ctx)
+    // Reading config must never open a trust dialog: several extensions resolve
+    // approval at session start, and a second prompt stacks over the first and eats
+    // the keys meant for it. An undecided project simply skips project settings.
+    const trusted = isProjectApprovedSilently(ctx)
     config = readStatusLineConfig(hookFiles(ctx.cwd, os.homedir(), trusted))
     if (config?.refreshInterval) {
       refreshTimer = setInterval(() => scheduleRefresh(), config.refreshInterval * 1000)
