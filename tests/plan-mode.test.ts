@@ -23,6 +23,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const sent: SentMessage[] = []
   const userMessages: string[] = []
   const appended: Array<{ type: string; data: unknown }> = []
+  const emitted: Array<{ channel: string; data: unknown }> = []
   let activeTools = options.activeTools ?? ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete', 'edit', 'write']
 
   const pi = {
@@ -39,6 +40,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     sendMessage: (message: SentMessage) => sent.push(message),
     sendUserMessage: (text: string) => userMessages.push(text),
     appendEntry: (type: string, data: unknown) => appended.push({ type, data }),
+    events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
   }
 
   planModeExtension(pi as never)
@@ -70,6 +72,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     sent,
     userMessages,
     appended,
+    emitted,
     shortcuts,
     getActiveTools: () => activeTools,
     runCommand: (name: string, args = '', context: unknown = ctx) => commands.get(name)?.(args, context),
@@ -78,6 +81,14 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
 }
 
 describe('plan mode toggle', () => {
+  it('publishes the plan state on the shared bus for each toggle', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    expect(s.emitted).toContainEqual({ channel: 'pi-code:plan-mode', data: { active: true } })
+    await s.runCommand('plan')
+    expect(s.emitted).toContainEqual({ channel: 'pi-code:plan-mode', data: { active: false } })
+  })
+
   it('restricts active tools to the read-only set when enabled', async () => {
     const s = setup()
     await s.runCommand('plan')

@@ -138,7 +138,7 @@ afterEach(() => {
 type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>
 
 /** The common Claude payload fields every hook receives, as produced by defaultCtx. */
-const COMMON = { session_id: 'sess-1', transcript_path: '/tmp/sess-1.jsonl', cwd: '/proj', effort: { level: 'high' } }
+const COMMON = { session_id: 'sess-1', transcript_path: '/tmp/sess-1.jsonl', cwd: '/proj', effort: { level: 'high' }, permission_mode: 'default' }
 
 /** Register the extension against a stub API and expose its three lifecycle handlers. */
 const setupExtension = () => {
@@ -177,6 +177,7 @@ const setupExtension = () => {
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
+    emitPlanMode: (state: unknown) => busHandlers.get('pi-code:plan-mode')?.(state),
   }
 }
 
@@ -973,6 +974,24 @@ describe('hooks MCP tool aliases', () => {
     await ext.toolResult('github_create_issue', { input: { title: 't' }, content: [{ type: 'text', text: 'ok' }] })
     expect(commandsRun()).toEqual(['post'])
     expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'ok' }], isError: false } })
+  })
+
+  it('reports permission_mode plan while plan mode is active', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'guard' }] }] })
+    ext.emitPlanMode({ active: true })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('plan')
+    hoisted.calls.length = 0
+    ext.emitPlanMode({ active: false })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('default')
+  })
+
+  it('ignores a malformed plan-mode payload from the bus', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'guard' }] }] })
+    ext.emitPlanMode({ active: 'yes' })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('default')
   })
 
   it('ignores a malformed alias payload from the bus', async () => {

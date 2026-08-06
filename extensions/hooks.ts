@@ -45,6 +45,7 @@ import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
+import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApproved } from './internal/project-approval.js'
 
 const DEFAULT_TIMEOUT_S = 60
@@ -345,7 +346,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let stopHookActive = false
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
-    const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd }
+    const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
     const transcript = ctx.sessionManager.getSessionFile()
     if (transcript) common.transcript_path = transcript
     if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
@@ -363,6 +364,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (!isMcpToolAliases(data)) return
     mcpAliases.clear()
     for (const entry of data) mcpAliases.set(entry.pi, entry.claude)
+  })
+  // Claude's permission_mode: pi has no permission system, but pi-code's plan mode is
+  // the documented "plan" mode; its extension publishes the state on the shared bus.
+  let permissionMode = 'default'
+  pi.events.on(PLAN_MODE_CHANNEL, (data) => {
+    if (isPlanModeState(data)) permissionMode = data.active ? 'plan' : 'default'
   })
 
   pi.on('session_start', async (event, ctx) => {
