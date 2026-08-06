@@ -323,6 +323,7 @@ function claudeSpelling(map: Record<string, string>, raw: string): { names: stri
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
+  let pendingSessionContext: string[] = []
   const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
@@ -341,7 +342,20 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // a fork is a genuine session begin, which Claude reports as source "fork".
     if (event.reason === 'reload') return
     const source = claudeSpelling(SESSION_START_SOURCE, event.reason)
-    await runNotifyHooks(matchingCommands(config.SessionStart, source.names), { hook_event_name: 'SessionStart', source: source.value }, runner)
+    const commands = matchingCommands(config.SessionStart, source.names)
+    const payload = { hook_event_name: 'SessionStart', source: source.value }
+    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    pendingSessionContext = results.map((result) => promptContext(result.stdout)).filter(Boolean)
+  })
+
+  // Claude adds a SessionStart hook's additionalContext (or plain stdout) to the
+  // conversation before the first prompt; pi's seam for that is a message injected
+  // on the next agent start.
+  pi.on('before_agent_start', async () => {
+    if (pendingSessionContext.length === 0) return
+    const content = pendingSessionContext.join('\n')
+    pendingSessionContext = []
+    return { message: { customType: 'claude-hook-context', content, display: false } }
   })
 
   pi.on('tool_call', async (event) => {

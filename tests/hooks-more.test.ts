@@ -162,6 +162,7 @@ const setupExtension = () => {
     agentEnd: () => handler('agent_end')({ messages: [] }),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }),
+    beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
   }
 }
@@ -487,7 +488,7 @@ describe('loadHooks malformed config shapes', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
   })
 })
 
@@ -524,6 +525,35 @@ describe('hooks extension session_start', () => {
     await setupExtension().sessionStart('fork', { cwd: tempDir('hooks-proj-') })
     expect(commandsRun()).toEqual(['home-session'])
     expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'fork' })
+  })
+
+  it('injects SessionStart hook stdout as context on the next agent start, once', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'ctx-hook' }] }] })
+    script('ctx-hook', { stdout: ['Remember the deploy freeze'], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toEqual({
+      message: { customType: 'claude-hook-context', content: 'Remember the deploy freeze', display: false },
+    })
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
+  })
+
+  it('prefers hookSpecificOutput.additionalContext over raw stdout and joins multiple hooks', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'json-ctx' }, { command: 'plain-ctx' }] }] })
+    script('json-ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'from-json' } })], code: 0 })
+    script('plain-ctx', { stdout: ['from-stdout'], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toEqual({
+      message: { customType: 'claude-hook-context', content: 'from-json\nfrom-stdout', display: false },
+    })
+  })
+
+  it('injects nothing when SessionStart hooks produce no context', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'silent' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
   })
 
   it("maps pi's new-session start onto Claude's clear source", async () => {
