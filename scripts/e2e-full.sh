@@ -101,6 +101,7 @@ try:
 except Exception:
     settings = {}
 settings["packages"] = [repo]
+settings["defaultThinkingLevel"] = "low"
 for key in ("extensions", "skills", "prompts"):
     settings.pop(key, None)
 json.dump(settings, open(dst, "w"))
