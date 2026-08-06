@@ -100,11 +100,13 @@ function foldName(name: string): string {
 }
 
 function exactListApplies(matcher: string, names: readonly string[]): boolean {
-  const tokens = matcher
-    .split(/[|,]/)
-    .map((token) => foldName(token.trim()))
-    .filter(Boolean)
-  return names.some((name) => tokens.includes(foldName(name)))
+  const tokens = new Set(
+    matcher
+      .split(/[|,]/)
+      .map((token) => foldName(token.trim()))
+      .filter(Boolean),
+  )
+  return names.some((name) => tokens.has(foldName(name)))
 }
 
 function matcherApplies(matcher: string | undefined, names: readonly string[]): boolean {
