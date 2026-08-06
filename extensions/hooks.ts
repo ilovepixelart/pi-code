@@ -6,12 +6,18 @@
  * - PreToolUse      -> pi `tool_call` (can block the tool or rewrite its input)
  * - PostToolUse     -> pi `tool_result` (block reasons and additionalContext are
  *                      appended next to the tool result, as Claude documents)
- * - SessionStart    -> pi `session_start` (fire-and-forget)
+ * - SessionStart    -> pi `session_start` (stdout/additionalContext is injected as
+ *                      context before the first prompt via `before_agent_start`)
  * - UserPromptSubmit-> pi `input` (can block the prompt via `handled`, or inject
  *                      additional context by transforming the submitted text)
- * - Stop            -> pi `agent_end` (fire-and-forget; cannot prevent stopping)
+ * - Stop            -> pi `agent_end` (a block feeds its reason back as a new turn,
+ *                      with stop_hook_active as the loop guard)
  * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
  * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
+ *
+ * Every event honors the universal `systemMessage` output (a user-facing warning).
+ * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
+ * transcript in the first place.
  *
  * Claude's SubagentStop has no pi lifecycle seam (the subagent tool spawns child pi
  * processes, and pi emits no subagent-completion event), so it is not bridged.
