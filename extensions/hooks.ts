@@ -42,7 +42,7 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
 import { isProjectApproved } from './internal/project-approval.js'
@@ -343,7 +343,19 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let projectDir = ''
   let pendingSessionContext: string[] = []
   let stopHookActive = false
-  const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
+  /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
+  const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
+    const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd }
+    const transcript = ctx.sessionManager.getSessionFile()
+    if (transcript) common.transcript_path = transcript
+    if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
+    return common
+  }
+  /** A runner bound to the firing context, filling the common fields into each stdin. */
+  const boundRunner =
+    (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
+    (command, payload, ms) =>
+      runHookCommand(command, { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }, ms, projectDir)
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
   const mcpAliases = new Map<string, string>()
@@ -363,7 +375,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const source = claudeSpelling(SESSION_START_SOURCE, event.reason)
     const commands = matchingCommands(config.SessionStart, source.names)
     const payload = { hook_event_name: 'SessionStart', source: source.value }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx)
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     pendingSessionContext = results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
@@ -379,7 +392,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event, ctx) => {
-    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
+    const decision = await runPreToolUse(config, event.toolName, event.input, boundRunner(ctx, { tool_use_id: event.toolCallId }), mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
     if (!decision.block) return undefined
     return { block: true, reason: decision.reason }
   })
@@ -400,7 +413,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
       tool_input: event.input,
       tool_response: { content: event.content, details: event.details, isError: event.isError },
     }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const feedback: string[] = []
     for (const result of results) {
@@ -418,7 +432,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
     // prompts the user submitted.
     if (event.source === 'extension') return { action: 'continue' }
-    const decision = await runUserPromptSubmit(config, event.text, runner, (message) => ctx.ui.notify(message, 'warning'))
+    const decision = await runUserPromptSubmit(config, event.text, boundRunner(ctx), (message) => ctx.ui.notify(message, 'warning'))
     if (decision.block) {
       // pi's input result has no reason channel, so surface why before consuming it.
       ctx.ui.notify(decision.reason ?? 'Prompt blocked by hook', 'error')
@@ -441,7 +455,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return
     }
     const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx)
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const block = results
       .filter((result) => !result.timedOut)
@@ -458,13 +473,13 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_before_compact', async (event, ctx) => {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 
   pi.on('session_shutdown', async (event, ctx) => {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 }
