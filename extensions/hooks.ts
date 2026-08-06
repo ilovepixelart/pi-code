@@ -144,7 +144,7 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
   return result
 }
 
-function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
+function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string } | undefined {
   try {
     return JSON.parse(text)
   } catch {
@@ -242,9 +242,22 @@ function timeoutMs(command: HookCommand): number {
   return seconds * 1000
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Claude's updatedInput replaces the whole tool_input, and pi's tool_call contract is
+ * in-place mutation, so the target object is emptied and refilled rather than reassigned. */
+function replaceRecord(target: Record<string, unknown>, next: Record<string, unknown>): void {
+  for (const key of Object.keys(target)) delete target[key]
+  Object.assign(target, next)
+}
+
 /** Run PreToolUse hooks for a tool; the first blocking verdict wins. For MCP tools the
  * matcher sees both the pi name and the Claude alias, and the payload reports the alias,
- * which is the name a Claude-written hook script expects in tool_name. */
+ * which is the name a Claude-written hook script expects in tool_name. A hook's
+ * hookSpecificOutput.updatedInput replaces the tool input in place before the permission
+ * decision applies, and later hooks see the rewritten input in their payload. */
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string): Promise<HookDecision> {
   const names = claudeName ? [toolName, claudeName] : [toolName]
   for (const command of matchingCommands(config.PreToolUse, names)) {
@@ -252,6 +265,8 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
+    const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
+    if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return decision
   }

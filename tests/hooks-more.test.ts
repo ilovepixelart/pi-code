@@ -377,6 +377,44 @@ describe('runPreToolUse hook sequencing', () => {
   })
 })
 
+describe('runPreToolUse updatedInput', () => {
+  const config = { PreToolUse: [{ hooks: [{ command: 'rewrite' }] }] }
+
+  it('replaces the entire tool input in place before the tool runs', async () => {
+    const input = { command: 'rm -rf /', timeout: 5 }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { updatedInput: { command: 'echo safe' } } }), stderr: '', timedOut: false })
+    expect(await runPreToolUse(config, 'bash', input, runner)).toEqual({ block: false })
+    // Claude documents updatedInput as replacing the whole tool_input: timeout is dropped.
+    expect(input).toEqual({ command: 'echo safe' })
+  })
+
+  it('lets a later hook see an earlier updatedInput in its payload', async () => {
+    const seen: unknown[] = []
+    const runner: HookRunner = async (command, payload) => {
+      seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
+      const stdout = command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
+      return { code: 0, stdout, stderr: '', timedOut: false }
+    }
+    const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
+    await runPreToolUse(two, 'bash', { a: 1 }, runner)
+    expect(seen).toEqual([{ a: 1 }, { a: 2 }])
+  })
+
+  it('applies updatedInput even when the same hook denies', async () => {
+    const input = { command: 'x' }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no', updatedInput: { command: 'y' } } }), stderr: '', timedOut: false })
+    expect(await runPreToolUse(config, 'bash', input, runner)).toEqual({ block: true, reason: 'no' })
+    expect(input).toEqual({ command: 'y' })
+  })
+
+  it('ignores a non-object updatedInput', async () => {
+    const input = { command: 'x' }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { updatedInput: 'junk' } }), stderr: '', timedOut: false })
+    await runPreToolUse(config, 'bash', input, runner)
+    expect(input).toEqual({ command: 'x' })
+  })
+})
+
 describe('matchingCommands edge shapes', () => {
   it('returns nothing when the event has no matcher list', () => {
     expect(matchingCommands(undefined, 'bash')).toEqual([])
