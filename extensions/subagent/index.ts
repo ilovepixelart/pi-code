@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -24,6 +25,7 @@ import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved } from '../internal/project-approval.js'
+import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
 import { activeBackgroundRuns, backgroundStatusText, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
 
@@ -256,9 +258,25 @@ interface RunAgentOptions {
   signal?: AbortSignal
   onUpdate?: OnUpdateCallback
   makeDetails: (results: SingleResult[]) => SubagentDetails
+  onPhase?: SubagentPhaseSink
 }
 
+/** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
+type SubagentPhaseSink = (phase: 'start' | 'stop', agentType: string, agentId: string) => void
+
 async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
+  const agent = options.agents.find((a) => a.name === options.agentName)
+  if (!agent) return runSingleAgentInner(options)
+  const agentId = `fg-${randomUUID().slice(0, 8)}`
+  options.onPhase?.('start', agent.name, agentId)
+  try {
+    return await runSingleAgentInner(options)
+  } finally {
+    options.onPhase?.('stop', agent.name, agentId)
+  }
+}
+
+async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResult> {
   const { defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails } = options
   const agent = agents.find((a) => a.name === agentName)
 
@@ -478,6 +496,7 @@ interface ModeContext {
   signal: AbortSignal | undefined
   onUpdate: OnUpdateCallback | undefined
   makeDetails: MakeDetails
+  onPhase?: SubagentPhaseSink
 }
 
 async function checkProjectAgentGate(params: SubagentParamsStatic, agents: AgentConfig[], ctx: ExtensionContext, projectAgentsDir: string | null, gateMode: SubagentMode, makeDetails: MakeDetails): Promise<ToolResult | null> {
@@ -572,6 +591,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   const invocation = getPiInvocation(args)
   const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd }, (run) => {
     removeTmpPrompt(tmpPrompt)
+    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
     const output = capForContext(run.output ?? '') || '(no output)'
     pi.sendMessage(
       {
@@ -587,6 +607,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
     removeTmpPrompt(tmpPrompt)
     return backgroundCapResult(makeDetails)
   }
+  pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: agent.name, agentId: id })
   return {
     content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
     details: makeDetails('single')([]),
@@ -628,6 +649,7 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
       signal,
       onUpdate: chainUpdate,
       makeDetails: makeDetails('chain'),
+      onPhase: mode.onPhase,
     })
     results.push(result)
 
@@ -695,6 +717,7 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
       task: t.task,
       cwd: t.cwd,
       signal,
+      onPhase: mode.onPhase,
       // Per-task update callback
       onUpdate: (partial) => {
         const live = partial.details?.results[0]
@@ -741,6 +764,7 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
     signal,
     onUpdate,
     makeDetails: makeDetails('single'),
+    onPhase: mode.onPhase,
   })
   const isError = result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
   if (isError) {
@@ -1109,7 +1133,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
       if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails)
 
-      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails }
+      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 
       if (params.chain?.length) return runChainMode(params.chain, mode)
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)

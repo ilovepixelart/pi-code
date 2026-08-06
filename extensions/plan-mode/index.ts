@@ -17,6 +17,8 @@ import type { AssistantMessage, TextContent } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from '@earendil-works/pi-coding-agent'
 import { Key } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
+
+import { PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
 import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, type TodoItem } from './utils.js'
 
 // Tools
@@ -70,6 +72,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     }
   }
 
+  /** Hooks report Claude's permission_mode from this bus state. */
+  function publishPlanState(): void {
+    pi.events.emit(PLAN_MODE_CHANNEL, { active: planModeEnabled })
+  }
+
   pi.registerFlag('plan', {
     description: 'Start in plan mode (read-only exploration)',
     type: 'boolean',
@@ -116,6 +123,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     }
     // Persist the toggle so a resume does not restore a state the user left.
     persistState()
+    publishPlanState()
     updateStatus(ctx)
   }
 
@@ -158,6 +166,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       executionMode = todoItems.length > 0
       planFromTool = false
       restoreTools()
+      publishPlanState()
       updateStatus(ctx)
 
       // Persist before the turn: a crash before the first turn_end must resume into
@@ -377,6 +386,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
       todoItems = planModeEntry.data.todos ?? todoItems
       executionMode = planModeEntry.data.executing ?? executionMode
     }
+    publishPlanState()
 
     // On resume: re-scan messages after the last "plan-mode-execute" to rebuild
     // completion state without picking up [DONE:n] from previous plans

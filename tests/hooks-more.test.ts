@@ -137,6 +137,9 @@ afterEach(() => {
 
 type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>
 
+/** The common Claude payload fields every hook receives, as produced by defaultCtx. */
+const COMMON = { session_id: 'sess-1', transcript_path: '/tmp/sess-1.jsonl', cwd: '/proj', effort: { level: 'high' }, permission_mode: 'default' }
+
 /** Register the extension against a stub API and expose its three lifecycle handlers. */
 const setupExtension = () => {
   const handlers = new Map<string, Handler>()
@@ -153,7 +156,12 @@ const setupExtension = () => {
     return found
   }
   const notes: Array<{ msg: string; level: string }> = []
-  const defaultCtx = { ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) } }
+  const defaultCtx = {
+    ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) },
+    cwd: '/proj',
+    thinkingLevel: 'high',
+    sessionManager: { getSessionId: () => 'sess-1', getSessionFile: () => '/tmp/sess-1.jsonl' },
+  }
   return {
     registered: [...handlers.keys()],
     notes,
@@ -165,9 +173,12 @@ const setupExtension = () => {
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: () => handler('agent_end')({ messages: [] }, defaultCtx),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
+    compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
+    emitPlanMode: (state: unknown) => busHandlers.get('pi-code:plan-mode')?.(state),
+    emitSubagent: (event: unknown) => busHandlers.get('pi-code:subagent')?.(event),
   }
 }
 
@@ -492,7 +503,7 @@ describe('loadHooks malformed config shapes', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
   })
 })
 
@@ -504,9 +515,10 @@ describe('hooks extension session_start', () => {
 
   it('runs SessionStart hooks matching the session source with the source in the payload', async () => {
     writeSettings(hoisted.home, 'settings.json', homeConfig)
-    await setupExtension().sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const proj = tempDir('hooks-proj-')
+    await setupExtension().sessionStart('startup', { cwd: proj })
     expect(commandsRun()).toEqual(['home-session'])
-    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'startup' })
+    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SessionStart', source: 'startup' })
   })
 
   it('does not run SessionStart hooks whose matcher misses the session source', async () => {
@@ -526,9 +538,10 @@ describe('hooks extension session_start', () => {
 
   it('fires SessionStart hooks on a fork with source fork, as Claude does', async () => {
     writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'fork', hooks: [{ command: 'home-session' }] }] })
-    await setupExtension().sessionStart('fork', { cwd: tempDir('hooks-proj-') })
+    const proj = tempDir('hooks-proj-')
+    await setupExtension().sessionStart('fork', { cwd: proj })
     expect(commandsRun()).toEqual(['home-session'])
-    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'fork' })
+    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SessionStart', source: 'fork' })
   })
 
   it('injects SessionStart hook stdout as context on the next agent start, once', async () => {
@@ -562,9 +575,10 @@ describe('hooks extension session_start', () => {
 
   it("maps pi's new-session start onto Claude's clear source", async () => {
     writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'clear', hooks: [{ command: 'home-session' }] }] })
-    await setupExtension().sessionStart('new', { cwd: tempDir('hooks-proj-') })
+    const proj = tempDir('hooks-proj-')
+    await setupExtension().sessionStart('new', { cwd: proj })
     expect(commandsRun()).toEqual(['home-session'])
-    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'clear' })
+    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SessionStart', source: 'clear' })
   })
 
   it('exposes CLAUDE_PROJECT_DIR to hook commands', async () => {
@@ -679,7 +693,7 @@ describe('hooks extension tool_call', () => {
   it('forwards the tool name and input to the hook payload', async () => {
     const ext = await withPreHook({ code: 0 })
     await ext.toolCall('bash', { command: 'ls -la' })
-    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'ls -la' } })
+    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'ls -la' }, tool_use_id: 't1' })
   })
 
   it('runs no hook and allows the tool before any session_start has loaded a config', async () => {
@@ -702,7 +716,7 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     const ext = await withPostHooks([{ command: 'post' }])
     await ext.toolResult('bash', { input: { command: 'ls' }, content: okText })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: { content: okText, isError: false } })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_use_id: 't1', tool_response: { content: okText, isError: false } })
   })
 
   it('returns no patch when every hook stays silent', async () => {
@@ -729,6 +743,23 @@ describe('hooks extension tool_result (PostToolUse)', () => {
   it('skips PostToolUse hooks when the tool execution failed', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
     await ext.toolResult('bash', { isError: true })
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('runs PostToolUseFailure hooks on a failed execution with the failure in the payload', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'failed' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })
+    expect(commandsRun()).toEqual(['failed'])
+    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
+  })
+
+  it('does not run PostToolUseFailure hooks on a successful execution', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'failed' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('bash', { content: okText })
     expect(commandsRun()).toEqual([])
   })
 
@@ -762,7 +793,7 @@ describe('hooks extension UserPromptSubmit', () => {
   it('continues an ordinary prompt, passing it in the payload', async () => {
     const ext = await withPromptHooks([{ command: 'audit' }])
     expect(await ext.input('ship it')).toEqual({ action: 'continue' })
-    expect(JSON.parse(recordFor('audit').stdin)).toEqual({ hook_event_name: 'UserPromptSubmit', prompt: 'ship it' })
+    expect(JSON.parse(recordFor('audit').stdin)).toEqual({ ...COMMON, hook_event_name: 'UserPromptSubmit', prompt: 'ship it' })
   })
 
   it('does not run on extension-injected input', async () => {
@@ -803,7 +834,7 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
     await ext.agentEnd()
     expect(commandsRun()).toEqual(['stopped'])
-    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ ...COMMON, hook_event_name: 'Stop', stop_hook_active: false })
     expect(ext.sent).toEqual([])
   })
 
@@ -823,12 +854,12 @@ describe('hooks extension notify-style events', () => {
     script('keep-going', { code: 0, stderr: [] })
     await ext.agentEnd()
     const second = hoisted.calls.filter((call) => call.command === 'keep-going')[1]
-    expect(JSON.parse(second.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: true })
+    expect(JSON.parse(second.stdin)).toEqual({ ...COMMON, hook_event_name: 'Stop', stop_hook_active: true })
     expect(ext.sent).toHaveLength(1)
 
     await ext.agentEnd()
     const third = hoisted.calls.filter((call) => call.command === 'keep-going')[2]
-    expect(JSON.parse(third.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+    expect(JSON.parse(third.stdin)).toEqual({ ...COMMON, hook_event_name: 'Stop', stop_hook_active: false })
   })
 
   it('surfaces a systemMessage from any hook as a user warning', async () => {
@@ -873,7 +904,7 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ PreCompact: [{ matcher: 'manual', hooks: [{ command: 'pc' }] }] })
     await ext.beforeCompact('manual')
     expect(commandsRun()).toEqual(['pc'])
-    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ hook_event_name: 'PreCompact', trigger: 'manual' })
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'manual' })
   })
 
   it('does not run PreCompact hooks whose matcher misses the trigger', async () => {
@@ -886,20 +917,63 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ PreCompact: [{ matcher: 'auto', hooks: [{ command: 'pc' }] }] })
     await ext.beforeCompact('threshold')
     expect(commandsRun()).toEqual(['pc'])
-    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ hook_event_name: 'PreCompact', trigger: 'auto' })
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'auto' })
+  })
+
+  it('runs PostCompact hooks after compaction with the Claude trigger', async () => {
+    const ext = await withHooks({ PostCompact: [{ matcher: 'auto', hooks: [{ command: 'pc-post' }] }] })
+    await ext.compacted('threshold')
+    expect(commandsRun()).toEqual(['pc-post'])
+    expect(JSON.parse(recordFor('pc-post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostCompact', trigger: 'auto' })
+  })
+
+  it('does not run PostCompact hooks whose matcher misses the trigger', async () => {
+    const ext = await withHooks({ PostCompact: [{ matcher: 'manual', hooks: [{ command: 'pc-post' }] }] })
+    await ext.compacted('overflow')
+    expect(commandsRun()).toEqual([])
   })
 
   it("runs SessionEnd hooks with the Claude spelling of pi's shutdown reason", async () => {
     const ext = await withHooks({ SessionEnd: [{ matcher: 'prompt_input_exit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
-    expect(JSON.parse(recordFor('bye').stdin)).toEqual({ hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' })
+    expect(JSON.parse(recordFor('bye').stdin)).toEqual({ ...COMMON, hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' })
   })
 
   it("still fires a SessionEnd matcher written against pi's raw reason", async () => {
     const ext = await withHooks({ SessionEnd: [{ matcher: 'quit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
+  })
+})
+
+describe('hooks subagent lifecycle', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    const proj = tempDir('hooks-proj-')
+    await ext.sessionStart('startup', { cwd: proj })
+    return { ext, proj }
+  }
+
+  it('runs SubagentStart hooks matching the agent type', async () => {
+    const { ext, proj } = await withHooks({ SubagentStart: [{ matcher: 'scout', hooks: [{ command: 'sub-start' }] }] })
+    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
+    expect(commandsRun()).toEqual(['sub-start'])
+    expect(JSON.parse(recordFor('sub-start').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStart', agent_type: 'scout', agent_id: 'fg-abc' })
+  })
+
+  it('runs SubagentStop hooks when the child run completes', async () => {
+    const { ext, proj } = await withHooks({ SubagentStop: [{ matcher: 'scout', hooks: [{ command: 'sub-stop' }] }] })
+    await ext.emitSubagent({ phase: 'stop', agentType: 'scout', agentId: 'bg-1234' })
+    expect(commandsRun()).toEqual(['sub-stop'])
+    expect(JSON.parse(recordFor('sub-stop').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'bg-1234' })
+  })
+
+  it('does not run subagent hooks whose matcher misses the agent type', async () => {
+    const { ext } = await withHooks({ SubagentStart: [{ matcher: 'reviewer', hooks: [{ command: 'sub-start' }] }] })
+    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
+    expect(commandsRun()).toEqual([])
   })
 })
 
@@ -916,7 +990,7 @@ describe('hooks MCP tool aliases', () => {
     ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
     await ext.toolCall('github_create_issue', { title: 't' })
     expect(commandsRun()).toEqual(['guard'])
-    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' } })
+    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_use_id: 't1' })
   })
 
   it('does not fire the mcp__ matcher when no alias was published', async () => {
@@ -930,7 +1004,25 @@ describe('hooks MCP tool aliases', () => {
     ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
     await ext.toolResult('github_create_issue', { input: { title: 't' }, content: [{ type: 'text', text: 'ok' }] })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: { content: [{ type: 'text', text: 'ok' }], isError: false } })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'ok' }], isError: false } })
+  })
+
+  it('reports permission_mode plan while plan mode is active', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'guard' }] }] })
+    ext.emitPlanMode({ active: true })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('plan')
+    hoisted.calls.length = 0
+    ext.emitPlanMode({ active: false })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('default')
+  })
+
+  it('ignores a malformed plan-mode payload from the bus', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'guard' }] }] })
+    ext.emitPlanMode({ active: 'yes' })
+    await ext.toolCall('read', { path: 'a' })
+    expect(JSON.parse(recordFor('guard').stdin).permission_mode).toBe('default')
   })
 
   it('ignores a malformed alias payload from the bus', async () => {

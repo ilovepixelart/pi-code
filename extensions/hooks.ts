@@ -13,14 +13,20 @@
  * - Stop            -> pi `agent_end` (a block feeds its reason back as a new turn,
  *                      with stop_hook_active as the loop guard)
  * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
+ * - PostCompact     -> pi `session_compact` (fire-and-forget)
+ * - PostToolUseFailure -> pi `tool_result` error branch (fire-and-forget)
  * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
  *
- * Every event honors the universal `systemMessage` output (a user-facing warning).
+ * Every payload carries session_id, transcript_path (pi's session file), cwd,
+ * permission_mode (plan-mode state off the shared bus) and effort; tool events add
+ * tool_use_id. Every event honors the universal `systemMessage` output (a
+ * user-facing warning).
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
  *
- * Claude's SubagentStop has no pi lifecycle seam (the subagent tool spawns child pi
- * processes, and pi emits no subagent-completion event), so it is not bridged.
+ * SubagentStart/SubagentStop ride pi-code's own subagent extension, which publishes
+ * child-run lifecycle on the shared bus (notify-style: a child has already exited by
+ * the time SubagentStop fires, so its exit-2 block semantics cannot be honored).
  *
  * Hook commands run via `sh -c` with the event JSON on stdin. A PreToolUse
  * hook blocks the tool by exiting 2 (stderr becomes the reason) or by printing
@@ -42,10 +48,12 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
+import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApproved } from './internal/project-approval.js'
+import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.js'
 
 const DEFAULT_TIMEOUT_S = 60
 
@@ -343,7 +351,20 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let projectDir = ''
   let pendingSessionContext: string[] = []
   let stopHookActive = false
-  const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
+  let sessionCtx: ExtensionContext | undefined
+  /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
+  const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
+    const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
+    const transcript = ctx.sessionManager.getSessionFile()
+    if (transcript) common.transcript_path = transcript
+    if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
+    return common
+  }
+  /** A runner bound to the firing context, filling the common fields into each stdin. */
+  const boundRunner =
+    (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
+    (command, payload, ms) =>
+      runHookCommand(command, { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }, ms, projectDir)
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
   const mcpAliases = new Map<string, string>()
@@ -352,8 +373,25 @@ export default function hooksExtension(pi: ExtensionAPI) {
     mcpAliases.clear()
     for (const entry of data) mcpAliases.set(entry.pi, entry.claude)
   })
+  // Claude's permission_mode: pi has no permission system, but pi-code's plan mode is
+  // the documented "plan" mode; its extension publishes the state on the shared bus.
+  let permissionMode = 'default'
+  pi.events.on(PLAN_MODE_CHANNEL, (data) => {
+    if (isPlanModeState(data)) permissionMode = data.active ? 'plan' : 'default'
+  })
+  // Subagent lifecycle arrives over the bus without a pi context; the session context
+  // captured at session_start supplies the common payload fields.
+  pi.events.on(SUBAGENT_CHANNEL, async (data) => {
+    if (!isSubagentPhaseEvent(data) || !sessionCtx) return
+    const ctx = sessionCtx
+    const eventName = data.phase === 'start' ? 'SubagentStart' : 'SubagentStop'
+    const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId }
+    const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+  })
 
   pi.on('session_start', async (event, ctx) => {
+    sessionCtx = ctx
     const trusted = await isProjectApproved(ctx)
     projectDir = ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
@@ -363,7 +401,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const source = claudeSpelling(SESSION_START_SOURCE, event.reason)
     const commands = matchingCommands(config.SessionStart, source.names)
     const payload = { hook_event_name: 'SessionStart', source: source.value }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx)
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     pendingSessionContext = results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
@@ -379,7 +418,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event, ctx) => {
-    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
+    const decision = await runPreToolUse(config, event.toolName, event.input, boundRunner(ctx, { tool_use_id: event.toolCallId }), mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
     if (!decision.block) return undefined
     return { block: true, reason: decision.reason }
   })
@@ -389,18 +428,30 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // to the tool result, which is where Claude documents they land. Failed executions
   // are skipped (Claude routes those to PostToolUseFailure, not bridged yet).
   pi.on('tool_result', async (event, ctx) => {
-    if (event.isError) return
     const alias = mcpAliases.get(event.toolName)
     const names = alias ? [event.toolName, alias] : [event.toolName]
+    const response = { content: event.content, details: event.details, isError: event.isError }
+    // A failed execution fires Claude's PostToolUseFailure instead: notify-style, no
+    // result patch, since the error content is already what the model sees.
+    if (event.isError) {
+      const failCommands = matchingCommands(config.PostToolUseFailure, names)
+      if (failCommands.length === 0) return
+      const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
+      const failPayload = { hook_event_name: 'PostToolUseFailure', tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
+      const failResults = await Promise.all(failCommands.map((command) => run(command.command, failPayload, timeoutMs(command))))
+      surfaceSystemMessages(failResults, (message) => ctx.ui.notify(message, 'warning'))
+      return
+    }
     const commands = matchingCommands(config.PostToolUse, names)
     if (commands.length === 0) return
     const payload = {
       hook_event_name: 'PostToolUse',
       tool_name: alias ?? event.toolName,
       tool_input: event.input,
-      tool_response: { content: event.content, details: event.details, isError: event.isError },
+      tool_response: response,
     }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const feedback: string[] = []
     for (const result of results) {
@@ -418,7 +469,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
     // prompts the user submitted.
     if (event.source === 'extension') return { action: 'continue' }
-    const decision = await runUserPromptSubmit(config, event.text, runner, (message) => ctx.ui.notify(message, 'warning'))
+    const decision = await runUserPromptSubmit(config, event.text, boundRunner(ctx), (message) => ctx.ui.notify(message, 'warning'))
     if (decision.block) {
       // pi's input result has no reason channel, so surface why before consuming it.
       ctx.ui.notify(decision.reason ?? 'Prompt blocked by hook', 'error')
@@ -441,7 +492,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return
     }
     const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive }
-    const results = await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+    const run = boundRunner(ctx)
+    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const block = results
       .filter((result) => !result.timedOut)
@@ -458,13 +510,19 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_before_compact', async (event, ctx) => {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+  })
+
+  pi.on('session_compact', async (event, ctx) => {
+    const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
+    const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), { hook_event_name: 'PostCompact', trigger: trigger.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 
   pi.on('session_shutdown', async (event, ctx) => {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
+    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 }

@@ -121,6 +121,7 @@ interface ResultShape {
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (partial: ToolResult) => void, ctx?: unknown) => Promise<ToolResult>
 
 const sendMessageMock = vi.fn()
+const emittedEvents: Array<{ channel: string; data: unknown }> = []
 
 const getExecute = (): Execute => {
   let execute: Execute | undefined
@@ -129,6 +130,7 @@ const getExecute = (): Execute => {
       if (t.name === 'subagent') execute = t.execute
     },
     sendMessage: sendMessageMock,
+    events: { emit: (channel: string, data: unknown) => emittedEvents.push({ channel, data }), on: () => () => {} },
   } as never)
   if (!execute) throw new Error('subagent tool was not registered')
   return execute
@@ -183,6 +185,7 @@ beforeEach(() => {
   backgroundStatusTextMock.mockClear()
   activeBackgroundRunsMock.mockReturnValue(0)
   sendMessageMock.mockClear()
+  emittedEvents.length = 0
   trustedCtx.ui.confirm.mockClear()
   discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
   execute = getExecute()
@@ -689,6 +692,25 @@ describe('single mode', () => {
 
     expect(text(result)).toBe('final answer')
     expect(results(result)[0]).toMatchObject({ agent: 'scout', agentSource: 'user', task: 'inspect', exitCode: 0 })
+  })
+
+  it('publishes start and stop lifecycle events for the child run on the shared bus', async () => {
+    script('inspect', { stdout: [say('done')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const phases = emittedEvents.filter((e) => e.channel === 'pi-code:subagent').map((e) => e.data as { phase: string; agentType: string; agentId: string })
+    expect(phases.map((p) => ({ phase: p.phase, agentType: p.agentType }))).toEqual([
+      { phase: 'start', agentType: 'scout' },
+      { phase: 'stop', agentType: 'scout' },
+    ])
+    expect(phases[0].agentId).toMatch(/^fg-[0-9a-f]{8}$/)
+    expect(phases[1].agentId).toBe(phases[0].agentId)
+  })
+
+  it('publishes no lifecycle events for an unknown agent', async () => {
+    await execute('c1', { agent: 'ghost', task: 'inspect' }, undefined, undefined, trustedCtx)
+    expect(emittedEvents.filter((e) => e.channel === 'pi-code:subagent')).toEqual([])
   })
 
   it('reports no output when the child exits cleanly with no assistant text', async () => {
