@@ -141,9 +141,11 @@ type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) =
 const setupExtension = () => {
   const handlers = new Map<string, Handler>()
   const busHandlers = new Map<string, (data: unknown) => void>()
+  const sent: Array<{ message: unknown; options: unknown }> = []
   hooksExtension({
     on: (name: string, fn: Handler) => handlers.set(name, fn),
     events: { on: (channel: string, fn: (data: unknown) => void) => busHandlers.set(channel, fn), emit: () => {} },
+    sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
   } as never)
   const handler = (name: string): Handler => {
     const found = handlers.get(name)
@@ -155,13 +157,16 @@ const setupExtension = () => {
   return {
     registered: [...handlers.keys()],
     notes,
-    sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
-    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }),
-    toolEnd: (toolName: string, isError = false, end: { toolCallId?: string; result?: unknown } = {}) => handler('tool_execution_end')({ toolName, isError, toolCallId: end.toolCallId ?? 't1', result: end.result }),
+    sent,
+    sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, { ...defaultCtx, ...ctx }),
+    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }, defaultCtx),
+    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
+      handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
-    agentEnd: () => handler('agent_end')({ messages: [] }),
-    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }),
-    shutdown: (reason: string) => handler('session_shutdown')({ reason }),
+    agentEnd: () => handler('agent_end')({ messages: [] }, defaultCtx),
+    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
+    shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
+    beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
   }
 }
@@ -377,6 +382,44 @@ describe('runPreToolUse hook sequencing', () => {
   })
 })
 
+describe('runPreToolUse updatedInput', () => {
+  const config = { PreToolUse: [{ hooks: [{ command: 'rewrite' }] }] }
+
+  it('replaces the entire tool input in place before the tool runs', async () => {
+    const input = { command: 'rm -rf /', timeout: 5 }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { updatedInput: { command: 'echo safe' } } }), stderr: '', timedOut: false })
+    expect(await runPreToolUse(config, 'bash', input, runner)).toEqual({ block: false })
+    // Claude documents updatedInput as replacing the whole tool_input: timeout is dropped.
+    expect(input).toEqual({ command: 'echo safe' })
+  })
+
+  it('lets a later hook see an earlier updatedInput in its payload', async () => {
+    const seen: unknown[] = []
+    const runner: HookRunner = async (command, payload) => {
+      seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
+      const stdout = command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
+      return { code: 0, stdout, stderr: '', timedOut: false }
+    }
+    const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
+    await runPreToolUse(two, 'bash', { a: 1 }, runner)
+    expect(seen).toEqual([{ a: 1 }, { a: 2 }])
+  })
+
+  it('applies updatedInput even when the same hook denies', async () => {
+    const input = { command: 'x' }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no', updatedInput: { command: 'y' } } }), stderr: '', timedOut: false })
+    expect(await runPreToolUse(config, 'bash', input, runner)).toEqual({ block: true, reason: 'no' })
+    expect(input).toEqual({ command: 'y' })
+  })
+
+  it('ignores a non-object updatedInput', async () => {
+    const input = { command: 'x' }
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { updatedInput: 'junk' } }), stderr: '', timedOut: false })
+    await runPreToolUse(config, 'bash', input, runner)
+    expect(input).toEqual({ command: 'x' })
+  })
+})
+
 describe('matchingCommands edge shapes', () => {
   it('returns nothing when the event has no matcher list', () => {
     expect(matchingCommands(undefined, 'bash')).toEqual([])
@@ -449,7 +492,7 @@ describe('loadHooks malformed config shapes', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'tool_call', 'tool_execution_end', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_shutdown'])
   })
 })
 
@@ -486,6 +529,35 @@ describe('hooks extension session_start', () => {
     await setupExtension().sessionStart('fork', { cwd: tempDir('hooks-proj-') })
     expect(commandsRun()).toEqual(['home-session'])
     expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'fork' })
+  })
+
+  it('injects SessionStart hook stdout as context on the next agent start, once', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'ctx-hook' }] }] })
+    script('ctx-hook', { stdout: ['Remember the deploy freeze'], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toEqual({
+      message: { customType: 'claude-hook-context', content: 'Remember the deploy freeze', display: false },
+    })
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
+  })
+
+  it('prefers hookSpecificOutput.additionalContext over raw stdout and joins multiple hooks', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'json-ctx' }, { command: 'plain-ctx' }] }] })
+    script('json-ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'from-json' } })], code: 0 })
+    script('plain-ctx', { stdout: ['from-stdout'], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toEqual({
+      message: { customType: 'claude-hook-context', content: 'from-json\nfrom-stdout', display: false },
+    })
+  })
+
+  it('injects nothing when SessionStart hooks produce no context', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'silent' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
   })
 
   it("maps pi's new-session start onto Claude's clear source", async () => {
@@ -617,52 +689,53 @@ describe('hooks extension tool_call', () => {
   })
 })
 
-describe('hooks extension tool_execution_end', () => {
+describe('hooks extension tool_result (PostToolUse)', () => {
   const withPostHooks = async (hooks: Array<{ command: string }>) => {
     writeSettings(hoisted.home, 'settings.json', { PostToolUse: [{ matcher: 'Bash', hooks }] })
     const ext = setupExtension()
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     return ext
   }
+  const okText = [{ type: 'text', text: 'file.txt' }]
 
   it('runs PostToolUse hooks with the tool name, input and response in the payload', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolCall('bash', { command: 'ls' })
-    await ext.toolEnd('bash', false, { result: 'file.txt' })
+    await ext.toolResult('bash', { input: { command: 'ls' }, content: okText })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: 'file.txt' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_response: { content: okText, isError: false } })
   })
 
-  it('pairs tool_input with the call it belongs to, not the latest call', async () => {
+  it('returns no patch when every hook stays silent', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolCall('bash', { command: 'first' }, 'c1')
-    await ext.toolCall('bash', { command: 'second' }, 'c2')
-    await ext.toolEnd('bash', false, { toolCallId: 'c1', result: 'r1' })
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'first' }, tool_response: 'r1' })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toBeUndefined()
   })
 
-  it('omits tool_input when no matching tool_call was seen', async () => {
+  it('appends an exit-2 hook stderr to the tool result as feedback', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('bash', false, { toolCallId: 'never-called', result: 'r' })
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'bash', tool_response: 'r' })
+    script('post', { stderr: ['angry'], code: 2 })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toEqual({
+      content: [...okText, { type: 'text', text: 'PostToolUse hook: angry' }],
+    })
+  })
+
+  it('appends a decision-block reason and additionalContext to the tool result', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    script('post', { stdout: [JSON.stringify({ decision: 'block', reason: 'lint failed', hookSpecificOutput: { additionalContext: 'run npm lint' } })], code: 0 })
+    await expect(ext.toolResult('bash', { content: okText })).resolves.toEqual({
+      content: [...okText, { type: 'text', text: 'PostToolUse hook: lint failed' }, { type: 'text', text: 'run npm lint' }],
+    })
   })
 
   it('skips PostToolUse hooks when the tool execution failed', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('bash', true)
+    await ext.toolResult('bash', { isError: true })
     expect(commandsRun()).toEqual([])
   })
 
   it('skips PostToolUse hooks whose matcher misses the tool', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
-    await ext.toolEnd('edit')
+    await ext.toolResult('edit')
     expect(commandsRun()).toEqual([])
-  })
-
-  it('does not block on a PostToolUse hook that exits 2', async () => {
-    const ext = await withPostHooks([{ command: 'post' }])
-    script('post', { stderr: ['angry'], code: 2 })
-    await expect(ext.toolEnd('bash')).resolves.toBeUndefined()
   })
 
   it('starts every matching PostToolUse hook before waiting on any of them', async () => {
@@ -670,7 +743,7 @@ describe('hooks extension tool_execution_end', () => {
     script('post-a', { hang: true })
     script('post-b', { hang: true })
 
-    const pending = ext.toolEnd('bash')
+    const pending = ext.toolResult('bash')
     await Promise.resolve()
     expect(commandsRun()).toEqual(['post-a', 'post-b'])
     for (const child of hoisted.live) child.emit('close', 0)
@@ -726,11 +799,74 @@ describe('hooks extension notify-style events', () => {
     return ext
   }
 
-  it('runs Stop hooks on agent end', async () => {
+  it('runs Stop hooks on agent end with stop_hook_active false', async () => {
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
     await ext.agentEnd()
     expect(commandsRun()).toEqual(['stopped'])
-    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop' })
+    expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+    expect(ext.sent).toEqual([])
+  })
+
+  it('continues the conversation when a Stop hook blocks, with the reason', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+    script('keep-going', { stdout: [JSON.stringify({ decision: 'block', reason: 'tests are still red' })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'tests are still red', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('reports stop_hook_active true while continuing from a stop hook, then resets', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+    script('keep-going', { stderr: ['not done'], code: 2 })
+    await ext.agentEnd()
+    expect(ext.sent).toHaveLength(1)
+
+    script('keep-going', { code: 0, stderr: [] })
+    await ext.agentEnd()
+    const second = hoisted.calls.filter((call) => call.command === 'keep-going')[1]
+    expect(JSON.parse(second.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: true })
+    expect(ext.sent).toHaveLength(1)
+
+    await ext.agentEnd()
+    const third = hoisted.calls.filter((call) => call.command === 'keep-going')[2]
+    expect(JSON.parse(third.stdin)).toEqual({ hook_event_name: 'Stop', stop_hook_active: false })
+  })
+
+  it('surfaces a systemMessage from any hook as a user warning', async () => {
+    const warn = JSON.stringify({ systemMessage: 'heads up' })
+    const ext = await withHooks({
+      PreToolUse: [{ hooks: [{ command: 'pre' }] }],
+      PostToolUse: [{ hooks: [{ command: 'post' }] }],
+      UserPromptSubmit: [{ hooks: [{ command: 'prompt' }] }],
+      Stop: [{ hooks: [{ command: 'stop' }] }],
+      PreCompact: [{ hooks: [{ command: 'compact' }] }],
+    })
+    for (const name of ['pre', 'post', 'prompt', 'stop', 'compact']) script(name, { stdout: [warn], code: 0 })
+
+    await ext.toolCall('bash', {})
+    await ext.toolResult('bash')
+    await ext.input('hello')
+    await ext.agentEnd()
+    await ext.beforeCompact('manual')
+    expect(ext.notes).toEqual(Array(5).fill({ msg: 'heads up', level: 'warning' }))
+  })
+
+  it('surfaces a SessionStart systemMessage without treating it as context', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'greet' }] }] })
+    script('greet', { stdout: [JSON.stringify({ systemMessage: 'welcome' })], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(ext.notes).toEqual([{ msg: 'welcome', level: 'warning' }])
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
+  })
+
+  it('does not treat a timed-out Stop hook as a block', async () => {
+    const ext = await withHooks({ Stop: [{ matcher: undefined, hooks: [{ command: 'hung', timeout: 1 }] }] })
+    script('hung', { hang: true })
+    vi.useFakeTimers()
+    const pending = ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(1500)
+    await pending
+    expect(ext.sent).toEqual([])
   })
 
   it('runs PreCompact hooks matching the compaction trigger', async () => {
@@ -792,10 +928,9 @@ describe('hooks MCP tool aliases', () => {
   it('reports the Claude name in PostToolUse payloads for aliased tools', async () => {
     const ext = await withHooks({ PostToolUse: [{ matcher: 'mcp__github__.*', hooks: [{ command: 'post' }] }] })
     ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
-    await ext.toolCall('github_create_issue', { title: 't' })
-    await ext.toolEnd('github_create_issue', false, { result: 'ok' })
+    await ext.toolResult('github_create_issue', { input: { title: 't' }, content: [{ type: 'text', text: 'ok' }] })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: 'ok' })
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ hook_event_name: 'PostToolUse', tool_name: 'mcp__github__create_issue', tool_input: { title: 't' }, tool_response: { content: [{ type: 'text', text: 'ok' }], isError: false } })
   })
 
   it('ignores a malformed alias payload from the bus', async () => {
