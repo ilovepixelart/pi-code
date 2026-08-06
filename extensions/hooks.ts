@@ -402,16 +402,27 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // to the tool result, which is where Claude documents they land. Failed executions
   // are skipped (Claude routes those to PostToolUseFailure, not bridged yet).
   pi.on('tool_result', async (event, ctx) => {
-    if (event.isError) return
     const alias = mcpAliases.get(event.toolName)
     const names = alias ? [event.toolName, alias] : [event.toolName]
+    const response = { content: event.content, details: event.details, isError: event.isError }
+    // A failed execution fires Claude's PostToolUseFailure instead: notify-style, no
+    // result patch, since the error content is already what the model sees.
+    if (event.isError) {
+      const failCommands = matchingCommands(config.PostToolUseFailure, names)
+      if (failCommands.length === 0) return
+      const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
+      const failPayload = { hook_event_name: 'PostToolUseFailure', tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
+      const failResults = await Promise.all(failCommands.map((command) => run(command.command, failPayload, timeoutMs(command))))
+      surfaceSystemMessages(failResults, (message) => ctx.ui.notify(message, 'warning'))
+      return
+    }
     const commands = matchingCommands(config.PostToolUse, names)
     if (commands.length === 0) return
     const payload = {
       hook_event_name: 'PostToolUse',
       tool_name: alias ?? event.toolName,
       tool_input: event.input,
-      tool_response: { content: event.content, details: event.details, isError: event.isError },
+      tool_response: response,
     }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))

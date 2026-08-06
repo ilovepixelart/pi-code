@@ -743,6 +743,23 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     expect(commandsRun()).toEqual([])
   })
 
+  it('runs PostToolUseFailure hooks on a failed execution with the failure in the payload', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'failed' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })
+    expect(commandsRun()).toEqual(['failed'])
+    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
+  })
+
+  it('does not run PostToolUseFailure hooks on a successful execution', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'failed' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('bash', { content: okText })
+    expect(commandsRun()).toEqual([])
+  })
+
   it('skips PostToolUse hooks whose matcher misses the tool', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
     await ext.toolResult('edit')
