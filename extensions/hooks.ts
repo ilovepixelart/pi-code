@@ -22,9 +22,11 @@
  *
  * Config is merged from ~/.claude/settings.json (always) plus the project's
  * .claude/settings.json and settings.local.json (only when the project is
- * trusted, since hooks execute arbitrary shell). Claude tool matchers are
- * PascalCase (`Bash`); pi tool names are lowercase (`bash`), so matchers are
- * applied case-insensitively.
+ * trusted, since hooks execute arbitrary shell). Matchers follow Claude's rule:
+ * `*`/empty match all, plain names are exact (with `|`/`,` list separators), and
+ * anything with other regex characters is an unanchored regex. Claude matchers
+ * are PascalCase (`Bash`); pi tool names are lowercase (`bash`), so comparison
+ * is case-insensitive and folds `-` to `_`.
  *
  * Docs: https://code.claude.com/docs/en/hooks.md
  */
@@ -35,6 +37,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
 import { isProjectApproved } from './internal/project-approval.js'
 
 const DEFAULT_TIMEOUT_S = 60
@@ -86,12 +89,34 @@ export function loadHooks(files: string[]): HooksConfig {
   return config
 }
 
-function matcherApplies(matcher: string | undefined, name: string): boolean {
+/** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
+ * is a list of exact names; anything else is an unanchored regex. */
+const EXACT_MATCHER = /^[\w\- ,|]*$/
+
+/** Claude names are PascalCase and keep dashes (`Bash`, `mcp__brave-search__x`);
+ * pi names are lowercase with underscores, so comparison folds both. */
+function foldName(name: string): string {
+  return name.toLowerCase().replaceAll('-', '_')
+}
+
+function exactListApplies(matcher: string, names: readonly string[]): boolean {
+  const tokens = new Set(
+    matcher
+      .split(/[|,]/)
+      .map((token) => foldName(token.trim()))
+      .filter(Boolean),
+  )
+  return names.some((name) => tokens.has(foldName(name)))
+}
+
+function matcherApplies(matcher: string | undefined, names: readonly string[]): boolean {
   if (!matcher || matcher === '*') return true
+  if (EXACT_MATCHER.test(matcher)) return exactListApplies(matcher, names)
   try {
-    return new RegExp(`^(?:${matcher})$`, 'i').test(name)
+    const regex = new RegExp(matcher, 'i')
+    return names.some((name) => regex.test(name))
   } catch {
-    return matcher.toLowerCase() === name.toLowerCase()
+    return exactListApplies(matcher, names)
   }
 }
 
@@ -101,11 +126,20 @@ function isRunnableHook(hook: HookCommand): boolean {
   return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
 }
 
-/** Command specs whose matcher applies to the given tool/source name. */
-export function matchingCommands(matchers: HookMatcher[] | undefined, name: string): HookCommand[] {
+/** Command specs whose matcher applies to any of the given tool/source names.
+ * Multiple candidates let one event offer both the pi name and its Claude alias. */
+export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
+  const candidates = typeof names === 'string' ? [names] : names
   const result: HookCommand[] = []
+  const seen = new Set<string>()
   for (const entry of matchers ?? []) {
-    if (matcherApplies(entry.matcher, name)) result.push(...(entry.hooks ?? []).filter(isRunnableHook))
+    if (!matcherApplies(entry.matcher, candidates)) continue
+    for (const hook of (entry.hooks ?? []).filter(isRunnableHook)) {
+      // Claude runs a handler defined in more than one settings file once.
+      if (seen.has(hook.command)) continue
+      seen.add(hook.command)
+      result.push(hook)
+    }
   }
   return result
 }
@@ -208,10 +242,13 @@ function timeoutMs(command: HookCommand): number {
   return seconds * 1000
 }
 
-/** Run PreToolUse hooks for a tool; the first blocking verdict wins. */
-export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner): Promise<HookDecision> {
-  for (const command of matchingCommands(config.PreToolUse, toolName)) {
-    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }, timeoutMs(command))
+/** Run PreToolUse hooks for a tool; the first blocking verdict wins. For MCP tools the
+ * matcher sees both the pi name and the Claude alias, and the payload reports the alias,
+ * which is the name a Claude-written hook script expects in tool_name. */
+export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string): Promise<HookDecision> {
+  const names = claudeName ? [toolName, claudeName] : [toolName]
+  for (const command of matchingCommands(config.PreToolUse, names)) {
+    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command))
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
@@ -257,6 +294,19 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
 /** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
 const MAX_PENDING_INPUTS = 100
 
+/** pi's lifecycle vocabularies differ from Claude's documented ones. The matcher is
+ * offered both spellings so existing configs keep firing either way, and the payload
+ * reports the Claude value, which is what a Claude-written hook script parses. */
+const SESSION_START_SOURCE: Record<string, string> = { startup: 'startup', new: 'clear', resume: 'resume', fork: 'fork' }
+const PRECOMPACT_TRIGGER: Record<string, string> = { manual: 'manual', threshold: 'auto', overflow: 'auto' }
+const SESSION_END_REASON: Record<string, string> = { quit: 'prompt_input_exit', new: 'clear', resume: 'resume', reload: 'other', fork: 'other' }
+
+/** The raw pi value plus its Claude spelling, deduplicated, for matcher candidates. */
+function claudeSpelling(map: Record<string, string>, raw: string): { names: string[]; value: string } {
+  const value = map[raw] ?? raw
+  return { names: value === raw ? [raw] : [raw, value], value }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -264,15 +314,24 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // contract does, so remember it from tool_call keyed by the call id.
   const pendingInputs = new Map<string, unknown>()
   const runner: HookRunner = (command, payload, ms) => runHookCommand(command, payload, ms, projectDir)
+  // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
+  // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
+  const mcpAliases = new Map<string, string>()
+  pi.events.on(MCP_TOOLS_CHANNEL, (data) => {
+    if (!isMcpToolAliases(data)) return
+    mcpAliases.clear()
+    for (const entry of data) mcpAliases.set(entry.pi, entry.claude)
+  })
 
   pi.on('session_start', async (event, ctx) => {
     const trusted = await isProjectApproved(ctx)
     projectDir = ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
-    // Only fire SessionStart hooks on a genuine session begin, matched by source (Claude uses
-    // "startup"/"resume"/...). "reload" and "fork" re-fire in-process and would double-run hooks.
-    if (event.reason === 'reload' || event.reason === 'fork') return
-    await runNotifyHooks(matchingCommands(config.SessionStart, event.reason), { hook_event_name: 'SessionStart', source: event.reason }, runner)
+    // "reload" re-fires in-process with the same conversation and would double-run hooks;
+    // a fork is a genuine session begin, which Claude reports as source "fork".
+    if (event.reason === 'reload') return
+    const source = claudeSpelling(SESSION_START_SOURCE, event.reason)
+    await runNotifyHooks(matchingCommands(config.SessionStart, source.names), { hook_event_name: 'SessionStart', source: source.value }, runner)
   })
 
   pi.on('tool_call', async (event) => {
@@ -281,7 +340,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const oldest = pendingInputs.keys().next().value
       if (oldest !== undefined) pendingInputs.delete(oldest)
     }
-    const decision = await runPreToolUse(config, event.toolName, event.input, runner)
+    const decision = await runPreToolUse(config, event.toolName, event.input, runner, mcpAliases.get(event.toolName))
     if (!decision.block) return undefined
     // pi still emits tool_execution_end (isError) for a blocked call, which also
     // cleans up; deleting here just avoids relying on that host detail.
@@ -293,7 +352,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const toolInput = pendingInputs.get(event.toolCallId)
     pendingInputs.delete(event.toolCallId)
     if (event.isError) return
-    await runNotifyHooks(matchingCommands(config.PostToolUse, event.toolName), { hook_event_name: 'PostToolUse', tool_name: event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
+    const alias = mcpAliases.get(event.toolName)
+    const names = alias ? [event.toolName, alias] : [event.toolName]
+    await runNotifyHooks(matchingCommands(config.PostToolUse, names), { hook_event_name: 'PostToolUse', tool_name: alias ?? event.toolName, tool_input: toolInput, tool_response: event.result }, runner)
   })
 
   pi.on('input', async (event, ctx) => {
@@ -319,10 +380,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_before_compact', async (event) => {
-    await runNotifyHooks(matchingCommands(config.PreCompact, event.reason), { hook_event_name: 'PreCompact', trigger: event.reason }, runner)
+    const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
+    await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
   })
 
   pi.on('session_shutdown', async (event) => {
-    await runNotifyHooks(matchingCommands(config.SessionEnd, event.reason), { hook_event_name: 'SessionEnd', reason: event.reason }, runner)
+    const reason = claudeSpelling(SESSION_END_REASON, event.reason)
+    await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
   })
 }

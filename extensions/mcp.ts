@@ -29,6 +29,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Type } from 'typebox'
+import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApproved } from './internal/project-approval.js'
 
@@ -261,6 +262,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
   const registered = new Set<string>()
+  // Original server/tool names per registered pi name, for Claude-style hook matchers.
+  const aliases: McpToolAlias[] = []
 
   async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
     for (const [name, config] of Object.entries(servers)) {
@@ -283,6 +286,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             continue
           }
           registered.add(toolName)
+          aliases.push({ pi: toolName, claude: `mcp__${name}__${tool.name}` })
           count++
           pi.registerTool({
             name: toolName,
@@ -327,6 +331,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       projectConnected = true
       await connectServers(loadConfigFrom(projectConfigPaths(ctx.cwd)))
     }
+
+    pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
 
     const connected = [...status.values()].filter((s) => s.state === 'connected')
     const failed = [...status.entries()].filter(([, s]) => s.state !== 'connected')
