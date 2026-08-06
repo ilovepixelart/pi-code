@@ -281,6 +281,19 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
 /** Bound on remembered tool inputs, in case a blocked or aborted call never ends. */
 const MAX_PENDING_INPUTS = 100
 
+/** pi's lifecycle vocabularies differ from Claude's documented ones. The matcher is
+ * offered both spellings so existing configs keep firing either way, and the payload
+ * reports the Claude value, which is what a Claude-written hook script parses. */
+const SESSION_START_SOURCE: Record<string, string> = { startup: 'startup', new: 'clear', resume: 'resume', fork: 'fork' }
+const PRECOMPACT_TRIGGER: Record<string, string> = { manual: 'manual', threshold: 'auto', overflow: 'auto' }
+const SESSION_END_REASON: Record<string, string> = { quit: 'prompt_input_exit', new: 'clear', resume: 'resume', reload: 'other', fork: 'other' }
+
+/** The raw pi value plus its Claude spelling, deduplicated, for matcher candidates. */
+function claudeSpelling(map: Record<string, string>, raw: string): { names: string[]; value: string } {
+  const value = map[raw] ?? raw
+  return { names: value === raw ? [raw] : [raw, value], value }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -293,10 +306,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const trusted = await isProjectApproved(ctx)
     projectDir = ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
-    // Only fire SessionStart hooks on a genuine session begin, matched by source (Claude uses
-    // "startup"/"resume"/...). "reload" and "fork" re-fire in-process and would double-run hooks.
-    if (event.reason === 'reload' || event.reason === 'fork') return
-    await runNotifyHooks(matchingCommands(config.SessionStart, event.reason), { hook_event_name: 'SessionStart', source: event.reason }, runner)
+    // "reload" re-fires in-process with the same conversation and would double-run hooks;
+    // a fork is a genuine session begin, which Claude reports as source "fork".
+    if (event.reason === 'reload') return
+    const source = claudeSpelling(SESSION_START_SOURCE, event.reason)
+    await runNotifyHooks(matchingCommands(config.SessionStart, source.names), { hook_event_name: 'SessionStart', source: source.value }, runner)
   })
 
   pi.on('tool_call', async (event) => {
@@ -343,10 +357,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_before_compact', async (event) => {
-    await runNotifyHooks(matchingCommands(config.PreCompact, event.reason), { hook_event_name: 'PreCompact', trigger: event.reason }, runner)
+    const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
+    await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, runner)
   })
 
   pi.on('session_shutdown', async (event) => {
-    await runNotifyHooks(matchingCommands(config.SessionEnd, event.reason), { hook_event_name: 'SessionEnd', reason: event.reason }, runner)
+    const reason = claudeSpelling(SESSION_END_REASON, event.reason)
+    await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, runner)
   })
 }

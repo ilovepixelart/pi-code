@@ -458,13 +458,27 @@ describe('hooks extension session_start', () => {
     expect(commandsRun()).toEqual([])
   })
 
-  it.each(['reload', 'fork'])('skips SessionStart hooks on a %s but still loads the config', async (reason) => {
-    writeSettings(hoisted.home, 'settings.json', { ...homeConfig, SessionStart: [{ matcher: reason, hooks: [{ command: 'home-session' }] }] })
+  it('skips SessionStart hooks on a reload but still loads the config', async () => {
+    writeSettings(hoisted.home, 'settings.json', { ...homeConfig, SessionStart: [{ matcher: 'reload', hooks: [{ command: 'home-session' }] }] })
     const ext = setupExtension()
-    await ext.sessionStart(reason, { cwd: tempDir('hooks-proj-') })
+    await ext.sessionStart('reload', { cwd: tempDir('hooks-proj-') })
     expect(commandsRun()).toEqual([])
     await ext.toolCall('bash', {})
     expect(commandsRun()).toEqual(['home-pre'])
+  })
+
+  it('fires SessionStart hooks on a fork with source fork, as Claude does', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'fork', hooks: [{ command: 'home-session' }] }] })
+    await setupExtension().sessionStart('fork', { cwd: tempDir('hooks-proj-') })
+    expect(commandsRun()).toEqual(['home-session'])
+    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'fork' })
+  })
+
+  it("maps pi's new-session start onto Claude's clear source", async () => {
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'clear', hooks: [{ command: 'home-session' }] }] })
+    await setupExtension().sessionStart('new', { cwd: tempDir('hooks-proj-') })
+    expect(commandsRun()).toEqual(['home-session'])
+    expect(JSON.parse(recordFor('home-session').stdin)).toEqual({ hook_event_name: 'SessionStart', source: 'clear' })
   })
 
   it('exposes CLAUDE_PROJECT_DIR to hook commands', async () => {
@@ -718,10 +732,23 @@ describe('hooks extension notify-style events', () => {
     expect(commandsRun()).toEqual([])
   })
 
-  it('runs SessionEnd hooks with the shutdown reason', async () => {
-    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'bye' }] }] })
+  it("maps pi's threshold/overflow compaction onto Claude's auto trigger", async () => {
+    const ext = await withHooks({ PreCompact: [{ matcher: 'auto', hooks: [{ command: 'pc' }] }] })
+    await ext.beforeCompact('threshold')
+    expect(commandsRun()).toEqual(['pc'])
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ hook_event_name: 'PreCompact', trigger: 'auto' })
+  })
+
+  it("runs SessionEnd hooks with the Claude spelling of pi's shutdown reason", async () => {
+    const ext = await withHooks({ SessionEnd: [{ matcher: 'prompt_input_exit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
-    expect(JSON.parse(recordFor('bye').stdin)).toEqual({ hook_event_name: 'SessionEnd', reason: 'quit' })
+    expect(JSON.parse(recordFor('bye').stdin)).toEqual({ hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' })
+  })
+
+  it("still fires a SessionEnd matcher written against pi's raw reason", async () => {
+    const ext = await withHooks({ SessionEnd: [{ matcher: 'quit', hooks: [{ command: 'bye' }] }] })
+    await ext.shutdown('quit')
+    expect(commandsRun()).toEqual(['bye'])
   })
 })
