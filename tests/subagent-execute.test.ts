@@ -123,6 +123,8 @@ type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSigna
 const sendMessageMock = vi.fn()
 const emittedEvents: Array<{ channel: string; data: unknown }> = []
 
+const eventHandlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+
 const getExecute = (): Execute => {
   let execute: Execute | undefined
   subagentExtension({
@@ -131,6 +133,7 @@ const getExecute = (): Execute => {
     },
     sendMessage: sendMessageMock,
     events: { emit: (channel: string, data: unknown) => emittedEvents.push({ channel, data }), on: () => () => {} },
+    on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => eventHandlers.set(name, fn),
   } as never)
   if (!execute) throw new Error('subagent tool was not registered')
   return execute
@@ -186,6 +189,7 @@ beforeEach(() => {
   activeBackgroundRunsMock.mockReturnValue(0)
   sendMessageMock.mockClear()
   emittedEvents.length = 0
+  eventHandlers.clear()
   trustedCtx.ui.confirm.mockClear()
   discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
   execute = getExecute()
@@ -681,6 +685,23 @@ describe('runSingleAgent process handling', () => {
 
     await expect(pending).rejects.toThrow('Subagent was aborted')
     expect(spawnedChildren[0].kill).toHaveBeenCalledWith('SIGTERM')
+  })
+})
+
+describe('agent roster', () => {
+  it('appends nothing when no agents are discovered', async () => {
+    getExecute()
+    discoverAgentsMock.mockReturnValueOnce({ agents: [], projectAgentsDir: null })
+    await expect(eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)).resolves.toBeUndefined()
+  })
+
+  it('appends the discovered agents with descriptions to the system prompt', async () => {
+    getExecute()
+    const result = (await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)) as { systemPrompt: string }
+    expect(result.systemPrompt).toContain('BASE')
+    expect(result.systemPrompt).toContain('## Subagents')
+    // Discovery is module-mocked here; builtin discovery is covered in the agents suite.
+    expect(result.systemPrompt).toMatch(/- scout \(user\): /)
   })
 })
 

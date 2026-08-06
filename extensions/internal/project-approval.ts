@@ -69,6 +69,16 @@ const APPROVAL_BODY = 'It ships Claude Code configuration that pi-code loads. MC
  * `defaultProjectTrust` at all, so there is no user preference to fall back on. A run
  * that cannot ask has not been approved.
  */
+/** The same decision as isProjectApproved, but never prompts: an undecided project
+ * reads as unapproved. For surfaces that only display project config, like the
+ * subagent roster, where a mid-turn dialog would be wrong. */
+export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'isProjectTrusted'>, deps: ApprovalDeps = defaultDeps): boolean {
+  if (ctx.isProjectTrusted?.() !== true) return false
+  if (!deps.hasClaudeShaped(ctx.cwd)) return true
+  if (deps.piWouldAsk(ctx.cwd)) return true
+  return deps.savedDecision(ctx.cwd) === true
+}
+
 export async function isProjectApproved(ctx: ApprovalContext, deps: ApprovalDeps = defaultDeps): Promise<boolean> {
   if (ctx.isProjectTrusted?.() !== true) return false // pi already declined, or never trusted
   if (!deps.hasClaudeShaped(ctx.cwd)) return true // nothing here pi's own check would miss

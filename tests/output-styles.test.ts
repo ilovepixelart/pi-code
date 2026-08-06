@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import outputStyles, { loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
 
 // The extension reads user-scope styles and settings from the home directory; point it
 // at a throwaway dir so the developer's real ~/.claude cannot influence assertions.
@@ -19,16 +19,54 @@ const tempDir = (): string => mkdtempSync(join(tmpdir(), 'os-'))
 describe('parseStyle', () => {
   it('reads name and description from frontmatter and trims the body', () => {
     const md = '---\nname: Explanatory\ndescription: Teach while you work\n---\nExplain your reasoning.\n'
-    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Explanatory', description: 'Teach while you work', body: 'Explain your reasoning.' })
+    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Explanatory', description: 'Teach while you work', body: 'Explain your reasoning.', keepCodingInstructions: false })
   })
 
   it('falls back to the filename when name is absent and keeps the whole body', () => {
-    expect(parseStyle('Just a persona.', 'concise')).toEqual({ name: 'concise', description: '', body: 'Just a persona.' })
+    expect(parseStyle('Just a persona.', 'concise')).toEqual({ name: 'concise', description: '', body: 'Just a persona.', keepCodingInstructions: false })
+  })
+
+  it('reads keep-coding-instructions true from frontmatter', () => {
+    const md = '---\nname: Diagrams\nkeep-coding-instructions: true\n---\nLead with a diagram.\n'
+    expect(parseStyle(md, 'fallback').keepCodingInstructions).toBe(true)
   })
 
   it('parses CRLF frontmatter (Windows-authored files)', () => {
     const md = '---\r\nname: Terse\r\ndescription: Few words\r\n---\r\nBe terse.\r\n'
-    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.' })
+    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.', keepCodingInstructions: false })
+  })
+})
+
+describe('applyStyle', () => {
+  const prompt = `You are a coding agent.\nGuidelines here.\n${CODING_BASE_MARKER}\n\n<project_context>CLAUDE.md content</project_context>\n\nCurrent working directory: /p\n\n## Global Rules\nrules here`
+  const style = { name: 'Writer', description: '', body: 'You are a writing assistant.', keepCodingInstructions: false }
+
+  it('replaces the coding instructions and keeps everything after the marker', () => {
+    const applied = applyStyle(prompt, style)
+    expect(applied).not.toContain('You are a coding agent.')
+    expect(applied).toContain('## Output Style: Writer')
+    expect(applied).toContain('You are a writing assistant.')
+    expect(applied).toContain('<project_context>CLAUDE.md content</project_context>')
+    expect(applied).toContain('## Global Rules')
+  })
+
+  it('appends instead when the style keeps the coding instructions', () => {
+    const applied = applyStyle(prompt, { ...style, keepCodingInstructions: true })
+    expect(applied).toContain('You are a coding agent.')
+    expect(applied.endsWith('## Output Style: Writer\n\nYou are a writing assistant.')).toBe(true)
+  })
+
+  it('falls back to appending when the marker is absent', () => {
+    const applied = applyStyle('A custom SYSTEM.md prompt.', style)
+    expect(applied).toContain('A custom SYSTEM.md prompt.')
+    expect(applied).toContain('## Output Style: Writer')
+  })
+
+  it('matches the marker in the installed pi build', () => {
+    // Canary: pi rewording its prompt tail silently degrades replace to append; this
+    // test turns that into a visible failure at the next pi bump.
+    const source = readFileSync(join('node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'system-prompt.js'), 'utf-8')
+    expect(source).toContain(CODING_BASE_MARKER)
   })
 })
 
@@ -64,6 +102,24 @@ describe('loadStyles', () => {
   })
 })
 
+describe('builtin styles', () => {
+  it('ships Explanatory, Learning and Proactive as lowest-precedence styles', () => {
+    const styles = loadStyles([BUILTIN_STYLES_DIR])
+    const names = styles.map((style) => style.name).sort()
+    expect(names).toEqual(['Explanatory', 'Learning', 'Proactive'])
+    // Claude's built-ins are coding styles: they keep the software engineering instructions.
+    expect(styles.every((style) => style.keepCodingInstructions)).toBe(true)
+  })
+
+  it('lets a user style of the same name override a builtin', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'explanatory.md'), '---\nname: Explanatory\ndescription: mine\n---\nCustom body.')
+    const styles = loadStyles([BUILTIN_STYLES_DIR, dir])
+    const explanatory = styles.find((style) => style.name === 'Explanatory')
+    expect(explanatory?.description).toBe('mine')
+  })
+})
+
 describe('readActiveStyleName', () => {
   it('returns the outputStyle from the last file that sets it', () => {
     const dir = tempDir()
@@ -84,8 +140,8 @@ describe('readActiveStyleName', () => {
 
 describe('styleForName', () => {
   const styles = [
-    { name: 'a', description: '', body: 'A' },
-    { name: 'b', description: '', body: 'B' },
+    { name: 'a', description: '', body: 'A', keepCodingInstructions: false },
+    { name: 'b', description: '', body: 'B', keepCodingInstructions: false },
   ]
 
   it('finds the matching style, or nothing for an unknown/undefined name', () => {
@@ -116,6 +172,42 @@ describe('extension wiring', () => {
     writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: name }))
     return cwd
   }
+
+  it('reports non-interactive mode and an empty style list from the picker', async () => {
+    const cwd = tempDir()
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: string[] = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const base = { cwd, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), confirm: async () => true, select: async () => undefined } }
+    await handlers.get('session_start')?.({}, { ...base, hasUI: true })
+
+    await commands.get('output-style')?.handler('', { ...base, hasUI: false })
+    expect(notes.some((n) => n.includes('requires interactive mode'))).toBe(true)
+  })
+
+  it('sets a style directly when /output-style is given a name', async () => {
+    const cwd = projectWithStyle('Explain', 'Explain everything.')
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: string[] = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), confirm: async () => true, select: async () => undefined } }
+    await handlers.get('session_start')?.({}, ctx)
+
+    await commands.get('output-style')?.handler('proactive', ctx)
+    const saved = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8'))
+    expect(saved.outputStyle).toBe('Proactive')
+
+    await commands.get('output-style')?.handler('no-such-style', ctx)
+    expect(notes.some((n) => n.includes('Unknown output style: no-such-style'))).toBe(true)
+  })
 
   it('appends the active style body and the command persists a new choice', async () => {
     const cwd = projectWithStyle('Explain', 'Explain everything.')

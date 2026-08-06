@@ -8,8 +8,11 @@
  * tone and role. `/output-style` lists the styles and persists a choice to the
  * project's settings.local.json.
  *
- * pi keeps its own base system prompt (tools, safety); the style is layered on
- * top rather than replacing it wholesale.
+ * Claude semantics: a style replaces the built-in coding instructions unless its
+ * frontmatter sets `keep-coding-instructions: true`. The replacement excises pi's
+ * default coding prose up to a stable marker line and keeps everything after it
+ * (append text, project context, skills, other extensions' additions); when the
+ * marker is absent (custom SYSTEM.md), the style falls back to appending.
  *
  * Docs: https://code.claude.com/docs/en/output-styles.md
  */
@@ -25,6 +28,7 @@ export interface OutputStyle {
   name: string
   description: string
   body: string
+  keepCodingInstructions: boolean
 }
 
 function field(frontmatter: string, key: string): string {
@@ -37,7 +41,27 @@ export function parseStyle(content: string, fallbackName: string): OutputStyle {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   const frontmatter = match ? match[1] : ''
   const body = match ? content.slice(match[0].length) : content
-  return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim() }
+  return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim(), keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true' }
+}
+
+/** Equivalents of Claude's built-in styles, shipped with pi-code as the
+ * lowest-precedence source: a user or project style of the same name wins. */
+export const BUILTIN_STYLES_DIR = path.join(import.meta.dirname, 'internal', 'builtin-styles')
+
+/** The last line of pi's default coding instructions. Everything after it (append
+ * text, project context, skills, cwd, other extensions' additions) survives a style
+ * replacement. Tracks pi's dist/core/system-prompt.js; a canary test pins it. */
+export const CODING_BASE_MARKER = '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)'
+
+/** Apply a style per Claude semantics: replace the coding instructions unless the
+ * style keeps them; fall back to appending when the marker is absent. */
+export function applyStyle(systemPrompt: string, style: OutputStyle): string {
+  const styleSection = `## Output Style: ${style.name}\n\n${style.body}`
+  if (!style.keepCodingInstructions) {
+    const idx = systemPrompt.indexOf(CODING_BASE_MARKER)
+    if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
+  }
+  return `${systemPrompt}\n\n${styleSection}`
 }
 
 function isDirectory(target: string): boolean {
@@ -132,7 +156,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     // project styles / selection once the project is approved. isProjectTrusted alone
     // is true for a repo pi never asked about; see project-approval.
     const trusted = await isProjectApproved(ctx)
-    styles = loadStyles(styleDirs(ctx.cwd, home, trusted))
+    styles = loadStyles([BUILTIN_STYLES_DIR, ...styleDirs(ctx.cwd, home, trusted)])
     localSettingsPath = path.join(ctx.cwd, '.claude', 'settings.local.json')
     activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
     const active = styleForName(styles, activeName)
@@ -142,12 +166,24 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
     const active = styleForName(styles, activeName)
     if (!active || active.body.length === 0) return
-    return { systemPrompt: `${event.systemPrompt}\n\n## Output Style: ${active.name}\n\n${active.body}` }
+    return { systemPrompt: applyStyle(event.systemPrompt, active) }
   })
 
   pi.registerCommand('output-style', {
-    description: 'Choose the active Claude output style',
-    handler: async (_args, ctx) => {
+    description: 'Choose the active Claude output style (or /output-style <name>)',
+    handler: async (args, ctx) => {
+      const requested = args.trim()
+      if (requested) {
+        const picked = styles.find((style) => style.name.toLowerCase() === requested.toLowerCase())
+        if (!picked) {
+          ctx.ui.notify(`Unknown output style: ${requested}. Available: ${styles.map((style) => style.name).join(', ')}`, 'error')
+          return
+        }
+        activeName = picked.name
+        persistActiveStyle(localSettingsPath, picked.name)
+        ctx.ui.notify(`Output style set to ${picked.name} (applies next turn)`, 'info')
+        return
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify('/output-style requires interactive mode', 'error')
         return

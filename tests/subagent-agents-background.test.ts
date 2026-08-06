@@ -64,7 +64,13 @@ const agentMd = (fields: Record<string, string>, body = 'body text'): string => 
   return `---\n${yaml}\n---\n${body}`
 }
 
-const names = (agents: Array<{ name: string }>): string[] => agents.map((a) => a.name).sort()
+/** The bundled builtins are always present and asserted in their own tests; these
+ * suites target user/project discovery, so the helpers filter builtins out. */
+const nonBuiltin = <T extends { source: string }>(agents: T[]): T[] => agents.filter((a) => a.source !== 'builtin')
+const names = (agents: Array<{ name: string; source: string }>): string[] =>
+  nonBuiltin(agents)
+    .map((a) => a.name)
+    .sort()
 
 describe('discoverAgents', () => {
   let root: string
@@ -109,7 +115,7 @@ describe('discoverAgents', () => {
   it('loads a user agent from ~/.pi/agent/agents with source and file path', () => {
     const filePath = writeAgent(piUserDir, 'scout.md', { name: 'scout', description: 'finds things' }, 'Scout prompt')
 
-    const { agents } = discoverAgents(cwd, 'user')
+    const agents = nonBuiltin(discoverAgents(cwd, 'user').agents)
 
     expect(agents).toEqual([
       {
@@ -122,6 +128,19 @@ describe('discoverAgents', () => {
         filePath,
       },
     ])
+  })
+
+  it('always offers the bundled builtin agents at lowest precedence', () => {
+    const { agents } = discoverAgents(cwd, 'user')
+    const builtins = agents.filter((a) => a.source === 'builtin').map((a) => a.name)
+    expect(builtins.sort()).toEqual(['Explore', 'Plan', 'general-purpose'])
+  })
+
+  it('lets a user agent of the same name override a builtin', () => {
+    writeAgent(piUserDir, 'explore.md', { name: 'Explore', description: 'mine' }, 'Custom prompt')
+    const explore = discoverAgents(cwd, 'user').agents.find((a) => a.name === 'Explore')
+    expect(explore?.source).toBe('user')
+    expect(explore?.description).toBe('mine')
   })
 
   it('loads a user agent from ~/.claude/agents', () => {
@@ -155,7 +174,7 @@ describe('discoverAgents', () => {
     writeAgent(piUserDir, 'dup.md', { name: 'dup', description: 'user copy' }, 'USER')
     writeAgent(piProjectDir, 'dup.md', { name: 'dup', description: 'project copy' }, 'PROJECT')
 
-    const { agents } = discoverAgents(cwd, 'both')
+    const agents = nonBuiltin(discoverAgents(cwd, 'both').agents)
 
     expect(agents).toHaveLength(1)
     expect(agents[0].source).toBe('project')
@@ -166,7 +185,7 @@ describe('discoverAgents', () => {
     writeAgent(claudeUserDir, 'dup.md', { name: 'dup', description: 'claude copy' }, 'CLAUDE')
     writeAgent(piUserDir, 'dup.md', { name: 'dup', description: 'pi copy' }, 'PI')
 
-    const { agents } = discoverAgents(cwd, 'user')
+    const agents = nonBuiltin(discoverAgents(cwd, 'user').agents)
 
     expect(agents).toHaveLength(1)
     expect(agents[0].description).toBe('pi copy')
@@ -174,7 +193,9 @@ describe('discoverAgents', () => {
   })
 
   it('returns no agents and a null projectAgentsDir when no agent directory exists', () => {
-    expect(discoverAgents(cwd, 'both')).toEqual({ agents: [], projectAgentsDir: null })
+    const discovered = discoverAgents(cwd, 'both')
+    expect(nonBuiltin(discovered.agents)).toEqual([])
+    expect(discovered.projectAgentsDir).toBeNull()
   })
 
   it('reports the nearest ancestor .pi/agents as projectAgentsDir', () => {
@@ -245,20 +266,20 @@ describe('discoverAgents', () => {
   it('maps Claude tool names to pi tool names and lowercases unmapped ones', () => {
     writeAgent(piUserDir, 'tooled.md', { name: 'tooled', description: 'has tools', tools: 'Read, Glob, Bash, WebFetch' })
 
-    expect(discoverAgents(cwd, 'user').agents[0].tools).toEqual(['read', 'find', 'bash', 'webfetch'])
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find', 'bash', 'webfetch'])
   })
 
   it('leaves tools undefined when the tools field lists nothing usable', () => {
     writeAgent(piUserDir, 'empty-tools.md', { name: 'empty-tools', description: 'no tools', tools: '",,"' })
 
-    expect(discoverAgents(cwd, 'user').agents[0].tools).toBeUndefined()
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toBeUndefined()
   })
 
   it('accepts a YAML block list for tools, as Claude Code agent files commonly use', () => {
     mkdirSync(piUserDir, { recursive: true })
     writeFileSync(join(piUserDir, 'listed.md'), '---\nname: listed\ndescription: block list tools\ntools:\n  - Read\n  - Glob\n---\nprompt')
 
-    expect(discoverAgents(cwd, 'user').agents[0].tools).toEqual(['read', 'find'])
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find'])
   })
 
   it('skips a file with malformed YAML frontmatter instead of aborting discovery', () => {
@@ -282,7 +303,7 @@ describe('discoverAgents', () => {
   it('carries a concrete model id through from frontmatter', () => {
     writeAgent(piUserDir, 'modelled.md', { name: 'modelled', description: 'pinned model', model: 'gpt-oss:20b' })
 
-    expect(discoverAgents(cwd, 'user').agents[0].model).toBe('gpt-oss:20b')
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].model).toBe('gpt-oss:20b')
   })
 
   it('normalizes disallowedTools from a comma string or YAML list', () => {
@@ -329,7 +350,7 @@ describe('discoverAgents', () => {
     // child fail to boot. Claude's `inherit` semantics (session model) degrade safely.
     writeAgent(piUserDir, 'aliased.md', { name: 'aliased', description: 'alias model', model })
 
-    expect(discoverAgents(cwd, 'user').agents[0].model).toBeUndefined()
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].model).toBeUndefined()
   })
 })
 

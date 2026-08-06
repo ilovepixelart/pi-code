@@ -68,7 +68,7 @@ function parseEffortField(raw: unknown): string | undefined {
 const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls']
 
 /** Parse one agent markdown file; null when it is not a usable agent definition. */
-function parseAgentFile(content: string, source: 'user' | 'project', filePath: string): AgentConfig | null {
+function parseAgentFile(content: string, source: AgentSource, filePath: string): AgentConfig | null {
   let parsed: { frontmatter: Record<string, unknown>; body: string }
   try {
     parsed = parseFrontmatter<Record<string, unknown>>(content)
@@ -106,7 +106,7 @@ export interface AgentConfig {
   model?: string
   effort?: string
   systemPrompt: string
-  source: 'user' | 'project'
+  source: AgentSource
   filePath: string
 }
 
@@ -115,7 +115,7 @@ export interface AgentDiscoveryResult {
   projectAgentsDir: string | null
 }
 
-function loadAgentsFromDir(dir: string, source: 'user' | 'project'): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   const agents: AgentConfig[] = []
 
   if (!fs.existsSync(dir)) {
@@ -202,6 +202,11 @@ function buildAgentMap(userAgents: AgentConfig[], projectAgents: AgentConfig[], 
   return agentMap
 }
 
+export type AgentSource = 'user' | 'project' | 'builtin'
+
+/** Bundled default agents (Explore, Plan, general-purpose), lowest precedence. */
+export const BUILTIN_AGENTS_DIR = path.join(import.meta.dirname, 'agents')
+
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), 'agents')
   const claudeUserDir = path.join(os.homedir(), '.claude', 'agents')
@@ -209,7 +214,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   const projectClaudeDir = findNearestDir(cwd, path.join('.claude', 'agents'))
 
   // ~/.claude/agents loads first so ~/.pi/agent/agents wins on name conflicts
-  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
+  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
   // project .claude/agents loads first so project .pi/agents wins on name conflicts
   const projectAgents = scope === 'user' ? [] : [...(projectClaudeDir ? loadAgentsFromDir(projectClaudeDir, 'project') : []), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
 

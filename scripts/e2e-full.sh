@@ -49,7 +49,9 @@ mkdir -p "$FX/.claude/rules" "$FX/.claude/commands" "$FX/.claude/skills/greet" "
 printf -- '- Tests must be deterministic.\n' > "$FX/.claude/rules/testing.md"
 printf 'Reply with exactly the word HELLO_MARKER and nothing else.\n' > "$FX/.claude/commands/hello.md"
 printf -- '---\nname: greet\ndescription: Greets people for the e2e test\n---\nSay a friendly greeting.\n' > "$FX/.claude/skills/greet/SKILL.md"
-printf -- '---\nname: Pirate\ndescription: e2e style\n---\nYou may speak like a pirate.\n' > "$FX/.claude/output-styles/pirate.md"
+# A tone-only style that still codes keeps the coding instructions, per Claude's docs;
+# without the flag the new replace semantics would strip tool guidance mid-suite.
+printf -- '---\nname: Pirate\ndescription: e2e style\nkeep-coding-instructions: true\n---\nYou may speak like a pirate.\n' > "$FX/.claude/output-styles/pirate.md"
 printf '{"outputStyle": "Pirate"}\n' > "$FX/.claude/settings.local.json"
 cat > "$FX/.claude/settings.json" <<'EOF'
 {

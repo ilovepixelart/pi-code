@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
 import { hookFiles } from '../extensions/hooks.ts'
-import { hasClaudeShapedConfig, isProjectApproved } from '../extensions/internal/project-approval.ts'
+import { hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'pa-'))
@@ -51,6 +51,27 @@ describe('pi does not consider claude-shaped config trust-requiring', () => {
     const cwd = tempDir()
     write(cwd, join('.pi', 'settings.json'))
     expect(hasTrustRequiringProjectResources(cwd)).toBe(true)
+  })
+})
+
+describe('isProjectApprovedSilently', () => {
+  it('refuses when pi never trusted the project', () => {
+    expect(isProjectApprovedSilently(ctx({ isProjectTrusted: () => false }), deps())).toBe(false)
+  })
+
+  it('approves a trusted project with no claude-shaped config', () => {
+    expect(isProjectApprovedSilently(ctx(), deps({ hasClaudeShaped: () => false }))).toBe(true)
+  })
+
+  it('approves when pi itself prompted for this project', () => {
+    expect(isProjectApprovedSilently(ctx(), deps({ piWouldAsk: () => true }))).toBe(true)
+  })
+
+  it('honors a stored decision and reads undecided as unapproved, never prompting', () => {
+    expect(isProjectApprovedSilently(ctx(), deps({ savedDecision: () => true }))).toBe(true)
+    expect(isProjectApprovedSilently(ctx(), deps({ savedDecision: () => false }))).toBe(false)
+    // The prompting variant would ask here; the silent one must not.
+    expect(isProjectApprovedSilently(ctx(), deps({ savedDecision: () => null }))).toBe(false)
   })
 })
 
