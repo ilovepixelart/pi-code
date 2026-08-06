@@ -173,6 +173,22 @@ describe('extension wiring', () => {
     return cwd
   }
 
+  it('reports non-interactive mode and an empty style list from the picker', async () => {
+    const cwd = tempDir()
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: string[] = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const base = { cwd, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), confirm: async () => true, select: async () => undefined } }
+    await handlers.get('session_start')?.({}, { ...base, hasUI: true })
+
+    await commands.get('output-style')?.handler('', { ...base, hasUI: false })
+    expect(notes.some((n) => n.includes('requires interactive mode'))).toBe(true)
+  })
+
   it('sets a style directly when /output-style is given a name', async () => {
     const cwd = projectWithStyle('Explain', 'Explain everything.')
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()

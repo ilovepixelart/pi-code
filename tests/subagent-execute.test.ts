@@ -689,6 +689,12 @@ describe('runSingleAgent process handling', () => {
 })
 
 describe('agent roster', () => {
+  it('appends nothing when no agents are discovered', async () => {
+    getExecute()
+    discoverAgentsMock.mockReturnValueOnce({ agents: [], projectAgentsDir: null })
+    await expect(eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)).resolves.toBeUndefined()
+  })
+
   it('appends the discovered agents with descriptions to the system prompt', async () => {
     getExecute()
     const result = (await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)) as { systemPrompt: string }
