@@ -93,16 +93,29 @@ mkdir -p "$FAKEHOME/.pi/agent"
 for f in auth.json models.json models-store.json; do
   [ -f "$HOME/.pi/agent/$f" ] && cp "$HOME/.pi/agent/$f" "$FAKEHOME/.pi/agent/$f"
 done
-python3 - "$HOME/.pi/agent/settings.json" "$FAKEHOME/.pi/agent/settings.json" "$REPO" <<'PY'
+# A wire probe records the exact provider payload of each request, giving the context
+# checks a deterministic oracle: what the model was actually sent, not what it recalls.
+WIRE="$FAKEHOME/wire.json"
+cat > "$FAKEHOME/wire-probe.ts" <<'EOF'
+import * as fs from 'node:fs'
+export default function wireProbe(pi: { on: (event: string, handler: (event: unknown) => void) => void }) {
+  pi.on('before_provider_request', (event) => {
+    const target = process.env.PI_E2E_WIRE
+    if (target) fs.writeFileSync(target, JSON.stringify(event))
+  })
+}
+EOF
+python3 - "$HOME/.pi/agent/settings.json" "$FAKEHOME/.pi/agent/settings.json" "$REPO" "$FAKEHOME/wire-probe.ts" <<'PY'
 import json, sys
-src, dst, repo = sys.argv[1:4]
+src, dst, repo, probe = sys.argv[1:5]
 try:
     settings = json.load(open(src))
 except Exception:
     settings = {}
 settings["packages"] = [repo]
 settings["defaultThinkingLevel"] = "low"
-for key in ("extensions", "skills", "prompts"):
+settings["extensions"] = [probe]
+for key in ("skills", "prompts"):
     settings.pop(key, None)
 json.dump(settings, open(dst, "w"))
 PY
@@ -122,7 +135,7 @@ cleanup() {
 trap cleanup EXIT
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE pi"
 
 # --- Deterministic checks -------------------------------------------------------------
 if wait_for 'Trust this project\?' 30; then
@@ -170,12 +183,12 @@ type_prompt "/hello"
 if wait_for 'HELLO_MARKER' 200; then ok "commands: /hello template drove the turn"; else bad "commands: no HELLO_MARKER"; fi
 if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusline: no turn segment"; fi
 
-# One question per turn: the two-question form let the model answer without ever
-# emitting the literal codeword, failing a healthy import (three misses in a row).
-type_prompt "What is the codeword in the imported context? Answer with just the codeword."
-if wait_for 'ZANZIBAR' 200; then ok "context-imports: @import content reached the model"; else bad "context-imports: codeword missing"; fi
-type_prompt "What marker does the CLAUDE.local.md section contain? Answer with just the marker."
-if wait_for 'PERSONAL LOCAL NOTE MARKER' 200; then ok "context-imports: CLAUDE.local.md loaded"; else bad "context-imports: local marker missing"; fi
+# The wire dump written during the /hello turn is the ground truth for context
+# injection: the exact payload the provider received, independent of model recall
+# (which proved unreliable in both directions as the prompt and thinking level varied).
+if wait_file "$WIRE" 20 && grep -q 'ZANZIBAR' "$WIRE"; then ok "context-imports: @import content on the wire"; else bad "context-imports: import missing from payload"; fi
+if grep -q 'PERSONAL LOCAL NOTE MARKER' "$WIRE" 2>/dev/null; then ok "context-imports: CLAUDE.local.md on the wire"; else bad "context-imports: local marker missing from payload"; fi
+if grep -q 'testing.md' "$WIRE" 2>/dev/null; then ok "rules: project rule pointer on the wire"; else bad "rules: pointer missing from payload"; fi
 
 type_prompt "Call the e2e_ping tool now and repeat its output verbatim."
 if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "mcp: no E2EPONG"; fi
@@ -258,7 +271,7 @@ sleep 2
 
 # --- Second session: persistence checks -----------------------------------------------
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE pi"
 if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
 # Known pi TUI interaction: this banner renders standalone but not always in the full
 # extension load; the memory feature itself is asserted above via the on-disk file.
