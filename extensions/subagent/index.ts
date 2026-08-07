@@ -27,7 +27,7 @@ import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
-import { activeBackgroundRuns, backgroundStatusText, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -460,6 +460,7 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process (single mode)' })),
   background: Type.Optional(Type.Boolean({ description: 'Run the single-mode task in the background: returns a run id immediately and a notification arrives when it completes.' })),
   status: Type.Optional(Type.Boolean({ description: 'Set true (alone, no other params) to list background runs instead of running anything.' })),
+  cancel: Type.Optional(Type.String({ description: 'Background run id to cancel (from the id returned when it started, or from status).' })),
 })
 
 /**
@@ -1119,6 +1120,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
           projectAgentsDir: discovery.projectAgentsDir,
           results,
         })
+
+      if (params.cancel) {
+        const outcome = cancelBackgroundRun(params.cancel)
+        const text = outcome === 'cancelled' ? `Cancelled background run ${params.cancel}.` : outcome === 'not-running' ? `Background run ${params.cancel} already finished; nothing to cancel.` : `Unknown background run: ${params.cancel}.\n\n${backgroundStatusText()}`
+        return { content: [{ type: 'text', text }], details: makeDetails('single')([]) }
+      }
 
       if (params.status) {
         return { content: [{ type: 'text', text: backgroundStatusText() }], details: makeDetails('single')([]) }

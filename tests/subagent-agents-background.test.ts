@@ -29,7 +29,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => fakeHome.path }
 })
 
-type FakeChild = EventEmitter & { stdout: EventEmitter }
+type FakeChild = EventEmitter & { stdout: EventEmitter; pid: number; kill: ReturnType<typeof vi.fn> }
 
 interface SpawnCall {
   command: string
@@ -43,7 +43,8 @@ vi.mock('node:child_process', async () => {
   const { EventEmitter: Emitter } = await import('node:events')
   return {
     spawn: (command: string, args: string[], options: unknown) => {
-      const child = Object.assign(new Emitter(), { stdout: new Emitter() }) as FakeChild
+      // pid and kill mirror a real child: cancellation signals the process group.
+      const child = Object.assign(new Emitter(), { stdout: new Emitter(), pid: 4242, kill: vi.fn() }) as FakeChild
       spawned.calls.push({ command, args, options })
       spawned.children.push(child)
       return child
@@ -454,6 +455,35 @@ describe('formatStatus', () => {
   })
 })
 
+describe('cancelBackgroundRun', () => {
+  const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
+
+  it('signals the run, reports cancelled state, and keeps it after the child exits', async () => {
+    const { startBackgroundRun, cancelBackgroundRun, backgroundStatusText } = await loadBackground()
+    let completed: { state: string } | undefined
+    const id = startBackgroundRun('scout', 'survey', invocation, (run) => {
+      completed = run
+    })
+
+    expect(cancelBackgroundRun(id as string)).toBe('cancelled')
+    expect(spawned.children[0].kill).toHaveBeenCalled()
+    expect(backgroundStatusText()).toContain('cancelled')
+
+    // The child's non-zero exit is the cancellation; it must not read as a failure.
+    spawned.children[0].emit('close', 143)
+    expect(completed?.state).toBe('cancelled')
+  })
+
+  it('reports an unknown id and a run that already finished', async () => {
+    const { startBackgroundRun, cancelBackgroundRun } = await loadBackground()
+    expect(cancelBackgroundRun('bg-deadbeef')).toBe('unknown')
+
+    const id = startBackgroundRun('scout', 'survey', invocation, () => {})
+    spawned.children[0].emit('close', 0)
+    expect(cancelBackgroundRun(id as string)).toBe('not-running')
+  })
+})
+
 describe('startBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
 
@@ -483,7 +513,7 @@ describe('startBackgroundRun', () => {
       {
         command: 'pi',
         args: ['--mode', 'json'],
-        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'ignore'], env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
+        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'ignore'], detached: true, env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
       },
     ])
   })
