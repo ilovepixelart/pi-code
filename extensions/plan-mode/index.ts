@@ -406,13 +406,18 @@ After completing a step, include a [DONE:n] tag in your response.`,
       // across /reload and cost the session edit and write for good; applying the
       // snapshot when plan mode is off would instead push a stale set over whatever
       // pi has registered since, so it stays scoped to this branch.
-      const recorded = planModeEntry?.data?.savedTools
-      savedTools = recorded ?? pi.getActiveTools()
+      savedTools = planModeEntry?.data?.savedTools ?? pi.getActiveTools()
       pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
       // --plan enters plan mode without ever toggling, so nothing has persisted yet
       // and a /reload would find no snapshot to restore from. Record it now, while
       // the active set still says what was there before the restriction.
-      if (!recorded) persistState()
+      //
+      // Only with no entry at all: an entry written before this field existed means
+      // the active set has already been through a restore and may be the restriction
+      // itself. Those tools are lost for this process either way, but persisting a
+      // guess would write the loss into the session file, where a later resume would
+      // inherit it instead of starting over.
+      if (!planModeEntry) persistState()
     } else {
       // A prior session in this instance may have shrunk the tool set; undo that when
       // the restored/fresh state is not plan mode.

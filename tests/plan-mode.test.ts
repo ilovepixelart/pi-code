@@ -511,6 +511,18 @@ describe('session restore', () => {
     expect(reloaded.getActiveTools()).toContain('write')
   })
 
+  it('does not write a guessed snapshot over an entry that predates the field', async () => {
+    // Upgrading pi-code mid-session then reloading: the entry says plan mode is on but
+    // carries no snapshot, and the active set is already the restriction. Persisting
+    // what it sees would cement the loss into the session file for every later resume.
+    const s = setup({ activeTools: afterReload(['read', 'bash', 'plan_mode_complete']) })
+    const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: true, todos: [], executing: false } }]
+
+    await s.emit('session_start', { reason: 'reload' }, restoreCtx(s, entries))
+
+    expect(s.appended.filter((e) => e.type === 'plan-mode')).toEqual([])
+  })
+
   it('does not push a recorded snapshot over the live tool set when plan mode is off', async () => {
     // The snapshot is only meaningful for undoing a restriction. Applying it on a
     // restore that is not in plan mode would drop whatever pi registered since it was
