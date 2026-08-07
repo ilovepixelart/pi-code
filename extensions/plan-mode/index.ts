@@ -390,7 +390,6 @@ After completing a step, include a [DONE:n] tag in your response.`,
       planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled
       todoItems = planModeEntry.data.todos ?? todoItems
       executionMode = planModeEntry.data.executing ?? executionMode
-      savedTools = planModeEntry.data.savedTools ?? savedTools
     }
     publishPlanState()
 
@@ -402,10 +401,12 @@ After completing a step, include a [DONE:n] tag in your response.`,
     }
 
     if (planModeEnabled) {
-      // Only snapshot when the entry carried nothing: re-reading the active set here
-      // would capture the restriction pi carried across /reload, and restoring it
-      // later would cost the session edit and write for good.
-      if (savedTools.length === 0) savedTools = pi.getActiveTools()
+      // Restoring into plan mode is the only case the recorded snapshot is for.
+      // Re-reading the active set here would capture the restriction pi carried
+      // across /reload and cost the session edit and write for good; applying the
+      // snapshot when plan mode is off would instead push a stale set over whatever
+      // pi has registered since, so it stays scoped to this branch.
+      savedTools = planModeEntry?.data?.savedTools ?? pi.getActiveTools()
       pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
     } else {
       // A prior session in this instance may have shrunk the tool set; undo that when

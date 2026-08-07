@@ -492,6 +492,21 @@ describe('session restore', () => {
     expect(reloaded.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete'])
   })
 
+  it('does not push a recorded snapshot over the live tool set when plan mode is off', async () => {
+    // The snapshot is only meaningful for undoing a restriction. Applying it on a
+    // restore that is not in plan mode would drop whatever pi registered since it was
+    // taken, e.g. an MCP server's tools connecting into the rebuilt session.
+    const s = setup()
+    await s.runCommand('plan')
+    await s.runCommand('plan')
+    const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
+
+    const reloaded = setup({ activeTools: [...ALL_TOOLS, 'mcp_sonar_search'] })
+    await reloaded.emit('session_start', { reason: 'reload' }, restoreCtx(reloaded, entries))
+
+    expect(reloaded.getActiveTools()).toContain('mcp_sonar_search')
+  })
+
   it('falls back to the active set when the entry predates the recorded snapshot', async () => {
     // Sessions written before savedTools was persisted must still restore something.
     const s = setup()
