@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import gitCheckpoint, { sessionSlug } from '../extensions/git-checkpoint.ts'
+import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
 
 type Handler = (event: any, ctx: any) => Promise<unknown>
 
@@ -178,5 +178,38 @@ describe('shadow-repo checkpoint lifecycle', () => {
     await t.commands.get('rewind')?.handler('', t.makeCtx([bad], [userEntry], [rewindLabel(bad.data), 'Code only']))
 
     expect(t.notifications.some((n) => n.startsWith('[warning] Code restore failed'))).toBe(true)
+  })
+})
+
+describe('pruneCheckpointRepos', () => {
+  const mkRepo = (root: string, name: string, ageDays: number): string => {
+    const dir = join(root, name)
+    mkdirSync(dir, { recursive: true })
+    const when = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000)
+    utimesSync(dir, when, when)
+    return dir
+  }
+
+  it('removes shadow repos past the retention window and keeps recent ones', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ckpt-root-'))
+    const old = mkRepo(root, 'old-session', 45)
+    const fresh = mkRepo(root, 'fresh-session', 2)
+
+    pruneCheckpointRepos(root, CHECKPOINT_RETENTION_DAYS)
+
+    expect(existsSync(old)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('never removes the repo of the live session and tolerates a missing root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ckpt-root-'))
+    const live = mkRepo(root, 'live-session', 90)
+
+    pruneCheckpointRepos(root, CHECKPOINT_RETENTION_DAYS, live)
+    expect(existsSync(live)).toBe(true)
+
+    expect(() => pruneCheckpointRepos(join(root, 'absent'), CHECKPOINT_RETENTION_DAYS)).not.toThrow()
+    rmSync(root, { recursive: true, force: true })
   })
 })
