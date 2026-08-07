@@ -18,11 +18,11 @@ afterEach(() => {
 
 describe('parseCommandFile', () => {
   it('reads the frontmatter Claude documents and keeps the body', () => {
-    const md = ['---', 'description: Ship it', 'argument-hint: [pr]', 'allowed-tools: Bash, Read', 'model: sonnet', 'disable-model-invocation: true', '---', 'Do the thing with $1.'].join('\n')
+    const md = ['---', 'description: Ship it', 'argument-hint: [pr]', 'allowed-tools: Bash, Read, Glob', 'model: sonnet', 'disable-model-invocation: true', '---', 'Do the thing with $1.'].join('\n')
     expect(parseCommandFile(md)).toEqual({
       description: 'Ship it',
       argumentHint: '[pr]',
-      allowedTools: ['bash', 'read'],
+      allowedTools: ['bash', 'read', 'find'],
       model: 'sonnet',
       disableModelInvocation: true,
       body: 'Do the thing with $1.',

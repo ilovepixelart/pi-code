@@ -61,6 +61,14 @@ export function collectCommands(dirs: string[]): DiscoveredCommand[] {
 
 export default function commandsExtension(pi: ExtensionAPI) {
   const registered = new Set<string>()
+  /** Tool set to put back once the turn a restricted command drove has ended. */
+  let pendingRestore: string[] | undefined
+
+  pi.on('turn_end', async () => {
+    if (!pendingRestore) return
+    pi.setActiveTools(pendingRestore)
+    pendingRestore = undefined
+  })
 
   async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext): Promise<void> {
     const withArgs = substituteArgs(parsed.body, args)
@@ -73,17 +81,16 @@ export default function commandsExtension(pi: ExtensionAPI) {
       return { stdout: result.stdout, stderr: result.stderr, code: result.code }
     })
 
-    // allowed-tools restricts the turn the command drives, then the previous set is
-    // restored: the restriction belongs to the command, not to the rest of the session.
-    const saved = parsed.allowedTools ? pi.getActiveTools() : undefined
-    if (parsed.allowedTools && saved) {
+    // allowed-tools restricts the turn the command drives, and the previous set is
+    // restored when that turn ends. Restoring inline does not work: sendUserMessage is
+    // fire-and-forget, so the restore would land before the agent ever read the tool
+    // list, leaving the command running with everything enabled.
+    if (parsed.allowedTools) {
+      const saved = pi.getActiveTools()
+      pendingRestore = saved
       pi.setActiveTools(parsed.allowedTools.filter((tool) => saved.includes(tool)))
     }
-    try {
-      pi.sendUserMessage(expanded)
-    } finally {
-      if (saved) pi.setActiveTools(saved)
-    }
+    pi.sendUserMessage(expanded)
   }
 
   pi.on('session_start', async (_event, ctx) => {

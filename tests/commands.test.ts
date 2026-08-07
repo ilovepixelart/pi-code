@@ -128,14 +128,20 @@ describe('commands extension', () => {
     expect(s.execCalls[0].shell).toContain('pwd')
   })
 
-  it('restricts tools for the command turn and restores them afterwards', async () => {
+  it('keeps the restriction in place for the turn, restoring only when it ends', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
     const s = setup(cwd)
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('safe')?.handler('', s.ctx)
 
+    // sendUserMessage is fire-and-forget, so restoring inside the handler would put
+    // the full set back before the agent ever read it: the restriction must outlive
+    // the handler and end with the turn.
     expect(s.toolSets[0]).toEqual(['read'])
+    expect(s.activeTools()).toEqual(['read'])
+
+    await s.handlers.get('turn_end')?.({}, s.ctx)
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
