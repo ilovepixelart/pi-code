@@ -50,7 +50,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Persistent memory | per-project memories, index injected each session | `memory.ts` |
 | WebSearch / WebFetch | key-free DuckDuckGo search, SSRF-guarded fetch | `web.ts` |
 | AskUserQuestion | one question with `header`, single- or `multiSelect` options, plus free-text; no multi-question batching | `question.ts` |
-| Statusline | turn state + session cost | `status-line.ts` |
+| Statusline | Claude `statusLine` command contract (stdin JSON, `padding`, `refreshInterval`); built-in turn state + session cost fallback | `status-line.ts` |
 | Notifications | vendored example | `notify.ts` |
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.

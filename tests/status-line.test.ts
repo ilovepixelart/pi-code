@@ -1,16 +1,35 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { describe, expect, it, vi } from 'vitest'
 
 import statusLine from '../extensions/status-line.ts'
+
+// The extension reads statusLine settings from the home dir at session start; point
+// it at an empty temp home so the developer's real config never reaches the tests.
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home }
+})
+hoisted.home = mkdtempSync(join(tmpdir(), 'sl-home-'))
 
 const theme = { fg: (_color: string, text: string) => text }
 
 function setup() {
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>()
-  statusLine({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, fn) } as never)
+  statusLine({
+    on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, fn),
+    events: { on: () => () => {}, emit: () => {} },
+  } as never)
   const status: string[] = []
   const makeCtx = (branch: unknown[] = []) => ({
-    ui: { theme, setStatus: (_key: string, text: string) => status.push(text) },
-    sessionManager: { getBranch: () => branch },
+    cwd: mkdtempSync(join(tmpdir(), 'sl-cwd-')),
+    isProjectTrusted: () => true,
+    ui: { theme, setStatus: (_key: string, text: string) => status.push(text), confirm: async () => true, notify: () => {} },
+    sessionManager: { getBranch: () => branch, getSessionId: () => 's', getSessionFile: () => undefined },
+    getContextUsage: () => ({ tokens: 0, contextWindow: 0, percent: 0 }),
   })
   return { handlers, status, makeCtx }
 }
