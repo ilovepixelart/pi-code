@@ -5,7 +5,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { getAgentDir, parseFrontmatter } from '@earendil-works/pi-coding-agent'
+import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 
 // Claude Code tool names -> pi tool names; unmapped names pass through lowercased
 const CLAUDE_TOOL_MAP: Record<string, string> = {
@@ -110,30 +110,31 @@ export function withPreloadedSkills(prompt: string, skills: string[] | undefined
  * prompt sent to the model, so a traversal would be an arbitrary-file read. */
 const SKILL_NAME = /^[A-Za-z0-9_.-]+$/
 
+/** Read one candidate file, but only if it really sits under `root` once symlinks
+ * are resolved. Both sides are canonicalised: on macOS /var is itself a symlink, so
+ * comparing a resolved path against an unresolved root rejects every valid read. */
+function readConfined(candidate: string, root: string): string | undefined {
+  try {
+    const real = fs.realpathSync(candidate)
+    if (real !== root && !real.startsWith(root + path.sep)) return undefined
+    return stripFrontmatter(fs.readFileSync(real, 'utf-8'))
+  } catch {
+    return undefined
+  }
+}
+
 function readSkillBody(name: string, skillDirs: string[]): string | undefined {
   if (!SKILL_NAME.test(name) || name === '.' || name === '..') return undefined
   for (const dir of skillDirs) {
-    // Both sides canonicalised: on macOS /var is itself a symlink, so comparing a
-    // resolved path against an unresolved root rejects every legitimate read.
     let root: string
     try {
       root = fs.realpathSync(dir)
     } catch {
-      continue
+      continue // a skills directory that does not exist simply contributes nothing
     }
     for (const candidate of [path.join(dir, name, 'SKILL.md'), path.join(dir, `${name}.md`)]) {
-      try {
-        // The file actually read must sit under the skills directory after symlinks
-        // are resolved: a repository can ship .claude/skills/<name> as a symlink, and
-        // a lexical check resolves no links at all.
-        const real = fs.realpathSync(candidate)
-        if (real !== root && !real.startsWith(root + path.sep)) continue
-        const content = fs.readFileSync(real, 'utf-8')
-        const match = /^---\r?\n[\s\S]*?\r?\n---/.exec(content)
-        return match ? content.slice(match[0].length) : content
-      } catch {
-        // try the next shape
-      }
+      const body = readConfined(candidate, root)
+      if (body !== undefined) return body
     }
   }
   return undefined
