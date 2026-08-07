@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
+import { discoverAgents, resolveModelAlias, withPreloadedSkills } from '../extensions/subagent/agents.ts'
 
 /**
  * Covers extensions/subagent/agents.ts and extensions/subagent/background.ts.
@@ -705,5 +705,27 @@ describe('resumeBackgroundRun', () => {
     const id = startBackgroundRun('scout', 'first', invocation, () => {}) as string
     expect(resumeBackgroundRun(id, 'again', () => {})).toBe('still-running')
     expect(resumeBackgroundRun('bg-nope', 'again', () => {})).toBe('unknown')
+  })
+})
+
+describe('resolveModelAlias', () => {
+  const available = [
+    { id: 'claude-sonnet-4-5', provider: 'anthropic' },
+    { id: 'claude-opus-4-1', provider: 'anthropic' },
+    { id: 'gpt-oss:20b', provider: 'ollama' },
+  ]
+
+  it('resolves a Claude tier alias to an authenticated model id', () => {
+    expect(resolveModelAlias('sonnet', available)).toBe('claude-sonnet-4-5')
+    expect(resolveModelAlias('Opus', available)).toBe('claude-opus-4-1')
+  })
+
+  it('returns undefined when the tier is not available, so the session model is used', () => {
+    expect(resolveModelAlias('haiku', available)).toBeUndefined()
+    expect(resolveModelAlias('sonnet', [{ id: 'gpt-oss:20b', provider: 'ollama' }])).toBeUndefined()
+  })
+
+  it('treats inherit as the session model rather than a tier to look up', () => {
+    expect(resolveModelAlias('inherit', available)).toBeUndefined()
   })
 })

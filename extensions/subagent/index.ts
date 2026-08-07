@@ -27,7 +27,7 @@ import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { skillDirs } from '../skills.js'
-import { type AgentConfig, type AgentScope, discoverAgents, withPreloadedSkills } from './agents.js'
+import { type AgentConfig, type AgentScope, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
@@ -262,6 +262,8 @@ interface RunAgentOptions {
   onPhase?: SubagentPhaseSink
   /** Skill directories to preload from, resolved where project trust is known. */
   skillRoots?: string[]
+  /** Models this user can actually run, for resolving a tier alias. */
+  availableModels?: ReadonlyArray<{ id: string }>
 }
 
 /** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
@@ -297,7 +299,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     }
   }
 
-  const args = agentInvocationArgs(agent)
+  const args = agentInvocationArgs(agent, resolveModelAlias(agent.modelAlias, options.availableModels ?? []))
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
@@ -527,6 +529,7 @@ interface ModeContext {
   makeDetails: MakeDetails
   onPhase?: SubagentPhaseSink
   skillRoots: string[]
+  availableModels: ReadonlyArray<{ id: string }>
 }
 
 async function checkProjectAgentGate(params: SubagentParamsStatic, agents: AgentConfig[], ctx: ExtensionContext, projectAgentsDir: string | null, gateMode: SubagentMode, makeDetails: MakeDetails): Promise<ToolResult | null> {
@@ -560,11 +563,13 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
 }
 
 /** CLI args shared by foreground and background children, from the agent's config. */
-function agentInvocationArgs(agent: AgentConfig): string[] {
+function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] {
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  // pi reads a thinking level from the model pattern's :suffix when a model is pinned,
-  // and from --thinking otherwise, so effort survives either way.
-  if (agent.model) args.push('--model', agent.effort ? `${agent.model}:${agent.effort}` : agent.model)
+  // A concrete model wins; otherwise a Claude tier alias resolved against the models
+  // this user can actually run. pi reads a thinking level from the model pattern's
+  // :suffix when a model is pinned, and from --thinking otherwise.
+  const model = agent.model ?? aliasModel
+  if (model) args.push('--model', agent.effort ? `${model}:${agent.effort}` : model)
   else if (agent.effort) args.push('--thinking', agent.effort)
   if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
   if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', agent.disallowedTools.join(','))
@@ -592,7 +597,7 @@ function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefine
   }
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[]): Promise<ToolResult> {
+async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>): Promise<ToolResult> {
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -612,7 +617,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
     return backgroundCapResult(makeDetails)
   }
-  const args = agentInvocationArgs(agent)
+  const args = agentInvocationArgs(agent, resolveModelAlias(agent.modelAlias, availableModels))
   let tmpPrompt: { dir: string; filePath: string } | undefined
   const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots)
   if (promptWithSkills.trim()) {
@@ -675,6 +680,7 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
       makeDetails: makeDetails('chain'),
       onPhase: mode.onPhase,
       skillRoots: mode.skillRoots,
+      availableModels: mode.availableModels,
     })
     results.push(result)
 
@@ -791,6 +797,7 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
     makeDetails: makeDetails('single'),
     onPhase: mode.onPhase,
     skillRoots: mode.skillRoots,
+    availableModels: mode.availableModels,
   })
   const isError = result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
   if (isError) {
@@ -1185,10 +1192,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // Project skills only preload once the project is approved, matching the
       // gate the skills extension applies to discovery itself.
       const skillRoots = skillDirs(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+      // Tier aliases resolve against what this user is authenticated for; an
+      // unavailable tier still falls back to the session model.
+      const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots)
+      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels)
 
-      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
+      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 
       if (params.chain?.length) return runChainMode(params.chain, mode)
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)

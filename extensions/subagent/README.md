@@ -114,11 +114,15 @@ Claude Code fields map onto pi where a sensible seam exists: `tools` and
 `--exclude-tools`; `effort` becomes the `:thinking` suffix on a pinned model, or
 `--thinking` when no model is pinned;
 `permissionMode: plan` selects a read-only toolset unless `tools` is set. Model
-aliases (`sonnet`, `opus`, `haiku`, `inherit`) run on the session's default
-model. `skills` names skills to preload: their bodies are inlined into the child's
+aliases (`sonnet`, `opus`, `haiku`) resolve against the models this machine is
+authenticated for, falling back to the session's default model when that tier is
+unavailable; `inherit` is the session model by definition. `skills` names skills to preload: their bodies are inlined into the child's
 prompt, since a child pi process does not inherit the parent's skill discovery, and
 a name that resolves to nothing is reported in the prompt rather than dropped.
-Fields with no pi equivalent are ignored: `memory`, `mcpServers`, `maxTurns`.
+Fields with no pi seam are ignored, each verified against pi's CLI rather than
+assumed: `maxTurns` (no turn-limit flag), `mcpServers` (a child reads MCP config
+from files, and writing config into the workspace to fake it would be worse than
+the gap), and `memory` (pi-code's memory is per project, not per agent).
 
 **Locations:**
 - `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)
