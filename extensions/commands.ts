@@ -92,10 +92,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
       // command would otherwise record the first one's narrowed set as the thing to
       // restore, and the tools the first command dropped would never come back.
       pendingRestore ??= saved
-      // An empty grant means every name was one pi has no tool for. Running the turn
-      // with no tools at all is never what the command asked for, so leave the set
-      // alone and let it run unrestricted rather than crippled.
-      if (granted.length > 0) pi.setActiveTools(granted)
+      // `allowed-tools: []` says no tools, and is honored. A non-empty list that
+      // intersects to nothing named only tools pi has none of: that restriction cannot
+      // be expressed, and applying it as "no tools" is not what the command asked for.
+      if (granted.length > 0 || parsed.allowedTools.length === 0) pi.setActiveTools(granted)
     }
     pi.sendUserMessage(expanded)
   }

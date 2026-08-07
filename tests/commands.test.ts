@@ -145,6 +145,28 @@ describe('commands extension', () => {
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
+  it('honors an explicitly empty grant, which asks for no tools', async () => {
+    // Distinct from the case below: `[]` is a restriction the author wrote, not a
+    // restriction that failed to map.
+    const cwd = tempDir()
+    writeCommand(cwd, 'none.md', '---\nallowed-tools: []\n---\nThink only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('none')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual([])
+  })
+
+  it('applies a flow-sequence grant, which YAML allows and a hand-rolled parse missed', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'ro.md', '---\nallowed-tools: [Read]\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ro')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['read'])
+  })
+
   it('runs unrestricted rather than with no tools when no name maps to a pi tool', async () => {
     // Every unmapped Claude name intersects the active set to nothing. A turn with no
     // tools is never what the command asked for.

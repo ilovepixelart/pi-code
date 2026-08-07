@@ -273,6 +273,14 @@ describe('discoverAgents', () => {
     expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find', 'bash', 'web_fetch', 'notebookedit'])
   })
 
+  it('keeps a comma inside an agent scope out of the entry split', () => {
+    writeAgent(piUserDir, 'mv.md', { name: 'mv', description: 'scoped bash', tools: 'Bash(mv, write, cp)' })
+
+    // --tools is an exact-name allowlist, so the fragments used to hand the child pi's
+    // real write tool from an agent that granted only a scoped bash permission.
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['bash'])
+  })
+
   it('grants the base tool for an argument-scoped agent tools entry', () => {
     writeAgent(piUserDir, 'scoped.md', { name: 'scoped', description: 'scoped tools', tools: 'Bash(git add:*), Read' })
 

@@ -38,6 +38,30 @@ describe('parseCommandFile', () => {
     expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
   })
 
+  it.each([
+    ['a flow sequence', 'allowed-tools: [Bash, Read]'],
+    ['an indented block list', 'allowed-tools:\n  - Bash\n  - Read'],
+    ['an unindented block list', 'allowed-tools:\n- Bash\n- Read'],
+    ['quoted items around a blank line', 'allowed-tools:\n  - "Bash"\n\n  - Read'],
+  ])('reads %s, which YAML allows and Claude files use', (_label, field) => {
+    // A shape the parser misreads yields no names, and a restriction that reads as
+    // empty is not applied at all: mangling a valid grant runs the turn wide open.
+    expect(parseCommandFile(`---\n${field}\n---\nBody.`).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it('keeps an explicitly empty grant distinct from an absent one', () => {
+    // `[]` says no tools and must stay a restriction; no key at all is no restriction.
+    expect(parseCommandFile('---\nallowed-tools: []\n---\nBody.').allowedTools).toEqual([])
+    expect(parseCommandFile('---\nmodel: sonnet\n---\nBody.').allowedTools).toBeUndefined()
+  })
+
+  it('reads a multi-line description rather than falling back to the body', () => {
+    const md = ['---', 'description:', '  A long description', 'model: sonnet', '---', 'Body line.'].join('\n')
+
+    expect(parseCommandFile(md).description).toBe('A long description')
+    expect(parseCommandFile(md).model).toBe('sonnet')
+  })
+
   it('maps the Claude names of the tools this package registers', () => {
     // Without these, an ordinary research command matched no pi tool and its turn was
     // intersected down to nothing.
@@ -58,13 +82,6 @@ describe('parseCommandFile', () => {
     const md = ['---', 'allowed-tools:', '  - Bash(git add:*)', '  - Read', '---', 'Stage it.'].join('\n')
 
     expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
-  })
-
-  it('does not let an empty key take the following line as its value', () => {
-    const md = ['---', 'description:', 'model: sonnet', '---', 'Body line.'].join('\n')
-
-    expect(parseCommandFile(md).description).toBe('Body line.')
-    expect(parseCommandFile(md).model).toBe('sonnet')
   })
 
   it('leaves a command with only scoped grants able to run', () => {

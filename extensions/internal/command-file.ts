@@ -12,6 +12,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
+
 export interface ParsedCommand {
   description: string
   argumentHint?: string
@@ -69,53 +71,63 @@ export function normalizeToolName(name: string): string {
  * Entries are comma-separated, except a comma inside an argument scope belongs to the
  * scope: `Bash(cat, tail)` is one grant, not three. Splitting on every comma made the
  * fragments between them top-level entries, so a command naming only `Bash` came away
- * with pi's `edit` tool active. A leading `-` is stripped so a YAML block list parses
- * as the same list.
+ * with pi's `edit` tool active.
+ *
+ * Scanned rather than matched with a regex: the pattern form is quadratic on an input
+ * of unclosed parens, and a command file comes from the repository.
  */
-function toolEntries(raw: string): string[] {
-  return (raw.match(/[^,()]+(?:\([^)]*\))?/g) ?? []).map((entry) => entry.trim().replace(/^-\s*/, '')).filter(Boolean)
-}
-
-function field(frontmatter: string, key: string): string {
-  // Horizontal whitespace only: `\s` spans newlines, so a key with no value on its
-  // own line used to take the following line as its value.
-  const match = new RegExp(String.raw`^\s*${key}[^\S\r\n]*:[^\S\r\n]*(.+)$`, 'm').exec(frontmatter)
-  return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+export function toolEntries(raw: string): string[] {
+  const entries: string[] = []
+  let current = ''
+  let depth = 0
+  for (const ch of raw) {
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    if (ch === ',' && depth === 0) {
+      entries.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  entries.push(current)
+  return entries.map((entry) => entry.trim()).filter(Boolean)
 }
 
 /**
- * `allowed-tools` may be inline (`Bash, Read`) or a YAML block list beneath the key.
- * Scanned line by line rather than with one multi-line pattern: the repeated-group
- * form of that pattern backtracks exponentially on a long run of near-matching lines.
+ * A tool grant is either a comma-separated string or a YAML list, and the two mean the
+ * same thing. An empty list is not the same as an absent one: it says no tools, so it
+ * comes back as an empty array rather than undefined.
  */
-function toolsField(frontmatter: string): string {
-  const inline = field(frontmatter, 'allowed-tools')
-  if (inline) return inline
-  const lines = frontmatter.split(/\r?\n/)
-  const key = lines.findIndex((line) => /^\s*allowed-tools[^\S\r\n]*:[^\S\r\n]*$/.test(line))
-  if (key === -1) return ''
-  const items: string[] = []
-  for (const line of lines.slice(key + 1)) {
-    if (!/^\s+-/.test(line)) break
-    items.push(line)
-  }
-  return items.join(',')
+export function parseToolList(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  let items: unknown[]
+  if (Array.isArray(raw)) items = raw
+  else if (typeof raw === 'string') items = toolEntries(raw)
+  else return undefined
+  if (items.some((item) => typeof item !== 'string')) return undefined
+  return [...new Set((items as string[]).map(normalizeToolName).filter(Boolean))]
 }
 
+const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
+
+/** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
+const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
+
 export function parseCommandFile(content: string): ParsedCommand {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  const frontmatter = match ? match[1] : ''
-  const body = (match ? content.slice(match[0].length) : content).trim()
-  const tools = toolsField(frontmatter)
+  // pi's own parser, rather than a hand-rolled one: it reads the YAML shapes Claude
+  // command files actually use (flow sequences, block lists, quoted and multi-line
+  // values), and a value this misreads is a restriction silently not applied.
+  const { frontmatter, body: raw } = parseFrontmatter(content)
+  const body = raw.trim()
   const firstLine = body.split('\n').find((line) => line.trim().length > 0) ?? ''
+  const disable = frontmatter['disable-model-invocation']
   return {
-    description: field(frontmatter, 'description') || firstLine.slice(0, 60),
-    argumentHint: field(frontmatter, 'argument-hint') || undefined,
-    // Several scoped grants collapse to one tool name; pi would otherwise be handed
-    // the same tool twice.
-    allowedTools: tools ? [...new Set(toolEntries(tools).map(normalizeToolName).filter(Boolean))] : undefined,
-    model: field(frontmatter, 'model') || undefined,
-    disableModelInvocation: field(frontmatter, 'disable-model-invocation') === 'true',
+    description: text(frontmatter.description) || firstLine.slice(0, 60),
+    argumentHint: hint(frontmatter['argument-hint']) || undefined,
+    allowedTools: parseToolList(frontmatter['allowed-tools']),
+    model: text(frontmatter.model) || undefined,
+    disableModelInvocation: disable === true || text(disable) === 'true',
     body,
   }
 }
