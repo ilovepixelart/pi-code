@@ -65,7 +65,9 @@ function parseEffortField(raw: unknown): string | undefined {
 
 /** Claude's `skills` frontmatter: a comma string or YAML list of skill names. */
 function parseSkillsField(raw: unknown): string[] | undefined {
-  const names = Array.isArray(raw) ? raw.map((entry) => String(entry)) : typeof raw === 'string' ? raw.split(',') : []
+  let names: string[] = []
+  if (Array.isArray(raw)) names = raw.map(String)
+  else if (typeof raw === 'string') names = raw.split(',')
   const cleaned = names.map((name) => name.trim()).filter(Boolean)
   return cleaned.length > 0 ? cleaned : undefined
 }
