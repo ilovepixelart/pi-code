@@ -629,7 +629,14 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd }, (run) => {
     removeTmpPrompt(tmpPrompt)
     pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
-    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    // The run outlives the session that started it, and every pi call throws once
+    // that session is disposed; an escaping error here would reach Node as an
+    // uncaughtException and take the process down with it.
+    try {
+      pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    } catch {
+      // the session that asked for this run is gone; nothing left to notify
+    }
   })
   if (id === null) {
     // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
@@ -1102,7 +1109,11 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 
 export default function subagentExtension(pi: ExtensionAPI) {
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string }): void => {
-    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    try {
+      pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    } catch {
+      // same as above: the session that started the run may already be gone
+    }
   }
 
   // Claude surfaces each agent's description so the model can pick one autonomously.

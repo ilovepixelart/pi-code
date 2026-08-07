@@ -687,3 +687,13 @@ describe('todo tool argument validation', () => {
     expect(result.details?.todos).toEqual([{ id: 1, text: 'second', status: 'pending' }])
   })
 })
+
+describe('replay with a failed todo call', () => {
+  it('keeps replaying the list when an errored result is on the branch', async () => {
+    const h = setup()
+    // pi persists a rejected or blocked call as details: {}, which is truthy; the
+    // list must survive it rather than the replay throwing for the rest of the session.
+    const entries = [resultEntry([{ id: 1, text: 'kept', done: false }], 2), { type: 'message', message: { role: 'toolResult', toolName: 'todo', details: {} } }]
+    await expect(h.fire('session_start', {}, branchCtx(entries as never, fakeUI()))).resolves.not.toThrow()
+  })
+})
