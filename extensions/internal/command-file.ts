@@ -128,12 +128,16 @@ const inRanges = (ranges: Array<[number, number]>, index: number): boolean => ra
 /** Read a `@path` reference, confined to the working directory. Returns undefined
  * when the path escapes it or cannot be read, so the reference stays literal. */
 function readReference(cwd: string, reference: string): string | undefined {
-  const resolved = path.resolve(cwd, reference)
-  const root = path.resolve(cwd)
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) return undefined
   try {
-    if (!fs.statSync(resolved).isFile()) return undefined
-    return fs.readFileSync(resolved, 'utf-8')
+    // Both sides canonicalised: on macOS /var is itself a symlink, so comparing a
+    // resolved path against an unresolved root rejects every legitimate read.
+    const root = fs.realpathSync(cwd)
+    // Confinement is checked after symlinks resolve: a lexical check passes a link
+    // that points outside the project, and the read would follow it.
+    const real = fs.realpathSync(path.resolve(cwd, reference))
+    if (real !== root && !real.startsWith(root + path.sep)) return undefined
+    if (!fs.statSync(real).isFile()) return undefined
+    return fs.readFileSync(real, 'utf-8')
   } catch {
     return undefined
   }

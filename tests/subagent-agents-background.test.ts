@@ -729,3 +729,19 @@ describe('resolveModelAlias', () => {
     expect(resolveModelAlias('inherit', available)).toBeUndefined()
   })
 })
+
+describe('preloaded skill symlink confinement', () => {
+  it('refuses a skill directory that symlinks outside the skills root', () => {
+    const outside = join(fakeHome.path, 'outside')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, 'SKILL.md'), 'ESCAPED_BODY')
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(skillsRoot, { recursive: true })
+    symlinkSync(outside, join(skillsRoot, 'linked'))
+
+    // The name passes the stem pattern; only resolving the link catches this.
+    const prompt = withPreloadedSkills('Base.', ['linked'], [skillsRoot])
+    expect(prompt).not.toContain('ESCAPED_BODY')
+    expect(prompt).toContain('not found')
+  })
+})
