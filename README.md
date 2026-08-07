@@ -43,7 +43,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
 | MCP servers | user `~/.claude.json` (incl. per-project `projects[cwd]` local scope), `~/.pi/agent/mcp.json`; project `.mcp.json`, `.pi/mcp.json` (once approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, consent keys only from non-repo settings); stdio/HTTP/SSE by `type`; `${VAR:-default}` expansion; `MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT`; tools refresh on `list_changed` | `mcp.ts` |
 | Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles) that pi would otherwise trust silently | `internal/project-approval.ts` |
-| Subagents / Task | builtin Explore/Plan/general-purpose agents, `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; agent roster with descriptions in the system prompt; background runs | `subagent/` |
+| Subagents / Task | builtin Explore/Plan/general-purpose agents, `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; agent roster with descriptions in the system prompt; `skills` preload; background runs with cancel and resume | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
 | Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later | `git-checkpoint.ts` |
