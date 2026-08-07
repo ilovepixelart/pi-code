@@ -70,11 +70,11 @@ export function splitArgs(args: string): string[] {
 export function substituteArgs(body: string, args: string): string {
   const parts = splitArgs(args)
   return body
-    .replace(/\$\{(\d+):-([^}]*)\}/g, (_m, index: string, fallback: string) => parts[Number(index) - 1] ?? fallback)
-    .replace(/\$\{ARGUMENTS:-([^}]*)\}/g, (_m, fallback: string) => (args.trim() ? args.trim() : fallback))
-    .replace(/\$ARGUMENTS\b/g, args.trim())
-    .replace(/\$@/g, args.trim())
-    .replace(/\$(\d+)/g, (_m, index: string) => parts[Number(index) - 1] ?? '')
+    .replaceAll(/\$\{(\d+):-([^}]*)\}/g, (_m, index: string, fallback: string) => parts[Number(index) - 1] ?? fallback)
+    .replaceAll(/\$\{ARGUMENTS:-([^}]*)\}/g, (_m, fallback: string) => (args.trim() ? args.trim() : fallback))
+    .replaceAll(/\$ARGUMENTS\b/g, args.trim())
+    .replaceAll('$@', args.trim())
+    .replaceAll(/\$(\d+)/g, (_m, index: string) => parts[Number(index) - 1] ?? '')
 }
 
 /** `a/b/c.md` becomes Claude's `a:b:c`. */
@@ -161,7 +161,7 @@ export async function expandDynamicContent(body: string, cwd: string, exec: Comm
 
   // Ranges are recomputed: command output can change offsets.
   const fencedAfter = fencedRanges(expanded)
-  return expanded.replace(/(^|\s)@(\S+)/g, (whole, lead: string, reference: string, offset: number) => {
+  return expanded.replaceAll(/(^|\s)@(\S+)/g, (whole, lead: string, reference: string, offset: number) => {
     if (inRanges(fencedAfter, offset)) return whole
     const content = readReference(cwd, reference)
     if (content === undefined) return whole
