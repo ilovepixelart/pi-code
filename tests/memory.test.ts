@@ -11,7 +11,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => hoisted.home || actual.homedir() }
 })
 
-import { capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, slugifyName, upsertIndexLine } from '../extensions/memory.ts'
+import { capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, indexWouldOverflow, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, slugifyName, upsertIndexLine } from '../extensions/memory.ts'
 
 describe('memory helpers', () => {
   it('slugs project paths into directory names', () => {
@@ -88,6 +88,24 @@ describe('memory helpers', () => {
   it('flattens a multi-line description into one index line', () => {
     // A newline in the description would break every later line-based match.
     expect(upsertIndexLine('', 'a', 'line one\nline two')).toBe('# Memory index\n- [a](a.md): line one line two\n')
+  })
+})
+
+describe('indexWouldOverflow', () => {
+  it('reports when a new entry would push the index past the startup bound', () => {
+    const roomy = '# Memory index\n- [a](a.md): first\n'
+    expect(indexWouldOverflow(roomy, 'b', 'second')).toBe(false)
+
+    const atLineLimit = ['# Memory index', ...Array.from({ length: INDEX_MAX_LINES }, (_, i) => `- [m${i}](m${i}.md): entry`)].join('\n')
+    expect(indexWouldOverflow(atLineLimit, 'extra', 'one more')).toBe(true)
+
+    const atByteLimit = `# Memory index\n- [big](big.md): ${'x'.repeat(INDEX_MAX_BYTES)}`
+    expect(indexWouldOverflow(atByteLimit, 'extra', 'one more')).toBe(true)
+  })
+
+  it('does not count replacing an existing entry as growth', () => {
+    const atLineLimit = ['# Memory index', ...Array.from({ length: INDEX_MAX_LINES }, (_, i) => `- [m${i}](m${i}.md): entry`)].join('\n')
+    expect(indexWouldOverflow(atLineLimit, 'm0', 'updated description')).toBe(false)
   })
 })
 

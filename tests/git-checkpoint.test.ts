@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
+import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, capCheckpoints, MAX_CHECKPOINTS_PER_SESSION, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
 
 type Handler = (event: any, ctx: any) => Promise<unknown>
 
@@ -211,5 +211,23 @@ describe('pruneCheckpointRepos', () => {
 
     expect(() => pruneCheckpointRepos(join(root, 'absent'), CHECKPOINT_RETENTION_DAYS)).not.toThrow()
     rmSync(root, { recursive: true, force: true })
+  })
+})
+
+describe('capCheckpoints', () => {
+  const entry = (n: number) => ({ entryId: `e${n}`, ref: `ref${n}`, prompt: `p${n}`, createdAt: new Date(2026, 0, n + 1).toISOString() })
+
+  it('keeps the most recent entries up to the cap', () => {
+    const many = Array.from({ length: MAX_CHECKPOINTS_PER_SESSION + 5 }, (_, i) => entry(i))
+    const capped = capCheckpoints(many)
+    expect(capped).toHaveLength(MAX_CHECKPOINTS_PER_SESSION)
+    // The oldest five are dropped, the newest kept.
+    expect(capped.at(-1)?.entryId).toBe(many.at(-1)?.entryId)
+    expect(capped.map((c) => c.entryId)).not.toContain('e0')
+  })
+
+  it('leaves a list under the cap untouched', () => {
+    const few = [entry(1), entry(2)]
+    expect(capCheckpoints(few)).toEqual(few)
   })
 })

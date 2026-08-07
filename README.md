@@ -37,7 +37,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 |---|---|---|
 | Global + project rules | `~/.claude/rules`, `.claude/rules` (+ `paths:` frontmatter scoping) | `claude-rules.ts` |
 | Custom slash commands | `.claude/commands/**/*.md` (namespaced `/dir:name`), `$ARGUMENTS`/`$1`, `` !`cmd` `` bash output, `@file` inlining, `allowed-tools`/`model`/`argument-hint` frontmatter; project commands gated on approval | `commands.ts` |
-| Skills | `.claude/skills` → pi skill discovery (pi reads `name`, `description`, `disable-model-invocation`; `allowed-tools` is inert in pi's loader) | `skills.ts` |
+| Skills | `.claude/skills` → pi skill discovery, project skills gated on approval (pi reads `name`, `description`, `disable-model-invocation`; `allowed-tools` is inert in pi's loader) | `skills.ts` |
 | Hooks | `.claude/settings.json` hooks: PreToolUse (blocks, rewrites input via `updatedInput`), PostToolUse (feedback and `additionalContext` land next to the tool result), PostToolUseFailure, SessionStart (context injection), UserPromptSubmit (blocks and injects context), Stop (a block continues the conversation), SubagentStart/SubagentStop, PreCompact, PostCompact, SessionEnd; Claude matcher semantics incl. `mcp__server__tool` names; payloads carry session_id, transcript_path, cwd, permission_mode, effort | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`; Claude replace semantics with `keep-coding-instructions`; bundled Explanatory/Learning/Proactive; `/output-style [name]` | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
