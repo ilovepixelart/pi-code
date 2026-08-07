@@ -172,6 +172,14 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
 
 /** Claude reports a config entry that has a url but no type as an error; pi-code
  * still connects (streamable HTTP with SSE fallback) but says the entry is wrong. */
+/** An inline bearerToken (interpolated) wins over bearerTokenEnv, which names an
+ * environment variable read as-is. */
+export function resolveBearerToken(config: { bearerToken?: string; bearerTokenEnv?: string }): string | undefined {
+  if (config.bearerToken) return interpolateEnv(config.bearerToken)
+  if (config.bearerTokenEnv) return process.env[config.bearerTokenEnv]
+  return undefined
+}
+
 /** A server cwd expands ${VAR} then a leading ~, or stays unset. */
 export function expandCwd(cwd: string | undefined): string | undefined {
   if (!cwd) return undefined
@@ -267,7 +275,7 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
   }
   const headers: Record<string, string> = {}
   for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = interpolateEnv(value)
-  const token = config.bearerToken ? interpolateEnv(config.bearerToken) : config.bearerTokenEnv ? process.env[config.bearerTokenEnv] : undefined
+  const token = resolveBearerToken(config)
   if (token) headers.Authorization = `Bearer ${token}`
   const url = new URL(interpolateEnv(config.url))
   if (config.type === 'sse') {

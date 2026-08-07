@@ -121,7 +121,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { splitByPolicy, expandCwd } = await import('../extensions/mcp.ts')
+const { splitByPolicy, expandCwd, resolveBearerToken } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -1083,5 +1083,18 @@ describe('policy split and cwd expansion helpers', () => {
     expect(expandCwd(undefined)).toBeUndefined()
     expect(expandCwd('~/proj')).toBe(`${hoisted.home}/proj`)
     unsetEnv('CWD_ROOT')
+  })
+})
+
+describe('resolveBearerToken', () => {
+  it('prefers an interpolated inline token, falls back to the named env var, else undefined', () => {
+    setEnv('TOK_INLINE', 'inline-secret')
+    setEnv('TOK_NAMED', 'named-secret')
+    expect(resolveBearerToken({ bearerToken: '${TOK_INLINE}' })).toBe('inline-secret')
+    expect(resolveBearerToken({ bearerTokenEnv: 'TOK_NAMED' })).toBe('named-secret')
+    expect(resolveBearerToken({ bearerToken: 'literal', bearerTokenEnv: 'TOK_NAMED' })).toBe('literal')
+    expect(resolveBearerToken({})).toBeUndefined()
+    unsetEnv('TOK_INLINE')
+    unsetEnv('TOK_NAMED')
   })
 })
