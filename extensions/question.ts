@@ -39,14 +39,15 @@ const SingleQuestion = Type.Object({
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
 
-/** Claude's AskUserQuestion carries 1-4 questions. The flat single-question form is
- * kept too, so existing callers need not wrap one question in an array. */
+/** One question in the flat form, plus an optional batch for Claude's 1-4 questions.
+ * The flat fields stay the documented path: a schema offering two equally optional
+ * shapes gave smaller models nothing to follow, and they produced neither. */
 export const QuestionParams = Type.Object({
-  question: Type.Optional(Type.String({ description: 'The question to ask (single-question form)' })),
-  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it (max 12 characters)', maxLength: 12 })),
-  options: Type.Optional(Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 })),
-  multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
-  questions: Type.Optional(Type.Array(SingleQuestion, { description: 'Ask 1-4 questions in sequence', minItems: 1, maxItems: 4 })),
+  question: Type.Optional(Type.String({ description: 'The question to ask. Required, unless asking several via questions.' })),
+  options: Type.Optional(Type.Array(OptionSchema, { description: 'The 1-4 choices for this question, each {label, description?}. Required with question.', minItems: 1, maxItems: 4 })),
+  header: Type.Optional(Type.String({ description: 'Optional short label shown above the question (max 12 characters)', maxLength: 12 })),
+  multiSelect: Type.Optional(Type.Boolean({ description: 'Optional: allow selecting several options (space toggles, enter confirms)' })),
+  questions: Type.Optional(Type.Array(SingleQuestion, { description: 'Only to ask 2-4 questions in one call: each entry takes the same fields as above. Leave unset for a single question.', minItems: 1, maxItems: 4 })),
 })
 
 export interface QuestionSpec {
@@ -145,7 +146,8 @@ export default function question(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'question',
     label: 'Question',
-    description: 'Ask the user a question and let them pick from options. Use when you need user input to proceed.',
+    description:
+      'Ask the user a question and let them pick from options. Use when you need user input to proceed. Pass question and options, for example {"question": "Which one?", "options": [{"label": "alpha"}, {"label": "beta"}]}. To ask 2-4 questions at once, pass questions instead, with the same fields per entry.',
     parameters: QuestionParams,
 
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
