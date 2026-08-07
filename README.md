@@ -49,7 +49,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later | `git-checkpoint.ts` |
 | Persistent memory | per-project memories, index injected each session | `memory.ts` |
 | WebSearch / WebFetch | key-free DuckDuckGo search, SSRF-guarded fetch | `web.ts` |
-| AskUserQuestion | one question with `header`, single- or `multiSelect` options, plus free-text; no multi-question batching | `question.ts` |
+| AskUserQuestion | 1-4 questions per call (asked in sequence), each with `header`, single- or `multiSelect` options, plus free-text | `question.ts` |
 | Statusline | Claude `statusLine` command contract (stdin JSON, `padding`, `refreshInterval`); built-in turn state + session cost fallback | `status-line.ts` |
 | Notifications | vendored example | `notify.ts` |
 
