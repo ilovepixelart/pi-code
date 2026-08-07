@@ -83,12 +83,23 @@ function field(frontmatter: string, key: string): string {
   return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
 }
 
-/** `allowed-tools` may be inline (`Bash, Read`) or a YAML block list beneath the key. */
+/**
+ * `allowed-tools` may be inline (`Bash, Read`) or a YAML block list beneath the key.
+ * Scanned line by line rather than with one multi-line pattern: the repeated-group
+ * form of that pattern backtracks exponentially on a long run of near-matching lines.
+ */
 function toolsField(frontmatter: string): string {
   const inline = field(frontmatter, 'allowed-tools')
   if (inline) return inline
-  const block = /^\s*allowed-tools[^\S\r\n]*:[^\S\r\n]*\r?\n((?:[^\S\r\n]+-[^\r\n]*\r?\n?)+)/m.exec(frontmatter)
-  return block ? block[1].replace(/\r?\n/g, ',') : ''
+  const lines = frontmatter.split(/\r?\n/)
+  const key = lines.findIndex((line) => /^\s*allowed-tools[^\S\r\n]*:[^\S\r\n]*$/.test(line))
+  if (key === -1) return ''
+  const items: string[] = []
+  for (const line of lines.slice(key + 1)) {
+    if (!/^\s+-/.test(line)) break
+    items.push(line)
+  }
+  return items.join(',')
 }
 
 export function parseCommandFile(content: string): ParsedCommand {
