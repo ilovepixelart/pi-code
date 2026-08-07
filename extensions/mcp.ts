@@ -32,7 +32,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
-import { capForContext, sliceBytes } from './internal/output-guard.js'
+import { capForContext } from './internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -246,39 +246,45 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
 }
 
 /**
- * Bound the whole result, not each block. The per-block cap multiplies by the block
- * count, so a server answering with one block per file still injects megabytes.
+ * Bound a result's text as a whole, not each block. The per-block cap multiplies by
+ * the block count, so a server answering with one block per file still injects
+ * megabytes.
  *
- * Text blocks are kept whole while the budget lasts, the one that overruns it is
- * trimmed, and the number omitted after that is stated so the model can tell a
- * truncated set from a complete one. Images pass through unconditionally: base64
- * cut in half is not a smaller image, it is a broken one, and a single screenshot
- * routinely exceeds the whole text budget. They still spend it, so text arriving
- * after an image is trimmed against what is left.
+ * Blocks are kept whole. Each has already been capped on its own, so keeping the one
+ * that crosses the budget bounds the text at roughly a single cap rather than at the
+ * block count times it, and it preserves that block's own truncation notice, which
+ * states how much of it was dropped. Blocks after it are omitted rather than skipped
+ * over, so what reaches the model is a prefix of what the server sent, and the number
+ * omitted is stated so a truncated set is distinguishable from a complete one.
+ *
+ * Images pass through uncut and do not spend the budget: base64 cut short is a broken
+ * image rather than a smaller one, so nothing here can bound them, and charging the
+ * budget for one would only delete the caption that accompanies a screenshot.
  */
 export function capTotal(blocks: ToolContent[]): ToolContent[] {
-  let budget = DEFAULT_MAX_BYTES
   const kept: ToolContent[] = []
+  let spent = 0
+  let full = false
   let dropped = 0
   for (const block of blocks) {
     if (block.type !== 'text') {
       kept.push(block)
-      budget -= Buffer.byteLength(block.data, 'utf-8')
       continue
     }
     const size = Buffer.byteLength(block.text, 'utf-8')
-    if (size <= budget) {
-      kept.push(block)
-      budget -= size
+    // The first text block always goes through: a lone oversized one is better read
+    // truncated, with its own notice, than replaced by a marker saying it existed.
+    if (full || (spent > 0 && spent + size > DEFAULT_MAX_BYTES)) {
+      full = true
+      dropped++
       continue
     }
-    if (budget > 0) {
-      kept.push({ type: 'text', text: `${sliceBytes(block.text, budget)}\n[truncated: tool output budget spent]` })
-      budget = 0
-    }
-    dropped++
+    kept.push(block)
+    spent += size
   }
-  if (dropped > 0) kept.push({ type: 'text', text: `[${dropped} further content block${dropped === 1 ? '' : 's'} omitted: tool output budget spent]` })
+  if (dropped > 0) {
+    kept.push({ type: 'text', text: `[${dropped} further content block${dropped === 1 ? '' : 's'} omitted: tool output budget spent]` })
+  }
   return kept
 }
 
@@ -420,7 +426,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           if (result.isError) {
             details.error = 'tool_error'
             const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
-            content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
+            content.push({ type: 'text', text: capForContext(`Tool reported an error. Expected input schema: ${hint}`) })
           }
           return { content, details }
         },

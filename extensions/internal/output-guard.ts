@@ -16,10 +16,11 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from '
  * Trim `text` to a byte budget. `String.slice` counts UTF-16 units, so slicing a CJK
  * string by a byte budget keeps up to three times the bytes asked for; cutting the
  * encoded buffer is exact. A character straddling the cut decodes to U+FFFD.
- * Shorter input comes back whole, so callers need no length check of their own.
+ * Shorter input comes back whole and a negative budget yields nothing, so callers
+ * need no length check of their own.
  */
 export function sliceBytes(text: string, maxBytes: number): string {
-  return Buffer.from(text, 'utf-8').subarray(0, maxBytes).toString('utf-8')
+  return Buffer.from(text, 'utf-8').subarray(0, Math.max(0, maxBytes)).toString('utf-8')
 }
 
 /** Trim `text` to pi's documented tool-output budget, noting what was dropped. */
