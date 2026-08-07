@@ -27,9 +27,23 @@ export interface DiscoveredCommand {
   filePath: string
 }
 
-/** Claude tool names are PascalCase; pi's are lowercase. */
-function normalizeToolName(name: string): string {
-  return name.trim().toLowerCase()
+/** Claude tool names are PascalCase and do not all exist in pi: `Glob` is pi's
+ * `find`. Lowercasing alone left `glob` in the list, and since pi has no tool by
+ * that name the grant was silently dropped when the list was intersected with the
+ * active tools. Shared with the subagent's own frontmatter parsing. */
+const CLAUDE_TOOL_MAP: Record<string, string> = {
+  read: 'read',
+  write: 'write',
+  edit: 'edit',
+  bash: 'bash',
+  grep: 'grep',
+  glob: 'find',
+  ls: 'ls',
+}
+
+export function normalizeToolName(name: string): string {
+  const lower = name.trim().toLowerCase()
+  return CLAUDE_TOOL_MAP[lower] ?? lower
 }
 
 function field(frontmatter: string, key: string): string {
