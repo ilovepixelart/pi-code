@@ -115,8 +115,10 @@ Claude Code fields map onto pi where a sensible seam exists: `tools` and
 `--thinking` when no model is pinned;
 `permissionMode: plan` selects a read-only toolset unless `tools` is set. Model
 aliases (`sonnet`, `opus`, `haiku`, `inherit`) run on the session's default
-model. Fields with no pi equivalent are ignored: `skills`, `memory`,
-`mcpServers`, `maxTurns`.
+model. `skills` names skills to preload: their bodies are inlined into the child's
+prompt, since a child pi process does not inherit the parent's skill discovery, and
+a name that resolves to nothing is reported in the prompt rather than dropped.
+Fields with no pi equivalent are ignored: `memory`, `mcpServers`, `maxTurns`.
 
 **Locations:**
 - `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)
