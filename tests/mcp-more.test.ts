@@ -127,7 +127,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { splitByPolicy, expandCwd, resolveBearerToken } = await import('../extensions/mcp.ts')
+const { splitByPolicy, expandCwd, resolveBearerToken, mapContent } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -729,6 +729,18 @@ describe('mcp tool execution', () => {
     ])
   })
 
+  it('caps the schema hint on error, so a huge schema cannot escape the output budget', async () => {
+    // The hint is appended after mapContent, so it is the one part of a result the
+    // aggregate cap never sees. The schema is server-controlled.
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'bad argument' }], isError: true })
+    const harness = await registerOne({ type: 'object', properties: { blob: { type: 'string', description: 'x'.repeat(400_000) } } })
+
+    const result = await harness.tools[0].execute('call-1', {})
+
+    const hint = result.content.at(-1)
+    expect(Buffer.byteLength(hint?.text ?? '', 'utf-8')).toBeLessThan(60_000)
+  })
+
   it('propagates a call timeout as a rejection naming the namespaced tool', async () => {
     hoisted.control.callTool = () => new Promise<CallResult>(() => {})
     const harness = await registerOne()
@@ -1160,5 +1172,68 @@ describe('in-project consent cannot self-approve', () => {
 
     expect(harness.toolNames()).toEqual([])
     expect(hoisted.transports).toEqual([])
+  })
+})
+
+describe('aggregate tool-output budget', () => {
+  const textBytes = (blocks: ReturnType<typeof mapContent>): number => blocks.reduce((sum, block) => sum + (block.type === 'text' ? Buffer.byteLength(block.text, 'utf-8') : 0), 0)
+
+  it('bounds the whole result, not each block, and states how many blocks were omitted', () => {
+    // A server answering with one block per file multiplies the per-block cap by the
+    // block count; 200 blocks of 40KB used to reach the model as ~8MB. Driven through
+    // mapContent because asserting capTotal directly would pass even if mapContent
+    // stopped calling it.
+    const blocks = Array.from({ length: 200 }, () => ({ type: 'text', text: 'x'.repeat(40_000) }))
+    const capped = mapContent(blocks)
+
+    expect(textBytes(capped)).toBeLessThan(60_000)
+    // One block fits, 199 do not: the count must name the blocks the model never saw.
+    expect(capped.at(-1)).toEqual({ type: 'text', text: '[199 further content blocks omitted: tool output budget spent]' })
+  })
+
+  it('reports no omission when the server sent a single oversized block', () => {
+    // That block reaches the model whole; claiming a further block exists invites a
+    // re-call for content that was never sent.
+    const capped = mapContent([{ type: 'text', text: 'x'.repeat(60_000) }])
+
+    expect(capped).toHaveLength(1)
+    expect(capped[0]?.type === 'text' && capped[0].text).toContain('[truncated:')
+  })
+
+  it('keeps what reaches the model a prefix of what the server sent', () => {
+    // Skipping an oversized block and resuming with smaller ones would hand the model
+    // blocks 1 and 3 under a notice saying one was omitted, which reads as contiguous.
+    const capped = mapContent([
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'B'.repeat(60_000) },
+      { type: 'text', text: 'third' },
+    ])
+
+    expect(capped.some((block) => block.type === 'text' && block.text === 'third')).toBe(false)
+    expect(capped.at(-1)).toEqual({ type: 'text', text: '[2 further content blocks omitted: tool output budget spent]' })
+  })
+
+  it('keeps the caption alongside an oversized image', () => {
+    // The screenshot shape: one image over the whole text budget plus a one-line
+    // caption. Charging the image against the budget deleted the only text the model
+    // could act on, and the marker replacing it was larger than the caption itself.
+    const image = { type: 'image', data: 'A'.repeat(200_000), mimeType: 'image/png' }
+    const capped = mapContent([image, { type: 'text', text: 'Clicked the login button at (120,340)' }])
+
+    expect(capped).toEqual([
+      { type: 'image', data: 'A'.repeat(200_000), mimeType: 'image/png' },
+      { type: 'text', text: 'Clicked the login button at (120,340)' },
+    ])
+  })
+
+  it('passes a small result through untouched', () => {
+    const blocks = [
+      { type: 'text', text: 'small' },
+      { type: 'image', data: 'AAA', mimeType: 'image/png' },
+    ]
+    expect(mapContent(blocks)).toEqual([
+      { type: 'text', text: 'small' },
+      { type: 'image', data: 'AAA', mimeType: 'image/png' },
+    ])
   })
 })

@@ -43,6 +43,17 @@ describe('capForContext', () => {
     expect(capped).toContain('truncated')
   })
 
+  it('honors the byte budget for multi-byte text on the single-long-line path', () => {
+    // The fallback slice is the only place the budget is applied by hand. String.slice
+    // counts UTF-16 units, so this 150KB line used to come back at ~150KB against a
+    // 50KB budget: one CJK character per byte of budget rather than one third of one.
+    const oneLongLine = '\u4f60'.repeat(DEFAULT_MAX_BYTES)
+    const capped = capForContext(oneLongLine)
+
+    expect(capped.startsWith('\u4f60')).toBe(true)
+    expect(Buffer.byteLength(capped, 'utf-8')).toBeLessThan(DEFAULT_MAX_BYTES * 1.1)
+  })
+
   it('reports the original size and line count in the notice', () => {
     const capped = capForContext(lines(5000))
     expect(capped).toMatch(/\[truncated: .+ total, 5000 lines\]/)

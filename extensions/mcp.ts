@@ -22,6 +22,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
@@ -222,12 +223,14 @@ export type ToolContent = { type: 'text'; text: string } | { type: 'image'; data
 export function mapContent(content: McpContentBlock[] | undefined, structured?: unknown): ToolContent[] {
   // capForContext every text output, whatever its source: a server can blow the tool-output
   // budget through a resource block, a JSON-stringified block, or the structured fallback,
-  // not only a text block.
+  // not only a text block. The per-block cap alone is not a budget, though: a server
+  // answering with one block per file multiplies it by the block count, so the blocks
+  // are capped again as a whole below.
   const text = (value: string): ToolContent => ({ type: 'text', text: capForContext(value) })
   if (!content || content.length === 0) {
     return [text(structured !== undefined ? JSON.stringify(structured, null, 2) : '(empty result)')]
   }
-  return content.map((block) => {
+  const mapped: ToolContent[] = content.map((block): ToolContent => {
     if (block.type === 'text') {
       return text(block.text ?? '')
     }
@@ -239,6 +242,50 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
     }
     return text(JSON.stringify(block))
   })
+  return capTotal(mapped)
+}
+
+/**
+ * Bound a result's text as a whole, not each block. The per-block cap multiplies by
+ * the block count, so a server answering with one block per file still injects
+ * megabytes.
+ *
+ * Blocks are kept whole. Each has already been capped on its own, so keeping the one
+ * that crosses the budget bounds the text at roughly a single cap rather than at the
+ * block count times it, and it preserves that block's own truncation notice, which
+ * states how much of it was dropped. Blocks after it are omitted rather than skipped
+ * over, so what reaches the model is a prefix of what the server sent, and the number
+ * omitted is stated so a truncated set is distinguishable from a complete one.
+ *
+ * Images pass through uncut and do not spend the budget: base64 cut short is a broken
+ * image rather than a smaller one, so nothing here can bound them, and charging the
+ * budget for one would only delete the caption that accompanies a screenshot.
+ */
+export function capTotal(blocks: ToolContent[]): ToolContent[] {
+  const kept: ToolContent[] = []
+  let spent = 0
+  let full = false
+  let dropped = 0
+  for (const block of blocks) {
+    if (block.type !== 'text') {
+      kept.push(block)
+      continue
+    }
+    const size = Buffer.byteLength(block.text, 'utf-8')
+    // The first text block always goes through: a lone oversized one is better read
+    // truncated, with its own notice, than replaced by a marker saying it existed.
+    if (full || (spent > 0 && spent + size > DEFAULT_MAX_BYTES)) {
+      full = true
+      dropped++
+      continue
+    }
+    kept.push(block)
+    spent += size
+  }
+  if (dropped > 0) {
+    kept.push({ type: 'text', text: `[${dropped} further content block${dropped === 1 ? '' : 's'} omitted: tool output budget spent]` })
+  }
+  return kept
 }
 
 function isStdio(config: ServerConfig): config is StdioServerConfig {
@@ -379,7 +426,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           if (result.isError) {
             details.error = 'tool_error'
             const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
-            content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
+            content.push({ type: 'text', text: capForContext(`Tool reported an error. Expected input schema: ${hint}`) })
           }
           return { content, details }
         },
