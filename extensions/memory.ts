@@ -63,6 +63,20 @@ export function migrateLegacyStore(cwd: string): void {
   }
 }
 
+/** Whether adding this memory would push the index past what a session can load.
+ * Claude reports an explicit error instead of silently writing a memory that will
+ * never be seen; replacing an existing entry is not growth. */
+export function indexWouldOverflow(index: string, name: string, description: string): boolean {
+  // Editing an entry that already exists is always allowed: it adds no entry, and
+  // refusing it would strand a user whose index is already at the bound with no way
+  // to revise their way back under it. An over-long description is bounded anyway,
+  // since the injected index is capped at read time.
+  const isUpdate = index.split('\n').some((entry) => entry.startsWith(entryPrefix(name)))
+  if (isUpdate) return false
+  const next = upsertIndexLine(index, name, description)
+  return next.split('\n').length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
+}
+
 /** The index as injected into the prompt, bounded like Claude's startup load. */
 export function capIndexForPrompt(index: string): string {
   const withinLines = index.split('\n').slice(0, INDEX_MAX_LINES)
@@ -154,9 +168,18 @@ export default function memoryExtension(pi: ExtensionAPI) {
         if (!name || !params.description || !params.content) {
           return { content: [{ type: 'text' as const, text: 'save requires name, description, and content.' }], details: {} }
         }
+        const index = readIndex(dir)
+        // Claude reports an explicit error rather than writing a memory the next
+        // session would never load, and says what to do about it.
+        if (indexWouldOverflow(index, name, params.description)) {
+          return {
+            content: [{ type: 'text' as const, text: `Memory index is full (${INDEX_MAX_LINES} entries or ${INDEX_MAX_BYTES} bytes). Delete or consolidate memories before saving ${name}.` }],
+            details: {},
+          }
+        }
         fs.mkdirSync(dir, { recursive: true })
         fs.writeFileSync(path.join(dir, `${name}.md`), params.content)
-        fs.writeFileSync(indexPath, upsertIndexLine(readIndex(dir), name, params.description))
+        fs.writeFileSync(indexPath, upsertIndexLine(index, name, params.description))
         return { content: [{ type: 'text' as const, text: `Saved memory ${name}.` }], details: {} }
       }
 

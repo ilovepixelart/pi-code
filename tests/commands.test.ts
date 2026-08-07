@@ -62,11 +62,15 @@ const setup = (cwd: string, trusted = true) => {
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
   const sent: string[] = []
   const toolSets: string[][] = []
+  const execCalls: Array<{ shell: string; env?: Record<string, string> }> = []
   let active = ['bash', 'read', 'edit', 'write']
   const pi = {
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
     registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
-    exec: async (_file: string, args: string[]) => ({ stdout: `ran:${args[1]}`, stderr: '', code: 0, killed: false }),
+    exec: async (_file: string, args: string[], opts?: { env?: Record<string, string> }) => {
+      execCalls.push({ shell: args[1], env: opts?.env })
+      return { stdout: `ran:${args[1]}`, stderr: '', code: 0, killed: false }
+    },
     sendUserMessage: (text: string) => {
       sent.push(text)
     },
@@ -83,7 +87,7 @@ const setup = (cwd: string, trusted = true) => {
     isProjectTrusted: () => trusted,
     ui: { confirm: async () => trusted, notify: () => {} },
   }
-  return { handlers, commands, sent, toolSets, ctx, activeTools: () => active }
+  return { handlers, commands, sent, toolSets, execCalls, ctx, activeTools: () => active }
 }
 
 describe('commands extension', () => {
@@ -108,8 +112,20 @@ describe('commands extension', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('ctx')?.handler('', s.ctx)
 
-    expect(s.sent[0]).toContain('ran:git status')
+    expect(s.sent[0]).toContain('git status')
     expect(s.sent[0]).toContain('NOTE_BODY')
+  })
+
+  it('exposes CLAUDE_PROJECT_DIR to a bash span, as hooks do', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'ctx.md', 'here: !`pwd`')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ctx')?.handler('', s.ctx)
+
+    // pi.exec takes no env, so the variable is exported in the shell string itself.
+    expect(s.execCalls[0].shell).toContain(`export CLAUDE_PROJECT_DIR='${cwd}'`)
+    expect(s.execCalls[0].shell).toContain('pwd')
   })
 
   it('restricts tools for the command turn and restores them afterwards', async () => {

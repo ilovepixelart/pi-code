@@ -260,6 +260,8 @@ interface RunAgentOptions {
   onUpdate?: OnUpdateCallback
   makeDetails: (results: SingleResult[]) => SubagentDetails
   onPhase?: SubagentPhaseSink
+  /** Skill directories to preload from, resolved where project trust is known. */
+  skillRoots?: string[]
 }
 
 /** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
@@ -322,7 +324,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   }
 
   try {
-    const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillDirs(defaultCwd, os.homedir()))
+    const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, options.skillRoots ?? [])
     if (promptWithSkills.trim()) {
       const tmp = await writePromptToTempFile(agent.name, promptWithSkills)
       tmpPromptDir = tmp.dir
@@ -524,6 +526,7 @@ interface ModeContext {
   onUpdate: OnUpdateCallback | undefined
   makeDetails: MakeDetails
   onPhase?: SubagentPhaseSink
+  skillRoots: string[]
 }
 
 async function checkProjectAgentGate(params: SubagentParamsStatic, agents: AgentConfig[], ctx: ExtensionContext, projectAgentsDir: string | null, gateMode: SubagentMode, makeDetails: MakeDetails): Promise<ToolResult | null> {
@@ -589,7 +592,7 @@ function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefine
   }
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails): Promise<ToolResult> {
+async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[]): Promise<ToolResult> {
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -611,7 +614,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   }
   const args = agentInvocationArgs(agent)
   let tmpPrompt: { dir: string; filePath: string } | undefined
-  const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillDirs(params.cwd ?? defaultCwd, os.homedir()))
+  const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots)
   if (promptWithSkills.trim()) {
     tmpPrompt = await writePromptToTempFile(agent.name, promptWithSkills)
     args.push('--append-system-prompt', tmpPrompt.filePath)
@@ -671,6 +674,7 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
       onUpdate: chainUpdate,
       makeDetails: makeDetails('chain'),
       onPhase: mode.onPhase,
+      skillRoots: mode.skillRoots,
     })
     results.push(result)
 
@@ -786,6 +790,7 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
     onUpdate,
     makeDetails: makeDetails('single'),
     onPhase: mode.onPhase,
+    skillRoots: mode.skillRoots,
   })
   const isError = result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
   if (isError) {
@@ -1177,9 +1182,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const gateResult = await checkProjectAgentGate(params, agents, ctx, discovery.projectAgentsDir, gateMode, makeDetails)
       if (gateResult) return gateResult
 
-      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails)
+      // Project skills only preload once the project is approved, matching the
+      // gate the skills extension applies to discovery itself.
+      const skillRoots = skillDirs(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
 
-      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
+      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots)
+
+      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 
       if (params.chain?.length) return runChainMode(params.chain, mode)
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)

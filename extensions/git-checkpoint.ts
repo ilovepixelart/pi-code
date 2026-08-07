@@ -34,6 +34,15 @@ interface Checkpoint {
  * for the life of the machine. */
 export const CHECKPOINT_RETENTION_DAYS = 30
 
+/** Claude keeps the 100 most recent checkpoints per session. Older ones drop off the
+ * rewind list; their commits stay in the shadow repo until the retention sweep. */
+export const MAX_CHECKPOINTS_PER_SESSION = 100
+
+/** The newest entries, up to the per-session cap, oldest first. */
+export function capCheckpoints<T>(all: T[]): T[] {
+  return all.length <= MAX_CHECKPOINTS_PER_SESSION ? all : all.slice(all.length - MAX_CHECKPOINTS_PER_SESSION)
+}
+
 /** Remove shadow repos untouched for longer than the retention window. The live
  * session's repo is always kept, whatever its age: a long session's directory mtime
  * can predate the window. Failures are ignored; this is housekeeping, not a gate. */
@@ -209,6 +218,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
 
     const checkpoint: Checkpoint = { entryId: target.entryId, ref: snap.ref, prompt: target.prompt, createdAt: snap.createdAt }
     checkpoints.set(checkpoint.entryId, checkpoint)
+    // Bound the rewind list the way Claude does, dropping the oldest first.
+    for (const stale of [...checkpoints.keys()].slice(0, Math.max(0, checkpoints.size - MAX_CHECKPOINTS_PER_SESSION))) {
+      checkpoints.delete(stale)
+    }
     pi.appendEntry(CUSTOM_TYPE, checkpoint)
   })
 

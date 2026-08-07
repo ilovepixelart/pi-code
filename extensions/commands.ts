@@ -63,7 +63,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
   async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext): Promise<void> {
     const withArgs = substituteArgs(parsed.body, args)
     const expanded = await expandDynamicContent(withArgs, ctx.cwd, async (shell) => {
-      const result = await pi.exec('/bin/sh', ['-c', shell], { timeout: BASH_TIMEOUT_MS })
+      // Hooks get CLAUDE_PROJECT_DIR, and a command's bash span is the same kind of
+      // project-scoped script. pi.exec takes no env, so it is exported in the script.
+      const projectDir = ctx.cwd.replaceAll("'", `'\\''`)
+      const script = `export CLAUDE_PROJECT_DIR='${projectDir}'; ${shell}`
+      const result = await pi.exec('/bin/sh', ['-c', script], { cwd: ctx.cwd, timeout: BASH_TIMEOUT_MS })
       return { stdout: result.stdout, stderr: result.stderr, code: result.code }
     })
 
