@@ -194,8 +194,10 @@ export function cleanStepText(text: string): string {
 // Anchored to line start (m flag) so a prose line merely ending in "plan:" is not taken
 // for the header, which would slice the plan section mid-list and drop earlier steps.
 // Horizontal whitespace only ([^\S\n]): \s would include \n itself and overlap the
-// following \n, which is what backtracks super-linearly.
-const PLAN_HEADER = /^[^\S\n]*\*{0,2}Plan:\*{0,2}[^\S\n]*\n/im
+// following \n. The runs are bounded rather than unbounded: an unbounded run retried
+// from every position on a long whitespace-only line is what backtracks super-linearly,
+// and a real header carries at most a few spaces of indentation.
+const PLAN_HEADER = /^[^\S\n]{0,8}\*{0,2}Plan:\*{0,2}[^\S\n]{0,8}\n/im
 
 const isBlank = (ch: string | undefined): boolean => ch !== undefined && ch !== '\n' && ch.trim() === ''
 
