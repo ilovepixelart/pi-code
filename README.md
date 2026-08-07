@@ -46,7 +46,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | MCP servers | user `~/.claude.json` (incl. per-project `projects[cwd]` local scope), `~/.pi/agent/mcp.json`; project `.mcp.json`, `.pi/mcp.json` (once approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, consent keys only from non-repo settings); stdio/HTTP/SSE by `type`; `${VAR:-default}` expansion; `MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT`; tools refresh on `list_changed` | `mcp.ts` |
 | Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles, commands, skills) that pi would otherwise trust silently | `internal/project-approval.ts` |
 | Subagents / Task | builtin Explore/Plan/general-purpose agents, `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; agent roster with descriptions in the system prompt; `skills` preload; background runs with cancel and resume | `subagent/` |
-| Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
+| Plan mode | `plan_mode_complete` tool, tool snapshot/restore that survives `/reload` | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
 | Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later; 100 per session, repos pruned after 30 days | `git-checkpoint.ts` |
 | Persistent memory | per-project memories, index injected each session within Claude's 200-line/25KB bound; a save that would overflow it reports why | `memory.ts` |

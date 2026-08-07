@@ -132,6 +132,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       enabled: planModeEnabled,
       todos: todoItems,
       executing: executionMode,
+      // The pre-plan tool set has to survive with the state that caused it to shrink.
+      // /reload rebuilds this extension with an empty snapshot while pi carries the
+      // restricted tools into the new runtime, so a restore has no way to work out
+      // what was active before plan mode unless it was written down here.
+      savedTools,
     })
   }
 
@@ -379,7 +384,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
     const entries = ctx.sessionManager.getEntries()
 
     // Restore persisted state
-    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean } } | undefined
+    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean; savedTools?: string[] } } | undefined
 
     if (planModeEntry?.data) {
       planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled
@@ -396,7 +401,23 @@ After completing a step, include a [DONE:n] tag in your response.`,
     }
 
     if (planModeEnabled) {
-      enterPlanTools()
+      // Restoring into plan mode is the only case the recorded snapshot is for.
+      // Re-reading the active set here would capture the restriction pi carried
+      // across /reload and cost the session edit and write for good; applying the
+      // snapshot when plan mode is off would instead push a stale set over whatever
+      // pi has registered since, so it stays scoped to this branch.
+      savedTools = planModeEntry?.data?.savedTools ?? pi.getActiveTools()
+      pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
+      // --plan enters plan mode without ever toggling, so nothing has persisted yet
+      // and a /reload would find no snapshot to restore from. Record it now, while
+      // the active set still says what was there before the restriction.
+      //
+      // Only with no entry at all: an entry written before this field existed means
+      // the active set has already been through a restore and may be the restriction
+      // itself. Those tools are lost for this process either way, but persisting a
+      // guess would write the loss into the session file, where a later resume would
+      // inherit it instead of starting over.
+      if (!planModeEntry) persistState()
     } else {
       // A prior session in this instance may have shrunk the tool set; undo that when
       // the restored/fresh state is not plan mode.
