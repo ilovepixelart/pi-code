@@ -111,7 +111,8 @@ System prompt for the agent goes here.
 
 Claude Code fields map onto pi where a sensible seam exists: `tools` and
 `disallowedTools` (comma string or YAML list) become pi's `--tools` /
-`--exclude-tools`; `effort` becomes the `:thinking` suffix on a pinned model;
+`--exclude-tools`; `effort` becomes the `:thinking` suffix on a pinned model, or
+`--thinking` when no model is pinned;
 `permissionMode: plan` selects a read-only toolset unless `tools` is set. Model
 aliases (`sonnet`, `opus`, `haiku`, `inherit`) run on the session's default
 model. Fields with no pi equivalent are ignored: `skills`, `memory`,
