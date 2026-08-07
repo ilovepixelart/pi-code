@@ -28,7 +28,7 @@ import { isProjectApproved, isProjectApprovedSilently } from '../internal/projec
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentScope, discoverAgents, withPreloadedSkills } from './agents.js'
-import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -463,6 +463,7 @@ const SubagentParams = Type.Object({
   background: Type.Optional(Type.Boolean({ description: 'Run the single-mode task in the background: returns a run id immediately and a notification arrives when it completes.' })),
   status: Type.Optional(Type.Boolean({ description: 'Set true (alone, no other params) to list background runs instead of running anything.' })),
   cancel: Type.Optional(Type.String({ description: 'Background run id to cancel (from the id returned when it started, or from status).' })),
+  resume: Type.Optional(Type.String({ description: 'Finished background run id to continue with a follow-up task; the child keeps everything it already saw. Pass task with it.' })),
 })
 
 /**
@@ -1132,6 +1133,23 @@ export default function subagentExtension(pi: ExtensionAPI) {
           projectAgentsDir: discovery.projectAgentsDir,
           results,
         })
+
+      if (params.resume) {
+        if (!params.task) {
+          return { content: [{ type: 'text', text: 'Pass task with resume: the follow-up needs an instruction.' }], details: makeDetails('single')([]) }
+        }
+        const outcome = resumeBackgroundRun(params.resume, params.task, (run) => {
+          const output = capForContext(run.output ?? '') || '(no output)'
+          pi.sendMessage({ customType: 'subagent-background', content: `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}`, display: true }, { triggerTurn: true })
+        })
+        const text =
+          outcome === 'resumed'
+            ? `Resumed background run ${params.resume} with the follow-up task; a notification will arrive on completion.`
+            : outcome === 'still-running'
+              ? `Background run ${params.resume} is still running; wait for it or cancel it first.`
+              : `Unknown background run: ${params.resume}.\n\n${backgroundStatusText()}`
+        return { content: [{ type: 'text', text }], details: makeDetails('single')([]) }
+      }
 
       if (params.cancel) {
         return { content: [{ type: 'text', text: cancelResultText(params.cancel) }], details: makeDetails('single')([]) }

@@ -557,7 +557,7 @@ describe('startBackgroundRun', () => {
     child.stdout.emit('data', Buffer.from(`${messageEnd('assistant', 'all done')}\n`))
     child.emit('close', 0)
 
-    expect(completed).toEqual([{ id, agent: 'scout', task: 'survey', state: 'done', exitCode: 0, output: 'all done', turns: 1 }])
+    expect(completed).toMatchObject([{ id, agent: 'scout', task: 'survey', state: 'done', exitCode: 0, output: 'all done', turns: 1 }])
   })
 
   it('concatenates stdout chunks before parsing', async () => {
@@ -607,7 +607,7 @@ describe('startBackgroundRun', () => {
     const child = spawned.children[0]
     child.emit('error', new Error('ENOENT'))
 
-    expect(completed).toEqual([{ id, agent: 'scout', task: 'survey', state: 'failed', exitCode: 1, turns: 0 }])
+    expect(completed).toMatchObject([{ id, agent: 'scout', task: 'survey', state: 'failed', exitCode: 1, turns: 0 }])
   })
 
   it('completes once when a spawn failure emits both error and close', async () => {
@@ -678,5 +678,32 @@ describe('agent skills preload', () => {
   it('returns the prompt untouched when the agent preloads nothing', () => {
     expect(withPreloadedSkills('Base.', undefined, [])).toBe('Base.')
     expect(withPreloadedSkills('Base.', [], [])).toBe('Base.')
+  })
+})
+
+describe('resumeBackgroundRun', () => {
+  const invocation = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', 'Task: first'], cwd: '/work/dir' }
+
+  it('spawns the follow-up under the same session id with the new task', async () => {
+    const { startBackgroundRun, resumeBackgroundRun, backgroundRun } = await loadBackground()
+    const id = startBackgroundRun('scout', 'first', invocation, () => {}) as string
+    const sessionId = backgroundRun(id)?.sessionId
+    expect(sessionId).toBeTruthy()
+    // --no-session is replaced so the child persists what it saw.
+    expect(spawned.calls[0].args).toContain('--session-id')
+    expect(spawned.calls[0].args).not.toContain('--no-session')
+    spawned.children[0].emit('close', 0)
+
+    expect(resumeBackgroundRun(id, 'second', () => {})).toBe('resumed')
+    const followUp = spawned.calls[1].args
+    expect(followUp[followUp.indexOf('--session-id') + 1]).toBe(sessionId)
+    expect(followUp.at(-1)).toBe('Task: second')
+  })
+
+  it('refuses to resume a run that is still going, or an unknown id', async () => {
+    const { startBackgroundRun, resumeBackgroundRun } = await loadBackground()
+    const id = startBackgroundRun('scout', 'first', invocation, () => {}) as string
+    expect(resumeBackgroundRun(id, 'again', () => {})).toBe('still-running')
+    expect(resumeBackgroundRun('bg-nope', 'again', () => {})).toBe('unknown')
   })
 })
