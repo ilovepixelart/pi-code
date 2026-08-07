@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -168,5 +168,32 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
     const cwd = tempDir()
     writeFileSync(join(cwd, 'CLAUDE.local.md'), 'notes')
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+})
+
+describe('hasClaudeShapedConfig walks to the repository root', () => {
+  const tmp = (): string => mkdtempSync(join(tmpdir(), 'shaped-'))
+
+  it('sees config at the repo root when started in a subdirectory', () => {
+    // Agent discovery already walks up, so a cwd-only check approved a project
+    // whose .claude/agents at the root was about to be loaded.
+    const root = tmp()
+    mkdirSync(join(root, '.git'), { recursive: true })
+    mkdirSync(join(root, '.claude', 'agents'), { recursive: true })
+    const sub = join(root, 'src', 'deep')
+    mkdirSync(sub, { recursive: true })
+
+    expect(hasClaudeShapedConfig(sub)).toBe(true)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('stops at the repository root rather than inheriting a parent', () => {
+    const outer = tmp()
+    mkdirSync(join(outer, '.claude', 'agents'), { recursive: true })
+    const inner = join(outer, 'nested')
+    mkdirSync(join(inner, '.git'), { recursive: true })
+
+    expect(hasClaudeShapedConfig(inner)).toBe(false)
+    rmSync(outer, { recursive: true, force: true })
   })
 })

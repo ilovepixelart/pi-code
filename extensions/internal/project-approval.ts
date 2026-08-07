@@ -37,8 +37,25 @@ const CLAUDE_SHAPED = [
   path.join('.pi', 'agents'),
 ]
 
+/** Markers that end the upward walk, matching the subagent's own discovery bound. */
+const ROOT_MARKERS = ['.git', 'package.json']
+
+/** Claude-shaped config anywhere between `cwd` and the repository root.
+ *
+ * The walk matters: agent discovery already searches upward, so starting pi in a
+ * subdirectory of a repository whose `.claude/agents` sits at the root found those
+ * agents while a cwd-only check reported nothing to gate, and the short-circuit
+ * approved the project without ever asking. The bound is the repository root, so a
+ * directory outside any repository never inherits a parent's config. */
 export function hasClaudeShapedConfig(cwd: string): boolean {
-  return CLAUDE_SHAPED.some((entry) => fs.existsSync(path.join(cwd, entry)))
+  let currentDir = cwd
+  while (true) {
+    if (CLAUDE_SHAPED.some((entry) => fs.existsSync(path.join(currentDir, entry)))) return true
+    if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return false
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) return false
+    currentDir = parentDir
+  }
 }
 
 export interface ApprovalContext {
