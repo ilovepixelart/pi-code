@@ -493,14 +493,28 @@ describe('startBackgroundRun', () => {
     // /new, /resume, /fork or /reload while it was still running). This runs from the
     // child's close listener, where an escaping error reaches Node as an
     // uncaughtException and exits pi.
-    const { startBackgroundRun, backgroundStatusText } = await loadBackground()
-    startBackgroundRun('scout', 'survey', invocation, () => {
+    const { startBackgroundRun } = await loadBackground()
+    let seen: { state: string; exitCode?: number } | undefined
+    startBackgroundRun('scout', 'survey', invocation, (run) => {
+      // Snapshot before throwing: reading the registry after the listener returns
+      // would pass even if the state were written after the callback.
+      seen = { state: run.state, exitCode: run.exitCode }
       throw new Error('This extension ctx is stale after session replacement or reload.')
     })
 
     expect(() => spawned.children[0].emit('close', 0)).not.toThrow()
-    // The run itself still finished; only the notification is lost.
-    expect(backgroundStatusText()).toContain('done')
+    // The run finished and was recorded before the notification was attempted;
+    // only the notification is lost.
+    expect(seen).toEqual({ state: 'done', exitCode: 0 })
+  })
+
+  it('survives a pipe error on the child stdout', async () => {
+    // EventEmitter rethrows an 'error' with no listener, and this stream belongs to a
+    // detached child, so the throw exits pi exactly as an unguarded completion would.
+    const { startBackgroundRun } = await loadBackground()
+    startBackgroundRun('scout', 'survey', invocation, () => {})
+
+    expect(() => spawned.children[0].stdout.emit('error', new Error('EPIPE'))).not.toThrow()
   })
 
   it('returns a bg- prefixed id built from a uuid prefix', async () => {

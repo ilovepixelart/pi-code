@@ -190,6 +190,10 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   proc.stdout.on('data', (data) => {
     stdout += data.toString()
   })
+  // An 'error' on a stream with no listener is rethrown by EventEmitter, and this one
+  // belongs to a detached child, so a pipe read failure would exit pi the same way an
+  // unguarded completion would. The foreground runner guards its streams the same way.
+  proc.stdout.on('error', () => {})
   proc.on('close', (code) => {
     const { text, turns } = parseFinalOutputFromJsonl(stdout)
     run.kill = undefined
