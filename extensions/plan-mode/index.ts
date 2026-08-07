@@ -61,26 +61,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let planFromTool = false
   let savedTools: string[] = []
 
-  /**
-   * pi carries the active tool names across /reload (agent-session's reload() feeds
-   * getActiveToolNames() into the rebuilt runtime) while this extension is rebuilt with
-   * an empty snapshot, so a restore can find the tool set already restricted. Taking
-   * that as the snapshot would make the restriction permanent: toggling plan mode off
-   * would restore the read-only set and edit/write would be gone for the session. The
-   * tool registry still holds every configured tool, so recover from it instead.
-   *
-   * A session deliberately narrowed to within the plan set is widened back to all tools
-   * by this, which is the price of not being able to tell it apart from a carried-over
-   * restriction. That is recoverable; silently losing edit and write is not.
-   */
-  function toolsToRestore(): string[] {
-    const active = pi.getActiveTools()
-    if (active.some((name) => !PLAN_MODE_TOOLS.includes(name))) return active
-    return pi.getAllTools().map((tool) => tool.name)
-  }
-
   function enterPlanTools(): void {
-    savedTools = toolsToRestore()
+    savedTools = pi.getActiveTools()
     pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
   }
 
@@ -150,6 +132,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       enabled: planModeEnabled,
       todos: todoItems,
       executing: executionMode,
+      // The pre-plan tool set has to survive with the state that caused it to shrink.
+      // /reload rebuilds this extension with an empty snapshot while pi carries the
+      // restricted tools into the new runtime, so a restore has no way to work out
+      // what was active before plan mode unless it was written down here.
+      savedTools,
     })
   }
 
@@ -397,12 +384,13 @@ After completing a step, include a [DONE:n] tag in your response.`,
     const entries = ctx.sessionManager.getEntries()
 
     // Restore persisted state
-    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean } } | undefined
+    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean; savedTools?: string[] } } | undefined
 
     if (planModeEntry?.data) {
       planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled
       todoItems = planModeEntry.data.todos ?? todoItems
       executionMode = planModeEntry.data.executing ?? executionMode
+      savedTools = planModeEntry.data.savedTools ?? savedTools
     }
     publishPlanState()
 
@@ -414,7 +402,11 @@ After completing a step, include a [DONE:n] tag in your response.`,
     }
 
     if (planModeEnabled) {
-      enterPlanTools()
+      // Only snapshot when the entry carried nothing: re-reading the active set here
+      // would capture the restriction pi carried across /reload, and restoring it
+      // later would cost the session edit and write for good.
+      if (savedTools.length === 0) savedTools = pi.getActiveTools()
+      pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
     } else {
       // A prior session in this instance may have shrunk the tool set; undo that when
       // the restored/fresh state is not plan mode.
