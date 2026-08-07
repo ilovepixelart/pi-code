@@ -337,8 +337,8 @@ export default function todoExtension(pi: ExtensionAPI) {
 
       const details = msg.details as (Omit<TodoDetails, 'todos'> & { todos?: LegacyTodo[] }) | undefined
       // pi persists a failed tool call as `details: {}`, which is truthy: a rejected
-      // or blocked todo call would otherwise throw here and break replay for the rest
-      // of the session, losing the list on every resume, fork and compaction.
+      // or blocked call would otherwise throw here and break replay for the rest of
+      // the session, losing the list on every resume, fork and compaction.
       if (Array.isArray(details?.todos)) {
         replayTodos = details.todos.map(normalizeTodo)
         replayNextId = details.nextId
