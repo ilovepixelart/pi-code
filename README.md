@@ -13,6 +13,8 @@
 
 Claude Code experience for the [pi](https://pi.dev) coding agent, in one package. Point pi at a project that already has a `.claude/` directory and it reads your existing config: rules, commands, skills, hooks, output styles, MCP servers, and agents. It also adds the Claude Code features pi lacks: a todo overlay, checkpoints, memory, web search, and subagents.
 
+What a repository ships is treated as untrusted until you approve it: project MCP servers, hooks, agents, rules, output styles, commands and skills load only once you say yes.
+
 ![pi-code demo](demos/hero.gif)
 
 ## Install
@@ -42,12 +44,12 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Output styles | `.claude/output-styles` + active `outputStyle`; Claude replace semantics with `keep-coding-instructions`; bundled Explanatory/Learning/Proactive; `/output-style [name]` | `output-styles.ts` |
 | CLAUDE.md `@imports` | resolves `@path` imports pi's native loader skips; loads `CLAUDE.local.md` (approval-gated) | `context-imports.ts` |
 | MCP servers | user `~/.claude.json` (incl. per-project `projects[cwd]` local scope), `~/.pi/agent/mcp.json`; project `.mcp.json`, `.pi/mcp.json` (once approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, consent keys only from non-repo settings); stdio/HTTP/SSE by `type`; `${VAR:-default}` expansion; `MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT`; tools refresh on `list_changed` | `mcp.ts` |
-| Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles) that pi would otherwise trust silently | `internal/project-approval.ts` |
+| Project trust | prompts before loading project config (MCP servers, hooks, agents, rules, output styles, commands, skills) that pi would otherwise trust silently | `internal/project-approval.ts` |
 | Subagents / Task | builtin Explore/Plan/general-purpose agents, `~/.claude/agents` and `~/.pi/agent/agents`, plus project `.claude/agents` and `.pi/agents`; agent roster with descriptions in the system prompt; `skills` preload; background runs with cancel and resume | `subagent/` |
 | Plan mode | `plan_mode_complete` tool, exact tool snapshot/restore | `plan-mode/` |
 | Todo list | persistent overlay, status machine, compaction-safe | `todo.ts` |
-| Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later | `git-checkpoint.ts` |
-| Persistent memory | per-project memories, index injected each session | `memory.ts` |
+| Checkpoints / rewind | shadow-repo snapshots; restore overwrites checkpointed files, keeps files created later; 100 per session, repos pruned after 30 days | `git-checkpoint.ts` |
+| Persistent memory | per-project memories, index injected each session within Claude's 200-line/25KB bound; a save that would overflow it reports why | `memory.ts` |
 | WebSearch / WebFetch | key-free DuckDuckGo search, SSRF-guarded fetch | `web.ts` |
 | AskUserQuestion | 1-4 questions per call (asked in sequence), each with `header`, single- or `multiSelect` options, plus free-text | `question.ts` |
 | Statusline | Claude `statusLine` command contract (stdin JSON, `padding`, `refreshInterval`); built-in turn state + session cost fallback | `status-line.ts` |
