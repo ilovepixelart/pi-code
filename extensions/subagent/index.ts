@@ -493,6 +493,21 @@ type SubagentParamsStatic = Static<typeof SubagentParams>
 type ChainStepParam = Static<typeof ChainItem>
 type TaskItemParam = Static<typeof TaskItem>
 
+/** The completion notice a background run sends when it finishes. */
+export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string }): string {
+  const output = capForContext(run.output ?? '') || '(no output)'
+  return `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}`
+}
+
+/** What to tell the model about a resume request. */
+export function resumeResultText(id: string, task: string | undefined, onComplete: (run: { id: string; agent: string; state: string; turns: number; output?: string }) => void): string {
+  if (!task) return 'Pass task with resume: the follow-up needs an instruction.'
+  const outcome = resumeBackgroundRun(id, task, onComplete)
+  if (outcome === 'resumed') return `Resumed background run ${id} with the follow-up task; a notification will arrive on completion.`
+  if (outcome === 'still-running') return `Background run ${id} is still running; wait for it or cancel it first.`
+  return `Unknown background run: ${id}.\n\n${backgroundStatusText()}`
+}
+
 /** What to tell the model about a cancel request. */
 export function cancelResultText(id: string): string {
   const outcome = cancelBackgroundRun(id)
@@ -606,15 +621,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd }, (run) => {
     removeTmpPrompt(tmpPrompt)
     pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
-    const output = capForContext(run.output ?? '') || '(no output)'
-    pi.sendMessage(
-      {
-        customType: 'subagent-background',
-        content: `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}`,
-        display: true,
-      },
-      { triggerTurn: true },
-    )
+    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   })
   if (id === null) {
     // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
@@ -1082,6 +1089,10 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
+  const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string }): void => {
+    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+  }
+
   // Claude surfaces each agent's description so the model can pick one autonomously.
   // Rebuilt per turn (agents are rediscovered per invocation too); project agents are
   // included only when the project is already approved, read without prompting, since
@@ -1135,20 +1146,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
         })
 
       if (params.resume) {
-        if (!params.task) {
-          return { content: [{ type: 'text', text: 'Pass task with resume: the follow-up needs an instruction.' }], details: makeDetails('single')([]) }
-        }
-        const outcome = resumeBackgroundRun(params.resume, params.task, (run) => {
-          const output = capForContext(run.output ?? '') || '(no output)'
-          pi.sendMessage({ customType: 'subagent-background', content: `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}`, display: true }, { triggerTurn: true })
-        })
-        const text =
-          outcome === 'resumed'
-            ? `Resumed background run ${params.resume} with the follow-up task; a notification will arrive on completion.`
-            : outcome === 'still-running'
-              ? `Background run ${params.resume} is still running; wait for it or cancel it first.`
-              : `Unknown background run: ${params.resume}.\n\n${backgroundStatusText()}`
-        return { content: [{ type: 'text', text }], details: makeDetails('single')([]) }
+        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion) }], details: makeDetails('single')([]) }
       }
 
       if (params.cancel) {
