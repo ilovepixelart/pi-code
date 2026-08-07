@@ -1,52 +1,133 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import commandsExt, { commandDirs } from '../extensions/commands.ts'
+import commandsExtension, { collectCommands, commandDirs } from '../extensions/commands.ts'
 
-const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home }
+})
+
+const dirs: string[] = []
+const tempDir = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'cmds-'))
+  dirs.push(dir)
+  return dir
+}
+const writeCommand = (root: string, rel: string, content: string): void => {
+  const full = join(root, '.claude', 'commands', rel)
+  mkdirSync(join(full, '..'), { recursive: true })
+  writeFileSync(full, content)
+}
+
+let savedAgentDir: string | undefined
+beforeEach(() => {
+  hoisted.home = tempDir()
+  savedAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = tempDir()
+})
+afterEach(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
 
 describe('commandDirs', () => {
-  it('returns nothing when no .claude/commands directory exists', () => {
-    expect(commandDirs(tempDir('cc-proj-'), tempDir('cc-home-'))).toEqual([])
-  })
-
-  it('returns the project commands directory when it exists', () => {
-    const cwd = tempDir('cc-proj-')
-    const home = tempDir('cc-home-')
-    mkdirSync(join(cwd, '.claude', 'commands'), { recursive: true })
-    expect(commandDirs(cwd, home)).toEqual([join(cwd, '.claude', 'commands')])
-  })
-
-  it('lists user commands before project commands', () => {
-    const cwd = tempDir('cc-proj-')
-    const home = tempDir('cc-home-')
-    mkdirSync(join(home, '.claude', 'commands'), { recursive: true })
-    mkdirSync(join(cwd, '.claude', 'commands'), { recursive: true })
-    expect(commandDirs(cwd, home)).toEqual([join(home, '.claude', 'commands'), join(cwd, '.claude', 'commands')])
-  })
-
-  it('ignores a .claude/commands path that is a file, not a directory', () => {
-    const cwd = tempDir('cc-proj-')
-    const home = tempDir('cc-home-')
-    mkdirSync(join(cwd, '.claude'), { recursive: true })
-    // .claude/commands exists but is not a directory
-    writeFileSync(join(cwd, '.claude', 'commands'), 'not a dir')
-    expect(commandDirs(cwd, home)).toEqual([])
+  it('includes the project directory only when the project is approved', () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'a.md', 'x')
+    writeCommand(hoisted.home, 'b.md', 'y')
+    expect(commandDirs(cwd, hoisted.home, false)).toHaveLength(1)
+    expect(commandDirs(cwd, hoisted.home, true)).toHaveLength(2)
   })
 })
 
-describe('extension wiring', () => {
-  it('returns promptPaths from resources_discover when commands exist', async () => {
-    const cwd = tempDir('cc-proj-')
-    mkdirSync(join(cwd, '.claude', 'commands'), { recursive: true })
+describe('collectCommands', () => {
+  it('lets a project command override a user command of the same name', () => {
+    const cwd = tempDir()
+    writeCommand(hoisted.home, 'ship.md', 'user version')
+    writeCommand(cwd, 'ship.md', 'project version')
+    const found = collectCommands(commandDirs(cwd, hoisted.home, true))
+    expect(found).toHaveLength(1)
+    expect(found[0].filePath).toContain(cwd)
+  })
+})
 
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
-    commandsExt({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
-    const result = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd })) as { promptPaths: string[] } | undefined
+const setup = (cwd: string, trusted = true) => {
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+  const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
+  const sent: string[] = []
+  const toolSets: string[][] = []
+  let active = ['bash', 'read', 'edit', 'write']
+  const pi = {
+    on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+    registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
+    exec: async (_file: string, args: string[]) => ({ stdout: `ran:${args[1]}`, stderr: '', code: 0, killed: false }),
+    sendUserMessage: (text: string) => {
+      sent.push(text)
+    },
+    getActiveTools: () => active,
+    setActiveTools: (next: string[]) => {
+      active = next
+      toolSets.push(next)
+    },
+  }
+  commandsExtension(pi as never)
+  const ctx = {
+    cwd,
+    hasUI: true,
+    isProjectTrusted: () => trusted,
+    ui: { confirm: async () => trusted, notify: () => {} },
+  }
+  return { handlers, commands, sent, toolSets, ctx, activeTools: () => active }
+}
 
-    expect(result?.promptPaths).toContain(join(cwd, '.claude', 'commands'))
+describe('commands extension', () => {
+  it('registers a nested command under its namespaced name and drives a turn with substituted args', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, join('frontend', 'build.md'), '---\ndescription: Build it\nargument-hint: [target]\n---\nBuild $1 now.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    expect([...s.commands.keys()]).toEqual(['frontend:build'])
+    expect(s.commands.get('frontend:build')?.description).toBe('Build it [target]')
+
+    await s.commands.get('frontend:build')?.handler('web', s.ctx)
+    expect(s.sent).toEqual(['Build web now.'])
+  })
+
+  it('expands bash spans and file references in the body', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'notes.md'), 'NOTE_BODY')
+    writeCommand(cwd, 'ctx.md', 'status: !`git status`\nnotes: @notes.md')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ctx')?.handler('', s.ctx)
+
+    expect(s.sent[0]).toContain('ran:git status')
+    expect(s.sent[0]).toContain('NOTE_BODY')
+  })
+
+  it('restricts tools for the command turn and restores them afterwards', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('safe')?.handler('', s.ctx)
+
+    expect(s.toolSets[0]).toEqual(['read'])
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('does not register project commands for an unapproved project', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'evil.md', 'do bad things')
+    const s = setup(cwd, false)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    expect(s.commands.size).toBe(0)
   })
 })
