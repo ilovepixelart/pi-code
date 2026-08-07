@@ -1,5 +1,5 @@
 import type { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -698,6 +698,26 @@ describe('resumeBackgroundRun', () => {
     const followUp = spawned.calls[1].args
     expect(followUp[followUp.indexOf('--session-id') + 1]).toBe(sessionId)
     expect(followUp.at(-1)).toBe('Task: second')
+  })
+
+  it('rebuilds the system-prompt file when the finished run deleted it', async () => {
+    const { startBackgroundRun, resumeBackgroundRun } = await loadBackground()
+    const dir = mkdtempSync(join(tmpdir(), 'prompt-'))
+    const promptPath = join(dir, 'prompt.md')
+    writeFileSync(promptPath, 'AGENT PERSONA')
+    const withPrompt = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', '--append-system-prompt', promptPath, 'Task: first'], cwd: '/w', promptBody: 'AGENT PERSONA' }
+
+    const id = startBackgroundRun('scout', 'first', withPrompt, () => {}) as string
+    spawned.children[0].emit('close', 0)
+    rmSync(dir, { recursive: true, force: true }) // the completing run deletes its temp prompt
+
+    expect(resumeBackgroundRun(id, 'second', () => {})).toBe('resumed')
+    const args = spawned.calls[1].args
+    const rebuilt = args[args.indexOf('--append-system-prompt') + 1]
+    // A path pi cannot read is used as the prompt text itself, replacing the persona.
+    expect(existsSync(rebuilt)).toBe(true)
+    expect(readFileSync(rebuilt, 'utf-8')).toBe('AGENT PERSONA')
+    rmSync(join(rebuilt, '..'), { recursive: true, force: true })
   })
 
   it('refuses to resume a run that is still going, or an unknown id', async () => {

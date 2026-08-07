@@ -7,6 +7,9 @@
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 export interface BackgroundRun {
   id: string
@@ -28,6 +31,10 @@ export interface BackgroundSpawn {
   command: string
   args: string[]
   cwd: string
+  /** The --append-system-prompt body, kept so a resume can rebuild the file the
+   * completing run deleted. Without it the resumed child is handed a path that no
+   * longer exists, and pi falls back to using that path as the prompt text. */
+  promptBody?: string
 }
 
 const runs = new Map<string, BackgroundRun>()
@@ -97,13 +104,33 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   const run = runs.get(id)
   if (!run) return 'unknown'
   if (run.state === 'running') return 'still-running'
-  const args = run.spawn.args.map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
+  const args = withRebuiltPrompt(run.spawn).map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
   run.state = 'running'
   run.task = task
   run.output = undefined
   run.exitCode = undefined
   driveRun(run, { ...run.spawn, args }, onComplete)
   return 'resumed'
+}
+
+/** Re-point --append-system-prompt at a fresh file when the original is gone. */
+function withRebuiltPrompt(spawnSpec: BackgroundSpawn): string[] {
+  const flag = spawnSpec.args.indexOf('--append-system-prompt')
+  if (flag === -1 || !spawnSpec.promptBody) return spawnSpec.args
+  const current = spawnSpec.args[flag + 1]
+  if (current && fs.existsSync(current)) return spawnSpec.args
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagent-'))
+    const file = path.join(dir, 'prompt.md')
+    fs.writeFileSync(file, spawnSpec.promptBody, { mode: 0o600 })
+    const rebuilt = [...spawnSpec.args]
+    rebuilt[flag + 1] = file
+    return rebuilt
+  } catch {
+    // Cannot rewrite it: drop the pair rather than hand pi a path it will treat as
+    // prompt text, which would replace the agent persona with a temp path.
+    return spawnSpec.args.filter((_arg, i) => i !== flag && i !== flag + 1)
+  }
 }
 
 export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string | null {
