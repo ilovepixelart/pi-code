@@ -487,6 +487,22 @@ describe('cancelBackgroundRun', () => {
 describe('startBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
 
+  it('survives a completion callback that throws because the session was disposed', async () => {
+    // pi's loader wires assertActive() into events.emit and sendMessage, so every call
+    // in the completion path throws once the session that started the run is gone (a
+    // /new, /resume, /fork or /reload while it was still running). This runs from the
+    // child's close listener, where an escaping error reaches Node as an
+    // uncaughtException and exits pi.
+    const { startBackgroundRun, backgroundStatusText } = await loadBackground()
+    startBackgroundRun('scout', 'survey', invocation, () => {
+      throw new Error('This extension ctx is stale after session replacement or reload.')
+    })
+
+    expect(() => spawned.children[0].emit('close', 0)).not.toThrow()
+    // The run itself still finished; only the notification is lost.
+    expect(backgroundStatusText()).toContain('done')
+  })
+
   it('returns a bg- prefixed id built from a uuid prefix', async () => {
     const { startBackgroundRun } = await loadBackground()
 

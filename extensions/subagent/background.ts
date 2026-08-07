@@ -175,7 +175,17 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   const complete = (): void => {
     if (completed) return
     completed = true
-    onComplete(run)
+    // A run outlives the session that started it, and pi's loader wires assertActive()
+    // into every runtime call, so notifying a disposed session throws. This fires from
+    // the child's 'close'/'error' listener, where nothing upstream catches: an escaping
+    // error reaches Node as an uncaughtException and takes pi down with it. The run
+    // state is already recorded by this point, so there is nothing to do but drop the
+    // notification for a session that is no longer there to receive it.
+    try {
+      onComplete(run)
+    } catch {
+      // the session that asked for this run is gone
+    }
   }
   proc.stdout.on('data', (data) => {
     stdout += data.toString()

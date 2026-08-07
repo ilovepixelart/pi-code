@@ -628,15 +628,11 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   const invocation = getPiInvocation(args)
   const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd, promptBody: tmpPrompt ? promptWithSkills : undefined }, (run) => {
     removeTmpPrompt(tmpPrompt)
+    // Both calls throw once the session that started the run is disposed; driveRun
+    // catches for the whole callback, so neither can escape into the child's close
+    // listener and become an uncaughtException.
     pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
-    // The run outlives the session that started it, and every pi call throws once
-    // that session is disposed; an escaping error here would reach Node as an
-    // uncaughtException and take the process down with it.
-    try {
-      pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
-    } catch {
-      // the session that asked for this run is gone; nothing left to notify
-    }
+    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   })
   if (id === null) {
     // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
@@ -1113,11 +1109,8 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 
 export default function subagentExtension(pi: ExtensionAPI) {
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string }): void => {
-    try {
-      pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
-    } catch {
-      // same as above: the session that started the run may already be gone
-    }
+    // Runs through driveRun's guard, same as the background-mode callback above.
+    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   }
 
   // Claude surfaces each agent's description so the model can pick one autonomously.
