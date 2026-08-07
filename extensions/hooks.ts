@@ -97,8 +97,14 @@ export function loadHooks(files: string[]): HooksConfig {
     } catch {
       continue
     }
-    for (const [event, matchers] of Object.entries(parsed.hooks ?? {})) {
-      if (Array.isArray(matchers)) config[event] = [...(config[event] ?? []), ...matchers]
+    for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {
+      if (!Array.isArray(matchers)) continue
+      // Entries are validated here rather than where they run: a hand-edited settings
+      // file that writes `hooks` as an object instead of a list used to throw out of
+      // the tool_call handler, and pi turns that into an error result, so every tool
+      // call for the rest of the session failed with an opaque type error.
+      const usable = matchers.filter((entry) => isUsableMatcher(entry, file, event))
+      if (usable.length > 0) config[event] = [...(config[event] ?? []), ...usable]
     }
   }
   return config
@@ -122,6 +128,26 @@ function exactListApplies(matcher: string, names: readonly string[]): boolean {
       .filter(Boolean),
   )
   return names.some((name) => tokens.has(foldName(name)))
+}
+
+/** A matcher entry pi-code can run: an object whose `hooks` is a list. Anything else
+ * is reported by name and skipped, so one bad entry costs its own hooks, not the
+ * session's tool calls. */
+function isUsableMatcher(entry: unknown, file: string, event: string): entry is HookMatcher {
+  const candidate = entry as HookMatcher | null
+  if (candidate === null || typeof candidate !== 'object') {
+    console.warn(`pi-code-hooks: ignoring a non-object ${event} entry in ${file}`)
+    return false
+  }
+  if (candidate.hooks !== undefined && !Array.isArray(candidate.hooks)) {
+    console.warn(`pi-code-hooks: ignoring ${event} entry in ${file}: "hooks" must be a list`)
+    return false
+  }
+  if (candidate.matcher !== undefined && typeof candidate.matcher !== 'string') {
+    console.warn(`pi-code-hooks: ignoring ${event} entry in ${file}: "matcher" must be a string`)
+    return false
+  }
+  return true
 }
 
 function matcherApplies(matcher: string | undefined, names: readonly string[]): boolean {
