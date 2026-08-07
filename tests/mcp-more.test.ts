@@ -121,6 +121,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
+const { splitByPolicy, expandCwd } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -1053,5 +1054,34 @@ describe('small MCP parity', () => {
     withTools([])
     const harness = await setupStarted({ user: { srv: { url: 'https://example.com/mcp' } } })
     expect(harness.warnings.some((w) => w.includes('no "type"'))).toBe(true)
+  })
+})
+
+describe('policy split and cwd expansion helpers', () => {
+  const policy = (over: Partial<{ disabled: Set<string>; consented: Set<string>; consentAll: boolean }> = {}) => ({
+    disabled: over.disabled ?? new Set<string>(),
+    consented: over.consented ?? new Set<string>(),
+    consentAll: over.consentAll ?? false,
+  })
+
+  it('drops disabled servers, separates consented from gated', () => {
+    const candidates = { a: { command: 'a' }, b: { command: 'b' }, c: { command: 'c' } }
+    const split = splitByPolicy(candidates, policy({ disabled: new Set(['a']), consented: new Set(['b']) }))
+    expect(Object.keys(split.consented)).toEqual(['b'])
+    expect(Object.keys(split.gated)).toEqual(['c'])
+  })
+
+  it('treats every surviving server as consented under consentAll', () => {
+    const split = splitByPolicy({ a: { command: 'a' }, b: { command: 'b' } }, policy({ consentAll: true, disabled: new Set(['b']) }))
+    expect(Object.keys(split.consented)).toEqual(['a'])
+    expect(split.gated).toEqual({})
+  })
+
+  it('expands a cwd through ${VAR} then a leading tilde, or leaves it unset', () => {
+    setEnv('CWD_ROOT', '/srv')
+    expect(expandCwd('${CWD_ROOT}/x')).toBe('/srv/x')
+    expect(expandCwd(undefined)).toBeUndefined()
+    expect(expandCwd('~/proj')).toBe(`${hoisted.home}/proj`)
+    unsetEnv('CWD_ROOT')
   })
 })

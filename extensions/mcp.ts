@@ -21,7 +21,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
@@ -127,6 +127,19 @@ export function projectServerPolicy(cwd: string, home: string): ProjectServerPol
   return { disabled, consented, consentAll }
 }
 
+/** Split project servers by the per-server policy: never-connect, connect without the
+ * whole-project confirm, and still gated behind it. */
+export function splitByPolicy(candidates: Record<string, ServerConfig>, policy: ProjectServerPolicy): { consented: Record<string, ServerConfig>; gated: Record<string, ServerConfig> } {
+  const consented: Record<string, ServerConfig> = {}
+  const gated: Record<string, ServerConfig> = {}
+  for (const [name, config] of Object.entries(candidates)) {
+    if (policy.disabled.has(name)) continue
+    if (policy.consentAll || policy.consented.has(name)) consented[name] = config
+    else gated[name] = config
+  }
+  return { consented, gated }
+}
+
 export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
   const servers: Record<string, ServerConfig> = {}
   for (const file of files) {
@@ -159,6 +172,12 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
 
 /** Claude reports a config entry that has a url but no type as an error; pi-code
  * still connects (streamable HTTP with SSE fallback) but says the entry is wrong. */
+/** A server cwd expands ${VAR} then a leading ~, or stays unset. */
+export function expandCwd(cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined
+  return interpolateEnv(cwd).replace(/^~(?=\/|$)/, os.homedir())
+}
+
 export function warnOnTypelessUrl(name: string, config: ServerConfig): void {
   if ('url' in config && config.type === undefined) {
     console.warn(`pi-code-mcp: server ${name} declares a url with no "type"; add "type": "http" or "sse"`)
@@ -240,7 +259,7 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
       command: interpolateEnv(config.command),
       args: (config.args ?? []).map((arg) => interpolateEnv(arg)),
       env,
-      cwd: config.cwd ? interpolateEnv(config.cwd).replace(/^~(?=\/|$)/, os.homedir()) : undefined,
+      cwd: expandCwd(config.cwd),
       stderr: 'ignore',
     })
     await connectWithTimeout(client, transport, `connect ${name}`)
@@ -362,6 +381,18 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** Connect the project scope under the per-server policy. Returns whether the scope
+   * is settled, so a refused confirm can be retried on a later session start. */
+  async function connectProjectScope(ctx: ExtensionContext): Promise<boolean> {
+    const policy = projectServerPolicy(ctx.cwd, os.homedir())
+    const { consented, gated } = splitByPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy)
+    if (Object.keys(consented).length > 0) await connectServers(consented)
+    if (Object.keys(gated).length === 0) return true
+    if (!(await isProjectApproved(ctx))) return false
+    await connectServers(gated)
+    return true
+  }
+
   let userConnected = false
   let projectConnected = false
 
@@ -377,23 +408,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // connect, servers the user consented to individually connect without the
     // whole-project confirm, and the rest stay behind it. Reconnect attempts after a
     // refusal are safe: connectServers skips names that already connected.
-    if (!projectConnected) {
-      const policy = projectServerPolicy(ctx.cwd, os.homedir())
-      const candidates = loadConfigFrom(projectConfigPaths(ctx.cwd))
-      const consented: Record<string, ServerConfig> = {}
-      const gated: Record<string, ServerConfig> = {}
-      for (const [name, config] of Object.entries(candidates)) {
-        if (policy.disabled.has(name)) continue
-        if (policy.consentAll || policy.consented.has(name)) consented[name] = config
-        else gated[name] = config
-      }
-      if (Object.keys(consented).length > 0) await connectServers(consented)
-      if (Object.keys(gated).length === 0) projectConnected = true
-      else if (await isProjectApproved(ctx)) {
-        projectConnected = true
-        await connectServers(gated)
-      }
-    }
+    if (!projectConnected) projectConnected = await connectProjectScope(ctx)
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
 
