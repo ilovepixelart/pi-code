@@ -41,9 +41,18 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
   ls: 'ls',
 }
 
+/**
+ * Claude scopes a grant to arguments: `Bash(git add:*)` allows exactly those commands.
+ * pi's active-tool list is per tool, with no argument dimension, so the scope is
+ * dropped and the base tool is granted. Keeping the scope in the name matched nothing
+ * when the list was intersected with the active tools, which left a command declaring
+ * only scoped grants running with no tools at all.
+ */
 export function normalizeToolName(name: string): string {
   const lower = name.trim().toLowerCase()
-  return CLAUDE_TOOL_MAP[lower] ?? lower
+  const scope = lower.indexOf('(')
+  const base = (scope === -1 ? lower : lower.slice(0, scope)).trim()
+  return CLAUDE_TOOL_MAP[base] ?? base
 }
 
 function field(frontmatter: string, key: string): string {
@@ -60,7 +69,9 @@ export function parseCommandFile(content: string): ParsedCommand {
   return {
     description: field(frontmatter, 'description') || firstLine.slice(0, 60),
     argumentHint: field(frontmatter, 'argument-hint') || undefined,
-    allowedTools: tools ? tools.split(',').map(normalizeToolName).filter(Boolean) : undefined,
+    // Several scoped grants collapse to one tool name; pi would otherwise be handed
+    // the same tool twice.
+    allowedTools: tools ? [...new Set(tools.split(',').map(normalizeToolName).filter(Boolean))] : undefined,
     model: field(frontmatter, 'model') || undefined,
     disableModelInvocation: field(frontmatter, 'disable-model-invocation') === 'true',
     body,

@@ -29,6 +29,23 @@ describe('parseCommandFile', () => {
     })
   })
 
+  it('grants the base tool for an argument-scoped Claude permission', () => {
+    // Claude scopes a grant to arguments; pi's active-tool list has no argument
+    // dimension. Keeping the scope in the name matched no pi tool, so this command
+    // used to run with no bash at all despite asking for it twice.
+    const md = ['---', 'allowed-tools: Bash(git add:*), Bash(git status:*), Read', '---', 'Stage the change.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it('leaves a command with only scoped grants able to run', () => {
+    const md = ['---', 'allowed-tools: Bash(git commit:*)', '---', 'Commit.'].join('\n')
+
+    // Not [] — an empty grant intersects the active tools to nothing and the turn
+    // gets no tools whatsoever.
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash'])
+  })
+
   it('falls back to the first body line as description and defaults the rest', () => {
     const parsed = parseCommandFile('Summarize the diff.\nMore detail.')
     expect(parsed.description).toBe('Summarize the diff.')
