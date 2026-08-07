@@ -54,6 +54,24 @@ function parseModelField(raw: unknown): string | undefined {
   return model && !CLAUDE_MODEL_ALIASES.has(model.toLowerCase()) ? model : undefined
 }
 
+/** The tier alias an agent asked for, kept so it can be resolved against the models
+ * this user is actually authenticated for. `inherit` is not a tier: it means the
+ * session model, which is also the fallback when a tier is unavailable. */
+function parseModelAlias(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const alias = raw.trim().toLowerCase()
+  return alias !== 'inherit' && CLAUDE_MODEL_ALIASES.has(alias) ? alias : undefined
+}
+
+/** Resolve a Claude tier alias to a concrete model id the user can actually run.
+ * Returning undefined leaves the child on the session model, which is what the
+ * unresolvable case degraded to before and still does. */
+export function resolveModelAlias(alias: string | undefined, available: ReadonlyArray<{ id: string; provider?: string }>): string | undefined {
+  if (!alias || alias === 'inherit') return undefined
+  const needle = alias.toLowerCase()
+  return available.find((model) => model.id.toLowerCase().includes(needle))?.id
+}
+
 /** pi's extended thinking levels; Claude's effort values are a subset, so they map 1:1. */
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -139,6 +157,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     disallowedTools,
     model: parseModelField(frontmatter.model),
     effort: parseEffortField(frontmatter.effort),
+    modelAlias: parseModelAlias(frontmatter.model),
     skills: parseSkillsField(frontmatter.skills),
     systemPrompt: body,
     source,
@@ -155,6 +174,8 @@ export interface AgentConfig {
   disallowedTools?: string[]
   model?: string
   effort?: string
+  /** Claude tier alias (`sonnet`/`opus`/`haiku`) when the file named one. */
+  modelAlias?: string
   /** Skill names to inline into the child's prompt, per Claude's `skills` field. */
   skills?: string[]
   systemPrompt: string
