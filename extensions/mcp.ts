@@ -60,6 +60,8 @@ export interface StdioServerConfig {
   args?: string[]
   env?: Record<string, string>
   cwd?: string
+  /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
+  timeout?: number
 }
 
 export interface HttpServerConfig {
@@ -68,6 +70,8 @@ export interface HttpServerConfig {
   headers?: Record<string, string>
   bearerToken?: string
   bearerTokenEnv?: string
+  /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
+  timeout?: number
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
@@ -228,7 +232,7 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
       command: interpolateEnv(config.command),
       args: (config.args ?? []).map((arg) => interpolateEnv(arg)),
       env,
-      cwd: config.cwd?.replace(/^~(?=\/|$)/, os.homedir()),
+      cwd: config.cwd ? interpolateEnv(config.cwd).replace(/^~(?=\/|$)/, os.homedir()) : undefined,
       stderr: 'ignore',
     })
     await connectWithTimeout(client, transport, `connect ${name}`)
@@ -305,6 +309,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
+      // Claude reports a config entry that has a url but no type as an error; pi-code
+      // still connects (streamable HTTP with SSE fallback) but says the entry is wrong.
+      if ('url' in config && config.type === undefined) {
+        console.warn(`pi-code-mcp: server ${name} declares a url with no "type"; add "type": "http" or "sse"`)
+      }
       try {
         const client = await connect(name, config)
         clients.set(name, client)
@@ -327,7 +336,10 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             async execute(_id, params) {
               // Pass the timeout to the SDK too: its own default request timeout is 60s and
               // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
-              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: callTimeoutMs() }), callTimeoutMs(), toolName)
+              // Claude's per-server timeout wins over MCP_TOOL_TIMEOUT, with a 1s floor.
+              const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
+              const budget = declared ?? callTimeoutMs()
+              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
               const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
               const details: { error?: string } = {}
               if (result.isError) {

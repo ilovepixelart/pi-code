@@ -1028,3 +1028,30 @@ describe('per-server project approvals', () => {
     expect(harness.toolNames()).toEqual([])
   })
 })
+
+describe('small MCP parity', () => {
+  it('honors a per-server timeout over the global default, with a 1s floor', async () => {
+    withTools([{ name: 'quick' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x', timeout: 1500 }, floored: { command: 'y', timeout: 10 } } })
+    await harness.tools[0].execute('c1', {})
+    expect((hoisted.callOptions.at(-1) as { timeout: number }).timeout).toBe(1500)
+
+    // Below Claude's documented 1s minimum the per-server value is ignored.
+    await harness.tools[1].execute('c2', {})
+    expect((hoisted.callOptions.at(-1) as { timeout: number }).timeout).toBe(120_000)
+  })
+
+  it('expands environment variables in cwd', async () => {
+    setEnv('PROJ_ROOT', '/tmp/proj')
+    withTools([])
+    await setupStarted({ user: { srv: { command: 'x', cwd: '${PROJ_ROOT}/sub' } } })
+    expect((hoisted.transports[0].options as { cwd?: string }).cwd).toBe('/tmp/proj/sub')
+    unsetEnv('PROJ_ROOT')
+  })
+
+  it('warns about a url entry that declares no type', async () => {
+    withTools([])
+    const harness = await setupStarted({ user: { srv: { url: 'https://example.com/mcp' } } })
+    expect(harness.warnings.some((w) => w.includes('no "type"'))).toBe(true)
+  })
+})
