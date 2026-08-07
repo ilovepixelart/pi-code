@@ -1,15 +1,18 @@
 /**
  * Claude Commands Extension
  *
- * Bridges Claude Code's custom slash commands into pi. On resources_discover
- * it hands pi the existing `.claude/commands` directories (user then project)
- * as prompt-template paths, so `/name` invokes `.claude/commands/name.md` the
- * same way pi loads its own `.pi/prompts`. pi's `$ARGUMENTS` / `$1` / `${1:-x}`
- * substitution overlaps Claude Code's, so most command files work unchanged.
+ * Registers Claude Code's custom slash commands with pi directly, rather than
+ * handing `.claude/commands` to pi's prompt-template loader. Owning registration
+ * is what makes the rest of Claude's command contract reachable: namespaced
+ * subdirectories (`frontend/build.md` is `/frontend:build`), `$ARGUMENTS` and
+ * positional substitution, `` !`cmd` `` bash output, `@file` inlining, and the
+ * `allowed-tools` / `model` / `argument-hint` / `disable-model-invocation`
+ * frontmatter.
  *
- * Not bridged (pi's prompt engine ignores them): `!` bash execution, `@` file
- * refs, `allowed-tools`/`model` frontmatter, and namespaced subdirectories
- * (discovery is non-recursive).
+ * A project command body is repository-controlled text that can now run shell
+ * commands and read files, so project commands load only once the project is
+ * approved. That closes the "skills / commands are not trust-gated" limitation
+ * for commands; skills remain pi-loader territory.
  *
  * Docs: https://code.claude.com/docs/en/slash-commands.md
  */
@@ -17,7 +20,13 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
+
+import { type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, substituteArgs } from './internal/command-file.js'
+import { isProjectApproved } from './internal/project-approval.js'
+
+/** Wall-clock budget for one `` !`cmd` `` span; a hung command must not wedge a turn. */
+const BASH_TIMEOUT_MS = 30_000
 
 function isDirectory(target: string): boolean {
   try {
@@ -27,9 +36,11 @@ function isDirectory(target: string): boolean {
   }
 }
 
-/** Existing `.claude/commands` directories, user first then project. */
-export function commandDirs(cwd: string, home: string): string[] {
-  const candidates = [path.join(home, '.claude', 'commands'), path.join(cwd, '.claude', 'commands')]
+/** Existing `.claude/commands` directories, user first then project. The project
+ * directory is included only for approved projects. */
+export function commandDirs(cwd: string, home: string, trusted: boolean): string[] {
+  const candidates = [path.join(home, '.claude', 'commands')]
+  if (trusted) candidates.push(path.join(cwd, '.claude', 'commands'))
   const dirs: string[] = []
   for (const dir of candidates) {
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)
@@ -37,9 +48,64 @@ export function commandDirs(cwd: string, home: string): string[] {
   return dirs
 }
 
+/** All commands across the given directories, later directories winning by name. */
+export function collectCommands(dirs: string[]): DiscoveredCommand[] {
+  const byName = new Map<string, DiscoveredCommand>()
+  for (const dir of dirs) {
+    for (const found of discoverCommandFiles(dir)) byName.set(found.name, found)
+  }
+  return [...byName.values()]
+}
+
 export default function commandsExtension(pi: ExtensionAPI) {
-  pi.on('resources_discover', async (_event, ctx) => {
-    const promptPaths = commandDirs(ctx.cwd, os.homedir())
-    return promptPaths.length > 0 ? { promptPaths } : undefined
+  const registered = new Set<string>()
+
+  async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext): Promise<void> {
+    const withArgs = substituteArgs(parsed.body, args)
+    const expanded = await expandDynamicContent(withArgs, ctx.cwd, async (shell) => {
+      const result = await pi.exec('/bin/sh', ['-c', shell], { timeout: BASH_TIMEOUT_MS })
+      return { stdout: result.stdout, stderr: result.stderr, code: result.code }
+    })
+
+    // allowed-tools restricts the turn the command drives, then the previous set is
+    // restored: the restriction belongs to the command, not to the rest of the session.
+    const saved = parsed.allowedTools ? pi.getActiveTools() : undefined
+    if (parsed.allowedTools && saved) {
+      pi.setActiveTools(parsed.allowedTools.filter((tool) => saved.includes(tool)))
+    }
+    try {
+      pi.sendUserMessage(expanded)
+    } finally {
+      if (saved) pi.setActiveTools(saved)
+    }
+  }
+
+  pi.on('session_start', async (_event, ctx) => {
+    const trusted = await isProjectApproved(ctx)
+    for (const command of collectCommands(commandDirs(ctx.cwd, os.homedir(), trusted))) {
+      // pi has no unregister, so a command already registered this process keeps its
+      // original file binding; re-registering would only add a numbered duplicate.
+      if (registered.has(command.name)) continue
+      let parsed: ParsedCommand
+      try {
+        parsed = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
+      } catch {
+        continue // an unreadable command file must not take down session start
+      }
+      registered.add(command.name)
+      pi.registerCommand(command.name, {
+        description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
+        handler: async (args, commandCtx) => {
+          // Re-read on invocation so an edited command file takes effect without a reload.
+          let current = parsed
+          try {
+            current = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
+          } catch {
+            // fall back to what was parsed at registration
+          }
+          await runCommand(current, args, commandCtx)
+        },
+      })
+    }
   })
 }
