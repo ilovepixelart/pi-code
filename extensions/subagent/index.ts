@@ -626,7 +626,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   }
   args.push(`Task: ${task}`)
   const invocation = getPiInvocation(args)
-  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd }, (run) => {
+  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd, promptBody: tmpPrompt ? promptWithSkills : undefined }, (run) => {
     removeTmpPrompt(tmpPrompt)
     pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
     // The run outlives the session that started it, and every pi call throws once
@@ -756,6 +756,10 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
       cwd: t.cwd,
       signal,
       onPhase: mode.onPhase,
+      // Same context single and chain mode pass: without these, an agent's skills
+      // preload and its model tier alias silently do nothing in parallel mode only.
+      skillRoots: mode.skillRoots,
+      availableModels: mode.availableModels,
       // Per-task update callback
       onUpdate: (partial) => {
         const live = partial.details?.results[0]
