@@ -61,8 +61,26 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let planFromTool = false
   let savedTools: string[] = []
 
+  /**
+   * pi carries the active tool names across /reload (agent-session's reload() feeds
+   * getActiveToolNames() into the rebuilt runtime) while this extension is rebuilt with
+   * an empty snapshot, so a restore can find the tool set already restricted. Taking
+   * that as the snapshot would make the restriction permanent: toggling plan mode off
+   * would restore the read-only set and edit/write would be gone for the session. The
+   * tool registry still holds every configured tool, so recover from it instead.
+   *
+   * A session deliberately narrowed to within the plan set is widened back to all tools
+   * by this, which is the price of not being able to tell it apart from a carried-over
+   * restriction. That is recoverable; silently losing edit and write is not.
+   */
+  function toolsToRestore(): string[] {
+    const active = pi.getActiveTools()
+    if (active.some((name) => !PLAN_MODE_TOOLS.includes(name))) return active
+    return pi.getAllTools().map((tool) => tool.name)
+  }
+
   function enterPlanTools(): void {
-    savedTools = pi.getActiveTools()
+    savedTools = toolsToRestore()
     pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
   }
 

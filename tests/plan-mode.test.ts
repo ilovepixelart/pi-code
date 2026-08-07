@@ -14,6 +14,9 @@ const theme = {
 
 const assistant = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }] })
 
+/** Every tool the session has configured, which is what pi's getAllTools reports. */
+const ALL_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete', 'edit', 'write']
+
 /** Fresh extension instance: the extension closes over mutable plan state per registration. */
 function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const handlers = new Map<string, Handler>()
@@ -24,12 +27,15 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const userMessages: string[] = []
   const appended: Array<{ type: string; data: unknown }> = []
   const emitted: Array<{ channel: string; data: unknown }> = []
-  let activeTools = options.activeTools ?? ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete', 'edit', 'write']
+  let activeTools = options.activeTools ?? [...ALL_TOOLS]
 
   const pi = {
     registerFlag: () => {},
     getFlag: () => options.flag,
     getActiveTools: () => activeTools,
+    // The real getAllTools reads the tool-definition registry, so the active-tool
+    // restriction does not narrow it.
+    getAllTools: () => ALL_TOOLS.map((name) => ({ name })),
     setActiveTools: (next: string[]) => {
       activeTools = next
     },
@@ -445,6 +451,22 @@ describe('session restore', () => {
     const s2 = setup()
     await s2.emit('session_start', {}, restoreCtx(s2, entries))
     expect(s2.getActiveTools()).toContain('write')
+  })
+
+  it('recovers edit and write when a reload restores plan mode over an already-restricted set', async () => {
+    // pi's reload() feeds getActiveToolNames() into the rebuilt runtime, so the new
+    // extension instance sees the restricted set with no snapshot of its own. Taking
+    // that as the snapshot made the restriction permanent for the session.
+    const s = setup()
+    await s.runCommand('plan')
+    const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
+
+    const reloaded = setup({ activeTools: s.getActiveTools() })
+    await reloaded.emit('session_start', { reason: 'reload' }, restoreCtx(reloaded, entries))
+    await reloaded.runCommand('plan')
+
+    expect(reloaded.getActiveTools()).toContain('edit')
+    expect(reloaded.getActiveTools()).toContain('write')
   })
 
   it('does not carry plan state into a fresh session with no plan entry', async () => {
