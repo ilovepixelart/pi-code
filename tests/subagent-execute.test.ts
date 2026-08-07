@@ -512,14 +512,15 @@ describe('runSingleAgent process handling', () => {
     expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', '--model', 'gpt-oss:20b:high', '--exclude-tools', 'write,edit', 'Task: inspect'])
   })
 
-  it('applies effort only when a concrete model is pinned', async () => {
-    // pi reads the thinking level from the model pattern; without a model there is no seam.
+  it('carries effort through --thinking when no model is pinned', async () => {
+    // pi reads the level from the model pattern when one is pinned, and from --thinking
+    // otherwise, so an agent that only sets effort no longer loses it.
     discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ effort: 'high' })], projectAgentsDir: null })
     script('inspect', { stdout: [say('ok')] })
 
     await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
-    expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', 'Task: inspect'])
+    expect(piArgs(spawnCalls[0])).toEqual(['--mode', 'json', '-p', '--no-session', '--thinking', 'high', 'Task: inspect'])
   })
 
   it('omits the model and tools flags when the agent declares neither', async () => {
@@ -688,6 +689,31 @@ describe('runSingleAgent process handling', () => {
 
     await expect(pending).rejects.toThrow('Subagent was aborted')
     expect(spawnedChildren[0].kill).toHaveBeenCalledWith('SIGTERM')
+  })
+})
+
+describe('effort and skills', () => {
+  it('passes effort as --thinking when the agent pins no model', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ effort: 'high' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('done')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const args = spawnMock.mock.calls[0][1] as string[]
+    expect(args).toContain('--thinking')
+    expect(args[args.indexOf('--thinking') + 1]).toBe('high')
+    expect(args).not.toContain('--model')
+  })
+
+  it('keeps the model:effort suffix when a model is pinned', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ model: 'gpt-oss:20b', effort: 'low' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('done')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const args = spawnMock.mock.calls[0][1] as string[]
+    expect(args[args.indexOf('--model') + 1]).toBe('gpt-oss:20b:low')
+    expect(args).not.toContain('--thinking')
   })
 })
 

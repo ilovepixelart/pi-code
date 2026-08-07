@@ -541,9 +541,10 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
 /** CLI args shared by foreground and background children, from the agent's config. */
 function agentInvocationArgs(agent: AgentConfig): string[] {
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  // pi reads a thinking level from the model pattern's :suffix, so Claude's effort
-  // has a seam only when the agent pins a concrete model.
+  // pi reads a thinking level from the model pattern's :suffix when a model is pinned,
+  // and from --thinking otherwise, so effort survives either way.
   if (agent.model) args.push('--model', agent.effort ? `${agent.model}:${agent.effort}` : agent.model)
+  else if (agent.effort) args.push('--thinking', agent.effort)
   if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
   if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', agent.disallowedTools.join(','))
   return args
