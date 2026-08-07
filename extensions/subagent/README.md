@@ -7,7 +7,7 @@ Delegate tasks to specialized subagents with isolated context windows.
 - **Isolated context**: Each subagent runs in a separate `pi` process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
-- **Background runs**: `{background: true}` returns a run id and notifies on completion; `{status: true}` lists runs and `{cancel: "<id>"}` stops one (signalling its process group); max 8 running at once
+- **Background runs**: `{background: true}` returns a run id and notifies on completion; `{status: true}` lists runs, `{cancel: "<id>"}` stops one (signalling its process group), and `{resume: "<id>", task: "..."}` continues a finished run under its own session, so the child keeps everything it already saw; max 8 running at once
 - **Bounded fan-out**: A subagent refuses to spawn subagents of its own (an env marker the tool honors: steering, not a sandbox)
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent

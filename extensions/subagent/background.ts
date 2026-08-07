@@ -18,6 +18,10 @@ export interface BackgroundRun {
   turns: number
   /** Set while running so the run can be cancelled; cleared on completion. */
   kill?: () => void
+  /** pi session the child ran under, so a follow-up can continue its context. */
+  sessionId: string
+  /** How the child was spawned, so a follow-up can repeat it with a new task. */
+  spawn: BackgroundSpawn
 }
 
 export interface BackgroundSpawn {
@@ -57,7 +61,7 @@ export function parseFinalOutputFromJsonl(jsonl: string): { text: string; turns:
   return { text, turns }
 }
 
-export function formatStatus(all: Iterable<BackgroundRun>): string {
+export function formatStatus(all: Iterable<Pick<BackgroundRun, 'id' | 'agent' | 'task' | 'state' | 'turns' | 'exitCode'>>): string {
   const lines = [...all].map((run) => {
     const label = run.state === 'running' ? 'running' : `${run.state} (exit ${run.exitCode ?? '?'}, ${run.turns} turns)`
     return `${run.id} ${run.agent}: ${label} - ${run.task.slice(0, 60)}`
@@ -81,15 +85,47 @@ export function backgroundStatusText(): string {
   return formatStatus(runs.values())
 }
 
+/** A finished run, so a caller can continue its session with a follow-up task. */
+export function backgroundRun(id: string): BackgroundRun | undefined {
+  return runs.get(id)
+}
+
+/** Re-spawn a finished run's session with a new task. The child is started with the
+ * same --session-id, so it continues with everything it already saw rather than
+ * re-deriving context the parent would have to repeat. */
+export function resumeBackgroundRun(id: string, task: string, onComplete: (run: BackgroundRun) => void): 'resumed' | 'still-running' | 'unknown' {
+  const run = runs.get(id)
+  if (!run) return 'unknown'
+  if (run.state === 'running') return 'still-running'
+  const args = run.spawn.args.map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
+  run.state = 'running'
+  run.task = task
+  run.output = undefined
+  run.exitCode = undefined
+  driveRun(run, { ...run.spawn, args }, onComplete)
+  return 'resumed'
+}
+
 export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string | null {
   // Checked here, synchronously with registration: callers await temp-file writes
   // between any check of their own and this call, so a parallel tool-call batch
   // could otherwise all pass that earlier check and overshoot the cap.
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) return null
   const id = `bg-${randomUUID().slice(0, 8)}`
-  const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0 }
+  // A stable session id per run: the child persists its session, so a follow-up can
+  // resume it instead of starting cold.
+  const sessionId = `pi-code-${id}-${randomUUID().slice(0, 8)}`
+  const args = invocation.args.map((arg) => (arg === '--no-session' ? '--session-id' : arg))
+  const withSession = args.includes('--session-id') ? args.flatMap((arg) => (arg === '--session-id' ? ['--session-id', sessionId] : [arg])) : args
+  const spawnSpec: BackgroundSpawn = { ...invocation, args: withSession }
+  const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0, sessionId, spawn: spawnSpec }
   runs.set(id, run)
+  driveRun(run, spawnSpec, onComplete)
+  return id
+}
 
+/** Spawn the child for a run and wire its lifecycle back onto the record. */
+function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): void {
   const proc = spawn(invocation.command, invocation.args, {
     cwd: invocation.cwd,
     shell: false,
@@ -133,5 +169,4 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     run.exitCode = 1
     complete()
   })
-  return id
 }

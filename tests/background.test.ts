@@ -19,8 +19,8 @@ describe('background subagent helpers', () => {
 
   it('formats run status lines', () => {
     const runs: BackgroundRun[] = [
-      { id: 'bg-1', agent: 'scout', task: 'find things', state: 'running', turns: 0 },
-      { id: 'bg-2', agent: 'worker', task: 'do things', state: 'done', exitCode: 0, turns: 3 },
+      { id: 'bg-1', agent: 'scout', task: 'find things', state: 'running', turns: 0, sessionId: 'sess', spawn: { command: 'pi', args: [], cwd: '/w' } },
+      { id: 'bg-2', agent: 'worker', task: 'do things', state: 'done', exitCode: 0, turns: 3, sessionId: 'sess', spawn: { command: 'pi', args: [], cwd: '/w' } },
     ]
     const text = formatStatus(runs)
     expect(text).toContain('bg-1 scout: running')
