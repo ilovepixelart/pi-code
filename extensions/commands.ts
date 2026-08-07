@@ -65,7 +65,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     const expanded = await expandDynamicContent(withArgs, ctx.cwd, async (shell) => {
       // Hooks get CLAUDE_PROJECT_DIR, and a command's bash span is the same kind of
       // project-scoped script. pi.exec takes no env, so it is exported in the script.
-      const projectDir = ctx.cwd.replaceAll("'", `'\\''`)
+      const projectDir = ctx.cwd.replaceAll("'", String.raw`'\''`)
       const script = `export CLAUDE_PROJECT_DIR='${projectDir}'; ${shell}`
       const result = await pi.exec('/bin/sh', ['-c', script], { cwd: ctx.cwd, timeout: BASH_TIMEOUT_MS })
       return { stdout: result.stdout, stderr: result.stderr, code: result.code }
