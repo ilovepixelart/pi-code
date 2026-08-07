@@ -1,7 +1,7 @@
 import type { Text } from '@earendil-works/pi-tui'
 import { describe, expect, it } from 'vitest'
 
-import questionExtension, { QuestionParams } from '../extensions/question.ts'
+import questionExtension, { QuestionParams, shortHeader } from '../extensions/question.ts'
 
 interface Option {
   label: string
@@ -96,10 +96,13 @@ const openOverlayWith = (tool: QuestionTool, params: Record<string, unknown>) =>
 
 describe('question schema caps', () => {
   it("bounds options and header to Claude's AskUserQuestion limits", () => {
-    const schema = QuestionParams as unknown as { properties: { options: { minItems: number; maxItems: number }; header: { maxLength: number } } }
+    const schema = QuestionParams as unknown as { properties: { options: { minItems: number; maxItems: number } } }
     expect(schema.properties.options.maxItems).toBe(4)
     expect(schema.properties.options.minItems).toBe(1)
-    expect(schema.properties.header.maxLength).toBe(12)
+    // The header cap is a display detail, so it truncates rather than failing the
+    // call: a rejected call costs a turn while the model recovers.
+    expect(shortHeader('a very long header indeed')).toBe('a very long ')
+    expect(shortHeader(undefined)).toBeUndefined()
   })
 })
 

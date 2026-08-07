@@ -34,7 +34,7 @@ const OptionSchema = Type.Object({
 
 const SingleQuestion = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
-  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it (max 12 characters)', maxLength: 12 })),
+  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it, kept to 12 characters' })),
   options: Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 }),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
@@ -45,7 +45,7 @@ const SingleQuestion = Type.Object({
 export const QuestionParams = Type.Object({
   question: Type.Optional(Type.String({ description: 'The question to ask. Required, unless asking several via questions.' })),
   options: Type.Optional(Type.Array(OptionSchema, { description: 'The 1-4 choices for this question, each {label, description?}. Required with question.', minItems: 1, maxItems: 4 })),
-  header: Type.Optional(Type.String({ description: 'Optional short label shown above the question (max 12 characters)', maxLength: 12 })),
+  header: Type.Optional(Type.String({ description: 'Optional short label shown above the question, kept to 12 characters' })),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Optional: allow selecting several options (space toggles, enter confirms)' })),
   questions: Type.Optional(Type.Array(SingleQuestion, { description: 'Only to ask 2-4 questions in one call: each entry takes the same fields as above. Leave unset for a single question.', minItems: 1, maxItems: 4 })),
 })
@@ -60,9 +60,15 @@ export interface QuestionSpec {
 /** Normalize either accepted shape into the list of questions to ask. */
 export function questionList(params: Partial<QuestionSpec> & { questions?: QuestionSpec[] }): QuestionSpec[] {
   if (params.questions && params.questions.length > 0) return params.questions
-  if (typeof params.question === 'string') return [{ question: params.question, header: params.header, options: params.options ?? [], multiSelect: params.multiSelect }]
+  if (typeof params.question === 'string') return [{ question: params.question, header: shortHeader(params.header), options: params.options ?? [], multiSelect: params.multiSelect }]
   return []
 }
+
+/** Claude keeps a header short for the label slot. Truncating is the forgiving read:
+ * rejecting the call costs a turn while the model recovers from a validation error,
+ * which is a poor trade for a display detail. */
+export const HEADER_MAX = 12
+export const shortHeader = (header: string | undefined): string | undefined => (header === undefined ? undefined : header.slice(0, HEADER_MAX))
 
 function checkbox(checked: boolean | undefined): string {
   if (checked === undefined) return ''
@@ -320,7 +326,7 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
     function render(width: number): string[] {
       if (cachedLines && cachedWidth === width) return cachedLines
       cachedWidth = width
-      cachedLines = buildQuestionLines({ width, question: params.question, header: params.header, options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
+      cachedLines = buildQuestionLines({ width, question: params.question, header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
       return cachedLines
     }
 
@@ -337,7 +343,7 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
   // Build simple options list for details; header/multiSelect appear only when set,
   // so single-select details are unchanged.
   const simpleOptions = params.options.map((o) => o.label)
-  const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: params.header } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
+  const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: shortHeader(params.header) } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
 
   if (!result) {
     return {
