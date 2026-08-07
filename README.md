@@ -38,7 +38,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 | Feature | Reads / provides | Extension |
 |---|---|---|
 | Global + project rules | `~/.claude/rules`, `.claude/rules` (+ `paths:` frontmatter scoping) | `claude-rules.ts` |
-| Custom slash commands | `.claude/commands/**/*.md` (namespaced `/dir:name`), `$ARGUMENTS`/`$1`, `` !`cmd` `` bash output, `@file` inlining, `allowed-tools`/`model`/`argument-hint` frontmatter; project commands gated on approval | `commands.ts` |
+| Custom slash commands | `.claude/commands/**/*.md` (namespaced `/dir:name`), `$ARGUMENTS`/`$1`, `` !`cmd` `` bash output, `@file` inlining, `allowed-tools`/`argument-hint` frontmatter (`model` is parsed but not yet applied); project commands gated on approval | `commands.ts` |
 | Skills | `.claude/skills` → pi skill discovery, project skills gated on approval (pi reads `name`, `description`, `disable-model-invocation`; `allowed-tools` is inert in pi's loader) | `skills.ts` |
 | Hooks | `.claude/settings.json` hooks: PreToolUse (blocks, rewrites input via `updatedInput`), PostToolUse (feedback and `additionalContext` land next to the tool result), PostToolUseFailure, SessionStart (context injection), UserPromptSubmit (blocks and injects context), Stop (a block continues the conversation), SubagentStart/SubagentStop, PreCompact, PostCompact, SessionEnd; Claude matcher semantics incl. `mcp__server__tool` names; payloads carry session_id, transcript_path, cwd, permission_mode, effort | `hooks.ts` |
 | Output styles | `.claude/output-styles` + active `outputStyle`; Claude replace semantics with `keep-coding-instructions`; bundled Explanatory/Learning/Proactive; `/output-style [name]` | `output-styles.ts` |
@@ -57,7 +57,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 
 `CLAUDE.md` itself needs no extension: pi loads `CLAUDE.md` / `AGENTS.md` context files natively (global + walking cwd to root). `context-imports.ts` only adds the `@import` resolution pi's loader lacks, appending the imported files without re-injecting the base.
 
-`extensions/internal/` holds shared modules pi's loader must not treat as extensions: `output-guard.ts` (context-budget truncation), `web-transport.ts` (DNS-pinned fetch), and `project-approval.ts` (the trust decision above). The extensions use them; only `internal/` keeps them out of pi's extension scan.
+`extensions/internal/` holds shared modules pi's loader must not treat as extensions: `output-guard.ts` (context-budget truncation), `web-transport.ts` (DNS-pinned fetch), `project-approval.ts` (the trust decision above), `command-file.ts` (slash-command parsing and dynamic content), and the shared-bus contracts `mcp-alias.ts`, `plan-mode-state.ts` and `subagent-events.ts`. The extensions use them; only `internal/` keeps them out of pi's extension scan.
 
 Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example extensions (see [LICENSE](LICENSE)).
 

@@ -32,7 +32,7 @@ import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/typ
 import { Type } from 'typebox'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
 import { capForContext } from './internal/output-guard.js'
-import { isProjectApproved } from './internal/project-approval.js'
+import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
@@ -103,13 +103,18 @@ export interface ProjectServerPolicy {
   consentAll: boolean
 }
 
-/** Claude's per-server approvals for project .mcp.json servers. Consent-granting keys
- * (enabledMcpjsonServers, enableAllProjectMcpServers) count only from files the repo
- * does not control (user settings and settings.local.json), so a checked-in
- * settings.json cannot approve its own servers. disabledMcpjsonServers counts from
- * every file and wins over consent. Lists union across files: for denies the union is
- * the restrictive reading, and consent is the union of the user's own two files. */
-export function projectServerPolicy(cwd: string, home: string): ProjectServerPolicy {
+/** Claude's per-server approvals for project .mcp.json servers.
+ *
+ * Consent-granting keys (enabledMcpjsonServers, enableAllProjectMcpServers) count
+ * from the user's own settings always, and from the project's settings.local.json
+ * only once the project itself is approved. That file is gitignored by convention,
+ * not by enforcement: a repository can commit one, and honoring it unconditionally
+ * let a hostile repo self-approve a server whose `command` runs on connect, even
+ * after the user declined the trust prompt.
+ *
+ * disabledMcpjsonServers counts from every file, including the repo's own, and wins
+ * over consent: a repo may always restrict itself further, never less. */
+export function projectServerPolicy(cwd: string, home: string, projectApproved: boolean): ProjectServerPolicy {
   const read = (file: string): Record<string, unknown> => {
     try {
       return JSON.parse(fs.readFileSync(file, 'utf-8'))
@@ -122,7 +127,7 @@ export function projectServerPolicy(cwd: string, home: string): ProjectServerPol
   const projectSettings = read(path.join(cwd, '.claude', 'settings.json'))
   const localSettings = read(path.join(cwd, '.claude', 'settings.local.json'))
   const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...names(localSettings.disabledMcpjsonServers)])
-  const consentSources = [userSettings, localSettings]
+  const consentSources = projectApproved ? [userSettings, localSettings] : [userSettings]
   const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
   const consentAll = consentSources.some((settings) => settings.enableAllProjectMcpServers === true)
   return { disabled, consented, consentAll }
@@ -431,7 +436,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   /** Connect the project scope under the per-server policy. Returns whether the scope
    * is settled, so a refused confirm can be retried on a later session start. */
   async function connectProjectScope(ctx: ExtensionContext): Promise<boolean> {
-    const policy = projectServerPolicy(ctx.cwd, os.homedir())
+    // The stored decision, read without prompting: consent recorded inside the
+    // project only counts once the project itself has been approved.
+    const policy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
     const { consented, gated } = splitByPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy)
     if (Object.keys(consented).length > 0) await connectServers(consented)
     if (Object.keys(gated).length === 0) return true

@@ -29,6 +29,8 @@ const CLAUDE_SHAPED = [
   path.join('.claude', 'hooks'),
   path.join('.claude', 'output-styles'),
   path.join('.claude', 'rules'),
+  path.join('.claude', 'skills'),
+  path.join('.claude', 'commands'),
   'CLAUDE.local.md',
   '.mcp.json',
   path.join('.pi', 'mcp.json'),

@@ -5,9 +5,8 @@ on:
     types:
       - published
   # Recovery path for undelivered release events (observed 2026-08-06: GitHub dropped
-  # the published event for v0.6.0 and its republish). Dispatch runs against the
-  # default branch; the tag-matches-package.json check keeps a stale dispatch from
-  # publishing content that does not belong to the tag.
+  # the published event for v0.6.0 and its republish). The build checks out the tag
+  # itself, so a dispatch publishes the tagged commit rather than whatever main holds.
   workflow_dispatch:
     inputs:
       tag:
@@ -32,6 +31,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          # The tag, not the default branch: a dispatch recovery run must build the
+          # commit the tag names. Comparing version strings alone cannot catch this,
+          # since main keeps the same version until the next bump.
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           persist-credentials: false
 
       - name: Use Node.js
