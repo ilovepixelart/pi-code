@@ -83,6 +83,7 @@ export default function statusLine(pi: ExtensionAPI) {
   let sessionCtx: ExtensionContext | undefined
   let commandLine: string | undefined
   let permissionMode = 'default'
+  let projectApproved = false
   let refreshTimer: ReturnType<typeof setInterval> | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
   let running = false
@@ -103,7 +104,9 @@ export default function statusLine(pi: ExtensionAPI) {
   /** The stdin payload per Claude's documented statusline contract. */
   function buildPayload(ctx: ExtensionContext): Record<string, unknown> {
     const usage = ctx.getContextUsage() ?? { tokens: null, contextWindow: 0, percent: null }
-    const styleName = readActiveStyleName(settingsFiles(ctx.cwd, os.homedir(), true))
+    // Same gate as the config read above: an unapproved project's style is not applied,
+    // so reporting it here would describe a style the session is not using.
+    const styleName = readActiveStyleName(settingsFiles(ctx.cwd, os.homedir(), projectApproved))
     const payload: Record<string, unknown> = {
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
@@ -128,11 +131,17 @@ export default function statusLine(pi: ExtensionAPI) {
     }
     running = true
     try {
+      // Everything below can touch ctx after an await, and every ctx getter throws
+      // once the session is disposed. This promise is started from a timer with no
+      // awaiter, so an escaping rejection becomes an uncaughtException and exits pi.
       const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS)
       const first = result.stdout.split('\n')[0].trimEnd()
       const pad = ' '.repeat(config.padding)
       commandLine = first ? `${pad}${first}${pad}` : undefined
       show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
+    } catch {
+      // A replaced or reloaded session invalidates ctx while the command is in
+      // flight; there is nothing left to update, and the next session starts fresh.
     } finally {
       running = false
       if (rerunQueued) {
@@ -168,6 +177,7 @@ export default function statusLine(pi: ExtensionAPI) {
     // approval at session start, and a second prompt stacks over the first and eats
     // the keys meant for it. An undecided project simply skips project settings.
     const trusted = isProjectApprovedSilently(ctx)
+    projectApproved = trusted
     config = readStatusLineConfig(hookFiles(ctx.cwd, os.homedir(), trusted))
     if (config?.refreshInterval) {
       refreshTimer = setInterval(() => scheduleRefresh(), config.refreshInterval * 1000)

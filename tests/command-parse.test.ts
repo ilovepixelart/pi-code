@@ -101,8 +101,15 @@ describe('expandDynamicContent', () => {
   it('leaves an unreadable or escaping @ref as written', async () => {
     const cwd = tempDir()
     expect(await expandDynamicContent('@missing.md', cwd, exec)).toContain('@missing.md')
-    // A traversal must not read outside the project.
-    expect(await expandDynamicContent('@../../etc/hosts', cwd, exec)).toContain('@../../etc/hosts')
+    // A traversal must not read a file that really exists outside the project: the
+    // previous non-existent path bailed in the catch and never reached the guard.
+    const parent = tempDir()
+    const child = join(parent, 'proj')
+    mkdirSync(child, { recursive: true })
+    writeFileSync(join(parent, 'secret.txt'), 'SECRET_BODY')
+    const escaped = await expandDynamicContent('leak: @../secret.txt', child, exec)
+    expect(escaped).not.toContain('SECRET_BODY')
+    expect(escaped).toContain('@../secret.txt')
   })
 
   it('ignores an @ref inside a fenced code block', async () => {

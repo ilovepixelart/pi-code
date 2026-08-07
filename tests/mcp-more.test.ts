@@ -254,7 +254,13 @@ const unsetEnv = (key: string): void => {
 
 const tempDirs: string[] = []
 
+let savedAgentDir: string | undefined
 beforeEach(() => {
+  // getAgentDir() lives in the SDK, so mocking node:os here does not reach it: without
+  // this the suite writes trust decisions into the developer's real ~/.pi/agent.
+  savedAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'agentdir-'))
+
   hoisted.transports.length = 0
   hoisted.clients.length = 0
   hoisted.callOptions.length = 0
@@ -264,6 +270,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+
   vi.restoreAllMocks()
   vi.useRealTimers()
   for (const dir of tempDirs.splice(0)) {
@@ -1003,10 +1012,12 @@ describe('per-server project approvals', () => {
     expect(harness.toolNames()).toEqual(['keep_a'])
   })
 
-  it('connects an enabledMcpjsonServers entry from settings.local.json without the project confirm', async () => {
+  it('connects an enabledMcpjsonServers entry from the user settings without the project confirm', async () => {
     withTools([{ name: 'a' }])
     const harness = await setup({ project: { consented: { command: 'c' }, other: { command: 'o' } } })
-    writeClaudeSettings(harness.cwd, 'settings.local.json', { enabledMcpjsonServers: ['consented'] })
+    // The user's own settings file is outside the repository, so its consent stands
+    // on its own; the unlisted server still waits for the project confirm.
+    writeClaudeSettings(harness.home, 'settings.json', { enabledMcpjsonServers: ['consented'] })
     await harness.sessionStart(true, false)
     expect(harness.toolNames()).toEqual(['consented_a'])
   })
@@ -1015,7 +1026,7 @@ describe('per-server project approvals', () => {
     withTools([{ name: 'a' }])
     const harness = await setup({ project: { one: { command: '1' }, two: { command: '2' } } })
     writeClaudeSettings(harness.cwd, 'settings.local.json', { enableAllProjectMcpServers: true })
-    await harness.sessionStart(true, false)
+    await harness.sessionStart(true, true)
     expect(harness.toolNames().sort()).toEqual(['one_a', 'two_a'])
   })
 
@@ -1133,5 +1144,21 @@ describe('tool list refresh', () => {
 
     const published = harness.emitted.filter((e) => e.channel === 'pi-code:mcp-tools').at(-1)?.data as Array<{ claude: string }>
     expect(published.map((entry) => entry.claude)).toContain('mcp__srv__second')
+  })
+})
+
+describe('in-project consent cannot self-approve', () => {
+  it('ignores settings.local.json consent when the user declines the project', async () => {
+    // A hostile repo can commit .claude/settings.local.json; honoring it regardless
+    // would spawn its .mcp.json server command after the user said no.
+    withTools([{ name: 'a' }])
+    const harness = await setup({ project: { evil: { command: 'sh' } } })
+    mkdirSync(join(harness.cwd, '.claude'), { recursive: true })
+    writeFileSync(join(harness.cwd, '.claude', 'settings.local.json'), JSON.stringify({ enableAllProjectMcpServers: true }))
+
+    await harness.sessionStart(false, false)
+
+    expect(harness.toolNames()).toEqual([])
+    expect(hoisted.transports).toEqual([])
   })
 })

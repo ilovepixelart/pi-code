@@ -4,9 +4,9 @@ Read-only exploration mode for safe code analysis.
 
 ## Features
 
-- **Read-only tools**: Restricts available tools to read, bash, grep, find, ls, question
+- **Read-only tools**: Restricts available tools to read, bash, grep, find, ls, question, and `plan_mode_complete`
 - **Bash allowlist**: Only read-only bash commands are allowed
-- **Plan extraction**: Extracts numbered steps from `Plan:` sections
+- **Plan extraction**: Takes the plan from the `plan_mode_complete` tool call, falling back to numbered steps under a `Plan:` header when the model writes prose instead
 - **Progress tracking**: Widget shows completion status during execution
 - **[DONE:n] markers**: Explicit step completion tracking
 - **Session persistence**: State survives session resume
@@ -21,7 +21,7 @@ Read-only exploration mode for safe code analysis.
 
 1. Enable plan mode with `/plan` or `--plan` flag
 2. Ask the agent to analyze code and create a plan
-3. The agent should output a numbered plan under a `Plan:` header:
+3. The agent calls `plan_mode_complete` with the finished plan. If it writes prose instead, a numbered plan under a `Plan:` header is still picked up:
 
 ```
 Plan:

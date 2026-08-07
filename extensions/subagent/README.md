@@ -41,7 +41,7 @@ This tool executes a separate `pi` subprocess with a delegated system prompt and
 
 To enable project-local agents (`.claude/agents`, `.pi/agents`), pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
-When running interactively, the tool prompts for confirmation before running project-local agents. Set `confirmProjectAgents: false` to disable.
+When running interactively, the tool prompts for confirmation before running project-local agents. `confirmProjectAgents: false` skips that prompt for a project you have already approved; an unapproved project is still asked about.
 
 ## Usage
 

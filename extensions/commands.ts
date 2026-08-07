@@ -6,8 +6,10 @@
  * is what makes the rest of Claude's command contract reachable: namespaced
  * subdirectories (`frontend/build.md` is `/frontend:build`), `$ARGUMENTS` and
  * positional substitution, `` !`cmd` `` bash output, `@file` inlining, and the
- * `allowed-tools` / `model` / `argument-hint` / `disable-model-invocation`
- * frontmatter.
+ * `allowed-tools` and `argument-hint` frontmatter. `model` and
+ * `disable-model-invocation` are parsed but not applied yet: pi has seams for both
+ * (`pi.setModel`, and commands are user-invoked anyway), so they are a gap rather
+ * than an impossibility.
  *
  * A project command body is repository-controlled text that can now run shell
  * commands and read files, so project commands load only once the project is
