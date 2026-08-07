@@ -487,6 +487,36 @@ describe('cancelBackgroundRun', () => {
 describe('startBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
 
+  it('survives a completion callback that throws because the session was disposed', async () => {
+    // pi's loader wires assertActive() into events.emit and sendMessage, so every call
+    // in the completion path throws once the session that started the run is gone (a
+    // /new, /resume, /fork or /reload while it was still running). This runs from the
+    // child's close listener, where an escaping error reaches Node as an
+    // uncaughtException and exits pi.
+    const { startBackgroundRun } = await loadBackground()
+    let seen: { state: string; exitCode?: number } | undefined
+    startBackgroundRun('scout', 'survey', invocation, (run) => {
+      // Snapshot before throwing: reading the registry after the listener returns
+      // would pass even if the state were written after the callback.
+      seen = { state: run.state, exitCode: run.exitCode }
+      throw new Error('This extension ctx is stale after session replacement or reload.')
+    })
+
+    expect(() => spawned.children[0].emit('close', 0)).not.toThrow()
+    // The run finished and was recorded before the notification was attempted;
+    // only the notification is lost.
+    expect(seen).toEqual({ state: 'done', exitCode: 0 })
+  })
+
+  it('survives a pipe error on the child stdout', async () => {
+    // EventEmitter rethrows an 'error' with no listener, and this stream belongs to a
+    // detached child, so the throw exits pi exactly as an unguarded completion would.
+    const { startBackgroundRun } = await loadBackground()
+    startBackgroundRun('scout', 'survey', invocation, () => {})
+
+    expect(() => spawned.children[0].stdout.emit('error', new Error('EPIPE'))).not.toThrow()
+  })
+
   it('returns a bg- prefixed id built from a uuid prefix', async () => {
     const { startBackgroundRun } = await loadBackground()
 
