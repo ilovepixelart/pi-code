@@ -22,6 +22,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
@@ -31,7 +32,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
-import { capForContext } from './internal/output-guard.js'
+import { capForContext, sliceBytes } from './internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -222,12 +223,14 @@ export type ToolContent = { type: 'text'; text: string } | { type: 'image'; data
 export function mapContent(content: McpContentBlock[] | undefined, structured?: unknown): ToolContent[] {
   // capForContext every text output, whatever its source: a server can blow the tool-output
   // budget through a resource block, a JSON-stringified block, or the structured fallback,
-  // not only a text block.
+  // not only a text block. The per-block cap alone is not a budget, though: a server
+  // answering with one block per file multiplies it by the block count, so the blocks
+  // are capped again as a whole below.
   const text = (value: string): ToolContent => ({ type: 'text', text: capForContext(value) })
   if (!content || content.length === 0) {
     return [text(structured !== undefined ? JSON.stringify(structured, null, 2) : '(empty result)')]
   }
-  return content.map((block) => {
+  const mapped: ToolContent[] = content.map((block): ToolContent => {
     if (block.type === 'text') {
       return text(block.text ?? '')
     }
@@ -239,6 +242,44 @@ export function mapContent(content: McpContentBlock[] | undefined, structured?: 
     }
     return text(JSON.stringify(block))
   })
+  return capTotal(mapped)
+}
+
+/**
+ * Bound the whole result, not each block. The per-block cap multiplies by the block
+ * count, so a server answering with one block per file still injects megabytes.
+ *
+ * Text blocks are kept whole while the budget lasts, the one that overruns it is
+ * trimmed, and the number omitted after that is stated so the model can tell a
+ * truncated set from a complete one. Images pass through unconditionally: base64
+ * cut in half is not a smaller image, it is a broken one, and a single screenshot
+ * routinely exceeds the whole text budget. They still spend it, so text arriving
+ * after an image is trimmed against what is left.
+ */
+export function capTotal(blocks: ToolContent[]): ToolContent[] {
+  let budget = DEFAULT_MAX_BYTES
+  const kept: ToolContent[] = []
+  let dropped = 0
+  for (const block of blocks) {
+    if (block.type !== 'text') {
+      kept.push(block)
+      budget -= Buffer.byteLength(block.data, 'utf-8')
+      continue
+    }
+    const size = Buffer.byteLength(block.text, 'utf-8')
+    if (size <= budget) {
+      kept.push(block)
+      budget -= size
+      continue
+    }
+    if (budget > 0) {
+      kept.push({ type: 'text', text: `${sliceBytes(block.text, budget)}\n[truncated: tool output budget spent]` })
+      budget = 0
+    }
+    dropped++
+  }
+  if (dropped > 0) kept.push({ type: 'text', text: `[${dropped} further content block${dropped === 1 ? '' : 's'} omitted: tool output budget spent]` })
+  return kept
 }
 
 function isStdio(config: ServerConfig): config is StdioServerConfig {

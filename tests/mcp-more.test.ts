@@ -127,7 +127,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { splitByPolicy, expandCwd, resolveBearerToken } = await import('../extensions/mcp.ts')
+const { splitByPolicy, expandCwd, resolveBearerToken, mapContent } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -1160,5 +1160,54 @@ describe('in-project consent cannot self-approve', () => {
 
     expect(harness.toolNames()).toEqual([])
     expect(hoisted.transports).toEqual([])
+  })
+})
+
+describe('aggregate tool-output budget', () => {
+  it('bounds the whole result, not each block, and says what was omitted', () => {
+    // A server answering with one block per file multiplies the per-block cap by the
+    // block count; 200 blocks of 40KB used to reach the model as ~8MB.
+    // Through mapContent, the path production actually uses: asserting capTotal
+    // directly would pass even if mapContent stopped calling it.
+    const blocks = Array.from({ length: 200 }, () => ({ type: 'text', text: 'x'.repeat(40_000) }))
+    const capped = mapContent(blocks)
+
+    const total = capped.reduce((sum, block) => sum + (block.type === 'text' ? Buffer.byteLength(block.text, 'utf-8') : 0), 0)
+    expect(total).toBeLessThan(60_000)
+    const last = capped.at(-1)
+    expect(last?.type === 'text' ? last.text : '').toContain('omitted')
+  })
+
+  it('never cuts an image, but spends the budget on it so later text is trimmed', () => {
+    // A screenshot routinely exceeds the whole text budget; half a base64 payload is a
+    // broken image, not a smaller one. The text after it must still be bounded.
+    const image = { type: 'image', data: 'A'.repeat(200_000), mimeType: 'image/png' }
+    const capped = mapContent([image, { type: 'text', text: 'y'.repeat(10_000) }])
+
+    expect(capped[0]).toEqual({ type: 'image', data: 'A'.repeat(200_000), mimeType: 'image/png' })
+    expect(capped.some((block) => block.type === 'text' && block.text.startsWith('yyy'))).toBe(false)
+  })
+
+  it('trims the overrunning block by bytes, not by UTF-16 units', () => {
+    // Three bytes per character: slicing by the byte budget with String.slice would
+    // keep three times the budget.
+    const capped = mapContent([
+      { type: 'text', text: 'a'.repeat(40_000) },
+      { type: 'text', text: '\u4f60'.repeat(40_000) },
+    ])
+    const total = capped.reduce((sum, block) => sum + (block.type === 'text' ? Buffer.byteLength(block.text, 'utf-8') : 0), 0)
+
+    expect(total).toBeLessThan(60_000)
+  })
+
+  it('passes a small result through untouched and keeps image blocks', () => {
+    const blocks = [
+      { type: 'text', text: 'small' },
+      { type: 'image', data: 'AAA', mimeType: 'image/png' },
+    ]
+    expect(mapContent(blocks)).toEqual([
+      { type: 'text', text: 'small' },
+      { type: 'image', data: 'AAA', mimeType: 'image/png' },
+    ])
   })
 })
