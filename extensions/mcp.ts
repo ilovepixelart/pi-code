@@ -28,6 +28,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // NOSONAR
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
 import { capForContext } from './internal/output-guard.js'
@@ -317,8 +318,14 @@ async function connectWithTimeout(client: Client, transport: Parameters<Client['
   }
 }
 
-async function listAllTools(client: Client): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>> {
-  const tools: Array<{ name: string; description?: string; inputSchema?: unknown }> = []
+export interface McpToolInfo {
+  name: string
+  description?: string
+  inputSchema?: unknown
+}
+
+async function listAllTools(client: Client): Promise<McpToolInfo[]> {
+  const tools: McpToolInfo[] = []
   let cursor: string | undefined
   do {
     const page = await client.listTools({ cursor })
@@ -331,9 +338,72 @@ async function listAllTools(client: Client): Promise<Array<{ name: string; descr
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
-  const registered = new Set<string>()
+  // pi tool name -> owning server, so a refresh can tell its own tools from a conflict.
+  const registered = new Map<string, string>()
   // Original server/tool names per registered pi name, for Claude-style hook matchers.
   const aliases: McpToolAlias[] = []
+
+  /** Register every not-yet-registered tool of a server; returns how many were added. */
+  function registerTools(name: string, config: ServerConfig, client: Client, tools: McpToolInfo[]): number {
+    let count = 0
+    for (const tool of tools) {
+      const toolName = formatToolName(name, tool.name)
+      const owner = registered.get(toolName)
+      if (owner === name) continue // already registered for this server: a refresh re-listing it
+      if (RESERVED_NAMES.has(toolName) || owner !== undefined) {
+        console.warn(`pi-code-mcp: skipping colliding tool name ${toolName}`)
+        continue
+      }
+      registered.set(toolName, name)
+      aliases.push({ pi: toolName, claude: `mcp__${name}__${tool.name}` })
+      count++
+      pi.registerTool({
+        name: toolName,
+        label: `${name}: ${tool.name}`,
+        description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
+        parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
+        async execute(_id, params) {
+          // Pass the timeout to the SDK too: its own default request timeout is 60s and
+          // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
+          // Claude's per-server timeout wins over MCP_TOOL_TIMEOUT, with a 1s floor.
+          const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
+          const budget = declared ?? callTimeoutMs()
+          const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
+          const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
+          const details: { error?: string } = {}
+          if (result.isError) {
+            details.error = 'tool_error'
+            const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
+            content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
+          }
+          return { content, details }
+        },
+      })
+    }
+    return count
+  }
+
+  /** Claude refreshes tools on a server's list_changed notification. pi has no
+   * unregister, so a withdrawn tool keeps its registration and surfaces the server's
+   * own error when called; a newly announced one is registered without a restart. */
+  function subscribeToToolChanges(name: string, config: ServerConfig, client: Client): void {
+    try {
+      client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+        try {
+          const refreshed = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
+          const added = registerTools(name, config, client, refreshed)
+          if (added === 0) return
+          const current = status.get(name)
+          status.set(name, { state: current?.state ?? 'connected', tools: (current?.tools ?? 0) + added })
+          pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
+        } catch (error) {
+          console.warn(`pi-code-mcp: tool refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
+    } catch {
+      // a transport or client without notification support simply never refreshes
+    }
+  }
 
   async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
     for (const [name, config] of Object.entries(servers)) {
@@ -349,39 +419,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         const client = await connect(name, config)
         clients.set(name, client)
         const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
-        let count = 0
-        for (const tool of tools) {
-          const toolName = formatToolName(name, tool.name)
-          if (RESERVED_NAMES.has(toolName) || registered.has(toolName)) {
-            console.warn(`pi-code-mcp: skipping colliding tool name ${toolName}`)
-            continue
-          }
-          registered.add(toolName)
-          aliases.push({ pi: toolName, claude: `mcp__${name}__${tool.name}` })
-          count++
-          pi.registerTool({
-            name: toolName,
-            label: `${name}: ${tool.name}`,
-            description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
-            parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
-            async execute(_id, params) {
-              // Pass the timeout to the SDK too: its own default request timeout is 60s and
-              // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
-              // Claude's per-server timeout wins over MCP_TOOL_TIMEOUT, with a 1s floor.
-              const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
-              const budget = declared ?? callTimeoutMs()
-              const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
-              const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
-              const details: { error?: string } = {}
-              if (result.isError) {
-                details.error = 'tool_error'
-                const hint = JSON.stringify(normalizeSchema(tool.inputSchema))
-                content.push({ type: 'text', text: `Tool reported an error. Expected input schema: ${hint}` })
-              }
-              return { content, details }
-            },
-          })
-        }
+        const count = registerTools(name, config, client, tools)
+        subscribeToToolChanges(name, config, client)
         status.set(name, { state: 'connected', tools: count })
       } catch (error) {
         status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })

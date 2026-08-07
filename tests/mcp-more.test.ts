@@ -47,6 +47,7 @@ const hoisted = vi.hoisted(() => {
     clients: [] as ClientRecord[],
     callOptions: [] as Array<unknown>,
     closed: [] as ClientRecord[],
+    notify: new Map<string, () => void | Promise<void>>(),
     control: {} as {
       connect: (transport: TransportRecord, client: ClientRecord) => Promise<void>
       listTools: (args: { cursor?: string }, client: ClientRecord) => Promise<ListPage>
@@ -82,6 +83,11 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     close(): Promise<void> {
       hoisted.closed.push(this)
       return hoisted.control.close(this)
+    }
+    setNotificationHandler(schema: unknown, handler: () => void | Promise<void>): void {
+      // The SDK passes a zod schema whose method is a literal in its shape.
+      const shape = (schema as { shape?: { method?: { value?: string } } })?.shape
+      hoisted.notify.set(shape?.method?.value ?? 'unknown', handler)
     }
   },
 }))
@@ -254,6 +260,7 @@ beforeEach(() => {
   hoisted.callOptions.length = 0
   hoisted.closed.length = 0
   hoisted.control = defaultControl()
+  hoisted.notify.clear()
 })
 
 afterEach(() => {
@@ -1096,5 +1103,35 @@ describe('resolveBearerToken', () => {
     expect(resolveBearerToken({})).toBeUndefined()
     unsetEnv('TOK_INLINE')
     unsetEnv('TOK_NAMED')
+  })
+})
+
+describe('tool list refresh', () => {
+  it('registers newly appeared tools when the server signals list_changed', async () => {
+    withTools([{ name: 'first' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+    expect(harness.toolNames()).toEqual(['srv_first'])
+
+    withTools([{ name: 'first' }, { name: 'second' }])
+    await hoisted.notify.get('notifications/tools/list_changed')?.()
+
+    expect(harness.toolNames().sort()).toEqual(['srv_first', 'srv_second'])
+  })
+
+  it('does not re-register a tool that is still listed', async () => {
+    withTools([{ name: 'only' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+    await hoisted.notify.get('notifications/tools/list_changed')?.()
+    expect(harness.toolNames()).toEqual(['srv_only'])
+  })
+
+  it('publishes the refreshed aliases so hook matchers see the new tools', async () => {
+    withTools([{ name: 'first' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+    withTools([{ name: 'first' }, { name: 'second' }])
+    await hoisted.notify.get('notifications/tools/list_changed')?.()
+
+    const published = harness.emitted.filter((e) => e.channel === 'pi-code:mcp-tools').at(-1)?.data as Array<{ claude: string }>
+    expect(published.map((entry) => entry.claude)).toContain('mcp__srv__second')
   })
 })
