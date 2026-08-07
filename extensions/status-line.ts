@@ -131,11 +131,17 @@ export default function statusLine(pi: ExtensionAPI) {
     }
     running = true
     try {
+      // Everything below can touch ctx after an await, and every ctx getter throws
+      // once the session is disposed. This promise is started from a timer with no
+      // awaiter, so an escaping rejection becomes an uncaughtException and exits pi.
       const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS)
       const first = result.stdout.split('\n')[0].trimEnd()
       const pad = ' '.repeat(config.padding)
       commandLine = first ? `${pad}${first}${pad}` : undefined
       show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
+    } catch {
+      // A replaced or reloaded session invalidates ctx while the command is in
+      // flight; there is nothing left to update, and the next session starts fresh.
     } finally {
       running = false
       if (rerunQueued) {

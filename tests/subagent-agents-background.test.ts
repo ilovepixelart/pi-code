@@ -1,5 +1,5 @@
 import type { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -732,10 +732,13 @@ describe('resolveModelAlias', () => {
 
 describe('preloaded skill symlink confinement', () => {
   it('refuses a skill directory that symlinks outside the skills root', () => {
-    const outside = join(fakeHome.path, 'outside')
+    // Own temp root: fakeHome.path is only assigned inside the discoverAgents block,
+    // so reusing it here would write the fixture into the repository.
+    const base = mkdtempSync(join(tmpdir(), 'skill-link-'))
+    const outside = join(base, 'outside')
     mkdirSync(outside, { recursive: true })
     writeFileSync(join(outside, 'SKILL.md'), 'ESCAPED_BODY')
-    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    const skillsRoot = join(base, '.claude', 'skills')
     mkdirSync(skillsRoot, { recursive: true })
     symlinkSync(outside, join(skillsRoot, 'linked'))
 
@@ -743,5 +746,6 @@ describe('preloaded skill symlink confinement', () => {
     const prompt = withPreloadedSkills('Base.', ['linked'], [skillsRoot])
     expect(prompt).not.toContain('ESCAPED_BODY')
     expect(prompt).toContain('not found')
+    rmSync(base, { recursive: true, force: true })
   })
 })
