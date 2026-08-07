@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
 
-const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false } }))
+const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined }))
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()
@@ -19,6 +19,12 @@ vi.mock('../extensions/hooks.js', async (importOriginal) => {
     ...actual,
     runHookCommand: async (command: string, payload: unknown) => {
       hoisted.runs.push({ command, payload })
+      // A test can hold the first run open to exercise in-flight queueing.
+      if (hoisted.gate) {
+        const gate = hoisted.gate
+        hoisted.gate = undefined
+        await gate
+      }
       return hoisted.result
     },
   }
@@ -40,6 +46,7 @@ beforeEach(() => {
   hoisted.home = tempDir()
   hoisted.runs.length = 0
   hoisted.result = { code: 0, stdout: '', stderr: '', timedOut: false }
+  hoisted.gate = undefined
 })
 
 afterEach(() => {
@@ -158,5 +165,53 @@ describe('statusLine command contract', () => {
     busHandlers.get('pi-code:plan-mode')?.({ active: true })
     await vi.advanceTimersByTimeAsync(400)
     expect(hoisted.runs.length).toBe(initial + 1)
+  })
+})
+
+describe('statusLine concurrency and compaction', () => {
+  it('queues one rerun while a command is in flight instead of overlapping', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    let release: (() => void) | undefined
+    hoisted.gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { handlers, ctx } = setup(cwd)
+
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    // Two more triggers arrive while the first run is still held open.
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('agent_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs).toHaveLength(1)
+
+    release?.()
+    await vi.advanceTimersByTimeAsync(400)
+    // The two triggers collapse into a single queued rerun, not one run each.
+    expect(hoisted.runs).toHaveLength(2)
+  })
+
+  it('refreshes after compaction and stops the timer at shutdown', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', refreshInterval: 1 } })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const beforeCompact = hoisted.runs.length
+    await handlers.get('session_compact')?.({ reason: 'manual' }, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs.length).toBe(beforeCompact + 1)
+
+    await handlers.get('session_shutdown')?.({}, ctx)
+    const afterShutdown = hoisted.runs.length
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(hoisted.runs.length).toBe(afterShutdown)
   })
 })

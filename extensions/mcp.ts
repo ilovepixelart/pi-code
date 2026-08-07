@@ -157,6 +157,14 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
   return servers
 }
 
+/** Claude reports a config entry that has a url but no type as an error; pi-code
+ * still connects (streamable HTTP with SSE fallback) but says the entry is wrong. */
+export function warnOnTypelessUrl(name: string, config: ServerConfig): void {
+  if ('url' in config && config.type === undefined) {
+    console.warn(`pi-code-mcp: server ${name} declares a url with no "type"; add "type": "http" or "sse"`)
+  }
+}
+
 export function formatToolName(server: string, tool: string): string {
   return `${server}_${tool}`.replaceAll('-', '_')
 }
@@ -309,11 +317,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
-      // Claude reports a config entry that has a url but no type as an error; pi-code
-      // still connects (streamable HTTP with SSE fallback) but says the entry is wrong.
-      if ('url' in config && config.type === undefined) {
-        console.warn(`pi-code-mcp: server ${name} declares a url with no "type"; add "type": "http" or "sse"`)
-      }
+      warnOnTypelessUrl(name, config)
       try {
         const client = await connect(name, config)
         clients.set(name, client)

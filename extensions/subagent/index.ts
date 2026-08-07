@@ -490,6 +490,14 @@ type SubagentParamsStatic = Static<typeof SubagentParams>
 type ChainStepParam = Static<typeof ChainItem>
 type TaskItemParam = Static<typeof TaskItem>
 
+/** What to tell the model about a cancel request. */
+export function cancelResultText(id: string): string {
+  const outcome = cancelBackgroundRun(id)
+  if (outcome === 'cancelled') return `Cancelled background run ${id}.`
+  if (outcome === 'not-running') return `Background run ${id} already finished; nothing to cancel.`
+  return `Unknown background run: ${id}.\n\n${backgroundStatusText()}`
+}
+
 /** Everything a mode handler needs from the surrounding execute() call. */
 interface ModeContext {
   agents: AgentConfig[]
@@ -1122,9 +1130,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
         })
 
       if (params.cancel) {
-        const outcome = cancelBackgroundRun(params.cancel)
-        const text = outcome === 'cancelled' ? `Cancelled background run ${params.cancel}.` : outcome === 'not-running' ? `Background run ${params.cancel} already finished; nothing to cancel.` : `Unknown background run: ${params.cancel}.\n\n${backgroundStatusText()}`
-        return { content: [{ type: 'text', text }], details: makeDetails('single')([]) }
+        return { content: [{ type: 'text', text: cancelResultText(params.cancel) }], details: makeDetails('single')([]) }
       }
 
       if (params.status) {

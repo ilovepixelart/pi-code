@@ -12,12 +12,14 @@ const spawnMock = vi.hoisted(() => vi.fn())
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
 const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string | null => 'bg-deadbeef'))
 const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background runs in this session.'))
+const cancelBackgroundRunMock = vi.hoisted(() => vi.fn())
 const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
 vi.mock('../extensions/subagent/agents.js', () => ({ discoverAgents: discoverAgentsMock }))
 vi.mock('../extensions/subagent/background.js', () => ({
   backgroundStatusText: backgroundStatusTextMock,
+  cancelBackgroundRun: cancelBackgroundRunMock,
   startBackgroundRun: startBackgroundRunMock,
   activeBackgroundRuns: activeBackgroundRunsMock,
   MAX_BACKGROUND_RUNS: 8,
@@ -186,6 +188,7 @@ beforeEach(() => {
   startBackgroundRunMock.mockClear()
   startBackgroundRunMock.mockReturnValue('bg-deadbeef')
   backgroundStatusTextMock.mockClear()
+  cancelBackgroundRunMock.mockReset()
   activeBackgroundRunsMock.mockReturnValue(0)
   sendMessageMock.mockClear()
   emittedEvents.length = 0
@@ -685,6 +688,25 @@ describe('runSingleAgent process handling', () => {
 
     await expect(pending).rejects.toThrow('Subagent was aborted')
     expect(spawnedChildren[0].kill).toHaveBeenCalledWith('SIGTERM')
+  })
+})
+
+describe('cancelResultText', () => {
+  it('reports cancelled, already-finished and unknown ids distinctly', async () => {
+    const { cancelResultText } = await import('../extensions/subagent/index.ts')
+
+    cancelBackgroundRunMock.mockReturnValue('cancelled')
+    expect(cancelResultText('bg-1')).toBe('Cancelled background run bg-1.')
+
+    cancelBackgroundRunMock.mockReturnValue('not-running')
+    expect(cancelResultText('bg-2')).toContain('already finished')
+
+    cancelBackgroundRunMock.mockReturnValue('unknown')
+    backgroundStatusTextMock.mockReturnValue('STATUS_LISTING')
+    const unknown = cancelResultText('bg-3')
+    expect(unknown).toContain('Unknown background run: bg-3')
+    // The status listing rides along so the model can see the real ids.
+    expect(unknown).toContain('STATUS_LISTING')
   })
 })
 
