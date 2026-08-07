@@ -6,7 +6,7 @@
  * Multiple questions per call are not batched; ask sequentially.
  */
 
-import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 
@@ -32,12 +32,36 @@ const OptionSchema = Type.Object({
   description: Type.Optional(Type.String({ description: 'Optional description shown below label' })),
 })
 
-export const QuestionParams = Type.Object({
+const SingleQuestion = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
   header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it (max 12 characters)', maxLength: 12 })),
   options: Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 }),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
+
+/** Claude's AskUserQuestion carries 1-4 questions. The flat single-question form is
+ * kept too, so existing callers need not wrap one question in an array. */
+export const QuestionParams = Type.Object({
+  question: Type.Optional(Type.String({ description: 'The question to ask (single-question form)' })),
+  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it (max 12 characters)', maxLength: 12 })),
+  options: Type.Optional(Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 })),
+  multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
+  questions: Type.Optional(Type.Array(SingleQuestion, { description: 'Ask 1-4 questions in sequence', minItems: 1, maxItems: 4 })),
+})
+
+export interface QuestionSpec {
+  question: string
+  header?: string
+  options: DisplayOption[]
+  multiSelect?: boolean
+}
+
+/** Normalize either accepted shape into the list of questions to ask. */
+export function questionList(params: Partial<QuestionSpec> & { questions?: QuestionSpec[] }): QuestionSpec[] {
+  if (params.questions && params.questions.length > 0) return params.questions
+  if (typeof params.question === 'string') return [{ question: params.question, header: params.header, options: params.options ?? [], multiSelect: params.multiSelect }]
+  return []
+}
 
 function checkbox(checked: boolean | undefined): string {
   if (checked === undefined) return ''
@@ -124,154 +148,25 @@ export default function question(pi: ExtensionAPI) {
     description: 'Ask the user a question and let them pick from options. Use when you need user input to proceed.',
     parameters: QuestionParams,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: 'text', text: 'Error: UI not available (running in non-interactive mode)' }],
-          details: {
-            question: params.question,
-            options: params.options.map((o) => o.label),
-            answer: null,
-          } as QuestionDetails,
-        }
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      const specs = questionList(rawParams as Partial<QuestionSpec> & { questions?: QuestionSpec[] })
+      if (specs.length === 0) {
+        return { content: [{ type: 'text', text: 'Error: No question provided' }], details: { question: '', options: [], answer: null } as QuestionDetails }
       }
+      if (specs.length === 1) return await askOne(specs[0], ctx)
 
-      if (params.options.length === 0) {
-        return {
-          content: [{ type: 'text', text: 'Error: No options provided' }],
-          details: { question: params.question, options: [], answer: null } as QuestionDetails,
-        }
+      // Several questions are asked in sequence; a cancel ends the run, since the
+      // remaining answers would be guesses about a flow the user just declined.
+      const texts: string[] = []
+      const collected: QuestionDetails[] = []
+      for (const spec of specs) {
+        const result = await askOne(spec, ctx)
+        const detail = result.details as QuestionDetails
+        collected.push(detail)
+        texts.push(`${spec.question}\n${result.content[0].text}`)
+        if (detail.answer === null) break
       }
-
-      const multiSelect = params.multiSelect === true
-      // The free-text option does not compose with checkbox selection, so it is single-select only.
-      const allOptions: DisplayOption[] = multiSelect ? [...params.options] : [...params.options, { label: 'Type something.', isOther: true }]
-
-      const result = await ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui, theme, _kb, done) => {
-        let optionIndex = 0
-        let editMode = false
-        const checked: boolean[] = allOptions.map(() => false)
-        let cachedLines: string[] | undefined
-        let cachedWidth: number | undefined
-
-        const editorTheme: EditorTheme = {
-          borderColor: (s) => theme.fg('accent', s),
-          selectList: {
-            selectedPrefix: (t) => theme.fg('accent', t),
-            selectedText: (t) => theme.fg('accent', t),
-            description: (t) => theme.fg('muted', t),
-            scrollInfo: (t) => theme.fg('dim', t),
-            noMatch: (t) => theme.fg('warning', t),
-          },
-        }
-        const editor = new Editor(tui, editorTheme)
-
-        editor.onSubmit = (value) => {
-          const trimmed = value.trim()
-          if (trimmed) {
-            done({ answer: trimmed, wasCustom: true })
-          } else {
-            editMode = false
-            editor.setText('')
-            refresh()
-          }
-        }
-
-        function refresh() {
-          cachedLines = undefined
-          tui.requestRender()
-        }
-
-        function handleInput(data: string) {
-          if (editMode) {
-            if (matchesKey(data, Key.escape)) {
-              editMode = false
-              editor.setText('')
-              refresh()
-              return
-            }
-            editor.handleInput(data)
-            refresh()
-            return
-          }
-
-          if (matchesKey(data, Key.up)) {
-            optionIndex = Math.max(0, optionIndex - 1)
-            refresh()
-            return
-          }
-          if (matchesKey(data, Key.down)) {
-            optionIndex = Math.min(allOptions.length - 1, optionIndex + 1)
-            refresh()
-            return
-          }
-
-          if (multiSelect && data === ' ') {
-            checked[optionIndex] = !checked[optionIndex]
-            refresh()
-            return
-          }
-
-          if (matchesKey(data, Key.enter)) {
-            if (multiSelect) {
-              done({ answer: selectedLabels(allOptions, checked), wasCustom: false })
-              return
-            }
-            const selected = allOptions[optionIndex]
-            if (selected.isOther) {
-              editMode = true
-              refresh()
-            } else {
-              done({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
-            }
-            return
-          }
-
-          if (matchesKey(data, Key.escape)) {
-            done(null)
-          }
-        }
-
-        function render(width: number): string[] {
-          if (cachedLines && cachedWidth === width) return cachedLines
-          cachedWidth = width
-          cachedLines = buildQuestionLines({ width, question: params.question, header: params.header, options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
-          return cachedLines
-        }
-
-        return {
-          render,
-          invalidate: () => {
-            cachedWidth = undefined
-            cachedLines = undefined
-          },
-          handleInput,
-        }
-      })
-
-      // Build simple options list for details; header/multiSelect appear only when set,
-      // so single-select details are unchanged.
-      const simpleOptions = params.options.map((o) => o.label)
-      const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: params.header } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
-
-      if (!result) {
-        return {
-          content: [{ type: 'text', text: 'User cancelled the selection' }],
-          details: { ...base, answer: null } as QuestionDetails,
-        }
-      }
-
-      if (result.wasCustom) {
-        return {
-          content: [{ type: 'text', text: `User wrote: ${result.answer}` }],
-          details: { ...base, answer: result.answer, wasCustom: true } as QuestionDetails,
-        }
-      }
-      const selectionText = multiSelect ? `User selected: ${result.answer || '(none)'}` : `User selected: ${result.index}. ${result.answer}`
-      return {
-        content: [{ type: 'text', text: selectionText }],
-        details: { ...base, answer: result.answer, wasCustom: false } as QuestionDetails,
-      }
+      return { content: [{ type: 'text', text: texts.join('\n\n') }], details: { ...collected[0], questions: collected } as QuestionDetails }
     },
 
     renderCall(args, theme, _context) {
@@ -288,7 +183,6 @@ export default function question(pi: ExtensionAPI) {
       }
       return new Text(text, 0, 0)
     },
-
     renderResult(result, _options, theme, _context) {
       const details = result.details as QuestionDetails | undefined
       if (!details) {
@@ -311,4 +205,154 @@ export default function question(pi: ExtensionAPI) {
       return new Text(theme.fg('success', '✓ ') + theme.fg('accent', display), 0, 0)
     },
   })
+}
+
+async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ content: Array<{ type: 'text'; text: string }>; details: QuestionDetails }> {
+  if (!ctx.hasUI) {
+    return {
+      content: [{ type: 'text', text: 'Error: UI not available (running in non-interactive mode)' }],
+      details: {
+        question: params.question,
+        options: params.options.map((o) => o.label),
+        answer: null,
+      } as QuestionDetails,
+    }
+  }
+
+  if (params.options.length === 0) {
+    return {
+      content: [{ type: 'text', text: 'Error: No options provided' }],
+      details: { question: params.question, options: [], answer: null } as QuestionDetails,
+    }
+  }
+
+  const multiSelect = params.multiSelect === true
+  // The free-text option does not compose with checkbox selection, so it is single-select only.
+  const allOptions: DisplayOption[] = multiSelect ? [...params.options] : [...params.options, { label: 'Type something.', isOther: true }]
+
+  const result = await ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui: Parameters<Parameters<ExtensionContext['ui']['custom']>[0]>[0], theme: Theme, _kb: unknown, done: (value: { answer: string; wasCustom: boolean; index?: number } | null) => void) => {
+    let optionIndex = 0
+    let editMode = false
+    const checked: boolean[] = allOptions.map(() => false)
+    let cachedLines: string[] | undefined
+    let cachedWidth: number | undefined
+
+    const editorTheme: EditorTheme = {
+      borderColor: (s) => theme.fg('accent', s),
+      selectList: {
+        selectedPrefix: (t) => theme.fg('accent', t),
+        selectedText: (t) => theme.fg('accent', t),
+        description: (t) => theme.fg('muted', t),
+        scrollInfo: (t) => theme.fg('dim', t),
+        noMatch: (t) => theme.fg('warning', t),
+      },
+    }
+    const editor = new Editor(tui, editorTheme)
+
+    editor.onSubmit = (value) => {
+      const trimmed = value.trim()
+      if (trimmed) {
+        done({ answer: trimmed, wasCustom: true })
+      } else {
+        editMode = false
+        editor.setText('')
+        refresh()
+      }
+    }
+
+    function refresh() {
+      cachedLines = undefined
+      tui.requestRender()
+    }
+
+    function handleInput(data: string) {
+      if (editMode) {
+        if (matchesKey(data, Key.escape)) {
+          editMode = false
+          editor.setText('')
+          refresh()
+          return
+        }
+        editor.handleInput(data)
+        refresh()
+        return
+      }
+
+      if (matchesKey(data, Key.up)) {
+        optionIndex = Math.max(0, optionIndex - 1)
+        refresh()
+        return
+      }
+      if (matchesKey(data, Key.down)) {
+        optionIndex = Math.min(allOptions.length - 1, optionIndex + 1)
+        refresh()
+        return
+      }
+
+      if (multiSelect && data === ' ') {
+        checked[optionIndex] = !checked[optionIndex]
+        refresh()
+        return
+      }
+
+      if (matchesKey(data, Key.enter)) {
+        if (multiSelect) {
+          done({ answer: selectedLabels(allOptions, checked), wasCustom: false })
+          return
+        }
+        const selected = allOptions[optionIndex]
+        if (selected.isOther) {
+          editMode = true
+          refresh()
+        } else {
+          done({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
+        }
+        return
+      }
+
+      if (matchesKey(data, Key.escape)) {
+        done(null)
+      }
+    }
+
+    function render(width: number): string[] {
+      if (cachedLines && cachedWidth === width) return cachedLines
+      cachedWidth = width
+      cachedLines = buildQuestionLines({ width, question: params.question, header: params.header, options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
+      return cachedLines
+    }
+
+    return {
+      render,
+      invalidate: () => {
+        cachedWidth = undefined
+        cachedLines = undefined
+      },
+      handleInput,
+    }
+  })
+
+  // Build simple options list for details; header/multiSelect appear only when set,
+  // so single-select details are unchanged.
+  const simpleOptions = params.options.map((o) => o.label)
+  const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: params.header } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
+
+  if (!result) {
+    return {
+      content: [{ type: 'text', text: 'User cancelled the selection' }],
+      details: { ...base, answer: null } as QuestionDetails,
+    }
+  }
+
+  if (result.wasCustom) {
+    return {
+      content: [{ type: 'text', text: `User wrote: ${result.answer}` }],
+      details: { ...base, answer: result.answer, wasCustom: true } as QuestionDetails,
+    }
+  }
+  const selectionText = multiSelect ? `User selected: ${result.answer || '(none)'}` : `User selected: ${result.index}. ${result.answer}`
+  return {
+    content: [{ type: 'text', text: selectionText }],
+    details: { ...base, answer: result.answer, wasCustom: false } as QuestionDetails,
+  }
 }

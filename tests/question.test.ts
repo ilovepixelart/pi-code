@@ -383,3 +383,61 @@ describe('question header and multiSelect', () => {
     expect(lines(rendered)).toEqual(['✓ Alpha, Beta'])
   })
 })
+
+describe('multiple questions per call', () => {
+  it('accepts a questions array, asks them in order, and reports every answer', async () => {
+    const asked: string[] = []
+    const answers = ['Alpha', 'Beta']
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom: async () => {
+          const answer = answers[asked.length]
+          asked.push(answer)
+          return { answer, wasCustom: false, index: 1 }
+        },
+      },
+    }
+    const params = {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', header: 'Two', options: OPTIONS },
+      ],
+    }
+    const result = await setup().execute('call-1', params as never, undefined, undefined, ctx as never)
+
+    expect(asked).toHaveLength(2)
+    expect(result.content[0].text).toContain('First?')
+    expect(result.content[0].text).toContain('Alpha')
+    expect(result.content[0].text).toContain('Second?')
+    expect(result.content[0].text).toContain('Beta')
+  })
+
+  it('stops asking once the user cancels', async () => {
+    let calls = 0
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom: async () => {
+          calls++
+          return null
+        },
+      },
+    }
+    const params = {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    }
+    const result = await setup().execute('call-1', params as never, undefined, undefined, ctx as never)
+
+    expect(calls).toBe(1)
+    expect(result.content[0].text).toContain('cancelled')
+  })
+
+  it('still accepts the single-question shape', async () => {
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS } as never, undefined, undefined, uiCtx({ answer: 'Alpha', wasCustom: false, index: 1 }) as never)
+    expect(result.content[0].text).toBe('User selected: 1. Alpha')
+  })
+})
