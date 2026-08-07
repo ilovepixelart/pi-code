@@ -12,10 +12,12 @@ export interface BackgroundRun {
   id: string
   agent: string
   task: string
-  state: 'running' | 'done' | 'failed'
+  state: 'running' | 'done' | 'failed' | 'cancelled'
   exitCode?: number
   output?: string
   turns: number
+  /** Set while running so the run can be cancelled; cleared on completion. */
+  kill?: () => void
 }
 
 export interface BackgroundSpawn {
@@ -63,6 +65,18 @@ export function formatStatus(all: Iterable<BackgroundRun>): string {
   return lines.length > 0 ? lines.join('\n') : 'No background runs in this session.'
 }
 
+/** Cancel a running background child. Returns what the caller should tell the model:
+ * unknown id, already finished, or cancelled. */
+export function cancelBackgroundRun(id: string): 'cancelled' | 'not-running' | 'unknown' {
+  const run = runs.get(id)
+  if (!run) return 'unknown'
+  if (run.state !== 'running' || !run.kill) return 'not-running'
+  run.state = 'cancelled'
+  run.kill()
+  run.kill = undefined
+  return 'cancelled'
+}
+
 export function backgroundStatusText(): string {
   return formatStatus(runs.values())
 }
@@ -80,9 +94,18 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
     cwd: invocation.cwd,
     shell: false,
     stdio: ['ignore', 'pipe', 'ignore'],
+    // Its own group, so cancelling reaches any grandchild the agent spawned.
+    detached: true,
     // The marker lets the child's subagent tool refuse to nest further.
     env: { ...process.env, PI_CODE_SUBAGENT: '1' },
   })
+  run.kill = () => {
+    try {
+      process.kill(-proc.pid!, 'SIGTERM')
+    } catch {
+      proc.kill('SIGTERM')
+    }
+  }
   let stdout = ''
   // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
   let completed = false
@@ -96,13 +119,16 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
   })
   proc.on('close', (code) => {
     const { text, turns } = parseFinalOutputFromJsonl(stdout)
-    run.state = code === 0 ? 'done' : 'failed'
+    run.kill = undefined
+    // A cancelled run keeps that state: its non-zero exit is the cancellation.
+    if (run.state !== 'cancelled') run.state = code === 0 ? 'done' : 'failed'
     run.exitCode = code ?? 0
     run.output = text
     run.turns = turns
     complete()
   })
   proc.on('error', () => {
+    run.kill = undefined
     run.state = 'failed'
     run.exitCode = 1
     complete()

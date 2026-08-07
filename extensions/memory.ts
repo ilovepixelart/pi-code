@@ -7,6 +7,7 @@
  * memories through the memory tool (save / read / delete / list).
  */
 
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -17,7 +18,27 @@ import { capForContext } from './internal/output-guard.js'
 
 const INDEX_FILE = 'MEMORY.md'
 
+/** Claude loads the first 200 lines or 25KB of the memory index at startup. */
+export const INDEX_MAX_LINES = 200
+export const INDEX_MAX_BYTES = 25_000
+
+/** Windows drive letters are case-insensitive, so C:\x and c:\x are one project. */
+function normalizeCwd(cwd: string): string {
+  return cwd.replace(/^([A-Za-z]):(?=[/\\])/, (_match, letter: string) => letter.toUpperCase())
+}
+
+/** Readable dashed path plus a short digest of the real path. The digest is what makes
+ * the slug injective: every separator becomes a dash, so /a/b, /a-b and \a\b share a
+ * dashed form and would otherwise share one store. */
 export function projectSlug(cwd: string): string {
+  const normalized = normalizeCwd(cwd)
+  const readable = normalized.replace(/[/\\]/g, '-').replace(/^-+/, '-')
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 8)
+  return `${readable}-${digest}`
+}
+
+/** The pre-digest slug, kept only to migrate an existing store to the new name. */
+function legacySlug(cwd: string): string {
   return cwd
     .replace(/^([A-Za-z]):(?=[/\\])/, '$1')
     .replace(/[/\\]/g, '-')
@@ -26,6 +47,34 @@ export function projectSlug(cwd: string): string {
 
 export function memoryDir(cwd: string): string {
   return path.join(os.homedir(), '.pi', 'agent', 'memory', projectSlug(cwd))
+}
+
+/** Move a store written under the pre-digest slug to the current one, once. Without
+ * this the slug change would silently orphan every memory a user already has. */
+export function migrateLegacyStore(cwd: string): void {
+  const current = memoryDir(cwd)
+  if (fs.existsSync(current)) return
+  const legacy = path.join(os.homedir(), '.pi', 'agent', 'memory', legacySlug(cwd))
+  if (!fs.existsSync(legacy)) return
+  try {
+    fs.renameSync(legacy, current)
+  } catch {
+    // A failed migration must not take down session start; the store stays legacy.
+  }
+}
+
+/** The index as injected into the prompt, bounded like Claude's startup load. */
+export function capIndexForPrompt(index: string): string {
+  const withinLines = index.split('\n').slice(0, INDEX_MAX_LINES)
+  let dropped = index.split('\n').length - withinLines.length
+  let text = withinLines.join('\n')
+  while (Buffer.byteLength(text, 'utf-8') > INDEX_MAX_BYTES && withinLines.length > 1) {
+    withinLines.pop()
+    dropped++
+    text = withinLines.join('\n')
+  }
+  if (dropped <= 0) return index
+  return `${text}\n(${dropped} more memories not shown; use the memory tool with action "list")`
 }
 
 export function slugifyName(name: string): string {
@@ -76,6 +125,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let dir = memoryDir(process.cwd())
 
   pi.on('session_start', async (_event, ctx) => {
+    migrateLegacyStore(ctx.cwd)
     dir = memoryDir(ctx.cwd)
     const count = readIndex(dir)
       .split('\n')
@@ -87,7 +137,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     const index = readIndex(dir)
     if (!index.trim()) return
     return {
-      systemPrompt: `${event.systemPrompt}\n\n## Memory\n\nPersistent memories from earlier sessions (index):\n\n${index}\nUse the memory tool with action "read" to load a memory's full content when relevant.`,
+      systemPrompt: `${event.systemPrompt}\n\n## Memory\n\nPersistent memories from earlier sessions (index):\n\n${capIndexForPrompt(index)}\nUse the memory tool with action "read" to load a memory's full content when relevant.`,
     }
   })
 

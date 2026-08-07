@@ -1,7 +1,7 @@
 import type { Text } from '@earendil-works/pi-tui'
 import { describe, expect, it } from 'vitest'
 
-import questionExtension from '../extensions/question.ts'
+import questionExtension, { QuestionParams } from '../extensions/question.ts'
 
 interface Option {
   label: string
@@ -93,6 +93,15 @@ const openOverlayWith = (tool: QuestionTool, params: Record<string, unknown>) =>
   if (!overlay) throw new Error('ui.custom factory was never invoked')
   return { overlay, result }
 }
+
+describe('question schema caps', () => {
+  it("bounds options and header to Claude's AskUserQuestion limits", () => {
+    const schema = QuestionParams as unknown as { properties: { options: { minItems: number; maxItems: number }; header: { maxLength: number } } }
+    expect(schema.properties.options.maxItems).toBe(4)
+    expect(schema.properties.options.minItems).toBe(1)
+    expect(schema.properties.header.maxLength).toBe(12)
+  })
+})
 
 describe('question execute', () => {
   it('refuses to ask when no UI is available', async () => {

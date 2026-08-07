@@ -82,7 +82,15 @@ await server.connect(new StdioServerTransport())
 EOF
 printf '{"mcpServers": {"e2e": {"command": "node", "args": ["mcp-server.mjs"]}}}\n' > "$FX/.mcp.json"
 
-SLUG=$(print -r -- "$FX" | sed 's#[/\\]#-#g' | sed 's#^--*#-#')
+# Mirrors projectSlug in extensions/memory.ts: readable dashed path + sha256 prefix.
+SLUG=$(python3 -c "
+import hashlib, sys
+cwd = sys.argv[1]
+readable = cwd.replace('/', '-').replace('\\\\', '-')
+while readable.startswith('--'):
+    readable = readable[1:]
+print(f'{readable}-{hashlib.sha256(cwd.encode()).hexdigest()[:8]}')
+" "$FX")
 
 # --- Isolated HOME --------------------------------------------------------------------
 # The developer's global config would otherwise ride into every prompt (observed: the

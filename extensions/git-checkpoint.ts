@@ -13,6 +13,7 @@
  * the checkpoint (files created after the checkpoint are left in place).
  */
 
+import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
@@ -26,6 +27,35 @@ interface Checkpoint {
   ref: string
   prompt: string
   createdAt: string
+}
+
+/** Claude deletes checkpoints after 30 days (cleanupPeriodDays). Shadow repos hold
+ * full snapshots of every non-ignored file, so unbounded retention grows under $HOME
+ * for the life of the machine. */
+export const CHECKPOINT_RETENTION_DAYS = 30
+
+/** Remove shadow repos untouched for longer than the retention window. The live
+ * session's repo is always kept, whatever its age: a long session's directory mtime
+ * can predate the window. Failures are ignored; this is housekeeping, not a gate. */
+export function pruneCheckpointRepos(root: string, retentionDays: number, keepDir?: string): void {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return
+  }
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const dir = path.join(root, entry.name)
+    if (keepDir && path.resolve(dir) === path.resolve(keepDir)) continue
+    try {
+      if (fs.statSync(dir).mtimeMs >= cutoff) continue
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // a repo we cannot stat or remove stays; housekeeping must not break startup
+    }
+  }
 }
 
 export function sessionSlug(sessionFile: string | undefined): string {
@@ -93,7 +123,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   async function ensureShadow(ctx: ExtensionContext): Promise<void> {
     workTree = ctx.cwd
     const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.()
-    shadowDir = path.join(os.homedir(), '.pi', 'agent', 'checkpoints', sessionSlug(sessionFile))
+    const checkpointsRoot = path.join(os.homedir(), '.pi', 'agent', 'checkpoints')
+    shadowDir = path.join(checkpointsRoot, sessionSlug(sessionFile))
+    pruneCheckpointRepos(checkpointsRoot, CHECKPOINT_RETENTION_DAYS, shadowDir)
     const check = await pi.exec('git', ['--git-dir', shadowDir, 'rev-parse', '--git-dir'], { cwd: ctx.cwd })
     if (check.code !== 0) {
       await pi.exec('git', ['init', '--bare', '-b', 'main', shadowDir], { cwd: ctx.cwd })

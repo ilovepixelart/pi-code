@@ -32,10 +32,10 @@ const OptionSchema = Type.Object({
   description: Type.Optional(Type.String({ description: 'Optional description shown below label' })),
 })
 
-const QuestionParams = Type.Object({
+export const QuestionParams = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
-  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it' })),
-  options: Type.Array(OptionSchema, { description: 'Options for the user to choose from' }),
+  header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it (max 12 characters)', maxLength: 12 })),
+  options: Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 }),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
 
