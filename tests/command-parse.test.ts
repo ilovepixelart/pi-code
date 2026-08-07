@@ -49,6 +49,11 @@ describe('parseCommandFile', () => {
     expect(parseCommandFile(`---\n${field}\n---\nBody.`).allowedTools).toEqual(['bash', 'read'])
   })
 
+  it('keeps a bare numeric scalar as its text', () => {
+    // YAML types `model: 3.5` as a number; dropping non-strings lost the value.
+    expect(parseCommandFile('---\nmodel: 3.5\n---\nB.').model).toBe('3.5')
+  })
+
   it('keeps an explicitly empty grant distinct from an absent one', () => {
     // `[]` says no tools and must stay a restriction; no key at all is no restriction.
     expect(parseCommandFile('---\nallowed-tools: []\n---\nBody.').allowedTools).toEqual([])

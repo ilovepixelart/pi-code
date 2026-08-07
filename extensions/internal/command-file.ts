@@ -109,7 +109,11 @@ export function parseToolList(raw: unknown): string[] | undefined {
   return [...new Set((items as string[]).map(normalizeToolName).filter(Boolean))]
 }
 
-const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
+/** YAML types a bare scalar, so a model named `3.5` arrives as a number, not a string. */
+const text = (value: unknown): string => {
+  if (typeof value === 'string') return value.trim()
+  return typeof value === 'number' || typeof value === 'boolean' ? String(value) : ''
+}
 
 /** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
 const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
