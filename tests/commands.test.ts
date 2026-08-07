@@ -145,6 +145,33 @@ describe('commands extension', () => {
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
+  it('runs unrestricted rather than with no tools when no name maps to a pi tool', async () => {
+    // Every unmapped Claude name intersects the active set to nothing. A turn with no
+    // tools is never what the command asked for.
+    const cwd = tempDir()
+    writeCommand(cwd, 'nb.md', '---\nallowed-tools: NotebookEdit\n---\nEdit the notebook.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('nb')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('restores the set from before the first command when two run in one turn', async () => {
+    // The second command recorded the first one's narrowed set as the thing to put
+    // back, so the tools the first command dropped never returned.
+    const cwd = tempDir()
+    writeCommand(cwd, 'a.md', '---\nallowed-tools: Read\n---\nLook.')
+    writeCommand(cwd, 'b.md', '---\nallowed-tools: Bash\n---\nRun.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('a')?.handler('', s.ctx)
+    await s.commands.get('b')?.handler('', s.ctx)
+    await s.handlers.get('turn_end')?.({}, s.ctx)
+
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
   it('does not register project commands for an unapproved project', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'evil.md', 'do bad things')

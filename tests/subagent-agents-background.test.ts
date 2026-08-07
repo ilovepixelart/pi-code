@@ -265,9 +265,20 @@ describe('discoverAgents', () => {
   })
 
   it('maps Claude tool names to pi tool names and lowercases unmapped ones', () => {
-    writeAgent(piUserDir, 'tooled.md', { name: 'tooled', description: 'has tools', tools: 'Read, Glob, Bash, WebFetch' })
+    writeAgent(piUserDir, 'tooled.md', { name: 'tooled', description: 'has tools', tools: 'Read, Glob, Bash, WebFetch, NotebookEdit' })
 
-    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find', 'bash', 'webfetch'])
+    // These become `--tools`, which pi treats as an exact-name allowlist, so a name no
+    // pi tool answers to narrows the child's registry rather than being ignored:
+    // WebFetch has to reach web_fetch. NotebookEdit has no counterpart either way.
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find', 'bash', 'web_fetch', 'notebookedit'])
+  })
+
+  it('grants the base tool for an argument-scoped agent tools entry', () => {
+    writeAgent(piUserDir, 'scoped.md', { name: 'scoped', description: 'scoped tools', tools: 'Bash(git add:*), Read' })
+
+    // Left whole, `bash(git add:*)` matched nothing and the child spawned with a
+    // registry holding only `read`; an agent naming solely scoped grants got none.
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['bash', 'read'])
   })
 
   it('leaves tools undefined when the tools field lists nothing usable', () => {

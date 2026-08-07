@@ -38,6 +38,35 @@ describe('parseCommandFile', () => {
     expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
   })
 
+  it('maps the Claude names of the tools this package registers', () => {
+    // Without these, an ordinary research command matched no pi tool and its turn was
+    // intersected down to nothing.
+    const md = ['---', 'allowed-tools: WebFetch, WebSearch, TodoWrite, Task', '---', 'Research it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['web_fetch', 'web_search', 'todo', 'subagent'])
+  })
+
+  it('keeps a comma inside an argument scope out of the entry split', () => {
+    // Splitting on every comma made the fragments top-level entries, so a command
+    // naming only Bash came away with pi's edit tool active for the turn.
+    const md = ['---', 'allowed-tools: Bash(cat, edit, tail)', '---', 'Show it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash'])
+  })
+
+  it('reads a YAML block list, which Claude command files also use', () => {
+    const md = ['---', 'allowed-tools:', '  - Bash(git add:*)', '  - Read', '---', 'Stage it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it('does not let an empty key take the following line as its value', () => {
+    const md = ['---', 'description:', 'model: sonnet', '---', 'Body line.'].join('\n')
+
+    expect(parseCommandFile(md).description).toBe('Body line.')
+    expect(parseCommandFile(md).model).toBe('sonnet')
+  })
+
   it('leaves a command with only scoped grants able to run', () => {
     const md = ['---', 'allowed-tools: Bash(git commit:*)', '---', 'Commit.'].join('\n')
 

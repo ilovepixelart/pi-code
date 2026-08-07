@@ -87,8 +87,15 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // list, leaving the command running with everything enabled.
     if (parsed.allowedTools) {
       const saved = pi.getActiveTools()
-      pendingRestore = saved
-      pi.setActiveTools(parsed.allowedTools.filter((tool) => saved.includes(tool)))
+      const granted = parsed.allowedTools.filter((tool) => saved.includes(tool))
+      // Only the first restriction in a turn knows the unrestricted set; a second
+      // command would otherwise record the first one's narrowed set as the thing to
+      // restore, and the tools the first command dropped would never come back.
+      pendingRestore ??= saved
+      // An empty grant means every name was one pi has no tool for. Running the turn
+      // with no tools at all is never what the command asked for, so leave the set
+      // alone and let it run unrestricted rather than crippled.
+      if (granted.length > 0) pi.setActiveTools(granted)
     }
     pi.sendUserMessage(expanded)
   }

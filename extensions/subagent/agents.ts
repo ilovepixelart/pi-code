@@ -7,21 +7,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 
-// Claude Code tool names -> pi tool names; unmapped names pass through lowercased
-const CLAUDE_TOOL_MAP: Record<string, string> = {
-  read: 'read',
-  write: 'write',
-  edit: 'edit',
-  bash: 'bash',
-  grep: 'grep',
-  glob: 'find',
-  ls: 'ls',
-}
-
-function normalizeToolName(tool: string): string {
-  const lower = tool.toLowerCase()
-  return CLAUDE_TOOL_MAP[lower] ?? lower
-}
+// The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
+// Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
+// is not merely ignored, it narrows the child's registry.
+import { normalizeToolName } from '../internal/command-file.js'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block

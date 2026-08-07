@@ -39,6 +39,16 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
   grep: 'grep',
   glob: 'find',
   ls: 'ls',
+  // Claude's names for the tools this package registers itself. Without these a
+  // perfectly ordinary `allowed-tools: WebFetch, WebSearch` matched no pi tool and
+  // the intersection left the turn with nothing.
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  todowrite: 'todo',
+  todoread: 'todo',
+  task: 'subagent',
+  askuserquestion: 'question',
+  exitplanmode: 'plan_mode_complete',
 }
 
 /**
@@ -55,23 +65,44 @@ export function normalizeToolName(name: string): string {
   return CLAUDE_TOOL_MAP[base] ?? base
 }
 
+/**
+ * Entries are comma-separated, except a comma inside an argument scope belongs to the
+ * scope: `Bash(cat, tail)` is one grant, not three. Splitting on every comma made the
+ * fragments between them top-level entries, so a command naming only `Bash` came away
+ * with pi's `edit` tool active. A leading `-` is stripped so a YAML block list parses
+ * as the same list.
+ */
+function toolEntries(raw: string): string[] {
+  return (raw.match(/[^,()]+(?:\([^)]*\))?/g) ?? []).map((entry) => entry.trim().replace(/^-\s*/, '')).filter(Boolean)
+}
+
 function field(frontmatter: string, key: string): string {
-  const match = new RegExp(String.raw`^\s*${key}\s*:\s*(.+)$`, 'm').exec(frontmatter)
+  // Horizontal whitespace only: `\s` spans newlines, so a key with no value on its
+  // own line used to take the following line as its value.
+  const match = new RegExp(String.raw`^\s*${key}[^\S\r\n]*:[^\S\r\n]*(.+)$`, 'm').exec(frontmatter)
   return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+}
+
+/** `allowed-tools` may be inline (`Bash, Read`) or a YAML block list beneath the key. */
+function toolsField(frontmatter: string): string {
+  const inline = field(frontmatter, 'allowed-tools')
+  if (inline) return inline
+  const block = /^\s*allowed-tools[^\S\r\n]*:[^\S\r\n]*\r?\n((?:[^\S\r\n]+-[^\r\n]*\r?\n?)+)/m.exec(frontmatter)
+  return block ? block[1].replace(/\r?\n/g, ',') : ''
 }
 
 export function parseCommandFile(content: string): ParsedCommand {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   const frontmatter = match ? match[1] : ''
   const body = (match ? content.slice(match[0].length) : content).trim()
-  const tools = field(frontmatter, 'allowed-tools')
+  const tools = toolsField(frontmatter)
   const firstLine = body.split('\n').find((line) => line.trim().length > 0) ?? ''
   return {
     description: field(frontmatter, 'description') || firstLine.slice(0, 60),
     argumentHint: field(frontmatter, 'argument-hint') || undefined,
     // Several scoped grants collapse to one tool name; pi would otherwise be handed
     // the same tool twice.
-    allowedTools: tools ? [...new Set(tools.split(',').map(normalizeToolName).filter(Boolean))] : undefined,
+    allowedTools: tools ? [...new Set(toolEntries(tools).map(normalizeToolName).filter(Boolean))] : undefined,
     model: field(frontmatter, 'model') || undefined,
     disableModelInvocation: field(frontmatter, 'disable-model-invocation') === 'true',
     body,
