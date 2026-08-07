@@ -1,13 +1,49 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import * as path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
 
-import { memoryDir, projectSlug, removeIndexLine, slugifyName, upsertIndexLine } from '../extensions/memory.ts'
+// homedir cannot be spied on an ESM namespace, so the module is mocked instead.
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home || actual.homedir() }
+})
+
+import { capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, slugifyName, upsertIndexLine } from '../extensions/memory.ts'
 
 describe('memory helpers', () => {
   it('slugs project paths into directory names', () => {
-    expect(projectSlug('/Users/alex/Documents/pi-code')).toBe('-Users-alex-Documents-pi-code')
-    expect(projectSlug('C:\\Users\\alex\\Documents\\pi-code')).toBe('C-Users-alex-Documents-pi-code')
-    expect(memoryDir('/tmp/x')).toContain(path.join('.pi', 'agent', 'memory', '-tmp-x'))
+    // Readable dashed path plus a short digest that keeps distinct paths distinct.
+    expect(projectSlug('/Users/alex/Documents/pi-code')).toMatch(/^-Users-alex-Documents-pi-code-[0-9a-f]{8}$/)
+    expect(projectSlug('C:\\Users\\alex\\Documents\\pi-code')).toMatch(/^C-Users-alex-Documents-pi-code-[0-9a-f]{8}$/)
+    expect(memoryDir('/tmp/x')).toContain(path.join('.pi', 'agent', 'memory', projectSlug('/tmp/x')))
+  })
+
+  it('distinguishes paths that collapse to the same dashed slug', () => {
+    // Every separator becomes a dash, so /a/b, /a-b and \\a\\b used to share one store.
+    const slashed = projectSlug('/a/b')
+    expect(slashed).not.toBe(projectSlug('/a-b'))
+    expect(projectSlug('/a/b')).toBe(slashed)
+  })
+
+  it('treats a windows drive letter case-insensitively', () => {
+    // C: and c: name the same location on Windows; two stores would split the index.
+    expect(projectSlug('C:\\Users\\alex\\code')).toBe(projectSlug('c:\\Users\\alex\\code'))
+  })
+
+  it('caps the injected index by lines and bytes, reporting what was dropped', () => {
+    const small = '# Memory index\n- [a](a.md): first\n'
+    expect(capIndexForPrompt(small)).toBe(small)
+
+    const many = ['# Memory index', ...Array.from({ length: INDEX_MAX_LINES + 20 }, (_, i) => `- [m${i}](m${i}.md): entry ${i}`)].join('\n')
+    const cappedLines = capIndexForPrompt(many)
+    expect(cappedLines.split('\n').length).toBeLessThanOrEqual(INDEX_MAX_LINES + 2)
+    expect(cappedLines).toContain('memories not shown')
+
+    const fat = `# Memory index\n- [big](big.md): ${'x'.repeat(INDEX_MAX_BYTES * 2)}`
+    expect(Buffer.byteLength(capIndexForPrompt(fat), 'utf-8')).toBeLessThanOrEqual(INDEX_MAX_BYTES + 200)
   })
 
   it('slugifies memory names', () => {
@@ -52,5 +88,28 @@ describe('memory helpers', () => {
   it('flattens a multi-line description into one index line', () => {
     // A newline in the description would break every later line-based match.
     expect(upsertIndexLine('', 'a', 'line one\nline two')).toBe('# Memory index\n- [a](a.md): line one line two\n')
+  })
+})
+
+describe('migrateLegacyStore', () => {
+  it('renames a pre-digest store to the current slug, once, without clobbering', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    hoisted.home = home
+    const cwd = '/proj/app'
+    const legacy = join(home, '.pi', 'agent', 'memory', '-proj-app')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'MEMORY.md'), '- [a](a.md): kept\n')
+
+    migrateLegacyStore(cwd)
+    expect(existsSync(legacy)).toBe(false)
+    expect(readFileSync(join(memoryDir(cwd), 'MEMORY.md'), 'utf-8')).toContain('kept')
+
+    // A second run with a fresh legacy dir must not overwrite the migrated store.
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'MEMORY.md'), '- [b](b.md): newer\n')
+    migrateLegacyStore(cwd)
+    expect(readFileSync(join(memoryDir(cwd), 'MEMORY.md'), 'utf-8')).toContain('kept')
+    rmSync(home, { recursive: true, force: true })
+    hoisted.home = ''
   })
 })
