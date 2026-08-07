@@ -510,6 +510,42 @@ describe('loadHooks malformed config shapes', () => {
   })
 })
 
+describe('malformed hook config', () => {
+  it('skips an entry whose hooks is not a list, keeping the rest of the event usable', () => {
+    const dir = tempDir('hooks-cfg-')
+    const file = join(dir, 'settings.json')
+    // A plausible hand-edit: one entry as an object instead of a one-element list.
+    writeFileSync(
+      file,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Bash', hooks: { type: 'command', command: 'bad' } },
+            { matcher: 'Edit', hooks: [{ command: 'good' }] },
+          ],
+        },
+      }),
+    )
+
+    const config = loadHooks([file])
+    expect(config.PreToolUse).toHaveLength(1)
+    // The whole session used to fail every tool call on this; now it costs one entry.
+    expect(() => matchingCommands(config.PreToolUse, 'bash')).not.toThrow()
+    expect(matchingCommands(config.PreToolUse, 'edit')).toEqual([{ command: 'good' }])
+  })
+
+  it('survives a settings file that is bare null, or a non-string matcher', () => {
+    const dir = tempDir('hooks-cfg-')
+    const nullFile = join(dir, 'null.json')
+    writeFileSync(nullFile, 'null')
+    expect(loadHooks([nullFile])).toEqual({})
+
+    const badMatcher = join(dir, 'matcher.json')
+    writeFileSync(badMatcher, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 42, hooks: [{ command: 'x' }] }] } }))
+    expect(loadHooks([badMatcher]).PreToolUse ?? []).toEqual([])
+  })
+})
+
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
     expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
