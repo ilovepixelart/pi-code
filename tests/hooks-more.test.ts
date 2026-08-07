@@ -120,7 +120,13 @@ const writeSettings = (root: string, name: string, hooks: unknown): void => {
   writeFileSync(join(root, '.claude', name), JSON.stringify({ hooks }))
 }
 
+let savedAgentDir: string | undefined
 beforeEach(() => {
+  // getAgentDir() lives in the SDK, so mocking node:os here does not reach it: without
+  // this the suite writes trust decisions into the developer's real ~/.pi/agent.
+  savedAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'agentdir-'))
+
   hoisted.calls.length = 0
   hoisted.live.length = 0
   hoisted.behaviors.clear()
@@ -128,6 +134,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+
   // Release any child scripted to hang so its pending promise never leaks into the next test.
   for (const child of hoisted.live.splice(0)) child.emit('close', 0)
   vi.useRealTimers()

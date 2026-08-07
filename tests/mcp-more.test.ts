@@ -254,7 +254,13 @@ const unsetEnv = (key: string): void => {
 
 const tempDirs: string[] = []
 
+let savedAgentDir: string | undefined
 beforeEach(() => {
+  // getAgentDir() lives in the SDK, so mocking node:os here does not reach it: without
+  // this the suite writes trust decisions into the developer's real ~/.pi/agent.
+  savedAgentDir = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'agentdir-'))
+
   hoisted.transports.length = 0
   hoisted.clients.length = 0
   hoisted.callOptions.length = 0
@@ -264,6 +270,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+
   vi.restoreAllMocks()
   vi.useRealTimers()
   for (const dir of tempDirs.splice(0)) {
