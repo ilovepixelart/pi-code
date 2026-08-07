@@ -63,6 +63,55 @@ function parseEffortField(raw: unknown): string | undefined {
   return THINKING_LEVELS.has(effort) ? effort : undefined
 }
 
+/** Claude's `skills` frontmatter: a comma string or YAML list of skill names. */
+function parseSkillsField(raw: unknown): string[] | undefined {
+  let names: string[] = []
+  if (Array.isArray(raw)) names = raw.map(String)
+  else if (typeof raw === 'string') names = raw.split(',')
+  const cleaned = names.map((name) => name.trim()).filter(Boolean)
+  return cleaned.length > 0 ? cleaned : undefined
+}
+
+/** Inline the named skills into an agent's prompt. Claude preloads a subagent's
+ * `skills` at startup rather than letting it discover them, and a child pi process
+ * does not inherit the parent's skill discovery, so the bodies travel in the prompt.
+ * A name that resolves to nothing is reported rather than dropped: a silently missing
+ * instruction is worse than a visible gap. */
+export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[]): string {
+  if (!skills || skills.length === 0) return prompt
+  const sections: string[] = []
+  for (const name of skills) {
+    const body = readSkillBody(name, skillDirs)
+    sections.push(body === undefined ? `<skill name="${name}">(skill not found)</skill>` : `<skill name="${name}">\n${body.trim()}\n</skill>`)
+  }
+  return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
+}
+
+/** A skill name is a single directory or file stem, never a path. The name comes from
+ * agent frontmatter, which a repository can control, and the body is inlined into the
+ * prompt sent to the model, so a traversal would be an arbitrary-file read. */
+const SKILL_NAME = /^[A-Za-z0-9_.-]+$/
+
+function readSkillBody(name: string, skillDirs: string[]): string | undefined {
+  if (!SKILL_NAME.test(name) || name === '.' || name === '..') return undefined
+  for (const dir of skillDirs) {
+    const root = path.resolve(dir)
+    for (const candidate of [path.join(dir, name, 'SKILL.md'), path.join(dir, `${name}.md`)]) {
+      // Belt and braces against symlinks and platform path quirks: the file actually
+      // read must still sit under the skills directory it was resolved from.
+      if (!path.resolve(candidate).startsWith(root + path.sep)) continue
+      try {
+        const content = fs.readFileSync(candidate, 'utf-8')
+        const match = /^---\r?\n[\s\S]*?\r?\n---/.exec(content)
+        return match ? content.slice(match[0].length) : content
+      } catch {
+        // try the next shape
+      }
+    }
+  }
+  return undefined
+}
+
 /** permissionMode has no pi equivalent; 'plan' means a research agent, so translate
  * the intent into a read-only toolset unless the file pins tools itself. */
 const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls']
@@ -90,6 +139,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     disallowedTools,
     model: parseModelField(frontmatter.model),
     effort: parseEffortField(frontmatter.effort),
+    skills: parseSkillsField(frontmatter.skills),
     systemPrompt: body,
     source,
     filePath,
@@ -105,6 +155,8 @@ export interface AgentConfig {
   disallowedTools?: string[]
   model?: string
   effort?: string
+  /** Skill names to inline into the child's prompt, per Claude's `skills` field. */
+  skills?: string[]
   systemPrompt: string
   source: AgentSource
   filePath: string

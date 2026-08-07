@@ -26,7 +26,8 @@ import { type Static, Type } from 'typebox'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
-import { type AgentConfig, type AgentScope, discoverAgents } from './agents.js'
+import { skillDirs } from '../skills.js'
+import { type AgentConfig, type AgentScope, discoverAgents, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
@@ -321,8 +322,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   }
 
   try {
-    if (agent.systemPrompt.trim()) {
-      const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt)
+    const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillDirs(defaultCwd, os.homedir()))
+    if (promptWithSkills.trim()) {
+      const tmp = await writePromptToTempFile(agent.name, promptWithSkills)
       tmpPromptDir = tmp.dir
       tmpPromptPath = tmp.filePath
       args.push('--append-system-prompt', tmpPromptPath)
@@ -593,8 +595,9 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   }
   const args = agentInvocationArgs(agent)
   let tmpPrompt: { dir: string; filePath: string } | undefined
-  if (agent.systemPrompt.trim()) {
-    tmpPrompt = await writePromptToTempFile(agent.name, agent.systemPrompt)
+  const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillDirs(params.cwd ?? defaultCwd, os.homedir()))
+  if (promptWithSkills.trim()) {
+    tmpPrompt = await writePromptToTempFile(agent.name, promptWithSkills)
     args.push('--append-system-prompt', tmpPrompt.filePath)
   }
   args.push(`Task: ${task}`)

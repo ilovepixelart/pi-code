@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { discoverAgents } from '../extensions/subagent/agents.ts'
+import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
 
 /**
  * Covers extensions/subagent/agents.ts and extensions/subagent/background.ts.
@@ -634,5 +634,49 @@ describe('startBackgroundRun', () => {
     child.emit('close', 0)
 
     expect(backgroundStatusText()).toBe(`${id} scout: done (exit 0, 1 turns) - survey`)
+  })
+})
+
+describe('agent skills preload', () => {
+  it('parses a skills list and appends the named skill bodies to the prompt', () => {
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(join(skillsRoot, 'deploy'), { recursive: true })
+    writeFileSync(join(skillsRoot, 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: ship it\n---\nRun the deploy checklist.')
+
+    const prompt = withPreloadedSkills('Base prompt.', ['deploy'], [skillsRoot])
+    expect(prompt).toContain('Base prompt.')
+    expect(prompt).toContain('Run the deploy checklist.')
+    expect(prompt).toContain('deploy')
+  })
+
+  it('notes a skill it cannot find rather than silently dropping it', () => {
+    const prompt = withPreloadedSkills('Base.', ['ghost'], [join(fakeHome.path, '.claude', 'skills')])
+    expect(prompt).toContain('ghost')
+    expect(prompt).toContain('not found')
+  })
+
+  it('refuses a skill name that escapes the skills directory', () => {
+    // The name comes from agent frontmatter, which a repository can control; a
+    // traversal would read an arbitrary file into the prompt sent to the model.
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(skillsRoot, { recursive: true })
+    writeFileSync(join(fakeHome.path, '.claude', 'secret.md'), 'TOP_SECRET')
+
+    const prompt = withPreloadedSkills('Base.', ['../secret'], [skillsRoot])
+    expect(prompt).not.toContain('TOP_SECRET')
+    expect(prompt).toContain('not found')
+  })
+
+  it('refuses a skill name with a path separator', () => {
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(join(skillsRoot, 'nested'), { recursive: true })
+    writeFileSync(join(skillsRoot, 'nested', 'SKILL.md'), 'NESTED_BODY')
+
+    expect(withPreloadedSkills('Base.', ['nested/../nested'], [skillsRoot])).toContain('not found')
+  })
+
+  it('returns the prompt untouched when the agent preloads nothing', () => {
+    expect(withPreloadedSkills('Base.', undefined, [])).toBe('Base.')
+    expect(withPreloadedSkills('Base.', [], [])).toBe('Base.')
   })
 })
