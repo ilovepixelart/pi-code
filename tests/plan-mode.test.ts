@@ -492,6 +492,25 @@ describe('session restore', () => {
     expect(reloaded.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete'])
   })
 
+  it('records the snapshot for a --plan session, which never toggles', async () => {
+    // The flag enters plan mode at session_start with no entry to restore from, so
+    // without a write here a /reload has nothing but the restricted active set to
+    // infer from, and the next persist cements that loss into the session file.
+    const s = setup({ flag: true })
+    await s.emit('session_start', {}, restoreCtx(s, []))
+    const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
+
+    const reloaded = setup({ flag: true, activeTools: afterReload(s.getActiveTools()) })
+    await reloaded.emit('session_start', { reason: 'reload' }, restoreCtx(reloaded, entries))
+    // A restore that already had a snapshot has nothing new to say; writing one per
+    // restore would grow the session file for every reload.
+    expect(reloaded.appended.filter((e) => e.type === 'plan-mode')).toEqual([])
+
+    await reloaded.runCommand('plan')
+    expect(reloaded.getActiveTools()).toContain('edit')
+    expect(reloaded.getActiveTools()).toContain('write')
+  })
+
   it('does not push a recorded snapshot over the live tool set when plan mode is off', async () => {
     // The snapshot is only meaningful for undoing a restriction. Applying it on a
     // restore that is not in plan mode would drop whatever pi registered since it was
