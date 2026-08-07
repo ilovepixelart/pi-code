@@ -85,9 +85,19 @@ export function withPreloadedSkills(prompt: string, skills: string[] | undefined
   return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
 }
 
+/** A skill name is a single directory or file stem, never a path. The name comes from
+ * agent frontmatter, which a repository can control, and the body is inlined into the
+ * prompt sent to the model, so a traversal would be an arbitrary-file read. */
+const SKILL_NAME = /^[A-Za-z0-9_.-]+$/
+
 function readSkillBody(name: string, skillDirs: string[]): string | undefined {
+  if (!SKILL_NAME.test(name) || name === '.' || name === '..') return undefined
   for (const dir of skillDirs) {
+    const root = path.resolve(dir)
     for (const candidate of [path.join(dir, name, 'SKILL.md'), path.join(dir, `${name}.md`)]) {
+      // Belt and braces against symlinks and platform path quirks: the file actually
+      // read must still sit under the skills directory it was resolved from.
+      if (!path.resolve(candidate).startsWith(root + path.sep)) continue
       try {
         const content = fs.readFileSync(candidate, 'utf-8')
         const match = /^---\r?\n[\s\S]*?\r?\n---/.exec(content)

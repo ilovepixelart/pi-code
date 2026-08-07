@@ -655,6 +655,26 @@ describe('agent skills preload', () => {
     expect(prompt).toContain('not found')
   })
 
+  it('refuses a skill name that escapes the skills directory', () => {
+    // The name comes from agent frontmatter, which a repository can control; a
+    // traversal would read an arbitrary file into the prompt sent to the model.
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(skillsRoot, { recursive: true })
+    writeFileSync(join(fakeHome.path, '.claude', 'secret.md'), 'TOP_SECRET')
+
+    const prompt = withPreloadedSkills('Base.', ['../secret'], [skillsRoot])
+    expect(prompt).not.toContain('TOP_SECRET')
+    expect(prompt).toContain('not found')
+  })
+
+  it('refuses a skill name with a path separator', () => {
+    const skillsRoot = join(fakeHome.path, '.claude', 'skills')
+    mkdirSync(join(skillsRoot, 'nested'), { recursive: true })
+    writeFileSync(join(skillsRoot, 'nested', 'SKILL.md'), 'NESTED_BODY')
+
+    expect(withPreloadedSkills('Base.', ['nested/../nested'], [skillsRoot])).toContain('not found')
+  })
+
   it('returns the prompt untouched when the agent preloads nothing', () => {
     expect(withPreloadedSkills('Base.', undefined, [])).toBe('Base.')
     expect(withPreloadedSkills('Base.', [], [])).toBe('Base.')
