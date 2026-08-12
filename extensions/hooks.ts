@@ -287,6 +287,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Pi's built-in file tools name the target parameter `path`; Claude's name it
+ * `file_path`. Hook payloads are Claude-shaped, so built-in file-tool inputs are
+ * translated on the way out, and updatedInput coming back is translated on the way in. */
+const FILE_TOOL_NAMES = new Set(['read', 'write', 'edit'])
+
+export function toClaudeToolInput(toolName: string, input: unknown): unknown {
+  if (!FILE_TOOL_NAMES.has(toolName) || !isRecord(input) || input.file_path !== undefined) return input
+  const { path, ...rest } = input
+  return path === undefined ? input : { ...rest, file_path: path }
+}
+
+export function fromClaudeToolInput(toolName: string, input: unknown): unknown {
+  if (!FILE_TOOL_NAMES.has(toolName) || !isRecord(input) || input.path !== undefined) return input
+  const { file_path, ...rest } = input
+  return file_path === undefined ? input : { ...rest, path: file_path }
+}
+
 /** Claude's updatedInput replaces the whole tool_input, and pi's tool_call contract is
  * in-place mutation, so the target object is emptied and refilled rather than reassigned. */
 function replaceRecord(target: Record<string, unknown>, next: Record<string, unknown>): void {
@@ -302,13 +319,14 @@ function replaceRecord(target: Record<string, unknown>, next: Record<string, unk
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink): Promise<HookDecision> {
   const names = claudeName ? [toolName, claudeName] : [toolName]
   for (const command of matchingCommands(config.PreToolUse, names)) {
-    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command))
+    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toClaudeToolInput(toolName, toolInput) }, timeoutMs(command))
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
     if (onSystemMessage) surfaceSystemMessages([result], onSystemMessage)
     const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
-    if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
+    const translated = isRecord(updated) ? fromClaudeToolInput(toolName, updated) : updated
+    if (isRecord(translated) && isRecord(toolInput)) replaceRecord(toolInput, translated)
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return decision
   }
@@ -463,7 +481,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const failCommands = matchingCommands(config.PostToolUseFailure, names)
       if (failCommands.length === 0) return
       const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
-      const failPayload = { hook_event_name: 'PostToolUseFailure', tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
+      const failPayload = { hook_event_name: 'PostToolUseFailure', tool_name: alias ?? event.toolName, tool_input: toClaudeToolInput(event.toolName, event.input), tool_response: response }
       const failResults = await Promise.all(failCommands.map((command) => run(command.command, failPayload, timeoutMs(command))))
       surfaceSystemMessages(failResults, (message) => ctx.ui.notify(message, 'warning'))
       return
@@ -473,7 +491,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const payload = {
       hook_event_name: 'PostToolUse',
       tool_name: alias ?? event.toolName,
-      tool_input: event.input,
+      tool_input: toClaudeToolInput(event.toolName, event.input),
       tool_response: response,
     }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })

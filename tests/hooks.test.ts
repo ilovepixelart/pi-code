@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import { describe, expect, it } from 'vitest'
 
-import { type HookRunner, hookFiles, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse } from '../extensions/hooks.ts'
+import { fromClaudeToolInput, type HookRunner, hookFiles, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, toClaudeToolInput } from '../extensions/hooks.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'hooks-'))
 
@@ -144,6 +144,45 @@ describe('runPreToolUse', () => {
     }
     await runPreToolUse(config, 'bash', { command: 'git status' }, runner)
     expect(seen).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'git status' } })
+  })
+
+  it('reports a file-tool path as the Claude file_path field in the payload', async () => {
+    const writeConfig = { PreToolUse: [{ matcher: 'Write|Edit', hooks: [{ command: 'guard.sh' }] }] }
+    let seen: unknown
+    const runner: HookRunner = async (_command, payload) => {
+      seen = payload
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
+    }
+    await runPreToolUse(writeConfig, 'write', { path: 'src/a.ts', content: 'x' }, runner)
+    expect(seen).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'write', tool_input: { file_path: 'src/a.ts', content: 'x' } })
+  })
+
+  it('translates a Claude-shaped updatedInput back to the pi path field', async () => {
+    const writeConfig = { PreToolUse: [{ matcher: 'Write', hooks: [{ command: 'rewrite.sh' }] }] }
+    const runner: HookRunner = async () => ({
+      code: 0,
+      stdout: JSON.stringify({ hookSpecificOutput: { updatedInput: { file_path: 'src/b.ts', content: 'y' } } }),
+      stderr: '',
+      timedOut: false,
+    })
+    const input: Record<string, unknown> = { path: 'src/a.ts', content: 'x' }
+    await runPreToolUse(writeConfig, 'write', input, runner)
+    expect(input).toEqual({ path: 'src/b.ts', content: 'y' })
+  })
+})
+
+describe('tool input translation', () => {
+  it('maps read/write/edit path to file_path and back', () => {
+    expect(toClaudeToolInput('read', { path: 'a.ts', limit: 5 })).toEqual({ file_path: 'a.ts', limit: 5 })
+    expect(fromClaudeToolInput('read', { file_path: 'a.ts', limit: 5 })).toEqual({ path: 'a.ts', limit: 5 })
+  })
+
+  it('leaves non-file tools and already-shaped inputs untouched', () => {
+    expect(toClaudeToolInput('bash', { command: 'ls' })).toEqual({ command: 'ls' })
+    expect(toClaudeToolInput('mcp__x__y', { path: 'a.ts' })).toEqual({ path: 'a.ts' })
+    expect(toClaudeToolInput('write', { file_path: 'a.ts' })).toEqual({ file_path: 'a.ts' })
+    expect(fromClaudeToolInput('write', { path: 'a.ts' })).toEqual({ path: 'a.ts' })
+    expect(toClaudeToolInput('write', 'not-an-object')).toBe('not-an-object')
   })
 })
 
