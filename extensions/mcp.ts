@@ -458,26 +458,28 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   }
 
   async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
-    for (const [name, config] of Object.entries(servers)) {
-      // A later scope must not take the name of a server that already connected: it
-      // would evict that client from the map, leaking it at shutdown, and misreport
-      // the earlier server's status.
-      if (clients.has(name)) {
-        console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
-        continue
-      }
-      warnOnTypelessUrl(name, config)
-      try {
-        const client = await connect(name, config)
-        clients.set(name, client)
-        const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
-        const count = registerTools(name, config, client, tools)
-        subscribeToToolChanges(name, config, client)
-        status.set(name, { state: 'connected', tools: count })
-      } catch (error) {
-        status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
-      }
-    }
+    await Promise.all(
+      Object.entries(servers).map(async ([name, config]) => {
+        // A later scope must not take the name of a server that already connected: it
+        // would evict that client from the map, leaking it at shutdown, and misreport
+        // the earlier server's status.
+        if (clients.has(name)) {
+          console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
+          return
+        }
+        warnOnTypelessUrl(name, config)
+        try {
+          const client = await connect(name, config)
+          clients.set(name, client)
+          const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
+          const count = registerTools(name, config, client, tools)
+          subscribeToToolChanges(name, config, client)
+          status.set(name, { state: 'connected', tools: count })
+        } catch (error) {
+          status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
+        }
+      }),
+    )
   }
 
   /** Connect the project scope under the per-server policy. Returns whether the scope
