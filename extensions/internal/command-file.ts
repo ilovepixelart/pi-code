@@ -12,6 +12,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
+
 export interface ParsedCommand {
   description: string
   argumentHint?: string
@@ -39,30 +41,97 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
   grep: 'grep',
   glob: 'find',
   ls: 'ls',
+  // Claude's names for the tools this package registers itself. Without these a
+  // perfectly ordinary `allowed-tools: WebFetch, WebSearch` matched no pi tool and
+  // the intersection left the turn with nothing.
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  todowrite: 'todo',
+  todoread: 'todo',
+  task: 'subagent',
+  askuserquestion: 'question',
+  exitplanmode: 'plan_mode_complete',
 }
 
+/**
+ * Claude scopes a grant to arguments: `Bash(git add:*)` allows exactly those commands.
+ * pi's active-tool list is per tool, with no argument dimension, so the scope is
+ * dropped and the base tool is granted. Keeping the scope in the name matched nothing
+ * when the list was intersected with the active tools, which left a command declaring
+ * only scoped grants running with no tools at all.
+ */
 export function normalizeToolName(name: string): string {
   const lower = name.trim().toLowerCase()
-  return CLAUDE_TOOL_MAP[lower] ?? lower
+  const scope = lower.indexOf('(')
+  const base = (scope === -1 ? lower : lower.slice(0, scope)).trim()
+  return CLAUDE_TOOL_MAP[base] ?? base
 }
 
-function field(frontmatter: string, key: string): string {
-  const match = new RegExp(String.raw`^\s*${key}\s*:\s*(.+)$`, 'm').exec(frontmatter)
-  return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+/**
+ * Entries are comma-separated, except a comma inside an argument scope belongs to the
+ * scope: `Bash(cat, tail)` is one grant, not three. Splitting on every comma made the
+ * fragments between them top-level entries, so a command naming only `Bash` came away
+ * with pi's `edit` tool active.
+ *
+ * Scanned rather than matched with a regex: the pattern form is quadratic on an input
+ * of unclosed parens, and a command file comes from the repository.
+ */
+export function toolEntries(raw: string): string[] {
+  const entries: string[] = []
+  let current = ''
+  let depth = 0
+  for (const ch of raw) {
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    if (ch === ',' && depth === 0) {
+      entries.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  entries.push(current)
+  return entries.map((entry) => entry.trim()).filter(Boolean)
 }
+
+/**
+ * A tool grant is either a comma-separated string or a YAML list, and the two mean the
+ * same thing. An empty list is not the same as an absent one: it says no tools, so it
+ * comes back as an empty array rather than undefined.
+ */
+export function parseToolList(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined
+  let items: unknown[]
+  if (Array.isArray(raw)) items = raw
+  else if (typeof raw === 'string') items = toolEntries(raw)
+  else return undefined
+  if (items.some((item) => typeof item !== 'string')) return undefined
+  return [...new Set((items as string[]).map(normalizeToolName).filter(Boolean))]
+}
+
+/** YAML types a bare scalar, so a model named `3.5` arrives as a number, not a string. */
+const text = (value: unknown): string => {
+  if (typeof value === 'string') return value.trim()
+  return typeof value === 'number' || typeof value === 'boolean' ? String(value) : ''
+}
+
+/** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
+const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
 
 export function parseCommandFile(content: string): ParsedCommand {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  const frontmatter = match ? match[1] : ''
-  const body = (match ? content.slice(match[0].length) : content).trim()
-  const tools = field(frontmatter, 'allowed-tools')
+  // pi's own parser, rather than a hand-rolled one: it reads the YAML shapes Claude
+  // command files actually use (flow sequences, block lists, quoted and multi-line
+  // values), and a value this misreads is a restriction silently not applied.
+  const { frontmatter, body: raw } = parseFrontmatter(content)
+  const body = raw.trim()
   const firstLine = body.split('\n').find((line) => line.trim().length > 0) ?? ''
+  const disable = frontmatter['disable-model-invocation']
   return {
-    description: field(frontmatter, 'description') || firstLine.slice(0, 60),
-    argumentHint: field(frontmatter, 'argument-hint') || undefined,
-    allowedTools: tools ? tools.split(',').map(normalizeToolName).filter(Boolean) : undefined,
-    model: field(frontmatter, 'model') || undefined,
-    disableModelInvocation: field(frontmatter, 'disable-model-invocation') === 'true',
+    description: text(frontmatter.description) || firstLine.slice(0, 60),
+    argumentHint: hint(frontmatter['argument-hint']) || undefined,
+    allowedTools: parseToolList(frontmatter['allowed-tools']),
+    model: text(frontmatter.model) || undefined,
+    disableModelInvocation: disable === true || text(disable) === 'true',
     body,
   }
 }

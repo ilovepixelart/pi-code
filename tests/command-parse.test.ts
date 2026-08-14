@@ -29,6 +29,74 @@ describe('parseCommandFile', () => {
     })
   })
 
+  it('grants the base tool for an argument-scoped Claude permission', () => {
+    // Claude scopes a grant to arguments; pi's active-tool list has no argument
+    // dimension. Keeping the scope in the name matched no pi tool, so this command
+    // used to run with no bash at all despite asking for it twice.
+    const md = ['---', 'allowed-tools: Bash(git add:*), Bash(git status:*), Read', '---', 'Stage the change.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it.each([
+    ['a flow sequence', 'allowed-tools: [Bash, Read]'],
+    ['an indented block list', 'allowed-tools:\n  - Bash\n  - Read'],
+    ['an unindented block list', 'allowed-tools:\n- Bash\n- Read'],
+    ['quoted items around a blank line', 'allowed-tools:\n  - "Bash"\n\n  - Read'],
+  ])('reads %s, which YAML allows and Claude files use', (_label, field) => {
+    // A shape the parser misreads yields no names, and a restriction that reads as
+    // empty is not applied at all: mangling a valid grant runs the turn wide open.
+    expect(parseCommandFile(`---\n${field}\n---\nBody.`).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it('keeps a bare numeric scalar as its text', () => {
+    // YAML types `model: 3.5` as a number; dropping non-strings lost the value.
+    expect(parseCommandFile('---\nmodel: 3.5\n---\nB.').model).toBe('3.5')
+  })
+
+  it('keeps an explicitly empty grant distinct from an absent one', () => {
+    // `[]` says no tools and must stay a restriction; no key at all is no restriction.
+    expect(parseCommandFile('---\nallowed-tools: []\n---\nBody.').allowedTools).toEqual([])
+    expect(parseCommandFile('---\nmodel: sonnet\n---\nBody.').allowedTools).toBeUndefined()
+  })
+
+  it('reads a multi-line description rather than falling back to the body', () => {
+    const md = ['---', 'description:', '  A long description', 'model: sonnet', '---', 'Body line.'].join('\n')
+
+    expect(parseCommandFile(md).description).toBe('A long description')
+    expect(parseCommandFile(md).model).toBe('sonnet')
+  })
+
+  it('maps the Claude names of the tools this package registers', () => {
+    // Without these, an ordinary research command matched no pi tool and its turn was
+    // intersected down to nothing.
+    const md = ['---', 'allowed-tools: WebFetch, WebSearch, TodoWrite, Task', '---', 'Research it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['web_fetch', 'web_search', 'todo', 'subagent'])
+  })
+
+  it('keeps a comma inside an argument scope out of the entry split', () => {
+    // Splitting on every comma made the fragments top-level entries, so a command
+    // naming only Bash came away with pi's edit tool active for the turn.
+    const md = ['---', 'allowed-tools: Bash(cat, edit, tail)', '---', 'Show it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash'])
+  })
+
+  it('reads a YAML block list, which Claude command files also use', () => {
+    const md = ['---', 'allowed-tools:', '  - Bash(git add:*)', '  - Read', '---', 'Stage it.'].join('\n')
+
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash', 'read'])
+  })
+
+  it('leaves a command with only scoped grants able to run', () => {
+    const md = ['---', 'allowed-tools: Bash(git commit:*)', '---', 'Commit.'].join('\n')
+
+    // Not [] — an empty grant intersects the active tools to nothing and the turn
+    // gets no tools whatsoever.
+    expect(parseCommandFile(md).allowedTools).toEqual(['bash'])
+  })
+
   it('falls back to the first body line as description and defaults the rest', () => {
     const parsed = parseCommandFile('Summarize the diff.\nMore detail.')
     expect(parsed.description).toBe('Summarize the diff.')

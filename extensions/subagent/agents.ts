@@ -7,21 +7,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 
-// Claude Code tool names -> pi tool names; unmapped names pass through lowercased
-const CLAUDE_TOOL_MAP: Record<string, string> = {
-  read: 'read',
-  write: 'write',
-  edit: 'edit',
-  bash: 'bash',
-  grep: 'grep',
-  glob: 'find',
-  ls: 'ls',
-}
-
-function normalizeToolName(tool: string): string {
-  const lower = tool.toLowerCase()
-  return CLAUDE_TOOL_MAP[lower] ?? lower
-}
+// The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
+// Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
+// is not merely ignored, it narrows the child's registry.
+import { parseToolList } from '../internal/command-file.js'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -30,12 +19,12 @@ function normalizeToolName(tool: string): string {
  */
 function parseToolsField(raw: unknown): string[] | undefined | null {
   if (raw === undefined) return undefined
-  let items: unknown[]
-  if (Array.isArray(raw)) items = raw
-  else if (typeof raw === 'string') items = raw.split(',')
-  else return null
-  if (items.some((item) => typeof item !== 'string')) return null
-  const tools = (items as string[]).map((item) => normalizeToolName(item.trim())).filter(Boolean)
+  // Shares the command parser's splitting, so a comma inside an argument scope stays
+  // inside it here too: `Bash(mv, write, cp)` used to hand the child pi's real `write`.
+  if (raw !== null && !Array.isArray(raw) && typeof raw !== 'string') return null
+  if (Array.isArray(raw) && raw.some((item) => typeof item !== 'string')) return null
+  const tools = parseToolList(raw)
+  if (!tools) return null
   return tools.length > 0 ? tools : undefined
 }
 

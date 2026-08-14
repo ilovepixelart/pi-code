@@ -87,8 +87,15 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // list, leaving the command running with everything enabled.
     if (parsed.allowedTools) {
       const saved = pi.getActiveTools()
-      pendingRestore = saved
-      pi.setActiveTools(parsed.allowedTools.filter((tool) => saved.includes(tool)))
+      const granted = parsed.allowedTools.filter((tool) => saved.includes(tool))
+      // Only the first restriction in a turn knows the unrestricted set; a second
+      // command would otherwise record the first one's narrowed set as the thing to
+      // restore, and the tools the first command dropped would never come back.
+      pendingRestore ??= saved
+      // `allowed-tools: []` says no tools, and is honored. A non-empty list that
+      // intersects to nothing named only tools pi has none of: that restriction cannot
+      // be expressed, and applying it as "no tools" is not what the command asked for.
+      if (granted.length > 0 || parsed.allowedTools.length === 0) pi.setActiveTools(granted)
     }
     pi.sendUserMessage(expanded)
   }
