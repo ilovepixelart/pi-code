@@ -15,6 +15,7 @@ const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background run
 const cancelBackgroundRunMock = vi.hoisted(() => vi.fn())
 const resumeBackgroundRunMock = vi.hoisted(() => vi.fn())
 const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
+const backgroundRunMock = vi.hoisted(() => vi.fn())
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
 vi.mock('../extensions/subagent/agents.js', async (importOriginal) => ({
@@ -27,6 +28,7 @@ vi.mock('../extensions/subagent/background.js', () => ({
   resumeBackgroundRun: resumeBackgroundRunMock,
   startBackgroundRun: startBackgroundRunMock,
   activeBackgroundRuns: activeBackgroundRunsMock,
+  backgroundRun: backgroundRunMock,
   MAX_BACKGROUND_RUNS: 8,
 }))
 
@@ -755,11 +757,42 @@ describe('resumeResultText', () => {
     resumeBackgroundRunMock.mockReturnValue('still-running')
     expect(resumeResultText('bg-1', 'follow up', noop)).toContain('still running')
 
+    resumeBackgroundRunMock.mockReturnValue('at-capacity')
+    expect(resumeResultText('bg-1', 'follow up', noop)).toContain('cap reached')
+
     resumeBackgroundRunMock.mockReturnValue('unknown')
     backgroundStatusTextMock.mockReturnValue('LISTING')
     const unknown = resumeResultText('bg-9', 'follow up', noop)
     expect(unknown).toContain('Unknown background run: bg-9')
     expect(unknown).toContain('LISTING')
+  })
+
+  it('reports a resumed run to the lifecycle callback', async () => {
+    const { resumeResultText } = await import('../extensions/subagent/index.ts')
+    resumeBackgroundRunMock.mockReturnValue('resumed')
+    backgroundRunMock.mockReturnValue({ id: 'bg-1', agent: 'scout' })
+    const started: unknown[] = []
+
+    resumeResultText(
+      'bg-1',
+      'follow up',
+      () => {},
+      (run) => started.push(run),
+    )
+
+    expect(started).toEqual([{ id: 'bg-1', agent: 'scout' }])
+  })
+})
+
+describe('backgroundCompletionText diagnostics', () => {
+  it('appends the stderr tail for a failed run and omits it for a clean one', async () => {
+    const { backgroundCompletionText } = await import('../extensions/subagent/index.ts')
+    const failed = backgroundCompletionText({ id: 'bg-1', agent: 'scout', state: 'failed', turns: 0, stderr: 'unknown model id x' })
+    expect(failed).toContain('stderr tail:')
+    expect(failed).toContain('unknown model id x')
+
+    const done = backgroundCompletionText({ id: 'bg-2', agent: 'scout', state: 'done', turns: 3, output: 'all good', stderr: 'noise' })
+    expect(done).not.toContain('stderr tail:')
   })
 })
 
@@ -1173,5 +1206,28 @@ describe('parallel mode', () => {
     await execute('c1', { tasks: [{ agent: 'scout', task: 'alpha', cwd: '/pkg/a' }] }, undefined, undefined, trustedCtx)
 
     expect(spawnCalls[0].options.cwd).toBe('/pkg/a')
+  })
+})
+
+describe('foreground abort process group', () => {
+  it('spawns the child detached and signals its whole group on abort', async () => {
+    const controller = new AbortController()
+    script('inspect', { stdout: [say('too late')], delay: 30 })
+    const groupKills: Array<[unknown, unknown]> = []
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string) => {
+      groupKills.push([pid, sig])
+      return true
+    }) as never)
+    try {
+      const pending = execute('c1', { agent: 'scout', task: 'inspect' }, controller.signal, undefined, trustedCtx)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect((spawnCalls[0].options as { detached?: boolean }).detached).toBe(true)
+      ;(spawnedChildren[0] as { pid?: number }).pid = 424242
+      controller.abort()
+      await expect(pending).rejects.toThrow('Subagent was aborted')
+      expect(groupKills).toContainEqual([-424242, 'SIGTERM'])
+    } finally {
+      killSpy.mockRestore()
+    }
   })
 })
