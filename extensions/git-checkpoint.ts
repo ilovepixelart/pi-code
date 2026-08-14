@@ -137,10 +137,23 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     pruneCheckpointRepos(checkpointsRoot, CHECKPOINT_RETENTION_DAYS, shadowDir)
     const check = await pi.exec('git', ['--git-dir', shadowDir, 'rev-parse', '--git-dir'], { cwd: ctx.cwd })
     if (check.code !== 0) {
-      await pi.exec('git', ['init', '--bare', '-b', 'main', shadowDir], { cwd: ctx.cwd })
+      const init = await pi.exec('git', ['init', '--bare', '-b', 'main', shadowDir], { cwd: ctx.cwd })
+      if (init.code !== 0) {
+        // Every later snapshot fails against the missing repo, so without this the
+        // user first learns /rewind is dead at the moment they need it.
+        ctx.ui.notify(`Checkpoints disabled: ${init.stderr.trim() || 'git init failed'}`, 'warning')
+        return
+      }
       await pi.exec('git', ['--git-dir', shadowDir, 'config', 'user.email', 'checkpoint@pi-code'], { cwd: ctx.cwd })
       await pi.exec('git', ['--git-dir', shadowDir, 'config', 'user.name', 'pi-code-checkpoint'], { cwd: ctx.cwd })
     }
+  }
+
+  /** `checkout -f <ref> -- .` errors when the ref's tree holds no files, so an empty
+   * snapshot restores as a no-op rather than vetoing the whole rewind. */
+  async function snapshotIsEmpty(ref: string): Promise<boolean> {
+    const files = await gitShadow(['ls-tree', '-r', '--name-only', ref])
+    return files.code === 0 && files.stdout.trim() === ''
   }
 
   async function snapshot(): Promise<{ ref: string; createdAt: string } | undefined> {
@@ -173,6 +186,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   async function restoreCode(ctx: ExtensionCommandContext, checkpoint: Checkpoint): Promise<boolean> {
     if (!checkpoint.ref) {
       ctx.ui.notify('Checkpoint has no code snapshot; code left untouched', 'warning')
+      return true
+    }
+    if (await snapshotIsEmpty(checkpoint.ref)) {
+      ctx.ui.notify('Checkpoint has no files; code left untouched', 'warning')
       return true
     }
     const result = await gitShadow(['checkout', '-f', checkpoint.ref, '--', '.'])
@@ -248,6 +265,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
 
     const choice = await ctx.ui.select('Restore code state?', ['Yes, restore code to that point', 'No, keep current code'])
     if (choice?.startsWith('Yes')) {
+      if (await snapshotIsEmpty(checkpoint.ref)) {
+        ctx.ui.notify('Checkpoint has no files; code left untouched', 'warning')
+        return
+      }
       const result = await gitShadow(['checkout', '-f', checkpoint.ref, '--', '.'])
       ctx.ui.notify(result.code === 0 ? 'Code restored to checkpoint' : `Restore failed: ${result.stderr.trim()}`, result.code === 0 ? 'info' : 'warning')
     }

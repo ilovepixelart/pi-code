@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -613,5 +613,54 @@ describe('session_before_fork code restore', () => {
     await t.handlers.get('session_before_fork')?.({ entryId: 'user0001' }, t.makeCtx({ entries: [forkEntry], hasUI: false, answers: [0] }))
 
     expect(t.selects).toEqual([])
+  })
+})
+
+describe('empty snapshots', () => {
+  /** Checkpoint an empty directory, then scaffold a file, as a fresh-project session does. */
+  async function emptyDirCheckpoint(t: Harness): Promise<string> {
+    const empty = mkdtempSync(join(tmpdir(), 'gcm-empty-'))
+    tempDirs.push(empty)
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx({ cwd: empty }))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx({ cwd: empty }))
+    await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx({ cwd: empty, branch: [userEntry] }))
+    writeFileSync(join(empty, 'scaffolded.txt'), 'new work\n')
+    return empty
+  }
+
+  it('rewinds to an empty snapshot as a no-op instead of failing', async () => {
+    const t = setup()
+    const empty = await emptyDirCheckpoint(t)
+
+    await rewind(t, { answers: [0, 0], branch: [userEntry] })
+
+    expect(t.notifications).toContain('[info] Rewind complete')
+    expect(t.notifications.some((n) => n.includes('restore failed'))).toBe(false)
+    expect(t.navigations).toEqual(['user0001'])
+    expect(existsSync(join(empty, 'scaffolded.txt'))).toBe(true)
+  })
+
+  it('skips the checkout before a fork when the snapshot is empty', async () => {
+    const t = setup()
+    await emptyDirCheckpoint(t)
+
+    await t.handlers.get('session_before_fork')?.({ entryId: 'user0001' }, t.makeCtx({ answers: [0] }))
+
+    expect(t.notifications.some((n) => n.includes('Restore failed'))).toBe(false)
+    expect(t.notifications.some((n) => n.includes('code left untouched'))).toBe(true)
+  })
+})
+
+describe('shadow repo init failure', () => {
+  it('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
+    const t = setup()
+    chmodSync(hoisted.home, 0o555)
+    try {
+      await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
+    } finally {
+      chmodSync(hoisted.home, 0o755)
+    }
+
+    expect(t.notifications.some((n) => n.startsWith('[warning] Checkpoints disabled:'))).toBe(true)
   })
 })
