@@ -482,8 +482,24 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           const count = registerTools(name, config, client, tools)
           subscribeToToolChanges(name, config, client)
           status.set(name, { state: 'connected', tools: count })
+          // A server that dies mid-session would otherwise stay "connected" in /mcp
+          // while every call fails with the SDK's bare "Not connected"; flip the
+          // status and free the name so a later session start can reconnect it.
+          client.onclose = () => {
+            if (clients.get(name) !== client) return
+            clients.delete(name)
+            status.set(name, { state: 'disconnected', tools: 0 })
+          }
         } catch (error) {
           status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
+          // Connected but failed after (tool listing hung or errored): left in the
+          // map, the client idles its process for the whole session and the
+          // duplicate-name guard blocks the name for every later attempt.
+          const leaked = clients.get(name)
+          if (leaked) {
+            clients.delete(name)
+            void leaked.close().catch(() => {})
+          }
         }
       }),
     )
@@ -503,16 +519,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     return true
   }
 
-  let userConnected = false
   let projectConnected = false
 
   pi.on('session_start', async (_event, ctx) => {
     // Connecting spawns processes and opens sockets, so it belongs here rather than in
     // the factory: pi runs the factory for invocations that never start a session.
-    if (!userConnected) {
-      userConnected = true
-      await connectServers(loadUserScope(os.homedir(), ctx.cwd))
-    }
+    // Names still connected are filtered out, so a later session start only retries
+    // servers that failed or whose transport dropped, without duplicate-name warnings.
+    const userServers = Object.fromEntries(Object.entries(loadUserScope(os.homedir(), ctx.cwd)).filter(([name]) => !clients.has(name)))
+    if (Object.keys(userServers).length > 0) await connectServers(userServers)
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once
     // the project is trusted. Per-server settings refine that: disabled servers never
     // connect, servers the user consented to individually connect without the

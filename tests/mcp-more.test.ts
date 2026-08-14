@@ -1237,3 +1237,43 @@ describe('aggregate tool-output budget', () => {
     ])
   })
 })
+
+describe('mcp client lifecycle', () => {
+  it('closes and releases a client whose tool listing fails', async () => {
+    hoisted.control.listTools = async () => {
+      throw new Error('boom')
+    }
+    const harness = await setupStarted({ user: { flaky: { command: 'ok' } } })
+
+    expect(await statusLinesOf(harness)).toEqual(['flaky: failed: boom (0 tools)'])
+    // Closed at failure time; a client left in the map would idle its process for
+    // the whole session and block the name for every later scope.
+    expect(hoisted.closed).toHaveLength(1)
+
+    await harness.shutdown()
+    expect(hoisted.closed).toHaveLength(1)
+  })
+
+  it('reconnects a name whose first connection failed after connect', async () => {
+    hoisted.control.listTools = async () => {
+      throw new Error('boom')
+    }
+    const harness = await setupStarted({ user: { flaky: { command: 'ok' } } })
+    withTools([{ name: 'go' }])
+    await harness.sessionStart()
+
+    expect(harness.toolNames()).toEqual(['flaky_go'])
+    expect(await statusLinesOf(harness)).toEqual(['flaky: connected (1 tools)'])
+  })
+
+  it('flips a server to disconnected when its transport closes mid-session', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { live: { command: 'ok' } } })
+    expect(await statusLinesOf(harness)).toEqual(['live: connected (1 tools)'])
+
+    const client = hoisted.clients.at(-1) as { onclose?: () => void } | undefined
+    client?.onclose?.()
+
+    expect(await statusLinesOf(harness)).toEqual(['live: disconnected (0 tools)'])
+  })
+})
