@@ -8,6 +8,7 @@
  * - Windows toast: Windows Terminal (WSL)
  */
 
+import { execFile } from 'node:child_process'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 function windowsToastScript(title: string, body: string): string {
@@ -29,7 +30,6 @@ function notifyOSC99(title: string, body: string): void {
 }
 
 function notifyWindows(title: string, body: string): void {
-  const { execFile } = require('node:child_process')
   // Resolve powershell from a fixed system path rather than through PATH, and let the callback
   // capture a spawn failure instead of an unhandled 'error' event crashing the host.
   const root = process.env.SystemRoot ?? String.raw`C:\Windows`
