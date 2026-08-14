@@ -458,15 +458,22 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   }
 
   async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
+    const pending: [string, ServerConfig][] = []
+    for (const [name, config] of Object.entries(servers)) {
+      // A later scope must not take the name of a server that already connected: it
+      // would evict that client from the map, leaking it at shutdown, and misreport
+      // the earlier server's status.
+      if (clients.has(name)) {
+        console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
+        continue
+      }
+      // Seed in config order before connecting: parallel connects settle in completion
+      // order, and /mcp plus the session summary iterate the map's insertion order.
+      status.set(name, { state: 'connecting', tools: 0 })
+      pending.push([name, config])
+    }
     await Promise.all(
-      Object.entries(servers).map(async ([name, config]) => {
-        // A later scope must not take the name of a server that already connected: it
-        // would evict that client from the map, leaking it at shutdown, and misreport
-        // the earlier server's status.
-        if (clients.has(name)) {
-          console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
-          return
-        }
+      pending.map(async ([name, config]) => {
         warnOnTypelessUrl(name, config)
         try {
           const client = await connect(name, config)
