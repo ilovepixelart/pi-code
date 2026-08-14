@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -85,5 +85,59 @@ describe('memory tool actions', () => {
     const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
     expect(result.systemPrompt).toContain('## Memory')
     expect(result.systemPrompt).toContain('style')
+  })
+})
+
+describe('memory index robustness', () => {
+  const origHome = process.env.HOME
+  afterEach(() => {
+    if (origHome === undefined) delete process.env.HOME
+    else process.env.HOME = origHome
+  })
+
+  function setup() {
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
+    const handlers = new Map<string, Handler>()
+    let tool: Tool | undefined
+    memoryExtension({
+      on: (name: string, fn: Handler) => handlers.set(name, fn),
+      registerTool: (t: Tool) => {
+        tool = t
+      },
+    } as never)
+    if (!tool) throw new Error('memory tool not registered')
+    return { handlers, tool, cwd, dir: memoryDir(cwd) }
+  }
+
+  const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, ui: { notify: () => {} } })
+
+  it('refuses to save while the index is unreadable instead of clobbering it', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'first', description: 'existing entry', content: 'kept' })
+
+    const indexPath = join(dir, 'MEMORY.md')
+    chmodSync(indexPath, 0o000)
+    const result = (await tool.execute('2', { action: 'save', name: 'second', description: 'new entry', content: 'other' })).content[0].text
+    chmodSync(indexPath, 0o644)
+
+    expect(result).not.toContain('Saved memory')
+    expect(readFileSync(indexPath, 'utf-8')).toContain('- [first](first.md):')
+  })
+
+  it('refuses to delete while the index is unreadable, keeping the memory file', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'keep', description: 'to survive', content: 'body' })
+
+    const indexPath = join(dir, 'MEMORY.md')
+    chmodSync(indexPath, 0o000)
+    const result = (await tool.execute('2', { action: 'delete', name: 'keep' })).content[0].text
+    chmodSync(indexPath, 0o644)
+
+    expect(result).not.toContain('Deleted')
+    expect(existsSync(join(dir, 'keep.md'))).toBe(true)
+    expect(readFileSync(indexPath, 'utf-8')).toContain('- [keep](keep.md):')
   })
 })

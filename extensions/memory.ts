@@ -93,7 +93,7 @@ export function saveMemory(dir: string, indexPath: string, name: string | undefi
   }
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, `${name}.md`), content)
-  fs.writeFileSync(indexPath, upsertIndexLine(index, name, description))
+  writeIndex(indexPath, upsertIndexLine(index, name, description))
   return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
 }
 
@@ -150,9 +150,29 @@ const MemoryParams = Type.Object({
 function readIndex(dir: string): string {
   try {
     return fs.readFileSync(path.join(dir, INDEX_FILE), 'utf-8')
+  } catch (error) {
+    // Only a missing file means an empty index. Treating any other failure as empty
+    // lets the next read-modify-write clobber every existing entry.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw error
+  }
+}
+
+/** For display paths, where a transiently unreadable index should not break the
+ * session; the mutating paths go through readIndex and refuse instead. */
+function readIndexQuietly(dir: string): string {
+  try {
+    return readIndex(dir)
   } catch {
     return ''
   }
+}
+
+/** Replace the index through a rename so a crash mid-write cannot truncate it. */
+function writeIndex(indexPath: string, content: string): void {
+  const tmp = `${indexPath}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, content)
+  fs.renameSync(tmp, indexPath)
 }
 
 export default function memoryExtension(pi: ExtensionAPI) {
@@ -161,14 +181,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     migrateLegacyStore(ctx.cwd)
     dir = memoryDir(ctx.cwd)
-    const count = readIndex(dir)
+    const count = readIndexQuietly(dir)
       .split('\n')
       .filter((l) => l.startsWith('- ')).length
     if (count > 0) ctx.ui.notify(`Memory: ${count} memories loaded`, 'info')
   })
 
   pi.on('before_agent_start', async (event) => {
-    const index = readIndex(dir)
+    const index = readIndexQuietly(dir)
     if (!index.trim()) return
     return {
       systemPrompt: `${event.systemPrompt}\n\n## Memory\n\nPersistent memories from earlier sessions (index):\n\n${capIndexForPrompt(index)}\nUse the memory tool with action "read" to load a memory's full content when relevant.`,
@@ -185,7 +205,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const indexPath = path.join(dir, INDEX_FILE)
 
       if (params.action === 'save') {
-        return saveMemory(dir, indexPath, name, params.description, params.content)
+        try {
+          return saveMemory(dir, indexPath, name, params.description, params.content)
+        } catch (error) {
+          return { content: [{ type: 'text' as const, text: `Memory save failed: ${error instanceof Error ? error.message : String(error)}. The index was left untouched.` }], details: {} }
+        }
       }
 
       if (params.action === 'read') {
@@ -200,14 +224,22 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       if (params.action === 'delete') {
         if (!name) return { content: [{ type: 'text' as const, text: 'delete requires name.' }], details: {} }
+        // The index is read before anything is removed: refusing on a failed read
+        // must leave both the memory file and the index as they were.
+        let index: string
+        try {
+          index = readIndex(dir)
+        } catch (error) {
+          return { content: [{ type: 'text' as const, text: `Memory delete failed: ${error instanceof Error ? error.message : String(error)}. Nothing was deleted.` }], details: {} }
+        }
         fs.rmSync(path.join(dir, `${name}.md`), { force: true })
-        const remaining = removeIndexLine(readIndex(dir), name)
-        if (remaining) fs.writeFileSync(indexPath, remaining)
+        const remaining = removeIndexLine(index, name)
+        if (remaining) writeIndex(indexPath, remaining)
         else fs.rmSync(indexPath, { force: true })
         return { content: [{ type: 'text' as const, text: `Deleted memory ${name}.` }], details: {} }
       }
 
-      const index = readIndex(dir)
+      const index = readIndexQuietly(dir)
       return { content: [{ type: 'text' as const, text: index.trim() || 'No memories saved for this project yet.' }], details: {} }
     },
   })
