@@ -104,6 +104,7 @@ export default function statusLine(pi: ExtensionAPI) {
   /** The stdin payload per Claude's documented statusline contract. */
   function buildPayload(ctx: ExtensionContext): Record<string, unknown> {
     const usage = ctx.getContextUsage() ?? { tokens: null, contextWindow: 0, percent: null }
+    const model = ctx.model as { id?: string; name?: string } | undefined
     // Same gate as the config read above: an unapproved project's style is not applied,
     // so reporting it here would describe a style the session is not using.
     const styleName = readActiveStyleName(settingsFiles(ctx.cwd, os.homedir(), projectApproved))
@@ -111,7 +112,9 @@ export default function statusLine(pi: ExtensionAPI) {
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
       workspace: { current_dir: ctx.cwd, project_dir: ctx.cwd },
-      model: { id: (ctx.model as { id?: string } | undefined)?.id ?? '' },
+      // Both fields, per Claude's documented contract: published statusline scripts
+      // read .model.display_name and render the literal "null" when it is missing.
+      model: { id: model?.id ?? '', display_name: model?.name ?? model?.id ?? '' },
       cost: { total_cost_usd: sessionCost(ctx) },
       context_window: { context_window_size: usage.contextWindow, used_percentage: usage.percent, total_input_tokens: usage.tokens },
       permission_mode: permissionMode,
