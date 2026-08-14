@@ -148,16 +148,21 @@ export function splitArgs(args: string): string[] {
   return out
 }
 
-/** Claude's substitutions: `$ARGUMENTS`, `$@`, `$1`..`$n`, `${n:-default}`. An
- * unfilled positional becomes empty rather than leaking its literal token. */
+/** Claude's substitutions: `$ARGUMENTS`, `$@`, `$1`..`$n`, `${n:-default}`, and `\$`
+ * for a literal dollar. An unfilled positional becomes empty rather than leaking its
+ * literal token. One pass with a replacer function: sequential string passes both
+ * interpreted `$&`-style metacharacters in the arguments and re-scanned substituted
+ * text, so `$` sequences the user typed were consumed as tokens. */
 export function substituteArgs(body: string, args: string): string {
   const parts = splitArgs(args)
-  return body
-    .replaceAll(/\$\{(\d+):-([^}]*)\}/g, (_m, index: string, fallback: string) => parts[Number(index) - 1] ?? fallback)
-    .replaceAll(/\$\{ARGUMENTS:-([^}]*)\}/g, (_m, fallback: string) => (args.trim() ? args.trim() : fallback))
-    .replaceAll(/\$ARGUMENTS\b/g, args.trim())
-    .replaceAll('$@', args.trim())
-    .replaceAll(/\$(\d+)/g, (_m, index: string) => parts[Number(index) - 1] ?? '')
+  const all = args.trim()
+  return body.replaceAll(/\\\$|\$\{(\d+):-([^}]*)\}|\$\{ARGUMENTS:-([^}]*)\}|\$ARGUMENTS\b|\$@|\$(\d+)/g, (token, index?: string, fallback?: string, argsFallback?: string, position?: string) => {
+    if (token === '\\$') return '$'
+    if (index !== undefined) return parts[Number(index) - 1] ?? fallback ?? ''
+    if (argsFallback !== undefined) return all || argsFallback
+    if (position !== undefined) return parts[Number(position) - 1] ?? ''
+    return all
+  })
 }
 
 /** `a/b/c.md` becomes Claude's `a:b:c`. */
@@ -239,12 +244,17 @@ export async function expandDynamicContent(body: string, cwd: string, exec: Comm
     bashMatch = bashPattern.exec(body)
   }
 
-  let expanded = body
+  // Splice by recorded position: a textual replace would interpret `$` sequences in
+  // the command's output and could hit an identical fenced copy of the span instead.
+  let expanded = ''
+  let cursor = 0
   for (const entry of commands) {
     const result = await exec(entry.command)
     const output = result.code === 0 ? result.stdout.trimEnd() : `(command failed: ${entry.command})\n${result.stderr.trim() || result.stdout.trim()}`
-    expanded = expanded.replace(entry.span, output)
+    expanded += body.slice(cursor, entry.index) + output
+    cursor = entry.index + entry.span.length
   }
+  expanded += body.slice(cursor)
 
   // Ranges are recomputed: command output can change offsets.
   const fencedAfter = fencedRanges(expanded)

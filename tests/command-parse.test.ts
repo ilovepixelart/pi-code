@@ -187,3 +187,30 @@ describe('expandDynamicContent', () => {
     expect(out).not.toContain('FILE_BODY')
   })
 })
+
+describe('dollar signs stay literal', () => {
+  it('keeps dollar sequences in arguments untouched', () => {
+    expect(substituteArgs('Fix this: $ARGUMENTS. Thanks.', 'costs $80, not $8')).toBe('Fix this: costs $80, not $8. Thanks.')
+    expect(substituteArgs('all: $ARGUMENTS', "the $' bug")).toBe("all: the $' bug")
+    expect(substituteArgs('all: $@', 'keep $& here')).toBe('all: keep $& here')
+    expect(substituteArgs('list: $ARGUMENTS', 'a $1 b')).toBe('list: a $1 b')
+    expect(substituteArgs('run: $1', "awk '{print $2}' file")).toBe('run: awk')
+  })
+
+  it('leaves a backslash-escaped dollar literal, dropping the backslash', () => {
+    expect(substituteArgs('price \\$1.00 and arg $1', 'x')).toBe('price $1.00 and arg x')
+  })
+
+  it('pastes command output verbatim even when it contains dollar sequences', async () => {
+    const exec = async () => ({ stdout: "IFS=$'\\n' read", stderr: '', code: 0, killed: false })
+    const out = await expandDynamicContent('diff: !`git diff`', tempDir(), exec)
+    expect(out).toBe("diff: IFS=$'\\n' read")
+  })
+
+  it('expands the live span, not an identical fenced example above it', async () => {
+    const body = 'Example:\n```\n!`git status`\n```\nNow really: !`git status`'
+    const exec = async () => ({ stdout: 'CLEAN', stderr: '', code: 0, killed: false })
+    const out = await expandDynamicContent(body, tempDir(), exec)
+    expect(out).toBe('Example:\n```\n!`git status`\n```\nNow really: CLEAN')
+  })
+})

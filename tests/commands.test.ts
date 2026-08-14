@@ -202,3 +202,19 @@ describe('commands extension', () => {
     expect(s.commands.size).toBe(0)
   })
 })
+
+describe('allowed-tools with queued commands', () => {
+  it('grants the second command its tools from the pre-restriction set', async () => {
+    // Intersecting against the first command's narrowed set granted nothing, so the
+    // second command ran under the first one's restriction.
+    const cwd = tempDir()
+    writeCommand(cwd, 'a.md', '---\nallowed-tools: Read\n---\nLook.')
+    writeCommand(cwd, 'b.md', '---\nallowed-tools: Bash\n---\nRun.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('a')?.handler('', s.ctx)
+    await s.commands.get('b')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['bash'])
+  })
+})
