@@ -271,3 +271,19 @@ describe('user config is off limits to project context files', () => {
     expect(handler.map((f) => f.body)).toEqual(['project notes'])
   })
 })
+
+describe('blocked imports and dedupe', () => {
+  it('does not let a blocked import suppress the same file for a later allowed reader', () => {
+    // A project context file references a home file it may not read; the user's own
+    // config, processed later with home in its roots, must still get it.
+    const home = tempDir()
+    const project = tempDir()
+    writeFileSync(join(home, 'style.md'), 'STYLE RULES')
+    const seen = new Set<string>()
+
+    expect(collectImports('@~/style.md', project, home, [project], seen)).toEqual([])
+
+    const allowed = collectImports('@~/style.md', home, home, [home], seen)
+    expect(allowed.map((f) => f.body)).toEqual(['STYLE RULES'])
+  })
+})

@@ -110,11 +110,14 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     return null
   }
   if (seen.has(real)) return null
-  seen.add(real)
   if (!isUnder(real, allowedRoots)) return null
   try {
     // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
-    return { real, body: fs.readFileSync(real, 'utf-8') }
+    const body = fs.readFileSync(real, 'utf-8')
+    // Only a consumed file dedupes: marking a blocked or unreadable target seen
+    // would let one reader's failure suppress the import for a later, allowed one.
+    seen.add(real)
+    return { real, body }
   } catch {
     return null
   }
