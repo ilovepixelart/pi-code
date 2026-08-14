@@ -24,6 +24,10 @@ import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, type 
 // Tools
 const PLAN_MODE_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete']
 
+/** Agent runs in execution mode with no [DONE:n] progress before execution ends on
+ * its own. Kept small: each stalled run re-injects the stale plan into the turn. */
+const STALLED_RUN_LIMIT = 2
+
 // Type guard for assistant messages
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
   return m.role === 'assistant' && Array.isArray(m.content)
@@ -60,6 +64,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let todoItems: TodoItem[] = []
   let planFromTool = false
   let savedTools: string[] = []
+  let stalledRuns = 0
+  let runProgress = false
 
   function enterPlanTools(): void {
     savedTools = pi.getActiveTools()
@@ -113,6 +119,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     executionMode = false
     todoItems = []
     planFromTool = false
+    stalledRuns = 0
+    runProgress = false
 
     if (planModeEnabled) {
       enterPlanTools()
@@ -140,16 +148,30 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     })
   }
 
-  // Announce completion and reset once every step is done
-  function finalizeCompletedExecution(ctx: ExtensionContext): void {
-    if (!todoItems.every((t) => t.completed)) return
-    const completedList = todoItems.map((t) => `~~${t.text}~~`).join('\n')
-    pi.sendMessage({ customType: 'plan-complete', content: `**Plan Complete!** ✓\n\n${completedList}`, display: true }, { triggerTurn: false })
+  function endExecution(ctx: ExtensionContext, content: string): void {
+    pi.sendMessage({ customType: 'plan-complete', content, display: true }, { triggerTurn: false })
     executionMode = false
     todoItems = []
     restoreTools()
     updateStatus(ctx)
     persistState() // Save cleared state so resume doesn't restore old execution mode
+  }
+
+  // Announce completion and reset once every step is done
+  function finalizeCompletedExecution(ctx: ExtensionContext): void {
+    if (!todoItems.every((t) => t.completed)) return
+    const completedList = todoItems.map((t) => `~~${t.text}~~`).join('\n')
+    endExecution(ctx, `**Plan Complete!** ✓\n\n${completedList}`)
+  }
+
+  /** Models regularly drop or renumber a [DONE:n] marker; without a bounded exit the
+   * stale plan would be injected into every later turn until the user finds /plan. */
+  function endStalledExecution(ctx: ExtensionContext): void {
+    const remaining = todoItems
+      .filter((t) => !t.completed)
+      .map((t) => `${t.step}. ${t.text}`)
+      .join('\n')
+    endExecution(ctx, `**Plan execution ended** after ${STALLED_RUN_LIMIT} turns without step progress. Unfinished steps:\n\n${remaining}`)
   }
 
   // Fall back to extracting a plan from the last assistant message's prose
@@ -170,6 +192,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       planModeEnabled = false
       executionMode = todoItems.length > 0
       planFromTool = false
+      stalledRuns = 0
+      runProgress = false
       restoreTools()
       publishPlanState()
       updateStatus(ctx)
@@ -241,9 +265,19 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     handler: async (ctx) => togglePlanMode(ctx),
   })
 
-  // Block destructive bash commands in plan mode
+  // Enforce plan mode at call time, not only through the active-tool set: pi
+  // activates tools registered after the restriction was applied (an MCP server
+  // connecting during session_start, or a mid-session list_changed refresh), so the
+  // set alone leaks write-capable tools into plan mode.
   pi.on('tool_call', async (event) => {
-    if (!planModeEnabled || event.toolName !== 'bash') return
+    if (!planModeEnabled) return
+    if (!PLAN_MODE_TOOLS.includes(event.toolName)) {
+      return {
+        block: true,
+        reason: `Plan mode: tool blocked (read-only mode). Use /plan to disable plan mode first.\nTool: ${event.toolName}`,
+      }
+    }
+    if (event.toolName !== 'bash') return
 
     const command = event.input.command as string
     if (!isSafeCommand(command)) {
@@ -332,6 +366,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
     const text = getTextContent(event.message)
     if (markCompletedSteps(text, todoItems) > 0) {
+      runProgress = true
       updateStatus(ctx)
     }
     persistState()
@@ -339,9 +374,18 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
   // Handle plan completion and plan mode UI
   pi.on('agent_end', async (event, ctx) => {
-    // Check if execution is complete
+    // Check if execution is complete, or has stalled without marker progress
     if (executionMode && todoItems.length > 0) {
-      finalizeCompletedExecution(ctx)
+      if (todoItems.every((t) => t.completed)) {
+        finalizeCompletedExecution(ctx)
+        stalledRuns = 0
+      } else if (runProgress) {
+        stalledRuns = 0
+      } else {
+        stalledRuns++
+        if (stalledRuns >= STALLED_RUN_LIMIT) endStalledExecution(ctx)
+      }
+      runProgress = false
       return
     }
 
@@ -376,6 +420,8 @@ After completing a step, include a [DONE:n] tag in your response.`,
     executionMode = false
     todoItems = []
     planFromTool = false
+    stalledRuns = 0
+    runProgress = false
 
     if (pi.getFlag('plan') === true) {
       planModeEnabled = true

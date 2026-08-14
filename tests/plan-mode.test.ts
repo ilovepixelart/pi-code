@@ -561,3 +561,58 @@ describe('session restore', () => {
     expect(injected?.message?.content ?? '').not.toContain('EXECUTING PLAN')
   })
 })
+
+describe('plan mode call-time enforcement', () => {
+  it('blocks a tool outside the plan set, since pi auto-activates late registrations', async () => {
+    // An MCP server connecting during session_start registers its tools after
+    // enterPlanTools ran, and pi's refreshTools adds them to the active set.
+    const s = setup()
+    await s.runCommand('plan')
+    const result = (await s.emit('tool_call', { toolName: 'filesystem_write_file', input: {} })) as { block?: boolean; reason?: string }
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('filesystem_write_file')
+  })
+
+  it('leaves tools outside the plan set alone when plan mode is off', async () => {
+    const s = setup()
+    expect(await s.emit('tool_call', { toolName: 'filesystem_write_file', input: {} })).toBeUndefined()
+  })
+})
+
+describe('execution mode stall exit', () => {
+  it('ends execution after two runs without step progress, listing what is left', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: '1. First step\n2. Second step' })
+    await s.emit('agent_end', { messages: [] })
+
+    await s.emit('turn_end', { message: assistant('finished [DONE:1]') })
+    await s.emit('agent_end', { messages: [] })
+    expect(await s.emit('before_agent_start')).toBeDefined()
+
+    await s.emit('turn_end', { message: assistant('did more work, forgot the marker') })
+    await s.emit('agent_end', { messages: [] })
+    expect(await s.emit('before_agent_start')).toBeDefined()
+
+    await s.emit('turn_end', { message: assistant('answered an unrelated question') })
+    await s.emit('agent_end', { messages: [] })
+
+    expect(await s.emit('before_agent_start')).toBeUndefined()
+    const notice = s.sent.at(-1)
+    expect(notice?.content).toContain('2. Second step')
+  })
+
+  it('keeps executing while every run makes progress', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: '1. First step\n2. Second step\n3. Third step' })
+    await s.emit('agent_end', { messages: [] })
+
+    await s.emit('turn_end', { message: assistant('[DONE:1]') })
+    await s.emit('agent_end', { messages: [] })
+    await s.emit('turn_end', { message: assistant('[DONE:2]') })
+    await s.emit('agent_end', { messages: [] })
+
+    expect(await s.emit('before_agent_start')).toBeDefined()
+  })
+})
