@@ -89,7 +89,7 @@ const setup = (cwd: string) => {
     hasUI: true,
     isProjectTrusted: () => true,
     thinkingLevel: 'high',
-    model: { id: 'gpt-oss:20b' },
+    model: { id: 'gpt-oss:20b', name: 'GPT-OSS 20B' },
     getContextUsage: () => ({ tokens: 1000, contextWindow: 131072, percent: 0.8 }),
     ui: { theme: { fg: (_c: string, t: string) => t }, setStatus: (_k: string, text: string | undefined) => status.push(text), notify: () => {}, confirm: async () => true },
     sessionManager: { getBranch: () => [], getSessionId: () => 'sess-9', getSessionFile: () => '/tmp/sess-9.jsonl' },
@@ -113,6 +113,9 @@ describe('statusLine command contract', () => {
     expect(payload.session_id).toBe('sess-9')
     expect(payload.cwd).toBe(cwd)
     expect((payload.model as { id: string }).id).toBe('gpt-oss:20b')
+    // Claude's documented payload carries both; published statusline scripts read
+    // .model.display_name and rendered the literal string "null" without it.
+    expect((payload.model as { display_name: string }).display_name).toBe('GPT-OSS 20B')
     expect((payload.context_window as { used_percentage: number }).used_percentage).toBe(0.8)
     expect(status.at(-1)).toBe(' CTX 42% | $0.10 ')
   })
@@ -213,5 +216,19 @@ describe('statusLine concurrency and compaction', () => {
     const afterShutdown = hoisted.runs.length
     await vi.advanceTimersByTimeAsync(5000)
     expect(hoisted.runs.length).toBe(afterShutdown)
+  })
+})
+
+describe('statusLine model payload', () => {
+  it('falls back to the model id when pi reports no display name', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'ok', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, { ...ctx, model: { id: 'bare-id' } })
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect((hoisted.runs[0].payload as { model: { display_name: string } }).model.display_name).toBe('bare-id')
   })
 })
