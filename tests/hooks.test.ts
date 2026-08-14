@@ -208,6 +208,7 @@ describe('runPreToolUse on a timed-out hook', () => {
 
     expect(decision.block).toBe(true)
     expect(decision.reason).toContain('guard.sh')
-    expect(run).toEqual(['guard.sh'])
+    // Parallel launch, as Claude runs hooks: the sibling was already in flight.
+    expect(run).toEqual(['guard.sh', 'second.sh'])
   })
 })

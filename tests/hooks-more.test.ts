@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse } from '../extensions/hooks.ts'
+import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit } from '../extensions/hooks.ts'
 
 /**
  * Hook commands must never reach a real shell from this suite, so `spawn` is
@@ -231,14 +231,14 @@ describe('runHookCommand process wiring', () => {
     expect(result.stdout.length).toBeLessThan(1_800_000)
   })
 
-  it('resolves as a clean run when the process fails to spawn', async () => {
+  it('marks a run whose process fails to spawn instead of reporting a clean allow', async () => {
     script('missing', { error: new Error('spawn /bin/sh ENOENT') })
-    expect(await runHookCommand('missing', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: '', timedOut: false })
+    expect(await runHookCommand('missing', {}, 5000)).toEqual({ code: 0, stdout: '', stderr: 'spawn /bin/sh ENOENT', timedOut: false, spawnFailed: true })
   })
 
   it('keeps output already received when the process then errors', async () => {
     script('half', { stdout: ['partial'], error: new Error('EIO') })
-    expect(await runHookCommand('half', {}, 5000)).toEqual({ code: 0, stdout: 'partial', stderr: '', timedOut: false })
+    expect(await runHookCommand('half', {}, 5000)).toEqual({ code: 0, stdout: 'partial', stderr: 'EIO', timedOut: false, spawnFailed: true })
   })
 
   it('swallows an EPIPE from a hook that exits without reading stdin', async () => {
@@ -374,7 +374,7 @@ describe('interpretHookResult defaults and precedence', () => {
 })
 
 describe('runPreToolUse hook sequencing', () => {
-  it('returns the first blocking verdict and skips the remaining hooks', async () => {
+  it('returns the first blocking verdict; every hook still runs (parallel launch)', async () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
       run.push(command)
@@ -382,7 +382,7 @@ describe('runPreToolUse hook sequencing', () => {
     }
     const config = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }, { command: 'third' }] }] }
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, reason: 'denied by second' })
-    expect(run).toEqual(['first', 'second'])
+    expect(run).toEqual(['first', 'second', 'third'])
   })
 
   it('allows the tool when every matching hook passes', async () => {
@@ -411,18 +411,6 @@ describe('runPreToolUse updatedInput', () => {
     expect(await runPreToolUse(config, 'bash', input, runner)).toEqual({ block: false })
     // Claude documents updatedInput as replacing the whole tool_input: timeout is dropped.
     expect(input).toEqual({ command: 'echo safe' })
-  })
-
-  it('lets a later hook see an earlier updatedInput in its payload', async () => {
-    const seen: unknown[] = []
-    const runner: HookRunner = async (command, payload) => {
-      seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
-      const stdout = command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
-      return { code: 0, stdout, stderr: '', timedOut: false }
-    }
-    const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
-    await runPreToolUse(two, 'bash', { a: 1 }, runner)
-    expect(seen).toEqual([{ a: 1 }, { a: 2 }])
   })
 
   it('applies updatedInput even when the same hook denies', async () => {
@@ -1076,5 +1064,72 @@ describe('hooks MCP tool aliases', () => {
     ext.emitMcpTools('junk')
     await ext.toolCall('github_create_issue', {})
     expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('hook execution parallelism', () => {
+  it('launches every matching PreToolUse hook before any completes', async () => {
+    // Claude runs matching hooks in parallel; serial execution paid each hook's
+    // latency in sequence on every tool call.
+    const launched: string[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const runner: HookRunner = async (command) => {
+      launched.push(command)
+      await gate
+      return { code: 0, stdout: '', stderr: '', timedOut: false }
+    }
+    const two = { PreToolUse: [{ hooks: [{ command: 'slow' }, { command: 'also-slow' }] }] }
+    const pending = runPreToolUse(two, 'bash', { a: 1 }, runner)
+    expect(launched).toEqual(['slow', 'also-slow'])
+    release()
+    expect(await pending).toEqual({ block: false })
+  })
+
+  it('every parallel hook sees the original tool input; updatedInput still lands', async () => {
+    const seen: unknown[] = []
+    const runner: HookRunner = async (command, payload) => {
+      seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
+      const stdout = command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
+      return { code: 0, stdout, stderr: '', timedOut: false }
+    }
+    const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
+    const input = { a: 1 }
+    await runPreToolUse(two, 'bash', input, runner)
+    expect(seen).toEqual([{ a: 1 }, { a: 1 }])
+    expect(input).toEqual({ a: 2 })
+  })
+
+  it('launches every matching UserPromptSubmit hook before any completes', async () => {
+    const launched: string[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const runner: HookRunner = async (command) => {
+      launched.push(command)
+      await gate
+      return { code: 0, stdout: 'ctx', stderr: '', timedOut: false }
+    }
+    const two = { UserPromptSubmit: [{ hooks: [{ command: 'one' }, { command: 'two' }] }] }
+    const pending = runUserPromptSubmit(two, 'hello', runner)
+    expect(launched).toEqual(['one', 'two'])
+    release()
+    expect((await pending).context).toBe('ctx\nctx')
+  })
+})
+
+describe('hook spawn failures', () => {
+  it('surfaces a spawn failure through the system message sink and proceeds', async () => {
+    // Claude shows a hook error notice and the action proceeds; a silent code-0
+    // meant a deny-list guard that never ran read as a clean allow.
+    const runner: HookRunner = async () => ({ code: 0, stdout: '', stderr: 'spawn /bin/sh ENOENT', timedOut: false, spawnFailed: true })
+    const messages: string[] = []
+    const config = { PreToolUse: [{ hooks: [{ command: 'guard.sh' }] }] }
+    const decision = await runPreToolUse(config, 'bash', { a: 1 }, runner, undefined, (m) => messages.push(m))
+    expect(decision).toEqual({ block: false })
+    expect(messages.some((m) => m.includes('guard.sh') && m.includes('ENOENT'))).toBe(true)
   })
 })
