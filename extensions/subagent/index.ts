@@ -28,7 +28,7 @@ import { isProjectApproved, isProjectApprovedSilently } from '../internal/projec
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentScope, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
-import { activeBackgroundRuns, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -343,6 +343,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         cwd: cwd ?? defaultCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // Its own group, so an abort reaches grandchildren too: killing only the
+        // direct child orphans a build or dev server the agent started.
+        detached: true,
         // The marker lets the child's subagent tool refuse to nest further.
         env: { ...process.env, PI_CODE_SUBAGENT: '1' },
       })
@@ -401,19 +404,24 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         resolve(1)
       })
 
+      const killGroup = (sig: NodeJS.Signals): void => {
+        try {
+          process.kill(-proc.pid!, sig)
+        } catch {
+          try {
+            proc.kill(sig)
+          } catch {
+            /* already gone */
+          }
+        }
+      }
       if (signal) {
         onAbort = () => {
           wasAborted = true
-          proc.kill('SIGTERM')
+          killGroup('SIGTERM')
           // proc.killed only reports that the signal was sent, not that the child died. Escalate
           // on a timer that the 'close' handler clears once the child has actually exited.
-          killTimer = setTimeout(() => {
-            try {
-              proc.kill('SIGKILL')
-            } catch {
-              /* already gone */
-            }
-          }, 5000)
+          killTimer = setTimeout(() => killGroup('SIGKILL'), 5000)
         }
         if (signal.aborted) onAbort()
         else signal.addEventListener('abort', onAbort, { once: true })
@@ -498,17 +506,25 @@ type ChainStepParam = Static<typeof ChainItem>
 type TaskItemParam = Static<typeof TaskItem>
 
 /** The completion notice a background run sends when it finishes. */
-export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string }): string {
+export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): string {
   const output = capForContext(run.output ?? '') || '(no output)'
-  return `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}`
+  // A child that dies at boot writes its reason only to stderr; without this the
+  // notice reads "failed after 0 turns ... (no output)" with nothing to act on.
+  const diagnostics = run.state === 'failed' && run.stderr ? `\n\nstderr tail:\n${capForContext(run.stderr)}` : ''
+  return `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}${diagnostics}`
 }
 
 /** What to tell the model about a resume request. */
-export function resumeResultText(id: string, task: string | undefined, onComplete: (run: { id: string; agent: string; state: string; turns: number; output?: string }) => void): string {
+export function resumeResultText(id: string, task: string | undefined, onComplete: (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }) => void, onResumed?: (run: { id: string; agent: string }) => void): string {
   if (!task) return 'Pass task with resume: the follow-up needs an instruction.'
   const outcome = resumeBackgroundRun(id, task, onComplete)
-  if (outcome === 'resumed') return `Resumed background run ${id} with the follow-up task; a notification will arrive on completion.`
+  if (outcome === 'resumed') {
+    const run = backgroundRun(id)
+    if (run) onResumed?.({ id: run.id, agent: run.agent })
+    return `Resumed background run ${id} with the follow-up task; a notification will arrive on completion.`
+  }
   if (outcome === 'still-running') return `Background run ${id} is still running; wait for it or cancel it first.`
+  if (outcome === 'at-capacity') return `Background run cap reached (${MAX_BACKGROUND_RUNS} concurrent); wait for a run to finish before resuming ${id}.`
   return `Unknown background run: ${id}.\n\n${backgroundStatusText()}`
 }
 
@@ -1108,8 +1124,10 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
-  const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string }): void => {
+  const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.
+    // The stop event fires here too, so SubagentStop hooks see resumed runs end.
+    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
     pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   }
 
@@ -1166,7 +1184,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
         })
 
       if (params.resume) {
-        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion) }], details: makeDetails('single')([]) }
+        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, (run) => pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })) }], details: makeDetails('single')([]) }
       }
 
       if (params.cancel) {
