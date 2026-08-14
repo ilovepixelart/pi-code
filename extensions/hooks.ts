@@ -78,6 +78,8 @@ export interface HookRunResult {
   stderr: string
   /** The hook was killed at its timeout, so its exit code carries no verdict. */
   timedOut: boolean
+  /** The process errored before delivering a verdict (spawn failure, EIO). */
+  spawnFailed?: boolean
 }
 export type HookRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string) => Promise<HookRunResult>
 
@@ -265,7 +267,9 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs, projectD
       if (stderr.length < MAX_HOOK_OUTPUT) stderr += chunk
     })
     child.on('close', (code) => finish({ code: code ?? 0, stdout, stderr, timedOut: false }))
-    child.on('error', () => finish({ code: 0, stdout, stderr, timedOut: false }))
+    // Marked rather than silently read as a clean run: under fd exhaustion a
+    // deny-list guard that never spawned would otherwise pass as an allow.
+    child.on('error', (error) => finish({ code: 0, stdout, stderr: stderr || error.message, timedOut: false, spawnFailed: true }))
     // A hook that exits without reading stdin (e.g. `exit 2`) closes the pipe first,
     // so ignore EPIPE on this write rather than crashing the host process.
     child.stdin?.on('error', () => {})
@@ -294,21 +298,42 @@ function replaceRecord(target: Record<string, unknown>, next: Record<string, unk
   Object.assign(target, next)
 }
 
-/** Run PreToolUse hooks for a tool; the first blocking verdict wins. For MCP tools the
- * matcher sees both the pi name and the Claude alias, and the payload reports the alias,
- * which is the name a Claude-written hook script expects in tool_name. A hook's
- * hookSpecificOutput.updatedInput replaces the tool input in place before the permission
- * decision applies, and later hooks see the rewritten input in their payload. */
+/** Claude surfaces a hook error notice and the action proceeds; silence would read a
+ * guard that never ran as a clean allow. */
+function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], notify?: SystemMessageSink): void {
+  if (!notify) return
+  for (const [i, result] of results.entries()) {
+    if (result.spawnFailed) notify(`Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}`)
+  }
+}
+
+/** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
+ * verdict in config order wins. For MCP tools the matcher sees both the pi name and
+ * the Claude alias, and the payload reports the alias, which is the name a
+ * Claude-written hook script expects in tool_name. Every hook sees the original
+ * tool input; hookSpecificOutput.updatedInput replaces the input in place as each
+ * hook completes, so with several rewrites the last to finish takes effect, which
+ * is Claude's documented (non-deterministic) behavior. */
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink): Promise<HookDecision> {
   const names = claudeName ? [toolName, claudeName] : [toolName]
-  for (const command of matchingCommands(config.PreToolUse, names)) {
-    const result = await runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command))
+  const commands = matchingCommands(config.PreToolUse, names)
+  const results = await Promise.all(
+    commands.map((command) =>
+      runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command)).then((result) => {
+        const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
+        if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
+        return result
+      }),
+    ),
+  )
+  surfaceHookFailures(commands, results, onSystemMessage)
+  for (const [i, result] of results.entries()) {
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
-    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}` }
-    if (onSystemMessage) surfaceSystemMessages([result], onSystemMessage)
-    const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
-    if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
+    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
+  }
+  if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
+  for (const result of results) {
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return decision
   }
@@ -343,14 +368,19 @@ function promptContext(stdout: string): string {
   return stdout.trim()
 }
 
-/** Run UserPromptSubmit hooks: the first blocking verdict wins; otherwise their
- * additional context is concatenated for injection ahead of the prompt. */
+/** Run UserPromptSubmit hooks, in parallel as Claude does: the first blocking
+ * verdict in config order wins; otherwise their additional context is concatenated
+ * in config order for injection ahead of the prompt. */
 export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner, onSystemMessage?: SystemMessageSink): Promise<PromptDecision> {
+  const commands = matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')
+  const results = await Promise.all(commands.map((command) => runner(command.command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))))
+  surfaceHookFailures(commands, results, onSystemMessage)
+  for (const [i, result] of results.entries()) {
+    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}`, context: '' }
+  }
+  if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const contexts: string[] = []
-  for (const command of matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')) {
-    const result = await runner(command.command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))
-    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(command)}ms: ${command.command}`, context: '' }
-    if (onSystemMessage) surfaceSystemMessages([result], onSystemMessage)
+  for (const result of results) {
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return { block: true, reason: decision.reason, context: '' }
     const context = promptContext(result.stdout)
