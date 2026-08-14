@@ -194,6 +194,9 @@ async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text:
       userAgent: USER_AGENT,
     })
     if (response.status >= 300 && response.status < 400) {
+      // The hop's body is never read; without the cancel its socket stays held
+      // until the 20s abort timeout, once per hop.
+      void response.body?.cancel().catch(() => {})
       const location = response.headers.get('location')
       if (!location) throw new Error(`redirect without location from ${url.hostname}`)
       url = new URL(location, url)
@@ -202,7 +205,10 @@ async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text:
       if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${url.protocol} from ${rawUrl}`)
       continue
     }
-    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {})
+      throw new Error(`HTTP ${response.status} for ${url}`)
+    }
     return { text: await readCapped(response), contentType: response.headers.get('content-type') ?? '' }
   }
   throw new Error(`too many redirects for ${rawUrl}`)

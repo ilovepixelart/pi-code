@@ -414,3 +414,33 @@ describe('isPrivateAddress covers special-use ranges', () => {
     expect(isPrivateAddress('199.0.0.1')).toBe(false)
   })
 })
+
+describe('web_fetch releases abandoned bodies', () => {
+  it('cancels the body of a redirect hop instead of holding its socket', async () => {
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    fetchMock.mockResolvedValueOnce(respond(stream, { status: 302, location: '/moved/here' })).mockResolvedValueOnce(respond('arrived', { contentType: 'text/plain' }))
+
+    await setup().fetchUrl('https://example.com/start')
+
+    expect(cancelled).toBe(true)
+  })
+
+  it('cancels the body of an error status before throwing', async () => {
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream, { status: 500 }))
+
+    await expect(setup().fetchUrl('https://example.com/broken')).rejects.toThrow('HTTP 500')
+
+    expect(cancelled).toBe(true)
+  })
+})
