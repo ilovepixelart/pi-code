@@ -62,6 +62,7 @@ import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { runAgent } from './internal/agent-run.js'
+import { claudeConfigDir } from './internal/config-dir.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from './internal/instruction-events.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
@@ -83,6 +84,9 @@ const DEFAULT_TIMEOUT_S = 60
 interface HookCommand {
   type?: string
   command: string
+  /** exec-form: spawn `command` directly with these args and no shell (shell-form when
+   * absent). $ARGUMENTS in each arg is replaced with the event JSON. */
+  args?: string[]
   timeout?: number
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
@@ -122,14 +126,15 @@ export interface HookRunResult {
 }
 /** Runs one configured hook entry, whatever its type; boundRunner dispatches. */
 export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
-/** The shell path specifically; the statusline reuses it for its own command. */
-export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string) => Promise<HookRunResult>
+/** The shell path specifically; the statusline reuses it for its own command. With an
+ * `args` array it becomes the exec path: `command` is spawned directly with those args. */
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[]) => Promise<HookRunResult>
 
 /** Settings files to read, newest-winning. Project files load only when trusted, each
  * the nearest of its name at or above cwd (bounded at the repository root, matching
  * the approval walk), so a subdirectory session reads the settings that gated it. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
-  const files = [path.join(home, '.claude', 'settings.json')]
+  const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!trusted) return files
   for (const name of ['settings.json', 'settings.local.json']) {
     files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
@@ -472,14 +477,23 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
     // `detached` makes the shell its own process group leader so the timeout can kill
     // the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
-    // reference project files regardless of the shell's cwd.
-    const env = projectDir ? { ...process.env, CLAUDE_PROJECT_DIR: projectDir } : process.env
-    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env })
+    // reference project files regardless of the shell's cwd. CLAUDECODE=1 marks every
+    // subprocess Claude spawns, so it is set on the child unconditionally.
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1' }
+    if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
+    // An exec-form hook (an `args` array) spawns the executable directly with those args
+    // and no shell, so shell metacharacters in the args arrive literally; $ARGUMENTS in
+    // each arg is replaced with the event JSON by a replacer function (so $$/$& in the
+    // payload survive verbatim). Without args it stays the shell path. Both share the
+    // same detached process group, so killTree reaches the descendants either way.
+    const file = Array.isArray(args) ? command : '/bin/sh'
+    const spawnArgs = Array.isArray(args) ? args.map((arg) => substituteArguments(arg, payload)) : ['-c', command]
+    const child = spawn(file, spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env })
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -673,6 +687,18 @@ export function lastAssistantText(messages: ReadonlyArray<{ role: string; conten
   return ''
 }
 
+/** Claude overrides a Stop hook after it blocks this many times in a row with no user
+ * progress, ending the turn with a warning rather than looping forever. */
+const DEFAULT_STOP_HOOK_BLOCK_CAP = 8
+
+/** The consecutive-block cap for the Stop hook: CLAUDE_CODE_STOP_HOOK_BLOCK_CAP when it
+ * is a positive integer, else the default. A non-positive or malformed value falls back
+ * to the default rather than capping at zero (which would suppress the very first block). */
+export function stopHookBlockCap(env: Record<string, string | undefined> = process.env): number {
+  const override = Number.parseInt(env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP ?? '', 10)
+  return Number.isInteger(override) && override > 0 ? override : DEFAULT_STOP_HOOK_BLOCK_CAP
+}
+
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
 
@@ -833,6 +859,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let allowedHttpHookUrls: string[] | undefined
   let pendingSessionContext: string[] = []
   let stopHookActive = false
+  /** Consecutive Stop-hook blocks with no user progress between them. Reset on user input
+   * and on a non-blocking Stop; at the cap the continuation is suppressed and the turn ends. */
+  let stopHookBlockCount = 0
   let sessionCtx: ExtensionContext | undefined
   /** Claude's disableAllHooks escape hatch was set somewhere in the honored chain. */
   let hooksDisabled = false
@@ -856,7 +885,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
       if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
       if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-      return runHookCommand(hook.command, merged, ms, projectDir)
+      return runHookCommand(hook.command, merged, ms, projectDir, hook.args)
     }
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
@@ -996,6 +1025,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
     // prompts the user submitted.
     if (event.source === 'extension') return { action: 'continue' }
+    // Genuine user input is progress, so it breaks a Stop-hook continuation streak: the
+    // block cap counts only consecutive blocks with nothing from the user in between.
+    stopHookBlockCount = 0
     const decision = await runUserPromptSubmit(config, event.text, boundRunner(ctx), (message) => ctx.ui.notify(message, 'warning'))
     if (decision.block) {
       // pi's input result has no reason channel, so surface why before consuming it.
@@ -1048,8 +1080,25 @@ export default function hooksExtension(pi: ExtensionAPI) {
         return { block: false, reason: '' }
       })
       .find((verdict) => verdict.block)
-    stopHookActive = block !== undefined
-    if (block) pi.sendMessage({ customType: 'claude-stop-hook', content: block.reason, display: true }, { triggerTurn: true })
+    if (!block) {
+      // A non-blocking Stop breaks the streak: the next block starts a fresh count.
+      stopHookActive = false
+      stopHookBlockCount = 0
+      return
+    }
+    stopHookBlockCount += 1
+    const cap = stopHookBlockCap()
+    if (stopHookBlockCount >= cap) {
+      // Claude overrides a Stop hook that has blocked cap times in a row with no user
+      // progress: suppress the continuation, warn, and let the turn end so the loop cannot
+      // run forever. Reset the count so a later run (or user turn) starts clean.
+      stopHookActive = false
+      stopHookBlockCount = 0
+      ctx.ui.notify(`Stop hook block cap reached (${cap} consecutive blocks); ending the turn.`, 'warning')
+      return
+    }
+    stopHookActive = true
+    pi.sendMessage({ customType: 'claude-stop-hook', content: block.reason, display: true }, { triggerTurn: true })
   })
 
   pi.on('session_before_compact', async (event, ctx) => {

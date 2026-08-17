@@ -65,6 +65,21 @@ describe('commandDirs', () => {
     mkdirSync(sub)
     expect(commandDirs(sub, hoisted.home, true)).toEqual([join(repo, '.claude', 'commands')])
   })
+
+  it('resolves the user commands directory under CLAUDE_CONFIG_DIR', () => {
+    // Claude keeps commands inside CLAUDE_CONFIG_DIR when set, not ~/.claude/commands.
+    const cfg = tempDir()
+    mkdirSync(join(cfg, 'commands'), { recursive: true })
+    writeFileSync(join(cfg, 'commands', 'x.md'), 'body')
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      expect(commandDirs(tempDir(), hoisted.home, false)).toEqual([join(cfg, 'commands')])
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
+  })
 })
 
 describe('collectCommands', () => {
@@ -118,8 +133,12 @@ const setup = (cwd: string, trusted = true) => {
       modelSets.push(model.id)
       return true
     },
+    setThinkingLevel: (level: string) => {
+      thinkingSets.push(level)
+    },
   }
   const modelSets: string[] = []
+  const thinkingSets: string[] = []
   const available = [
     { id: 'gemma4', name: 'Gemma 4' },
     { id: 'claude-opus-5', name: 'Opus' },
@@ -154,6 +173,7 @@ const setup = (cwd: string, trusted = true) => {
     execCalls,
     ctx,
     modelSets,
+    thinkingSets,
     activeTools: () => active,
     setIdle: (value: boolean) => {
       idle = value
@@ -397,6 +417,103 @@ describe('command model frontmatter', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('x')?.handler('', s.ctx)
     expect(s.modelSets).toEqual([])
+  })
+})
+
+describe('command effort frontmatter', () => {
+  it('escalates the thinking level for the run and restores it on agent_settled', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deep.md', '---\neffort: max\n---\nThink hard.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('deep')?.handler('', s.ctx)
+    // The session level is 'high'; the command raises it for its run.
+    expect(s.thinkingSets).toEqual(['max'])
+    // A mid-run turn_end must not restore: a multi-step command keeps its level.
+    await s.handlers.get('turn_end')?.({}, s.ctx)
+    expect(s.thinkingSets).toEqual(['max'])
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    // Restored to the session level once the run settles.
+    expect(s.thinkingSets).toEqual(['max', 'high'])
+  })
+
+  it('does not touch the thinking level when effort matches the session or is absent, and restores nothing', async () => {
+    const cwd = tempDir()
+    // The session level is 'high'.
+    writeCommand(cwd, 'same.md', '---\neffort: high\n---\nx')
+    writeCommand(cwd, 'none.md', 'x')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('same')?.handler('', s.ctx)
+    await s.commands.get('none')?.handler('', s.ctx)
+    expect(s.thinkingSets).toEqual([])
+    // Nothing was changed, so agent_settled restores nothing either.
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    expect(s.thinkingSets).toEqual([])
+  })
+
+  it('ignores an effort value outside the thinking-level union', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'bad.md', '---\neffort: turbo\n---\nx')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('bad')?.handler('', s.ctx)
+    expect(s.thinkingSets).toEqual([])
+  })
+
+  it('restores the level from before the first command when two escalate in one turn', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'a.md', '---\neffort: max\n---\nA.')
+    writeCommand(cwd, 'b.md', '---\neffort: low\n---\nB.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('a')?.handler('', s.ctx)
+    await s.commands.get('b')?.handler('', s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    // First-restriction-wins: the restore target is the original session level.
+    expect(s.thinkingSets).toEqual(['max', 'low', 'high'])
+  })
+})
+
+describe('user-invocable frontmatter', () => {
+  it('hides a user-invocable:false command from the slash-command map but lists and runs it via the tool', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'gen.md', '---\ndescription: Generate code\nuser-invocable: false\n---\nGenerate $0.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    // Not registered as a user slash command...
+    expect(s.commands.has('gen')).toBe(false)
+    // ...but present in the slash_command tool description and callable by the model.
+    const tool = s.tools.get('slash_command')
+    expect(tool?.description).toContain('/gen - Generate code')
+    const result = await tool?.execute('t1', { command: '/gen staging' }, undefined, undefined, s.ctx)
+    expect(result?.content[0].text).toContain('Generate staging.')
+  })
+
+  it('registers only the user-invocable commands while keeping the hidden one model-callable', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'hidden.md', '---\nuser-invocable: false\n---\nHidden.')
+    writeCommand(cwd, 'shown.md', '---\ndescription: Visible\n---\nShown.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    expect([...s.commands.keys()]).toEqual(['shown'])
+    // The hidden command still resolves for the model.
+    const result = await s.tools.get('slash_command')?.execute('t1', { command: '/hidden' }, undefined, undefined, s.ctx)
+    expect(result?.content[0].text).toContain('Hidden.')
+  })
+})
+
+describe('when_to_use frontmatter', () => {
+  it('appends when_to_use to the tool listing but not the user-facing command description', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deploy.md', '---\ndescription: Deploy it\nargument-hint: [env]\nwhen_to_use: use when shipping to prod\n---\nDeploy $0.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    // The user-facing command description omits when_to_use.
+    expect(s.commands.get('deploy')?.description).toBe('Deploy it [env]')
+    // The tool listing carries the trigger text.
+    expect(s.tools.get('slash_command')?.description).toContain('use when shipping to prod')
   })
 })
 
@@ -808,6 +925,11 @@ describe('slashCommandToolDescription', () => {
     expect(text).toContain('/lint - Lint the tree')
   })
 
+  it('appends when_to_use trigger text after the description, before the argument hint', () => {
+    const text = slashCommandToolDescription([{ name: 'deploy', description: 'Deploy it', whenToUse: 'use when shipping', argumentHint: '[env]' }], 15_000)
+    expect(text).toContain('/deploy - Deploy it use when shipping ([env])')
+  })
+
   it('caps one entry at 1536 characters', () => {
     const text = slashCommandToolDescription([{ name: 'big', description: 'x'.repeat(4000) }], 15_000)
     const entry = text.split('\n').find((line) => line.startsWith('/big')) ?? ''
@@ -992,6 +1114,21 @@ describe('disableSkillShellExecution', () => {
     writeFileSync(managed, JSON.stringify({ disableSkillShellExecution: true }))
     setManagedSettingsPath(managed)
     expect(shellExecutionDisabled(tempDir(), hoisted.home, false)).toBe(true)
+  })
+
+  it('reads the user settings.json from CLAUDE_CONFIG_DIR', () => {
+    // The user policy relocates with CLAUDE_CONFIG_DIR; ~/.claude/settings.json is no
+    // longer where Claude stores it.
+    const cfg = tempDir()
+    writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ disableSkillShellExecution: true }))
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      expect(shellExecutionDisabled(tempDir(), hoisted.home, false)).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
   })
 
   it('replaces spans with the placeholder on the user path when set', async () => {

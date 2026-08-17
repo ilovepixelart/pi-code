@@ -24,6 +24,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { findNearestDir, findNearestFile } from './internal/project-root.js'
@@ -82,7 +83,7 @@ function isDirectory(target: string): boolean {
  * verbatim into the system prompt.
  */
 export function styleDirs(cwd: string, home: string, trusted: boolean): string[] {
-  const dirs = [path.join(home, '.claude', 'output-styles')]
+  const dirs = [path.join(claudeConfigDir(home), 'output-styles')]
   if (trusted) dirs.push(findNearestDir(cwd, path.join('.claude', 'output-styles')) ?? path.join(cwd, '.claude', 'output-styles'))
   return dirs.filter((dir) => isDirectory(dir))
 }
@@ -129,7 +130,7 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
 /** Settings files that carry `outputStyle`. Project settings apply only when trusted,
  * each the nearest of its name at or above cwd, as the hooks settings chain reads. */
 export function settingsFiles(cwd: string, home: string, trusted: boolean): string[] {
-  const files = [path.join(home, '.claude', 'settings.json')]
+  const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!trusted) return files
   for (const name of ['settings.json', 'settings.local.json']) {
     files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))

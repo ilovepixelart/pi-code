@@ -45,6 +45,7 @@ import { Type } from 'typebox'
 
 import { matchesBashRules } from './internal/bash-rules.js'
 import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
@@ -115,7 +116,7 @@ function isDirectory(target: string): boolean {
  * directory is the nearest at or above cwd (bounded at the repository root, matching
  * the approval walk) and is included only for approved projects. */
 export function commandDirs(cwd: string, home: string, trusted: boolean): string[] {
-  const candidates = [path.join(home, '.claude', 'commands')]
+  const candidates = [path.join(claudeConfigDir(home), 'commands')]
   if (trusted) candidates.push(findNearestDir(cwd, path.join('.claude', 'commands')) ?? path.join(cwd, '.claude', 'commands'))
   const dirs: string[] = []
   for (const dir of candidates) {
@@ -165,7 +166,7 @@ type CommandPlugin = NonNullable<DiscoveredCommand['plugin']>
  */
 export function shellExecutionDisabled(cwd: string, home: string, trusted: boolean): boolean {
   if (readManagedSettings().disableSkillShellExecution === true) return true
-  const files = [path.join(home, '.claude', 'settings.json')]
+  const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (trusted) {
     for (const name of ['settings.json', 'settings.local.json']) {
       files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
@@ -244,6 +245,8 @@ export interface SlashCommandEntry {
   name: string
   description: string
   argumentHint?: string
+  /** `when_to_use:` trigger text, appended to this entry's line in the tool listing. */
+  whenToUse?: string
 }
 
 /** One listed command's cap inside the tool description, as Claude cuts an
@@ -271,7 +274,10 @@ export function slashCommandToolDescription(commands: SlashCommandEntry[], budge
   let omitted = 0
   for (const command of commands) {
     const hintSuffix = command.argumentHint ? ` (${command.argumentHint})` : ''
-    const entry = `/${command.name} - ${command.description}${hintSuffix}`.slice(0, ENTRY_CHAR_CAP)
+    // when_to_use is model-facing trigger text, appended after the description and before
+    // the argument hint; it shares the per-entry cap and never reaches the user surface.
+    const whenSuffix = command.whenToUse ? ` ${command.whenToUse}` : ''
+    const entry = `/${command.name} - ${command.description}${whenSuffix}${hintSuffix}`.slice(0, ENTRY_CHAR_CAP)
     if (used + entry.length + 1 > budget) {
       omitted++
       continue // a shorter later entry may still fit the remaining budget
@@ -303,6 +309,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
   let pendingPathRules: Partial<Record<PathRuleTool, string[]>> | undefined
   /** The session model to restore after a command's `model:` override drove its run. */
   let pendingModelRestore: ModelLike | undefined
+  /** The thinking level to restore after a command's `effort:` override drove its run. */
+  let pendingEffortRestore: string | undefined
 
   // Claude's contract is "the grant clears when you send your next message", and
   // pi's turn_end fires after every assistant step: restoring there stripped a
@@ -322,6 +330,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
       // escape as unhandled; surface it instead of leaving the session silently on the
       // command's override model.
       void pi.setModel(restore).catch(() => {})
+    }
+    if (pendingEffortRestore) {
+      const level = pendingEffortRestore as Parameters<typeof pi.setThinkingLevel>[0]
+      pendingEffortRestore = undefined
+      pi.setThinkingLevel(level)
     }
     if (pendingRestore) {
       pi.setActiveTools(pendingRestore)
@@ -404,6 +417,19 @@ export default function commandsExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** Claude's `effort:` frontmatter overrides the thinking level for this run only, then
+   * the session level resumes; restore happens on agent_settled like the model restore.
+   * Applied before sendUserMessage so the run it drives happens at the new level. Only the
+   * first override in a turn records the restore target, so a second command restores to
+   * the original session level rather than the first command's override (as pendingModelRestore). */
+  function applyEffortOverride(parsed: ParsedCommand, varCtx: VarContext): void {
+    const target = parsed.effort
+    if (target && varCtx.thinkingLevel && target !== varCtx.thinkingLevel) {
+      pendingEffortRestore = pendingEffortRestore ?? varCtx.thinkingLevel
+      pi.setThinkingLevel(target as Parameters<typeof pi.setThinkingLevel>[0])
+    }
+  }
+
   async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext, filePath: string, plugin?: CommandPlugin): Promise<void> {
     const varCtx = ctx as unknown as VarContext
     const vars = commandVars(ctx, filePath, plugin)
@@ -435,6 +461,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     applyAllowedTools(parsed, vars)
     applyDisallowedTools(parsed)
     await applyModelOverride(parsed, varCtx)
+    applyEffortOverride(parsed, varCtx)
     pi.sendUserMessage(expanded)
   }
 
@@ -463,7 +490,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
       discovered.set(command.name, command)
       // A user-only command stays off the tool description; it is still in the
       // map so a model attempt gets the explicit refusal, not "unknown command".
-      if (!parsed.disableModelInvocation) invocable.push({ name: command.name, description: parsed.description, argumentHint: parsed.argumentHint })
+      if (!parsed.disableModelInvocation) invocable.push({ name: command.name, description: parsed.description, argumentHint: parsed.argumentHint, whenToUse: parsed.whenToUse })
+      // user-invocable:false is the inverse of disable-model-invocation: the command is
+      // hidden from the user slash-command surface but stays in `discovered` and the tool
+      // description above, so the model can still run it through the slash_command tool.
+      if (!parsed.userInvocable) continue
       // pi has no unregister, so a command already registered this process keeps its
       // original file binding; re-registering would only add a numbered duplicate.
       if (registered.has(command.name)) continue

@@ -1502,6 +1502,21 @@ describe('agent memory', () => {
     expect(agentMemoryDir('project', 'scout', '/nowhere', '/home/u')).toBe(join('/nowhere', '.claude', 'agent-memory', 'scout'))
   })
 
+  it('resolves the user memory store under CLAUDE_CONFIG_DIR', () => {
+    // The user-scope store relocates with CLAUDE_CONFIG_DIR (consistent with the swept
+    // agents dir); the repo-controlled project/local stores never do.
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    const cfg = fs.mkdtempSync(join(tmpdir(), 'sa-cfg-'))
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      expect(agentMemoryDir('user', 'scout', '/repo', '/home/u')).toBe(join(cfg, 'agent-memory', 'scout'))
+      expect(agentMemoryDir('project', 'scout', '/nowhere', '/home/u')).toBe(join('/nowhere', '.claude', 'agent-memory', 'scout'))
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
+  })
+
   it('sanitizes a repo-controlled agent name before it becomes a path segment', () => {
     expect(agentMemoryDir('user', '../../etc/passwd', '/repo', '/home/u')).toBe(join('/home/u', '.claude', 'agent-memory', '.._.._etc_passwd'))
     // A name of only dots survives the character filter but would still traverse.

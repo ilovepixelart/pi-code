@@ -216,8 +216,24 @@ describe('runHookCommand process wiring', () => {
     expect(record.file).toBe('/bin/sh')
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
-    // the grandchildren a compound command forks.
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: process.env })
+    // the grandchildren a compound command forks. Claude marks every subprocess it
+    // spawns with CLAUDECODE=1, so the child env inherits the parent's plus that flag.
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: { ...process.env, CLAUDECODE: '1' } })
+  })
+
+  it('marks the hook child with CLAUDECODE=1 even when the parent env lacks it', async () => {
+    // Hermetic: pi-code itself may run under a parent that already set CLAUDECODE, so
+    // clear it to prove runHookCommand adds the flag rather than merely inheriting it.
+    const saved = process.env.CLAUDECODE
+    delete process.env.CLAUDECODE
+    try {
+      await runHookCommand('guard.sh', {}, 5000)
+      const options = recordFor('guard.sh').options as { env?: Record<string, string> }
+      expect(options.env?.CLAUDECODE).toBe('1')
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDECODE
+      else process.env.CLAUDECODE = saved
+    }
   })
 
   it('writes the payload to stdin as JSON', async () => {
@@ -262,6 +278,46 @@ describe('runHookCommand process wiring', () => {
   it('swallows an EPIPE from a hook that exits without reading stdin', async () => {
     script('exit2', { stdinError: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }), stderr: ['denied'], code: 2 })
     expect(await runHookCommand('exit2', {}, 5000)).toEqual({ code: 2, stdout: '', stderr: 'denied', timedOut: false })
+  })
+})
+
+describe('runHookCommand exec form', () => {
+  it('spawns the executable directly with its args and no /bin/sh wrapper', async () => {
+    await runHookCommand('/usr/bin/notify', {}, 5000, undefined, ['--message', 'hi; rm -rf /'])
+    const record = hoisted.calls.find((call) => call.file === '/usr/bin/notify')
+    expect(record).toBeDefined()
+    // No `/bin/sh -c`: the executable is spawned directly, so the metacharacters in the
+    // args are handed over literally rather than interpreted by a shell.
+    expect(record?.args).toEqual(['--message', 'hi; rm -rf /'])
+    expect(record?.options).toMatchObject({ detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  })
+
+  it('delivers the payload as JSON on stdin, like the shell path', async () => {
+    await runHookCommand('/bin/tool', { tool_name: 'bash' }, 5000, undefined, ['run'])
+    const record = hoisted.calls.find((call) => call.file === '/bin/tool')
+    expect(JSON.parse(record?.stdin ?? '')).toEqual({ tool_name: 'bash' })
+  })
+
+  it('substitutes $ARGUMENTS per arg with a $$-safe replacer', async () => {
+    const payload = { tool_input: { command: 'echo $$ && x $&' } }
+    await runHookCommand('/bin/tool', payload, 5000, undefined, ['--json', '$ARGUMENTS', 'tail-$ARGUMENTS'])
+    const record = hoisted.calls.find((call) => call.file === '/bin/tool')
+    expect(record?.args[0]).toBe('--json')
+    // The whole event JSON replaces $ARGUMENTS; the $$ / $& inside it survive verbatim
+    // rather than being eaten as String.replace patterns.
+    expect(record?.args[1]).toBe(JSON.stringify(payload))
+    expect(record?.args[1]).toContain('echo $$ && x $&')
+    // Substitution applies to every arg, mid-string included.
+    expect(record?.args[2]).toBe(`tail-${JSON.stringify(payload)}`)
+  })
+
+  it('kills the exec-form child at the timeout, like the shell path', async () => {
+    vi.useFakeTimers()
+    script('holdopen', { hang: true })
+    void runHookCommand('/bin/tool', {}, 1000, undefined, ['run', 'holdopen'])
+    await vi.advanceTimersByTimeAsync(1000)
+    const record = hoisted.calls.find((call) => call.file === '/bin/tool')
+    expect(record?.killSignals).toEqual(['SIGKILL'])
   })
 })
 
@@ -649,6 +705,7 @@ describe('hooks extension session_start', () => {
 
     const options = recordFor('home-pre').options as { env?: Record<string, string> }
     expect(options.env?.CLAUDE_PROJECT_DIR).toBe(project)
+    expect(options.env?.CLAUDECODE).toBe('1')
     expect(options.env?.PATH).toBeDefined()
   })
 
@@ -1012,6 +1069,64 @@ describe('hooks extension notify-style events', () => {
     await ext.agentEnd()
     const third = hoisted.calls.filter((call) => call.command === 'keep-going')[2]
     expect(JSON.parse(third.stdin)).toEqual({ ...COMMON, hook_event_name: 'Stop', stop_hook_active: false })
+  })
+
+  describe('Stop hook consecutive-block cap', () => {
+    it('overrides the Stop hook after the default cap of consecutive blocks, ending the turn with a warning', async () => {
+      const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+      script('keep-going', { stderr: ['still red'], code: 2 })
+      // Blocks 1..7 each continue the conversation.
+      for (let i = 0; i < 7; i += 1) await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      // The 8th consecutive block is suppressed: no continuation, a warning instead, and
+      // the turn is allowed to end.
+      await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      expect(ext.notes.some((n) => n.level === 'warning' && /cap/i.test(n.msg))).toBe(true)
+    })
+
+    it('honors CLAUDE_CODE_STOP_HOOK_BLOCK_CAP as the consecutive-block cap', async () => {
+      const saved = process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP
+      process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP = '2'
+      try {
+        const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+        script('keep-going', { stderr: ['nope'], code: 2 })
+        await ext.agentEnd() // block 1 continues
+        expect(ext.sent).toHaveLength(1)
+        await ext.agentEnd() // block 2 hits the cap: suppressed
+        expect(ext.sent).toHaveLength(1)
+        expect(ext.notes.some((n) => /cap/i.test(n.msg))).toBe(true)
+      } finally {
+        if (saved === undefined) delete process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP
+        else process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP = saved
+      }
+    })
+
+    it('resets the streak on a non-blocking Stop result so a later block continues again', async () => {
+      const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+      script('keep-going', { stderr: ['red'], code: 2 })
+      for (let i = 0; i < 7; i += 1) await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      // A clean stop breaks the streak...
+      script('keep-going', { code: 0, stderr: [] })
+      await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      // ...so the next block continues rather than tripping the cap at the 8th call.
+      script('keep-going', { stderr: ['red again'], code: 2 })
+      await ext.agentEnd()
+      expect(ext.sent).toHaveLength(8)
+    })
+
+    it('resets the streak on genuine user input', async () => {
+      const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+      script('keep-going', { stderr: ['red'], code: 2 })
+      for (let i = 0; i < 7; i += 1) await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      // User input breaks the streak, so the next block continues rather than capping.
+      await ext.input('keep working on it')
+      await ext.agentEnd()
+      expect(ext.sent).toHaveLength(8)
+    })
   })
 
   it('surfaces a systemMessage from any hook as a user warning', async () => {

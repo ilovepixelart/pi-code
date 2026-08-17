@@ -21,6 +21,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './internal/config-dir.js'
+
 /** How a finished turn is announced, from Claude's `preferredNotifChannel`. */
 export type NotifChannel = 'desktop' | 'bell' | 'both' | 'off'
 
@@ -55,7 +57,7 @@ export function isAway(lastInputAt: number | undefined, now: number, thresholdMs
  * or change your notifications. */
 function readPreferredNotifChannel(home: string): unknown {
   try {
-    const settings = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf-8'))
+    const settings = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8'))
     return settings?.preferredNotifChannel
   } catch {
     return undefined
