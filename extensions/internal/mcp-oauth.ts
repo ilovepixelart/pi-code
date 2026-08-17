@@ -1,0 +1,171 @@
+/**
+ * OAuth for remote MCP servers, through the MCP SDK's authProvider seam.
+ *
+ * Claude Code authenticates remote HTTP servers via OAuth from its /mcp panel;
+ * here the flow runs at connect time: a 401 surfaces as UnauthorizedError, the
+ * user approves opening the browser, a one-shot localhost listener catches the
+ * redirect, and the SDK's finishAuth exchanges the code. Tokens, the dynamic
+ * client registration and the PKCE verifier persist per server under pi's agent
+ * directory with owner-only permissions, so later sessions reconnect silently
+ * and refresh through the SDK without a browser round-trip.
+ */
+
+import { spawn } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as http from 'node:http'
+import * as path from 'node:path'
+import { getAgentDir } from '@earendil-works/pi-coding-agent'
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+
+interface StoredAuth {
+  client?: OAuthClientInformationMixed
+  tokens?: OAuthTokens
+  verifier?: string
+  /** The loopback port a prior login registered, reused so a strict server that
+   * pins redirect_uris still accepts a re-login after tokens are revoked. */
+  redirectPort?: number
+}
+
+/** A server name is config-controlled text; the digest keeps hostile names inside
+ * the store directory and distinct names from colliding after sanitization. */
+function storeFileFor(serverName: string): string {
+  const digest = crypto.createHash('sha256').update(serverName).digest('hex').slice(0, 8)
+  const safe =
+    serverName
+      .replace(/[^A-Za-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'server'
+  return path.join(getAgentDir(), 'mcp-oauth', `${safe}-${digest}.json`)
+}
+
+export class FileOAuthProvider implements OAuthClientProvider {
+  private readonly storePath: string
+  private data: StoredAuth
+  private port = 0
+  private readonly onRedirect: (authorizationUrl: URL) => void
+
+  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void) {
+    this.storePath = storeFileFor(serverName)
+    this.onRedirect = onRedirect
+    try {
+      this.data = JSON.parse(fs.readFileSync(this.storePath, 'utf-8'))
+    } catch {
+      this.data = {}
+    }
+  }
+
+  private persist(): void {
+    fs.mkdirSync(path.dirname(this.storePath), { recursive: true })
+    fs.writeFileSync(this.storePath, JSON.stringify(this.data), { mode: 0o600 })
+  }
+
+  /** The port a prior login registered, so a re-login can bind the same one. */
+  savedRedirectPort(): number | undefined {
+    return this.data.redirectPort
+  }
+
+  /** Record the loopback port the callback server actually bound; the redirect
+   * URL and the registered redirect_uri both derive from it. */
+  bindRedirectPort(port: number): void {
+    this.port = port
+    if (this.data.redirectPort !== port) {
+      this.data.redirectPort = port
+      this.persist()
+    }
+  }
+
+  get redirectUrl(): string {
+    return `http://127.0.0.1:${this.port}/callback`
+  }
+
+  get clientMetadata(): OAuthClientMetadata {
+    return {
+      client_name: 'pi-code',
+      redirect_uris: [this.redirectUrl],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      // A local CLI is a public client; PKCE carries the proof instead of a secret.
+      token_endpoint_auth_method: 'none',
+    }
+  }
+
+  clientInformation(): OAuthClientInformationMixed | undefined {
+    return this.data.client
+  }
+
+  saveClientInformation(client: OAuthClientInformationMixed): void {
+    this.data.client = client
+    this.persist()
+  }
+
+  tokens(): OAuthTokens | undefined {
+    return this.data.tokens
+  }
+
+  saveTokens(tokens: OAuthTokens): void {
+    this.data.tokens = tokens
+    this.persist()
+  }
+
+  hasTokens(): boolean {
+    return this.data.tokens !== undefined
+  }
+
+  redirectToAuthorization(authorizationUrl: URL): void {
+    this.onRedirect(authorizationUrl)
+  }
+
+  saveCodeVerifier(verifier: string): void {
+    this.data.verifier = verifier
+    this.persist()
+  }
+
+  codeVerifier(): string {
+    if (!this.data.verifier) throw new Error('no code verifier saved for this authorization')
+    return this.data.verifier
+  }
+}
+
+/** A one-shot loopback listener for the authorization redirect. Loopback redirect
+ * URIs are the RFC 8252 pattern for native apps. A preferred port (from a prior
+ * login) is tried first so a re-login keeps the registered redirect_uri; if it is
+ * taken, an ephemeral port is used. */
+export async function startCallbackServer(preferredPort?: number): Promise<{ server: http.Server; port: number }> {
+  const server = http.createServer()
+  const listen = (port: number): Promise<void> => new Promise((resolve, reject) => server.listen(port, '127.0.0.1', resolve).once('error', reject))
+  try {
+    await listen(preferredPort ?? 0)
+  } catch {
+    await listen(0)
+  }
+  return { server, port: (server.address() as { port: number }).port }
+}
+
+export function waitForAuthCode(server: http.Server, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`authorization timed out after ${timeoutMs}ms`)), timeoutMs)
+    server.on('request', (request, response) => {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      const code = url.searchParams.get('code')
+      const error = url.searchParams.get('error')
+      response.writeHead(200, { 'content-type': 'text/html' })
+      response.end('<html><body>pi-code: you can close this tab and return to the terminal.</body></html>')
+      clearTimeout(timer)
+      if (code) resolve(code)
+      else reject(new Error(`authorization failed: ${error ?? 'no code in redirect'} ${url.searchParams.get('error_description') ?? ''}`.trim()))
+    })
+  })
+}
+
+/** Best-effort browser launch; the caller also surfaces the URL as text. */
+export function openBrowser(url: string): void {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
+  try {
+    spawn(command, args, { stdio: 'ignore', detached: true }).unref()
+  } catch {
+    // the notified URL is the fallback
+  }
+}

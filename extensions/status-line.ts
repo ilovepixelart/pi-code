@@ -21,6 +21,7 @@
 
 import * as fs from 'node:fs'
 import * as os from 'node:os'
+import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { hookFiles, runHookCommand } from './hooks.js'
@@ -30,6 +31,15 @@ import { readActiveStyleName, settingsFiles } from './output-styles.js'
 
 const COMMAND_TIMEOUT_MS = 5_000
 const DEBOUNCE_MS = 300
+
+/** Claude sends its CLI version; pi-code's own version is the honest analogue. */
+const PACKAGE_VERSION = (() => {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf-8')).version ?? '')
+  } catch {
+    return ''
+  }
+})()
 
 interface UsageEntry {
   type: string
@@ -84,6 +94,17 @@ export default function statusLine(pi: ExtensionAPI) {
   let commandLine: string | undefined
   let permissionMode = 'default'
   let projectApproved = false
+  let sessionStartMs = Date.now()
+  // Lines changed, counted from successful edit/write inputs: newText and content
+  // lines add, oldText lines remove. An approximation of Claude's counters, which
+  // is honest for the tools pi has; bash-side changes are invisible to both.
+  let linesAdded = 0
+  let linesRemoved = 0
+  // API timing and the last message's token usage, from provider/message events:
+  // the fields ctx.getContextUsage() does not expose (output/cache tokens, API time).
+  let apiDurationMs = 0
+  let requestStartMs: number | undefined
+  let lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number } | undefined
   let refreshTimer: ReturnType<typeof setInterval> | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
   let running = false
@@ -109,19 +130,52 @@ export default function statusLine(pi: ExtensionAPI) {
     // so reporting it here would describe a style the session is not using.
     const styleName = readActiveStyleName(settingsFiles(ctx.cwd, os.homedir(), projectApproved))
     const payload: Record<string, unknown> = {
+      hook_event_name: 'Status',
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
+      version: PACKAGE_VERSION,
       workspace: { current_dir: ctx.cwd, project_dir: ctx.cwd },
       // Both fields, per Claude's documented contract: published statusline scripts
       // read .model.display_name and render the literal "null" when it is missing.
       model: { id: model?.id ?? '', display_name: model?.name ?? model?.id ?? '' },
-      cost: { total_cost_usd: sessionCost(ctx) },
-      context_window: { context_window_size: usage.contextWindow, used_percentage: usage.percent, total_input_tokens: usage.tokens },
+      cost: {
+        total_cost_usd: sessionCost(ctx),
+        total_duration_ms: Date.now() - sessionStartMs,
+        total_api_duration_ms: apiDurationMs,
+        total_lines_added: linesAdded,
+        total_lines_removed: linesRemoved,
+      },
+      context_window: {
+        context_window_size: usage.contextWindow,
+        used_percentage: usage.percent,
+        remaining_percentage: usage.percent === null ? null : 100 - usage.percent,
+        total_input_tokens: usage.tokens,
+        // The per-component breakdown from the last message's usage, which
+        // ctx.getContextUsage() (input-side estimate only) cannot provide.
+        ...(lastUsage
+          ? {
+              total_output_tokens: lastUsage.output,
+              current_usage: {
+                input_tokens: lastUsage.input,
+                output_tokens: lastUsage.output,
+                cache_read_input_tokens: lastUsage.cacheRead,
+                cache_creation_input_tokens: lastUsage.cacheWrite,
+              },
+            }
+          : {}),
+      },
+      // The true combined total when a message usage is known, else the input-side estimate.
+      exceeds_200k_tokens: (lastUsage?.totalTokens ?? usage.tokens ?? 0) > 200_000,
       permission_mode: permissionMode,
     }
     const transcript = ctx.sessionManager.getSessionFile()
     if (transcript) payload.transcript_path = transcript
-    if (ctx.thinkingLevel) payload.effort = { level: ctx.thinkingLevel }
+    const sessionName = ctx.sessionManager.getSessionName?.()
+    if (sessionName) payload.session_name = sessionName
+    if (ctx.thinkingLevel) {
+      payload.effort = { level: ctx.thinkingLevel }
+      payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
+    }
     if (styleName) payload.output_style = { name: styleName }
     return payload
   }
@@ -170,11 +224,47 @@ export default function statusLine(pi: ExtensionAPI) {
     scheduleRefresh()
   })
 
+  // Counted here rather than in buildPayload so the numbers accumulate across the
+  // session the way Claude's counters do.
+  pi.on('tool_result', async (event) => {
+    if (event.isError) return
+    const input = event.input as Record<string, unknown>
+    const lines = (text: unknown): number => (typeof text === 'string' && text.length > 0 ? text.split('\n').length : 0)
+    if (event.toolName === 'write') linesAdded += lines(input.content)
+    if (event.toolName === 'edit' && Array.isArray(input.edits)) {
+      for (const edit of input.edits as Array<{ oldText?: unknown; newText?: unknown }>) {
+        linesAdded += lines(edit.newText)
+        linesRemoved += lines(edit.oldText)
+      }
+    }
+  })
+
+  // API round-trip timing: the window between the request and its response, summed
+  // across the session. ctx exposes no API-duration getter, so it is measured here.
+  pi.on('before_provider_request', async () => {
+    requestStartMs = Date.now()
+  })
+  pi.on('after_provider_response', async () => {
+    if (requestStartMs !== undefined) apiDurationMs += Date.now() - requestStartMs
+    requestStartMs = undefined
+  })
+  // The last message's token usage, for the breakdown getContextUsage() omits.
+  pi.on('message_end', async (event) => {
+    const usage = (event as { message?: { usage?: typeof lastUsage } }).message?.usage
+    if (usage) lastUsage = usage
+  })
+
   pi.on('session_start', async (_event, ctx) => {
     // One instance serves every session, so a fresh session must not inherit state.
     turnCount = 0
     commandLine = undefined
     sessionCtx = ctx
+    sessionStartMs = Date.now()
+    linesAdded = 0
+    linesRemoved = 0
+    apiDurationMs = 0
+    requestStartMs = undefined
+    lastUsage = undefined
     clearInterval(refreshTimer)
     // Reading config must never open a trust dialog: several extensions resolve
     // approval at session start, and a second prompt stacks over the first and eats

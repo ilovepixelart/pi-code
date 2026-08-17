@@ -10,22 +10,31 @@ import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
-import { parseToolList } from '../internal/command-file.js'
+import { parseToolGrants } from '../internal/command-file.js'
+import { installedPlugins } from '../internal/plugins.js'
+import { findNearestDir } from '../internal/project-root.js'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
  * list. Anything else returns null: a restriction that failed to parse must not run
  * the agent unrestricted.
+ *
+ * An argument-scoped grant (`Bash(git log:*)`) cannot be expressed in the child's
+ * --tools allowlist, and the parent cannot reach into the child process to enforce
+ * it at call time the way commands.ts does, so on the granting side it is rejected
+ * like any other unexpressable restriction. A scoped *disallow* only denies more
+ * than the file asked for, which is the safe direction, so it stands.
  */
-function parseToolsField(raw: unknown): string[] | undefined | null {
+function parseToolsField(raw: unknown, granting: boolean): string[] | undefined | null {
   if (raw === undefined) return undefined
   // Shares the command parser's splitting, so a comma inside an argument scope stays
   // inside it here too: `Bash(mv, write, cp)` used to hand the child pi's real `write`.
   if (raw !== null && !Array.isArray(raw) && typeof raw !== 'string') return null
   if (Array.isArray(raw) && raw.some((item) => typeof item !== 'string')) return null
-  const tools = parseToolList(raw)
-  if (!tools) return null
-  return tools.length > 0 ? tools : undefined
+  const grants = parseToolGrants(raw)
+  if (!grants) return null
+  if (granting && grants.scopedEntries.length > 0) return null
+  return grants.tools.length > 0 ? grants.tools : undefined
 }
 
 /**
@@ -35,7 +44,7 @@ function parseToolsField(raw: unknown): string[] | undefined | null {
  * (Claude's `inherit`) is the degradation that works everywhere; users who want a
  * tier pinned should name a concrete model id.
  */
-const CLAUDE_MODEL_ALIASES = new Set(['sonnet', 'opus', 'haiku', 'inherit'])
+const CLAUDE_MODEL_ALIASES = new Set(['sonnet', 'opus', 'haiku', 'fable', 'inherit'])
 
 function parseModelField(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
@@ -68,6 +77,20 @@ function parseEffortField(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const effort = raw.trim().toLowerCase()
   return THINKING_LEVELS.has(effort) ? effort : undefined
+}
+
+/** Claude's agent `memory:` scopes: a persistent per-agent store for cross-session
+ * learning, separate from the parent conversation's auto memory. */
+export type AgentMemoryScope = 'user' | 'project' | 'local'
+
+const MEMORY_SCOPES: ReadonlySet<string> = new Set(['user', 'project', 'local'])
+
+/** Anything other than the three scopes is ignored, so the agent still runs, just
+ * without memory; a typo in an optional enhancement should not drop the agent. */
+function parseMemoryField(raw: unknown): AgentMemoryScope | undefined {
+  if (typeof raw !== 'string') return undefined
+  const scope = raw.trim().toLowerCase()
+  return MEMORY_SCOPES.has(scope) ? (scope as AgentMemoryScope) : undefined
 }
 
 /** Claude's `skills` frontmatter: a comma string or YAML list of skill names. */
@@ -145,9 +168,15 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
   const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
-  const tools = parseToolsField(frontmatter.tools)
-  if (tools === null) return null
-  const disallowedTools = parseToolsField(frontmatter.disallowedTools)
+  const tools = parseToolsField(frontmatter.tools, true)
+  if (tools === null) {
+    // A silent drop reads as "agent does not exist"; say why, since an
+    // argument-scoped grant is a shape Claude's own docs recommend but pi cannot
+    // enforce on a child process.
+    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it)`)
+    return null
+  }
+  const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
   if (disallowedTools === null) return null
   return {
     name,
@@ -158,10 +187,18 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     effort: parseEffortField(frontmatter.effort),
     modelAlias: parseModelAlias(frontmatter.model),
     skills: parseSkillsField(frontmatter.skills),
+    memory: parseMemoryField(frontmatter.memory),
+    maxTurns: parseMaxTurns(frontmatter.maxTurns),
     systemPrompt: body,
     source,
     filePath,
   }
+}
+
+/** Claude's `maxTurns`: a positive integer cap on the subagent's agentic turns.
+ * Anything else (0, negative, non-number) is ignored, so the run is uncapped. */
+function parseMaxTurns(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined
 }
 
 export type AgentScope = 'user' | 'project' | 'both'
@@ -177,6 +214,10 @@ export interface AgentConfig {
   modelAlias?: string
   /** Skill names to inline into the child's prompt, per Claude's `skills` field. */
   skills?: string[]
+  /** Persistent per-agent memory scope, per Claude's `memory:` field. */
+  memory?: AgentMemoryScope
+  /** Cap on the child's agentic turns, enforced by killing at the turn boundary. */
+  maxTurns?: number
   systemPrompt: string
   source: AgentSource
   filePath: string
@@ -187,25 +228,27 @@ export interface AgentDiscoveryResult {
   projectAgentsDir: string | null
 }
 
+/** Claude scans .claude/agents recursively so agents can be organized into
+ * subfolders (agents/review/, agents/research/); the walk mirrors that. */
 function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   const agents: AgentConfig[] = []
-
-  if (!fs.existsSync(dir)) {
-    return agents
-  }
 
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
   } catch {
-    return agents
+    return agents // a missing or unreadable directory contributes nothing
   }
 
   for (const entry of entries) {
+    const filePath = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      agents.push(...loadAgentsFromDir(filePath, source))
+      continue
+    }
     if (!entry.name.endsWith('.md')) continue
     if (!entry.isFile() && !entry.isSymbolicLink()) continue
 
-    const filePath = path.join(dir, entry.name)
     let content: string
     try {
       content = fs.readFileSync(filePath, 'utf-8')
@@ -220,49 +263,6 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   return agents
 }
 
-function isDirectory(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-/** Project root at or above `from`. `.git` is a file in worktrees and submodules. */
-const ROOT_MARKERS = ['.git', 'package.json']
-
-function repoRoot(from: string): string | undefined {
-  let currentDir = from
-  while (true) {
-    if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return currentDir
-    const parentDir = path.dirname(currentDir)
-    if (parentDir === currentDir) return undefined
-    currentDir = parentDir
-  }
-}
-
-/**
- * Nearest `relative` directory at or above `cwd`, stopping at the repository root.
- *
- * Without the boundary the search runs to the filesystem root, so an agent planted in a
- * world-writable ancestor such as /tmp is offered as a project agent for every session
- * beneath it. With no project marker (.git, package.json) the extent is unknown, so only
- * `cwd` is considered.
- */
-function findNearestDir(cwd: string, relative: string): string | null {
-  const boundary = repoRoot(cwd) ?? cwd
-  let currentDir = cwd
-  while (true) {
-    const candidate = path.join(currentDir, relative)
-    if (isDirectory(candidate)) return candidate
-
-    if (currentDir === boundary) return null
-    const parentDir = path.dirname(currentDir)
-    if (parentDir === currentDir) return null
-    currentDir = parentDir
-  }
-}
-
 function buildAgentMap(userAgents: AgentConfig[], projectAgents: AgentConfig[], scope: AgentScope): Map<string, AgentConfig> {
   const agentMap = new Map<string, AgentConfig>()
   const register = (agents: AgentConfig[]): void => {
@@ -274,10 +274,20 @@ function buildAgentMap(userAgents: AgentConfig[], projectAgents: AgentConfig[], 
   return agentMap
 }
 
-export type AgentSource = 'user' | 'project' | 'builtin'
+export type AgentSource = 'user' | 'project' | 'builtin' | 'plugin'
 
 /** Bundled default agents (Explore, Plan, general-purpose), lowest precedence. */
 export const BUILTIN_AGENTS_DIR = path.join(import.meta.dirname, 'agents')
+
+/** Agent directories of every enabled plugin: `agents/` unless the manifest
+ * points elsewhere. Plugins are user-installed, so user scope only decides. */
+function pluginAgentDirs(home: string): string[] {
+  return installedPlugins(home).flatMap((plugin) => {
+    const declared = plugin.manifest.agents
+    const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'agents']
+    return dirs.map((dir) => path.resolve(plugin.root, String(dir)))
+  })
+}
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), 'agents')
@@ -285,8 +295,9 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   const projectPiDir = findNearestDir(cwd, path.join('.pi', 'agents'))
   const projectClaudeDir = findNearestDir(cwd, path.join('.claude', 'agents'))
 
-  // ~/.claude/agents loads first so ~/.pi/agent/agents wins on name conflicts
-  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
+  // Plugins load after builtins and before the user's own dirs, so a user agent
+  // wins a name clash with a plugin's, and ~/.pi/agent/agents wins over ~/.claude.
+  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...pluginAgentDirs(os.homedir()).flatMap((dir) => loadAgentsFromDir(dir, 'plugin')), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
   // project .claude/agents loads first so project .pi/agents wins on name conflicts
   const projectAgents = scope === 'user' ? [] : [...(projectClaudeDir ? loadAgentsFromDir(projectClaudeDir, 'project') : []), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
 

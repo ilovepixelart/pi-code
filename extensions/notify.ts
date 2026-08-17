@@ -6,10 +6,61 @@
  * - OSC 777: Ghostty, iTerm2, WezTerm, rxvt-unicode
  * - OSC 99: Kitty
  * - Windows toast: Windows Terminal (WSL)
+ *
+ * Honors Claude Code's `preferredNotifChannel` (user settings): `terminal_bell`
+ * rings the bell, `notifications_disabled` stays silent, `iterm2_with_bell` does
+ * both, anything else sends the desktop notification. Like Claude, a notification
+ * fires only when you "appear to be away": pi exposes no terminal-focus signal, so
+ * a turn is treated as away when it ran at least AWAY_AFTER_MS, or when no prompt
+ * was submitted since session start.
  */
 
 import { execFile } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+
+/** How a finished turn is announced, from Claude's `preferredNotifChannel`. */
+export type NotifChannel = 'desktop' | 'bell' | 'both' | 'off'
+
+/** Map Claude's `preferredNotifChannel` to what we emit. Unknown or unset means the
+ * default desktop notification; `iterm2_with_bell` both notifies and rings. */
+export function resolveNotifChannel(setting: unknown): NotifChannel {
+  switch (typeof setting === 'string' ? setting : '') {
+    case 'notifications_disabled':
+      return 'off'
+    case 'terminal_bell':
+      return 'bell'
+    case 'iterm2_with_bell':
+      return 'both'
+    default:
+      return 'desktop'
+  }
+}
+
+/** How long a turn must run before its end is worth a notification. Claude only
+ * notifies when you "appear to be away"; pi exposes no terminal-focus signal, so a
+ * turn that ran at least this long is the best available proxy for having stepped
+ * away. A turn with no recorded start (none since session start) always notifies. */
+export const AWAY_AFTER_MS = 30_000
+
+export function isAway(lastInputAt: number | undefined, now: number, thresholdMs: number): boolean {
+  if (lastInputAt === undefined) return true
+  return now - lastInputAt >= thresholdMs
+}
+
+/** The `preferredNotifChannel` from the user's settings. This is a personal terminal
+ * preference, so only user scope is read; a checked-out repo does not get to silence
+ * or change your notifications. */
+function readPreferredNotifChannel(home: string): unknown {
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf-8'))
+    return settings?.preferredNotifChannel
+  } catch {
+    return undefined
+  }
+}
 
 function windowsToastScript(title: string, body: string): string {
   const type = 'Windows.UI.Notifications'
@@ -37,9 +88,7 @@ function notifyWindows(title: string, body: string): void {
   execFile(powershell, ['-NoProfile', '-Command', windowsToastScript(title, body)], () => {})
 }
 
-function notify(title: string, body: string): void {
-  // Piped or headless stdout (pi -p, CI) must not receive raw escape bytes.
-  if (!process.stdout.isTTY) return
+function notifyDesktop(title: string, body: string): void {
   if (process.env.WT_SESSION) {
     notifyWindows(title, body)
   } else if (process.env.KITTY_WINDOW_ID) {
@@ -50,7 +99,31 @@ function notify(title: string, body: string): void {
 }
 
 export default function notifyExtension(pi: ExtensionAPI) {
+  let channel: NotifChannel = 'desktop'
+  // When the user last submitted a prompt, so a turn's duration can stand in for
+  // Claude's "appear to be away" check. Undefined until the first prompt this session.
+  let lastInputAt: number | undefined
+
+  pi.on('session_start', async (_event, ctx) => {
+    channel = resolveNotifChannel(readPreferredNotifChannel(os.homedir()))
+    lastInputAt = undefined
+    void ctx
+  })
+
+  pi.on('input', async () => {
+    lastInputAt = Date.now()
+  })
+
   pi.on('agent_end', async () => {
-    notify('Pi', 'Ready for input')
+    if (channel === 'off') return
+    // Piped or headless stdout (pi -p, CI) must not receive raw escape bytes.
+    if (!process.stdout.isTTY) return
+    if (!isAway(lastInputAt, Date.now(), AWAY_AFTER_MS)) return
+    if (channel === 'bell') {
+      process.stdout.write('\x07')
+      return
+    }
+    notifyDesktop('Pi', 'Ready for input')
+    if (channel === 'both') process.stdout.write('\x07')
   })
 }

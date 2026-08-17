@@ -32,7 +32,9 @@ export function httpFetch(url: URL, opts: TransportOptions): Promise<Response> {
       url,
       {
         method: 'GET',
-        headers: { 'User-Agent': opts.userAgent },
+        // Prefer markdown, as Claude's WebFetch does, so a content-negotiating
+        // server can return markdown directly and skip the lossy HTML conversion.
+        headers: { 'User-Agent': opts.userAgent, Accept: 'text/markdown, text/html;q=0.9, */*;q=0.8' },
         signal: opts.signal,
         lookup: opts.lookup,
         // servername is left to default to url.hostname, so SNI and certificate

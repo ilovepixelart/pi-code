@@ -4,7 +4,84 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, mapContent, normalizeSchema, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
+import { applyServerPolicy, formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, managedSettingsPath, mapContent, mcpAllowDeny, normalizeSchema, parseHelperHeaders, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
+
+describe('parseHelperHeaders', () => {
+  it('keeps string-valued header entries and drops the rest', () => {
+    expect(parseHelperHeaders('{"Authorization":"Bearer x","X-N":5,"Y":"z"}')).toEqual({ Authorization: 'Bearer x', Y: 'z' })
+  })
+  it('returns empty on invalid or non-object output', () => {
+    expect(parseHelperHeaders('not json')).toEqual({})
+    expect(parseHelperHeaders('["a"]')).toEqual({})
+    expect(parseHelperHeaders('null')).toEqual({})
+  })
+})
+
+describe('applyServerPolicy', () => {
+  const servers = { a: { command: 'a' }, b: { command: 'b' }, c: { command: 'c' } } as never
+
+  it('keeps everything when there is no allow list and no deny', () => {
+    expect(Object.keys(applyServerPolicy(servers, null, new Set()))).toEqual(['a', 'b', 'c'])
+  })
+  it('treats a configured empty allow list as a lockdown (Claude: empty array = deny all)', () => {
+    expect(Object.keys(applyServerPolicy(servers, new Set(), new Set()))).toEqual([])
+  })
+  it('an allow list is exclusive', () => {
+    expect(Object.keys(applyServerPolicy(servers, new Set(['a', 'c']), new Set()))).toEqual(['a', 'c'])
+  })
+  it('deny removes servers and wins over allow (and over no allow list)', () => {
+    expect(Object.keys(applyServerPolicy(servers, null, new Set(['b'])))).toEqual(['a', 'c'])
+    expect(Object.keys(applyServerPolicy(servers, new Set(['a', 'b']), new Set(['b'])))).toEqual(['a'])
+  })
+})
+
+describe('managedSettingsPath', () => {
+  it('maps each platform to its ClaudeCode managed-settings.json location', () => {
+    expect(managedSettingsPath('darwin')).toBe('/Library/Application Support/ClaudeCode/managed-settings.json')
+    expect(managedSettingsPath('linux')).toBe('/etc/claude-code/managed-settings.json')
+    expect(managedSettingsPath('win32')).toBe('C:\\Program Files\\ClaudeCode\\managed-settings.json')
+  })
+})
+
+describe('mcpAllowDeny', () => {
+  const writeManaged = (settings: unknown): string => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-managed-')), 'managed-settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    return file
+  }
+
+  it('reads allow/deny from managed settings as {serverName} objects', () => {
+    const file = writeManaged({ allowedMcpServers: [{ serverName: 'github' }], deniedMcpServers: [{ serverName: 'filesystem' }] })
+    const { allowed, denied } = mcpAllowDeny(file)
+    expect([...(allowed ?? [])]).toEqual(['github'])
+    expect([...denied]).toEqual(['filesystem'])
+  })
+
+  it('tolerates bare-string entries and drops malformed ones', () => {
+    const file = writeManaged({ allowedMcpServers: ['a', { serverName: 'b' }, { name: 'c' }, 5] })
+    expect([...(mcpAllowDeny(file).allowed ?? [])]).toEqual(['a', 'b'])
+  })
+
+  it('returns a null allow list when unset (no restriction) and empty deny', () => {
+    const file = writeManaged({})
+    const { allowed, denied } = mcpAllowDeny(file)
+    expect(allowed).toBeNull()
+    expect(denied.size).toBe(0)
+  })
+
+  it('returns an empty (lockdown) allow set for an explicit empty array', () => {
+    const file = writeManaged({ allowedMcpServers: [] })
+    const { allowed } = mcpAllowDeny(file)
+    expect(allowed).not.toBeNull()
+    expect(allowed?.size).toBe(0)
+  })
+
+  it('treats a missing managed file as no policy', () => {
+    const { allowed, denied } = mcpAllowDeny(join(tmpdir(), 'no-such-managed-settings.json'))
+    expect(allowed).toBeNull()
+    expect(denied.size).toBe(0)
+  })
+})
 
 describe('loadUserScope', () => {
   it('merges local-scope per-project servers over the global user servers', () => {
@@ -75,6 +152,16 @@ describe('mcp adapter helpers', () => {
   it('separates always-loaded user config from trust-gated project config', () => {
     expect(userConfigPaths('/home')).toEqual(['/home/.claude.json', '/home/.pi/agent/mcp.json'])
     expect(projectConfigPaths('/proj')).toEqual(['/proj/.mcp.json', '/proj/.pi/mcp.json'])
+  })
+
+  it('finds project mcp config at the repository root from a subdirectory session', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'mcp-repo-'))
+    mkdirSync(join(repo, '.git'))
+    writeFileSync(join(repo, '.mcp.json'), '{}')
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+    // .pi/mcp.json exists nowhere, so its entry stays anchored at the session cwd.
+    expect(projectConfigPaths(sub)).toEqual([join(repo, '.mcp.json'), join(sub, '.pi', 'mcp.json')])
   })
 
   it('lets pi config override a Claude server of the same name', () => {

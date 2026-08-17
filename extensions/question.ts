@@ -35,7 +35,7 @@ const OptionSchema = Type.Object({
 const SingleQuestion = Type.Object({
   question: Type.String({ description: 'The question to ask the user' }),
   header: Type.Optional(Type.String({ description: 'Short label for the question, shown above it, kept to 12 characters' })),
-  options: Type.Array(OptionSchema, { description: 'Options for the user to choose from (1-4)', minItems: 1, maxItems: 4 }),
+  options: Type.Array(OptionSchema, { description: 'Options for the user to choose from (2-4)', minItems: 2, maxItems: 4 }),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Allow selecting several options (space toggles, enter confirms)' })),
 })
 
@@ -44,7 +44,7 @@ const SingleQuestion = Type.Object({
  * shapes gave smaller models nothing to follow, and they produced neither. */
 export const QuestionParams = Type.Object({
   question: Type.Optional(Type.String({ description: 'The question to ask. Required, unless asking several via questions.' })),
-  options: Type.Optional(Type.Array(OptionSchema, { description: 'The 1-4 choices for this question, each {label, description?}. Required with question.', minItems: 1, maxItems: 4 })),
+  options: Type.Optional(Type.Array(OptionSchema, { description: 'The 2-4 choices for this question, each {label, description?}. Required with question.', minItems: 2, maxItems: 4 })),
   header: Type.Optional(Type.String({ description: 'Optional short label shown above the question, kept to 12 characters' })),
   multiSelect: Type.Optional(Type.Boolean({ description: 'Optional: allow selecting several options (space toggles, enter confirms)' })),
   questions: Type.Optional(Type.Array(SingleQuestion, { description: 'Only to ask 2-4 questions in one call: each entry takes the same fields as above. Leave unset for a single question.', minItems: 1, maxItems: 4 })),

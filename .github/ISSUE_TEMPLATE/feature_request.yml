@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest a Claude Code behavior or improvement for pi-code
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is the problem or missing behavior?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: input
+    id: docs
+    attributes:
+      label: Claude Code docs reference
+      description: If this mirrors a Claude Code feature, link the relevant page at code.claude.com/docs.

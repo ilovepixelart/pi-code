@@ -3,6 +3,8 @@
  * Extracted for testability.
  */
 
+import { hasSubstitution, splitSegments } from '../internal/shell-split.js'
+
 // Destructive commands blocked in plan mode
 const DESTRUCTIVE_PATTERNS = [
   /\brm\b/i,
@@ -90,62 +92,6 @@ const SAFE_PATTERNS = [
   /^\s*eza\b/,
 ]
 
-// The shell can hide an arbitrary command inside any of these, so they are refused
-// outright rather than parsed.
-const SUBSTITUTION = /\$\(|`|<\(|>\(/
-
-/**
- * Split on the shell separators Claude Code documents (`&&`, `||`, `;`, `|`, `|&`, `&`,
- * newline) so every subcommand is checked on its own, ignoring separators inside quotes:
- * `grep 'a|b'` is one read, not a pipe. Returns nothing on an unbalanced quote, which
- * fails the caller closed rather than guessing at the intended split.
- *
- * A shell AST would be exact; this is the honest approximation for a quoting-only concern.
- */
-/** Length of the separator at `i`, or 0 when there is none. */
-function separatorAt(command: string, i: number): number {
-  const pair = command.slice(i, i + 2)
-  if (pair === '&&' || pair === '||' || pair === '|&') return 2
-  const ch = command[i]
-  return ch === ';' || ch === '|' || ch === '&' || ch === '\n' ? 1 : 0
-}
-
-function splitSegments(command: string): string[] {
-  const segments: string[] = []
-  let current = ''
-  let quote: "'" | '"' | undefined
-
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
-    if (quote !== undefined) {
-      current += ch
-      if (ch === quote) quote = undefined
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      current += ch
-      continue
-    }
-    if (ch === '\\' && i + 1 < command.length) {
-      current += ch + command[++i]
-      continue
-    }
-    const separator = separatorAt(command, i)
-    if (separator > 0) {
-      segments.push(current)
-      current = ''
-      i += separator - 1
-      continue
-    }
-    current += ch
-  }
-
-  if (quote !== undefined) return []
-  segments.push(current)
-  return segments.map((segment) => segment.trim()).filter(Boolean)
-}
-
 // find is allowlisted for traversal only; these actions run commands or delete.
 const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf)\b/
 
@@ -163,7 +109,7 @@ function isSafeSegment(segment: string): boolean {
  * containing a determined one. Only OS-level isolation would be a boundary.
  */
 export function isSafeCommand(command: string): boolean {
-  if (SUBSTITUTION.test(command)) return false
+  if (hasSubstitution(command)) return false
   const segments = splitSegments(command)
   return segments.length > 0 && segments.every(isSafeSegment)
 }

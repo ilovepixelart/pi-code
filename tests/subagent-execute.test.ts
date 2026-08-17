@@ -4,9 +4,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
+import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, buildHookAgent, withMemoryTools } from '../extensions/subagent/index.ts'
 
-import subagentExtension from '../extensions/subagent/index.ts'
+// The agent-memory tests read settings and stores under the home directory; point
+// homedir at a throwaway dir so the developer's real ~/.claude cannot influence them.
+const osHoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => osHoisted.home || actual.homedir() }
+})
 
 const spawnMock = vi.hoisted(() => vi.fn())
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
@@ -148,7 +156,7 @@ const getExecute = (): Execute => {
   return execute
 }
 
-const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; disallowedTools: string[]; effort: string; filePath: string }> = {}) => ({
+const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; disallowedTools: string[]; effort: string; filePath: string; memory: 'user' | 'project' | 'local' }> = {}) => ({
   name: 'scout',
   description: 'a scout',
   systemPrompt: '',
@@ -208,13 +216,60 @@ beforeEach(() => {
 
 // ---------------------------------------------------------------------------
 
+describe('agent hook runner', () => {
+  afterEach(() => setAgentRunner(undefined))
+
+  it('builds a read-only inspection agent, appending a hook systemPrompt', () => {
+    const plain = buildHookAgent({})
+    expect(plain.tools).toEqual(['read', 'grep', 'find'])
+    expect(plain.systemPrompt).toBe(AGENT_HOOK_SYSTEM)
+    expect(plain.model).toBeUndefined()
+
+    const custom = buildHookAgent({ model: 'fast-1', systemPrompt: 'extra rules' })
+    expect(custom.model).toBe('fast-1')
+    expect(custom.systemPrompt).toBe(`${AGENT_HOOK_SYSTEM}\n\nextra rules`)
+  })
+
+  it('registers a runner on session_start that spawns a restricted subagent and returns its text', async () => {
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
+    expect(hasAgentRunner()).toBe(true)
+
+    const decision = '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"reads /etc"}}'
+    script('inspect the command', { stdout: [say(decision)], exitCode: 0 })
+
+    const out = await runAgent({ prompt: 'inspect the command', model: 'fast-1' })
+    expect(out).toBe(decision)
+    const args = piArgs(spawnCalls[0])
+    expect(args).toContain('--tools')
+    expect(args[args.indexOf('--tools') + 1]).toBe('read,grep,find')
+    expect(args).toContain('--model')
+    expect(args[args.indexOf('--model') + 1]).toBe('fast-1')
+    // The child's system prompt is the JSON-decision instruction.
+    expect(spawnCalls[0].promptFile?.content).toContain('permissionDecision')
+  })
+
+  it('refuses to run inside a subagent session', async () => {
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+    const saved = process.env.PI_CODE_SUBAGENT
+    process.env.PI_CODE_SUBAGENT = '1'
+    try {
+      await expect(runAgent({ prompt: 'x' })).rejects.toThrow(/subagent/i)
+    } finally {
+      if (saved === undefined) delete process.env.PI_CODE_SUBAGENT
+      else process.env.PI_CODE_SUBAGENT = saved
+    }
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('execute dispatch', () => {
   it('returns the background status listing and runs nothing when status is set', async () => {
     backgroundStatusTextMock.mockReturnValue('bg-1 scout: running - audit')
     const result = await execute('c1', { status: true, agent: 'scout', task: 'ignored' }, undefined, undefined, trustedCtx)
 
     expect(text(result)).toBe('bg-1 scout: running - audit')
-    expect(result.details).toMatchObject({ mode: 'single', agentScope: 'user', projectAgentsDir: null, results: [] })
+    // trustedCtx has no Claude-shaped config, so the default scope resolves to both.
+    expect(result.details).toMatchObject({ mode: 'single', agentScope: 'both', projectAgentsDir: null, results: [] })
     expect(spawnMock).not.toHaveBeenCalled()
   })
 
@@ -243,10 +298,27 @@ describe('execute dispatch', () => {
   })
 
   it('passes the requested agent scope to discovery and echoes it back in the details', async () => {
-    const result = await execute('c1', { status: true, agentScope: 'both' }, undefined, undefined, trustedCtx)
+    const result = await execute('c1', { status: true, agentScope: 'user' }, undefined, undefined, trustedCtx)
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'user')
+    expect(result.details).toMatchObject({ agentScope: 'user' })
+  })
+
+  it('defaults the scope to both for an approved project, so every listed agent resolves', async () => {
+    // The roster advertises project agents under the same condition; a default call
+    // must be able to reach what the roster lists, as Claude's Task does.
+    const result = await execute('c1', { status: true }, undefined, undefined, trustedCtx)
 
     expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'both')
     expect(result.details).toMatchObject({ agentScope: 'both' })
+  })
+
+  it('defaults the scope to user when the project is not approved', async () => {
+    const ctx = { ...trustedCtx, isProjectTrusted: () => false }
+    const result = await execute('c1', { status: true }, undefined, undefined, ctx)
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'user')
+    expect(result.details).toMatchObject({ agentScope: 'user' })
   })
 })
 
@@ -1206,6 +1278,183 @@ describe('parallel mode', () => {
     await execute('c1', { tasks: [{ agent: 'scout', task: 'alpha', cwd: '/pkg/a' }] }, undefined, undefined, trustedCtx)
 
     expect(spawnCalls[0].options.cwd).toBe('/pkg/a')
+  })
+})
+
+describe('agent memory', () => {
+  let home: string
+  let savedDisable: string | undefined
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(join(tmpdir(), 'sa-home-'))
+    osHoisted.home = home
+    savedDisable = process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+  })
+  afterEach(() => {
+    osHoisted.home = ''
+    if (savedDisable === undefined) delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    else process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = savedDisable
+  })
+
+  const writeStore = (dir: string, content: string) => {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(join(dir, 'MEMORY.md'), content)
+  }
+
+  it('resolves the store directory per scope, keyed on the project root', () => {
+    expect(agentMemoryDir('user', 'scout', '/repo', '/home/u')).toBe(join('/home/u', '.claude', 'agent-memory', 'scout'))
+
+    const repo = fs.mkdtempSync(join(tmpdir(), 'sa-repo-'))
+    fs.mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    fs.mkdirSync(sub, { recursive: true })
+    expect(agentMemoryDir('project', 'scout', sub, '/home/u')).toBe(join(repo, '.claude', 'agent-memory', 'scout'))
+    expect(agentMemoryDir('local', 'scout', sub, '/home/u')).toBe(join(repo, '.claude', 'agent-memory-local', 'scout'))
+    // Without a project marker the cwd itself is the root.
+    expect(agentMemoryDir('project', 'scout', '/nowhere', '/home/u')).toBe(join('/nowhere', '.claude', 'agent-memory', 'scout'))
+  })
+
+  it('sanitizes a repo-controlled agent name before it becomes a path segment', () => {
+    expect(agentMemoryDir('user', '../../etc/passwd', '/repo', '/home/u')).toBe(join('/home/u', '.claude', 'agent-memory', '.._.._etc_passwd'))
+    // A name of only dots survives the character filter but would still traverse.
+    expect(agentMemoryDir('user', '..', '/repo', '/home/u')).toBe(join('/home/u', '.claude', 'agent-memory', '_'))
+  })
+
+  it('appends the memory section with the stored MEMORY.md to the child prompt', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user' })], projectAgentsDir: null })
+    const dir = agentMemoryDir('user', 'scout', '/repo', home)
+    writeStore(dir, '# Scout memory\n- prefers ripgrep\n')
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const content = spawnCalls[0].promptFile?.content as string
+    expect(content.startsWith('Be terse.')).toBe(true)
+    expect(content).toContain('## Agent memory')
+    expect(content).toContain(dir)
+    expect(content).toContain('- prefers ripgrep')
+  })
+
+  it('caps the MEMORY.md carried into the section at the startup bound', () => {
+    const long = ['# idx', ...Array.from({ length: 300 }, (_, i) => `- [m${i}](m${i}.md): entry ${i}`)].join('\n')
+    const section = agentMemorySection('/mem/scout', long)
+    expect(section).toContain('- [m0](m0.md): entry 0')
+    expect(section).not.toContain('- [m250](m250.md)')
+    expect(section).toContain('not shown')
+  })
+
+  it('tells a memory-enabled child where to start when no MEMORY.md exists yet', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const content = spawnCalls[0].promptFile?.content as string
+    expect(content).toContain('## Agent memory')
+    expect(content).toContain('does not exist yet')
+  })
+
+  it('adds nothing when auto memory is disabled by the env kill switch', async () => {
+    process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user', tools: ['grep'] })], projectAgentsDir: null })
+    writeStore(agentMemoryDir('user', 'scout', '/repo', home), '- kept out\n')
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls[0].promptFile?.content).toBe('Be terse.')
+    const args = piArgs(spawnCalls[0])
+    expect(args[args.indexOf('--tools') + 1]).toBe('grep')
+  })
+
+  it('adds nothing when user settings disable auto memory', async () => {
+    fs.mkdirSync(join(home, '.claude'), { recursive: true })
+    fs.writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ autoMemoryEnabled: false }))
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls[0].promptFile?.content).toBe('Be terse.')
+  })
+
+  it('widens a restricted allowlist with read, write, edit so the child can manage its store', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ memory: 'user', tools: ['grep', 'read'] })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const args = piArgs(spawnCalls[0])
+    expect(args[args.indexOf('--tools') + 1]).toBe('grep,read,write,edit')
+  })
+
+  it('leaves an unrestricted memory-enabled agent without a --tools flag', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ memory: 'user' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(piArgs(spawnCalls[0])).not.toContain('--tools')
+  })
+
+  it('withMemoryTools leaves no allowlist alone and never duplicates a tool', () => {
+    expect(withMemoryTools(undefined)).toBeUndefined()
+    expect(withMemoryTools(['bash', 'edit'])).toEqual(['bash', 'edit', 'read', 'write'])
+  })
+
+  it('skips a project-scoped store when the project is not approved', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'project' })], projectAgentsDir: null })
+    const ctx = { ...trustedCtx, isProjectTrusted: () => false }
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, ctx)
+
+    expect(spawnCalls[0].promptFile?.content).toBe('Be terse.')
+  })
+
+  it('anchors project memory at the session repo, never a model-supplied cwd', async () => {
+    // The store must come from the approved session repo, not an arbitrary cwd the
+    // model passes; otherwise an unapproved clone's agent-memory injects as trusted.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'project' })], projectAgentsDir: null })
+    const sessionRepo = fs.mkdtempSync(join(tmpdir(), 'sa-session-'))
+    fs.mkdirSync(join(sessionRepo, '.git'))
+    const otherRepo = fs.mkdtempSync(join(tmpdir(), 'sa-other-'))
+    fs.mkdirSync(join(otherRepo, '.git'))
+    writeStore(agentMemoryDir('project', 'scout', sessionRepo, home), '- session store\n')
+    writeStore(agentMemoryDir('project', 'scout', otherRepo, home), '- DECOY from an unapproved cwd\n')
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect', cwd: otherRepo }, undefined, undefined, { ...trustedCtx, cwd: sessionRepo })
+
+    const content = spawnCalls[0].promptFile?.content as string
+    expect(content).toContain('- session store')
+    expect(content).not.toContain('DECOY')
+  })
+
+  it('keeps a user-scoped store even when the project is not approved', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user' })], projectAgentsDir: null })
+    writeStore(agentMemoryDir('user', 'scout', '/repo', home), '- crosses projects\n')
+    const ctx = { ...trustedCtx, isProjectTrusted: () => false }
+    script('inspect', { stdout: [say('ok')] })
+
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, ctx)
+
+    expect(spawnCalls[0].promptFile?.content).toContain('- crosses projects')
+  })
+
+  it('carries the memory section and widened tools into a background run', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'You audit.', memory: 'user', tools: ['grep'] })], projectAgentsDir: null })
+    writeStore(agentMemoryDir('user', 'scout', '/repo', home), '- audit patterns\n')
+
+    await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+
+    const invocation = startBackgroundRunMock.mock.calls[0][2]
+    expect(invocation.args[invocation.args.indexOf('--tools') + 1]).toBe('grep,read,write,edit')
+    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    const content = fs.readFileSync(promptPath, 'utf-8')
+    expect(content).toContain('## Agent memory')
+    expect(content).toContain('- audit patterns')
   })
 })
 

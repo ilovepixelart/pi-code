@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { decodeEntities, htmlToText, isPrivateAddress, parseSearchResults, resolveResultUrl, stripTags } from '../extensions/web.ts'
+import { htmlToMarkdown } from '../extensions/internal/html-markdown.ts'
+import { decodeEntities, filterByDomain, isPrivateAddress, parseSearchResults, resolveResultUrl, stripTags } from '../extensions/web.ts'
 
 const FIXTURE = `
 <div class="result">
@@ -29,6 +30,19 @@ describe('web helpers', () => {
 
   it('respects the result limit', () => {
     expect(parseSearchResults(FIXTURE, 1)).toHaveLength(1)
+  })
+
+  it('filters search results by allowed and blocked domains, subdomains included', () => {
+    const rs = [
+      { title: 'a', url: 'https://pi.dev/docs', snippet: '' },
+      { title: 'b', url: 'https://api.pi.dev/x', snippet: '' },
+      { title: 'c', url: 'https://example.com/y', snippet: '' },
+    ]
+    expect(filterByDomain(rs, ['pi.dev'], undefined).map((r) => r.title)).toEqual(['a', 'b'])
+    expect(filterByDomain(rs, undefined, ['pi.dev']).map((r) => r.title)).toEqual(['c'])
+    // allowed wins when both are given, matching Claude's mutually-exclusive rule.
+    expect(filterByDomain(rs, ['example.com'], ['example.com']).map((r) => r.title)).toEqual(['c'])
+    expect(filterByDomain(rs, undefined, undefined)).toEqual(rs)
   })
 
   it('keeps snippets aligned when an ad result is skipped', () => {
@@ -76,11 +90,41 @@ describe('web helpers', () => {
     }
   })
 
-  it('converts html to readable text with structure-preserving newlines', () => {
-    const text = htmlToText('<html><script>evil()</script><body><h1>Title</h1><p>One</p><p>Two</p></body></html>')
-    expect(text).toContain('Title')
+  it('converts html to markdown, dropping script and style bodies', () => {
+    const text = htmlToMarkdown('<html><script>evil()</script><body><h1>Title</h1><p>One</p><p>Two</p></body></html>')
+    expect(text).toContain('# Title')
     expect(text).toContain('One')
     expect(text).not.toContain('evil')
     expect(text.split('\n').length).toBeGreaterThan(1)
+  })
+})
+
+describe('htmlToMarkdown', () => {
+  it('converts headings, links, emphasis and lists', () => {
+    const md = htmlToMarkdown('<h2>Docs</h2><p>See <a href="https://x.dev/a">the guide</a> for <strong>bold</strong> and <em>slanted</em>.</p><ul><li>one</li><li>two</li></ul>')
+    expect(md).toContain('## Docs')
+    expect(md).toContain('[the guide](https://x.dev/a)')
+    expect(md).toContain('**bold**')
+    expect(md).toContain('*slanted*')
+    expect(md).toContain('- one')
+    expect(md).toContain('- two')
+  })
+
+  it('converts pre blocks to fences and inline code to backticks', () => {
+    const md = htmlToMarkdown('<p>Run <code>npm test</code>:</p><pre><code>line one\nline two</code></pre>')
+    expect(md).toContain('`npm test`')
+    expect(md).toContain('```\nline one\nline two\n```')
+  })
+
+  it('decodes named and numeric entities', () => {
+    expect(htmlToMarkdown('<p>a &amp; b &#8212; c &#x2192; d</p>')).toBe('a & b — c → d')
+  })
+
+  it('drops comments and keeps a plain anchor without an http href as text', () => {
+    const md = htmlToMarkdown('<!-- hidden --><p><a href="javascript:x()">click</a> and <a href="#top">jump</a></p>')
+    expect(md).not.toContain('hidden')
+    expect(md).toContain('click')
+    expect(md).not.toContain('javascript:')
+    expect(md).not.toContain('(#top)')
   })
 })

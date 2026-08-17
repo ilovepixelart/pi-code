@@ -21,6 +21,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
+import { ROOT_MARKERS } from './project-root.js'
+
 /** Project files pi-code acts on that pi's own trust check does not look for. */
 const CLAUDE_SHAPED = [
   path.join('.claude', 'settings.json'),
@@ -36,9 +38,6 @@ const CLAUDE_SHAPED = [
   path.join('.pi', 'mcp.json'),
   path.join('.pi', 'agents'),
 ]
-
-/** Markers that end the upward walk, matching the subagent's own discovery bound. */
-const ROOT_MARKERS = ['.git', 'package.json']
 
 /** Claude-shaped config anywhere between `cwd` and the repository root.
  *

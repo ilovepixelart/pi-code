@@ -12,6 +12,8 @@ import type { LookupFunction } from 'node:net'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
+import { htmlToMarkdown } from './internal/html-markdown.js'
+import { completeText } from './internal/model-complete.js'
 import { capForContext } from './internal/output-guard.js'
 import { httpFetch } from './internal/web-transport.js'
 
@@ -57,6 +59,26 @@ export function resolveResultUrl(href: string): string {
   return href.startsWith('//') ? `https:${href}` : href
 }
 
+/** Keep results whose host matches an allowed domain (or is not blocked). A domain
+ * matches the host itself or any subdomain of it, as Claude's domain scoping does. */
+export function filterByDomain(results: SearchResult[], allowed: string[] | undefined, blocked: string[] | undefined): SearchResult[] {
+  const hostOf = (url: string): string => {
+    try {
+      return new URL(url).hostname.toLowerCase()
+    } catch {
+      return ''
+    }
+  }
+  const matches = (host: string, domain: string): boolean => {
+    const d = domain.toLowerCase().replace(/^\.+/, '')
+    return host === d || host.endsWith(`.${d}`)
+  }
+  let out = results
+  if (allowed && allowed.length > 0) out = out.filter((r) => allowed.some((d) => matches(hostOf(r.url), d)))
+  else if (blocked && blocked.length > 0) out = out.filter((r) => !blocked.some((d) => matches(hostOf(r.url), d)))
+  return out
+}
+
 export function parseSearchResults(html: string, limit: number): SearchResult[] {
   const results: SearchResult[] = []
   const anchorPattern = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
@@ -76,15 +98,8 @@ export function parseSearchResults(html: string, limit: number): SearchResult[] 
   return results
 }
 
-export function htmlToText(html: string): string {
-  const withoutBlocks = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/tr)[^>]*>/gi, '\n')
-  const text = decodeEntities(withoutBlocks.replace(/<[^<>]*>/g, ' '))
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s+/g, '\n')
-    .trim()
+/** Cap a converted body at the fetch budget, naming what was dropped. */
+function capFetchChars(text: string): string {
   return text.length > MAX_FETCH_CHARS ? `${text.slice(0, MAX_FETCH_CHARS)}\n[truncated ${text.length - MAX_FETCH_CHARS} chars]` : text
 }
 
@@ -214,7 +229,12 @@ async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text:
   throw new Error(`too many redirects for ${rawUrl}`)
 }
 
+/** Claude documents a 15-minute per-URL cache for WebFetch. */
+const FETCH_CACHE_TTL_MS = 15 * 60 * 1000
+const FETCH_CACHE_MAX_ENTRIES = 50
+
 export default function webExtension(pi: ExtensionAPI) {
+  const fetchCache = new Map<string, { expires: number; body: string }>()
   pi.registerTool({
     name: 'web_search',
     label: 'Web search',
@@ -222,10 +242,14 @@ export default function webExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: 'Search query' }),
       count: Type.Optional(Type.Number({ description: 'Max results (default 5)' })),
+      allowed_domains: Type.Optional(Type.Array(Type.String(), { description: 'Only include results from these domains' })),
+      blocked_domains: Type.Optional(Type.Array(Type.String(), { description: 'Exclude results from these domains' })),
     }),
     async execute(_id, params) {
+      // Claude documents allowed/blocked domains as mutually exclusive; allowed wins.
       const { text } = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query))
-      const results = parseSearchResults(text, Math.min(params.count ?? 5, 10))
+      const limit = Math.min(params.count ?? 5, 10)
+      const results = filterByDomain(parseSearchResults(text, 10), params.allowed_domains, params.blocked_domains).slice(0, limit)
       if (results.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No results found.' }], details: {} }
       }
@@ -237,14 +261,55 @@ export default function webExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'web_fetch',
     label: 'Web fetch',
-    description: 'Fetch a URL and return its content as readable text (HTML is stripped).',
-    parameters: Type.Object({ url: Type.String({ description: 'Absolute http(s) URL to fetch' }) }),
-    async execute(_id, params) {
+    description: 'Fetch a URL and return its content converted to markdown. Pass `prompt` to get a focused answer extracted from the page instead of the raw content. Responses are cached for 15 minutes per URL.',
+    parameters: Type.Object({
+      url: Type.String({ description: 'Absolute http(s) URL to fetch' }),
+      prompt: Type.Optional(Type.String({ description: 'What to extract or answer from the page; returns the model’s answer instead of the raw markdown' })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
       if (!/^https?:\/\//.test(params.url)) {
         return { content: [{ type: 'text' as const, text: 'Only http(s) URLs are supported.' }], details: {} }
       }
-      const { text, contentType } = await fetchText(params.url)
-      const body = contentType.includes('html') ? htmlToText(text) : text.slice(0, MAX_FETCH_CHARS)
+      const now = Date.now()
+      // The cache holds the raw markdown, so a second fetch with a different prompt
+      // still reuses it: retrieval and the optional prompt step are separate.
+      const cached = fetchCache.get(params.url)
+      let body: string
+      if (cached && cached.expires > now) {
+        body = cached.body
+      } else {
+        const { text, contentType } = await fetchText(params.url)
+        body = capFetchChars(contentType.includes('html') ? htmlToMarkdown(text) : text)
+        // Only a delivered body is cached; a thrown fetch must retry next call.
+        // Drop expired entries first, then evict the oldest live one if still full;
+        // deleting before set keeps Map insertion order a true recency order, so a
+        // refreshed URL moves to the newest slot instead of keeping its stale one.
+        fetchCache.delete(params.url)
+        for (const [url, entry] of fetchCache) {
+          if (entry.expires <= now) fetchCache.delete(url)
+        }
+        if (fetchCache.size >= FETCH_CACHE_MAX_ENTRIES) {
+          const oldest = fetchCache.keys().next().value
+          if (oldest !== undefined) fetchCache.delete(oldest)
+        }
+        fetchCache.set(params.url, { expires: now + FETCH_CACHE_TTL_MS, body })
+      }
+
+      // Claude's WebFetch runs the prompt over the page with a fast model and returns
+      // that answer, not the raw page. Best-effort: any failure (no model, provider
+      // error) falls back to the markdown, so web_fetch always returns something.
+      if (params.prompt && ctx?.model) {
+        try {
+          const answer = await completeText(ctx.model, `${params.prompt}\n\nAnswer using only the page content below, fetched from ${params.url}:\n\n${body}`, {
+            system: 'You extract and answer questions from a web page. Answer only from the provided content, concisely. If the content does not contain the answer, say so.',
+            maxTokens: 1024,
+            signal,
+          })
+          if (answer) return { content: [{ type: 'text' as const, text: answer }], details: {} }
+        } catch {
+          // fall through to the raw markdown
+        }
+      }
       // The char cap alone admits thousands of short lines; pi's tool-output budget
       // bounds lines too, which the shared guard enforces.
       return { content: [{ type: 'text' as const, text: capForContext(body) || '(empty response)' }], details: {} }

@@ -98,7 +98,8 @@ describe('question schema caps', () => {
   it("bounds options and header to Claude's AskUserQuestion limits", () => {
     const schema = QuestionParams as unknown as { properties: { options: { minItems: number; maxItems: number } } }
     expect(schema.properties.options.maxItems).toBe(4)
-    expect(schema.properties.options.minItems).toBe(1)
+    // Claude requires 2-4 options: a single-option question is not a question.
+    expect(schema.properties.options.minItems).toBe(2)
     // The header cap is a display detail, so it truncates rather than failing the
     // call: a rejected call costs a turn while the model recovers.
     expect(shortHeader('a very long header indeed')).toBe('a very long ')

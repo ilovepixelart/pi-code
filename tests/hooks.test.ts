@@ -1,18 +1,233 @@
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import * as http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { describe, expect, it } from 'vitest'
-
-import { type HookRunner, hookFiles, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse } from '../extensions/hooks.ts'
+import { type HookRunner, hookFiles, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
+import { setAgentRunner } from '../extensions/internal/agent-run.ts'
+import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
+import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'hooks-'))
+
+const fakeModel = {} as never
+
+describe('runPromptHook', () => {
+  afterEach(() => setCompleteBackend(null))
+
+  it('substitutes $ARGUMENTS with the event JSON and returns the model decision as stdout', async () => {
+    let sentPrompt = ''
+    setCompleteBackend(async (_m, context) => {
+      sentPrompt = String(context.messages[0]?.content ?? '')
+      return { role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"blocked by policy"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 } as never
+    })
+    const result = await runPromptHook({ type: 'prompt', command: '', prompt: 'Decide about $ARGUMENTS' }, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, fakeModel, 30_000)
+    expect(result).toMatchObject({ code: 0, timedOut: false })
+    // The decision flows through the same interpreter as a command hook's stdout.
+    expect(interpretHookResult(result.code, result.stdout, result.stderr)).toEqual({ block: true, reason: 'blocked by policy' })
+    expect(sentPrompt).toContain('"tool_name":"bash"')
+    expect(sentPrompt).toContain('Decide about')
+  })
+
+  it('is non-blocking when no model is available', async () => {
+    const result = await runPromptHook({ type: 'prompt', command: '', prompt: 'x' }, {}, undefined, 30_000)
+    expect(result.timedOut).toBe(false)
+    expect(result.code).not.toBe(0)
+    expect(result.code).not.toBe(2)
+  })
+
+  it('is non-blocking when the completion errors (not a timeout)', async () => {
+    setCompleteBackend(async () => {
+      throw new Error('provider down')
+    })
+    const result = await runPromptHook({ type: 'prompt', command: '', prompt: 'x' }, {}, fakeModel, 30_000)
+    expect(result.timedOut).toBe(false)
+    expect(result.code).not.toBe(0)
+    expect(result.code).not.toBe(2)
+  })
+
+  it('substitutes $ARGUMENTS literally, not interpreting $-sequences in the payload', async () => {
+    // JSON.stringify used as a string replacement would treat `$$` in the payload as
+    // the `$` escape; a shell command like `echo $$` is a common trigger.
+    let sentPrompt = ''
+    setCompleteBackend(async (_m, context) => {
+      sentPrompt = String(context.messages[0]?.content ?? '')
+      return { role: 'assistant', content: [{ type: 'text', text: '{}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 } as never
+    })
+    await runPromptHook({ type: 'prompt', command: '', prompt: 'Check $ARGUMENTS now' }, { hook_event_name: 'PreToolUse', tool_input: { command: "a $$ b $& c $' d" } }, fakeModel, 30_000)
+    expect(sentPrompt).toContain("a $$ b $& c $' d")
+  })
+
+  it('reports a timeout so PreToolUse fails closed when the model is aborted', async () => {
+    setCompleteBackend(async (_m, _c, options) => {
+      // Simulate the abort signal firing: reject as an aborted request would.
+      return await new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+      })
+    })
+    const result = await runPromptHook({ type: 'prompt', command: '', prompt: 'x' }, {}, fakeModel, 30)
+    expect(result.timedOut).toBe(true)
+  })
+})
+
+describe('lastAssistantText', () => {
+  it('returns the text of the last assistant message, joining its text parts', () => {
+    const messages = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'text', text: 'first' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'x' },
+          { type: 'text', text: 'done: ' },
+          { type: 'text', text: 'ok' },
+        ],
+      },
+      { role: 'tool_result', content: 'r' },
+    ]
+    expect(lastAssistantText(messages as never)).toBe('done: ok')
+  })
+
+  it('handles a plain string assistant content and returns empty when none', () => {
+    expect(lastAssistantText([{ role: 'assistant', content: 'plain' }] as never)).toBe('plain')
+    expect(lastAssistantText([{ role: 'user', content: 'hi' }] as never)).toBe('')
+    expect(lastAssistantText([] as never)).toBe('')
+  })
+})
+
+describe('runMcpToolHook', () => {
+  afterEach(() => setMcpToolCaller(undefined))
+
+  it('calls the named server tool and returns its text as stdout', async () => {
+    let seen: unknown
+    setMcpToolCaller(async (server, tool, input) => {
+      seen = { server, tool, input }
+      return { text: 'server says ok', isError: false }
+    })
+    const result = await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint', input: { strict: true } }, { hook_event_name: 'PreToolUse' }, 5000)
+    expect(result).toMatchObject({ code: 0, stdout: 'server says ok', timedOut: false })
+    expect(seen).toEqual({ server: 'gh', tool: 'lint', input: { strict: true } })
+  })
+
+  it('passes the event payload as input when the hook declares none', async () => {
+    let seenInput: unknown
+    setMcpToolCaller(async (_s, _t, input) => {
+      seenInput = input
+      return { text: '', isError: false }
+    })
+    await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint' }, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, 5000)
+    expect(seenInput).toMatchObject({ tool_name: 'bash' })
+  })
+
+  it('clears its deadline timer once the call settles instead of pinning the event loop', async () => {
+    // The unclosed 60s deadline timer kept a one-shot headless run alive for the
+    // full timeout after the call had long resolved.
+    vi.useFakeTimers()
+    try {
+      setMcpToolCaller(async () => ({ text: 'ok', isError: false }))
+      await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint' }, {}, 60_000)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('is non-blocking on a server error, a missing caller, or missing fields', async () => {
+    setMcpToolCaller(async () => ({ text: 'boom', isError: true }))
+    const errored = await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint' }, {}, 5000)
+    expect(errored).toMatchObject({ code: 1, timedOut: false })
+    setMcpToolCaller(undefined)
+    const noCaller = await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint' }, {}, 5000)
+    expect(noCaller.timedOut).toBe(false)
+    expect(noCaller.code).not.toBe(0)
+    const noFields = await runMcpToolHook({ type: 'mcp_tool', command: '' }, {}, 5000)
+    expect(noFields.code).not.toBe(0)
+  })
+})
+
+describe('runAgentHook', () => {
+  afterEach(() => setAgentRunner(undefined))
+
+  it('substitutes $ARGUMENTS, passes model/systemPrompt, and returns the decision as stdout', async () => {
+    let seen: unknown
+    setAgentRunner(async (req) => {
+      seen = req
+      return '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"reads /etc"}}'
+    })
+    const result = await runAgentHook({ type: 'agent', command: '', prompt: 'Inspect $ARGUMENTS', model: 'fast-1', systemPrompt: 'be strict' }, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, 60_000, undefined)
+    expect(result).toMatchObject({ code: 0, timedOut: false })
+    expect(interpretHookResult(result.code, result.stdout, result.stderr)).toEqual({ block: true, reason: 'reads /etc' })
+    expect(seen).toMatchObject({ model: 'fast-1', systemPrompt: 'be strict' })
+    expect((seen as { prompt: string }).prompt).toContain('"tool_name":"bash"')
+    expect((seen as { prompt: string }).prompt).toContain('Inspect ')
+  })
+
+  it('falls back to the session model id when the hook names none', async () => {
+    let seenModel: unknown
+    setAgentRunner(async (req) => {
+      seenModel = req.model
+      return ''
+    })
+    await runAgentHook({ type: 'agent', command: '', prompt: 'x' }, {}, 60_000, 'session-model')
+    expect(seenModel).toBe('session-model')
+  })
+
+  it('is non-blocking when no runner is registered or the run errors', async () => {
+    const noRunner = await runAgentHook({ type: 'agent', command: '', prompt: 'x' }, {}, 60_000, undefined)
+    expect(noRunner.timedOut).toBe(false)
+    expect(noRunner.code).not.toBe(0)
+    expect(noRunner.code).not.toBe(2)
+
+    setAgentRunner(async () => {
+      throw new Error('subagent crashed')
+    })
+    const errored = await runAgentHook({ type: 'agent', command: '', prompt: 'x' }, {}, 60_000, undefined)
+    expect(errored.timedOut).toBe(false)
+    expect(errored.code).not.toBe(0)
+  })
+
+  it('substitutes $ARGUMENTS literally, not interpreting $-sequences in the payload', async () => {
+    let seenPrompt = ''
+    setAgentRunner(async (req) => {
+      seenPrompt = req.prompt
+      return '{}'
+    })
+    await runAgentHook({ type: 'agent', command: '', prompt: 'Inspect $ARGUMENTS' }, { tool_input: { command: 'echo $$' } }, 60_000, undefined)
+    expect(seenPrompt).toContain('echo $$')
+  })
+
+  it('reports a timeout so PreToolUse fails closed even when the runner throws a plain abort error', async () => {
+    // The real subagent runner rejects with a generic Error('Subagent was aborted')
+    // on abort, whose name is not AbortError, so the deadline must be detected via the
+    // signal, not the error name, or a hung PreToolUse agent hook fails open.
+    setAgentRunner(
+      (req) =>
+        new Promise((_resolve, reject) => {
+          req.signal?.addEventListener('abort', () => reject(new Error('Subagent was aborted')))
+        }),
+    )
+    const result = await runAgentHook({ type: 'agent', command: '', prompt: 'x' }, {}, 20, undefined)
+    expect(result.timedOut).toBe(true)
+  })
+})
 
 describe('hookFiles', () => {
   it('always includes user settings and adds project settings only when trusted', () => {
     expect(hookFiles('/proj', '/home', false)).toEqual(['/home/.claude/settings.json'])
     expect(hookFiles('/proj', '/home', true)).toEqual(['/home/.claude/settings.json', '/proj/.claude/settings.json', '/proj/.claude/settings.local.json'])
+  })
+
+  it('finds project settings at the repository root from a subdirectory session', () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(repo, '.claude'))
+    writeFileSync(join(repo, '.claude', 'settings.json'), '{}')
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+    // settings.local.json exists nowhere, so its entry stays anchored at the session cwd.
+    expect(hookFiles(sub, '/home', true)).toEqual(['/home/.claude/settings.json', join(repo, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json')])
   })
 })
 
@@ -102,11 +317,11 @@ describe('interpretHookResult', () => {
     expect(interpretHookResult(0, JSON.stringify({ decision: 'block', reason: 'stop' }), '')).toEqual({ block: true, reason: 'stop' })
   })
 
-  it('blocks on a permissionDecision ask, since pi has no ask channel', () => {
-    // Claude's "ask" means confirm-with-user; pi's tool_call return is allow-or-block,
-    // so the safe mapping on a trust-gated path is block-with-reason, not a silent allow.
+  it('marks a permissionDecision ask so the caller can prompt, blocking as the fallback', () => {
+    // Claude's "ask" prompts the user; the tool_call handler turns ask into a
+    // ctx.ui.confirm. block:true stands in for a headless run with no dialog.
     const out = JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm first' } })
-    expect(interpretHookResult(0, out, '')).toEqual({ block: true, reason: 'confirm first' })
+    expect(interpretHookResult(0, out, '')).toEqual({ block: true, ask: true, reason: 'confirm first' })
   })
 
   it('blocks on a top-level continue false', () => {
@@ -124,6 +339,20 @@ describe('runPreToolUse', () => {
   it('blocks the tool when a matching hook returns a blocking result', async () => {
     const runner: HookRunner = async () => ({ code: 2, stdout: '', stderr: 'blocked', timedOut: false })
     expect(await runPreToolUse(config, 'bash', { command: 'x' }, runner)).toEqual({ block: true, reason: 'blocked' })
+  })
+
+  it('surfaces an ask decision so the caller can prompt', async () => {
+    const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }), stderr: '', timedOut: false })
+    expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, ask: true, reason: 'confirm' })
+  })
+
+  it('prefers a hard deny over an ask, matching Claude deny > ask precedence', async () => {
+    const two = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'a.sh' }, { command: 'b.sh' }] }] }
+    const runner: HookRunner = async (hook) =>
+      hook.command === 'a.sh'
+        ? { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'maybe' } }), stderr: '', timedOut: false }
+        : { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no' } }), stderr: '', timedOut: false }
+    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, reason: 'no' })
   })
 
   it('does not invoke the runner for a non-matching tool', async () => {
@@ -195,13 +424,103 @@ describe('runHookCommand timeout (real shell)', () => {
   })
 })
 
+describe('http hooks', () => {
+  const serve = async (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<{ url: string; close: () => Promise<void> }> => {
+    const server = http.createServer(handler)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as { port: number }
+    return {
+      url: `http://127.0.0.1:${address.port}/hook`,
+      close: () => new Promise((resolve) => server.close(() => resolve())),
+    }
+  }
+
+  const httpRunner: HookRunner = (hook, payload, ms) => runHttpHook(hook, payload, ms)
+
+  it('loads an http entry and blocks on a 2xx body carrying a deny decision', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'nope' } }))
+    })
+    const file = join(tempDir(), 'settings.json')
+    writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'http', url: srv.url }] }] } }))
+    const config = loadHooks([file])
+
+    const decision = await runPreToolUse(config, 'bash', {}, httpRunner)
+    await srv.close()
+
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('nope')
+  })
+
+  it('posts the payload as JSON and interpolates only allowlisted env vars into headers', async () => {
+    let seenAuth = ''
+    let seenOther = ''
+    let seenBody = ''
+    const srv = await serve((req, res) => {
+      seenAuth = String(req.headers.authorization ?? '')
+      seenOther = String(req.headers['x-other'] ?? '')
+      let body = ''
+      req.on('data', (chunk) => {
+        body += chunk
+      })
+      req.on('end', () => {
+        seenBody = body
+        res.writeHead(200)
+        res.end()
+      })
+    })
+    process.env.HOOK_TOKEN = 'tok123'
+    process.env.HOOK_SECRET = 'leakme'
+    const hook = { type: 'http', command: srv.url, url: srv.url, headers: { Authorization: 'Bearer $HOOK_TOKEN', 'X-Other': '${HOOK_SECRET}' }, allowedEnvVars: ['HOOK_TOKEN'] }
+
+    const result = await runHttpHook(hook, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, 5000)
+    await srv.close()
+    delete process.env.HOOK_TOKEN
+    delete process.env.HOOK_SECRET
+
+    expect(result).toMatchObject({ code: 0, timedOut: false })
+    expect(seenAuth).toBe('Bearer tok123')
+    expect(seenOther).toBe('')
+    expect(JSON.parse(seenBody).tool_name).toBe('bash')
+  })
+
+  it('treats non-2xx, non-JSON bodies and unreachable endpoints as non-blocking', async () => {
+    // Claude: an http hook cannot block through status codes or failures; only a
+    // 2xx JSON decision blocks. A timeout renders no decision either, so none of
+    // these may ever read as timedOut, which PreToolUse fails closed on.
+    const srvError = await serve((_req, res) => {
+      res.writeHead(500)
+      res.end('boom')
+    })
+    const srvText = await serve((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('not json')
+    })
+    const failing = await runHttpHook({ type: 'http', command: srvError.url, url: srvError.url }, {}, 5000)
+    const nonJson = await runHttpHook({ type: 'http', command: srvText.url, url: srvText.url }, {}, 5000)
+    const unreachable = await runHttpHook({ type: 'http', command: 'http://127.0.0.1:9', url: 'http://127.0.0.1:9' }, {}, 2000)
+    await srvError.close()
+    await srvText.close()
+
+    for (const result of [failing, nonJson, unreachable]) {
+      expect(result.timedOut).toBe(false)
+      expect(result.code).not.toBe(0)
+      expect(result.code).not.toBe(2)
+    }
+    const config = { PreToolUse: [{ hooks: [{ type: 'http', command: srvError.url, url: srvError.url }] }] }
+    const decision = await runPreToolUse(config, 'bash', {}, async () => failing)
+    expect(decision.block).toBe(false)
+  })
+})
+
 describe('runPreToolUse on a timed-out hook', () => {
   const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard.sh' }, { command: 'second.sh' }] }] }
 
   it('blocks the tool rather than treating the killed hook as an allow', async () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
-      run.push(command)
+      run.push(command.command)
       return { code: 0, stdout: '', stderr: '', timedOut: true }
     }
     const decision = await runPreToolUse(config, 'bash', {}, runner)

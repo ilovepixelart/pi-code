@@ -18,22 +18,29 @@
  * environment plus its own `env` block, not the whole process environment.
  */
 
+import { execFile } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
+import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // NOSONAR
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
+import { setMcpToolCaller } from './internal/mcp-call.js'
+import { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } from './internal/mcp-oauth.js'
 import { capForContext } from './internal/output-guard.js'
+import { type InstalledPlugin, installedPlugins, substitutePluginVars } from './internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
+import { findNearestFile } from './internal/project-root.js'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
@@ -64,16 +71,23 @@ export interface StdioServerConfig {
   cwd?: string
   /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
   timeout?: number
+  /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
+  aliasPrefix?: string
 }
 
 export interface HttpServerConfig {
-  type?: 'http' | 'streamable-http' | 'sse'
+  type?: 'http' | 'streamable-http' | 'sse' | 'ws' | 'websocket'
   url: string
   headers?: Record<string, string>
   bearerToken?: string
   bearerTokenEnv?: string
+  /** A command whose JSON stdout is merged into the connect headers, for auth
+   * schemes other than OAuth/static tokens (Claude's headersHelper). */
+  headersHelper?: string
   /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
   timeout?: number
+  /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
+  aliasPrefix?: string
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
@@ -93,9 +107,11 @@ export function userConfigPaths(home: string): string[] {
   return [path.join(home, '.claude.json'), path.join(home, '.pi', 'agent', 'mcp.json')]
 }
 
-/** Project-scoped MCP config. Loaded only for trusted projects: a server's `command` runs on connect. */
+/** Project-scoped MCP config, each file the nearest of its name at or above cwd
+ * (bounded at the repository root, matching the approval walk). Loaded only for
+ * trusted projects: a server's `command` runs on connect. */
 export function projectConfigPaths(cwd: string): string[] {
-  return [path.join(cwd, '.mcp.json'), path.join(cwd, '.pi', 'mcp.json')]
+  return ['.mcp.json', path.join('.pi', 'mcp.json')].map((rel) => findNearestFile(cwd, rel) ?? path.join(cwd, rel))
 }
 
 export interface ProjectServerPolicy {
@@ -125,8 +141,8 @@ export function projectServerPolicy(cwd: string, home: string, projectApproved: 
   }
   const names = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [])
   const userSettings = read(path.join(home, '.claude', 'settings.json'))
-  const projectSettings = read(path.join(cwd, '.claude', 'settings.json'))
-  const localSettings = read(path.join(cwd, '.claude', 'settings.local.json'))
+  const projectSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.json')) ?? path.join(cwd, '.claude', 'settings.json'))
+  const localSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.local.json')) ?? path.join(cwd, '.claude', 'settings.local.json'))
   const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...names(localSettings.disabledMcpjsonServers)])
   const consentSources = projectApproved ? [userSettings, localSettings] : [userSettings]
   const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
@@ -177,6 +193,40 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
   return servers
 }
 
+/** Servers shipped by enabled plugins (.mcp.json or the manifest's `mcpServers`,
+ * inline or by path), with ${CLAUDE_PLUGIN_*} substituted before parsing. Their
+ * tools alias as mcp__plugin_<plugin>_<server>__<tool> for hook matchers, as
+ * Claude scopes them. */
+export function loadPluginServers(plugins: InstalledPlugin[]): Record<string, ServerConfig> {
+  const fold = (name: string): string => name.replaceAll('-', '_')
+  const servers: Record<string, ServerConfig> = {}
+  for (const plugin of plugins) {
+    const declared = plugin.manifest.mcpServers
+    let entries: Record<string, ServerConfig> = {}
+    // An inline map of name -> config; an array is not a valid mcpServers map (it
+    // would register a server named '0'), so it falls through to the path branch.
+    if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
+      try {
+        entries = JSON.parse(substitutePluginVars(JSON.stringify(declared), plugin))
+      } catch {
+        continue
+      }
+    } else {
+      const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : '.mcp.json')
+      try {
+        const parsed = JSON.parse(substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin))
+        entries = parsed.mcpServers ?? {}
+      } catch {
+        continue
+      }
+    }
+    for (const [name, config] of Object.entries(entries)) {
+      servers[name] = { ...config, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__` }
+    }
+  }
+  return servers
+}
+
 /** Claude reports a config entry that has a url but no type as an error; pi-code
  * still connects (streamable HTTP with SSE fallback) but says the entry is wrong. */
 /** An inline bearerToken (interpolated) wins over bearerTokenEnv, which names an
@@ -185,6 +235,72 @@ export function resolveBearerToken(config: { bearerToken?: string; bearerTokenEn
   if (config.bearerToken) return interpolateEnv(config.bearerToken)
   if (config.bearerTokenEnv) return process.env[config.bearerTokenEnv]
   return undefined
+}
+
+/** Claude's `headersHelper` output: a flat JSON object of header name -> string,
+ * merged into the connect headers. Non-string values and non-object output are
+ * ignored so a broken helper cannot poison the request. */
+export function parseHelperHeaders(stdout: string): Record<string, string> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return {}
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parsed)) if (typeof value === 'string') out[key] = value
+  return out
+}
+
+/** The OS managed-settings.json path, where Claude sources `allowedMcpServers`/
+ * `deniedMcpServers` (an enterprise policy file deployed by IT, not user- or
+ * repo-writable in the normal flow). */
+export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json'
+  // The legacy C:\ProgramData\ClaudeCode path was dropped in Claude Code v2.1.75.
+  if (platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json'
+  return '/etc/claude-code/managed-settings.json'
+}
+
+/** Test seam: override the managed-settings.json path the extension reads. */
+let managedSettingsFileOverride: string | undefined
+export function setManagedSettingsPath(file: string | undefined): void {
+  managedSettingsFileOverride = file
+}
+
+/** Claude's `allowedMcpServers`/`deniedMcpServers`, read from managed settings only
+ * (not user or project settings, so a repo can neither widen nor narrow the policy),
+ * applied globally to every server across scopes. Entries are `{ serverName }` objects
+ * (bare strings tolerated). `allowed` is null when unset (no restriction); an empty
+ * set is an explicit lockdown, as Claude documents (empty allow array = deny all). */
+export function mcpAllowDeny(managedFile: string = managedSettingsFileOverride ?? managedSettingsPath()): { allowed: Set<string> | null; denied: Set<string> } {
+  let settings: Record<string, unknown> = {}
+  try {
+    const parsed = JSON.parse(fs.readFileSync(managedFile, 'utf-8'))
+    if (parsed && typeof parsed === 'object') settings = parsed
+  } catch {
+    // No managed policy on this machine: no restriction.
+  }
+  const names = (value: unknown): string[] =>
+    Array.isArray(value) ? value.map((entry) => (typeof entry === 'string' ? entry : typeof (entry as { serverName?: unknown })?.serverName === 'string' ? (entry as { serverName: string }).serverName : undefined)).filter((name): name is string => typeof name === 'string' && name.length > 0) : []
+  return {
+    allowed: Array.isArray(settings.allowedMcpServers) ? new Set(names(settings.allowedMcpServers)) : null,
+    denied: new Set(names(settings.deniedMcpServers)),
+  }
+}
+
+/** Claude's managed allow/deny lists: `allowed` null means no allow list (keep all);
+ * a set (even empty) is exclusive, so only its members survive; a deny list removes
+ * servers on top, deny winning over allow. */
+export function applyServerPolicy(servers: Record<string, ServerConfig>, allowed: ReadonlySet<string> | null, denied: ReadonlySet<string>): Record<string, ServerConfig> {
+  const out: Record<string, ServerConfig> = {}
+  for (const [name, config] of Object.entries(servers)) {
+    if (denied.has(name)) continue
+    if (allowed !== null && !allowed.has(name)) continue
+    out[name] = config
+  }
+  return out
 }
 
 /** A server cwd expands ${VAR} then a leading ~, or stays unset. */
@@ -308,7 +424,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
-async function connect(name: string, config: ServerConfig): Promise<Client> {
+async function connect(name: string, config: ServerConfig, authUi?: AuthUi): Promise<Client> {
   const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
   if (isStdio(config)) {
     // Start from the SDK's allowlist (PATH, HOME, SHELL, ...) rather than the whole
@@ -326,27 +442,127 @@ async function connect(name: string, config: ServerConfig): Promise<Client> {
     await connectWithTimeout(client, transport, `connect ${name}`)
     return client
   }
+  const url = new URL(interpolateEnv(config.url))
+  if (config.type === 'ws' || config.type === 'websocket') {
+    // The SDK's WebSocket transport takes only a url: it carries no headers, bearer
+    // token, or headersHelper output. Warn rather than silently dropping configured
+    // auth, and skip the helper entirely (running it would block the connect for up to
+    // 10s while contributing nothing). A ws server must be reachable without auth.
+    if (config.headers || config.bearerToken || config.bearerTokenEnv || config.headersHelper) {
+      console.warn(`pi-code-mcp: server ${name} is a WebSocket server; the SDK ws transport is url-only, so its headers/bearerToken/headersHelper are ignored`)
+    }
+    const transport = new WebSocketClientTransport(url)
+    await connectWithTimeout(client, transport, `connect ${name} (ws)`)
+    return client
+  }
   const headers: Record<string, string> = {}
   for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = interpolateEnv(value)
   const token = resolveBearerToken(config)
   if (token) headers.Authorization = `Bearer ${token}`
-  const url = new URL(interpolateEnv(config.url))
+  // A headersHelper generates connect-time headers for non-OAuth auth schemes; its
+  // JSON stdout merges over the static headers.
+  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(interpolateEnv(config.headersHelper)))
+  const sseTransport = (authProvider?: OAuthClientProvider) => new SSEClientTransport(url, { requestInit: { headers }, authProvider }) // NOSONAR: explicitly declared or deliberate legacy transport
   if (config.type === 'sse') {
-    const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: explicitly declared legacy transport
-    await connectWithTimeout(client, transport, `connect ${name} (sse)`)
-    return client
+    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, token, authUi)
   }
   try {
-    const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } })
-    await connectWithTimeout(client, transport, `connect ${name}`)
-    return client
+    return await connectHttpFamily(name, config, (authProvider) => new StreamableHTTPClientTransport(url, { requestInit: { headers }, authProvider }), `connect ${name}`, token, authUi)
   } catch (error) {
     // An explicitly declared streamable transport must not silently degrade to SSE.
-    if (config.type !== undefined || String(error).includes('Unauthorized')) throw error
-    const fallback = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
-    const transport = new SSEClientTransport(url, { requestInit: { headers } }) // NOSONAR: deliberate legacy fallback
-    await connectWithTimeout(fallback, transport, `connect ${name} (sse)`)
-    return fallback
+    if (config.type !== undefined || isUnauthorized(error)) throw error
+    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, token, authUi)
+  }
+}
+
+/** Run a headersHelper command and parse its JSON stdout into headers. A failure or
+ * a 10s timeout yields no extra headers rather than blocking the connection. */
+function runHeadersHelper(command: string): Promise<Record<string, string>> {
+  return new Promise((resolve) => {
+    execFile('/bin/sh', ['-c', command], { timeout: 10_000 }, (error, stdout) => {
+      resolve(error ? {} : parseHelperHeaders(stdout))
+    })
+  })
+}
+
+/** UI seams the OAuth flow needs; absent in headless runs, which fail with advice. */
+export interface AuthUi {
+  confirm: (title: string, body: string) => Promise<boolean>
+  notify: (message: string, level: 'info' | 'warning' | 'error') => void
+}
+
+/** Browser logins are human-paced; a connect-sized timeout would cut them off. */
+const OAUTH_FLOW_TIMEOUT_MS = 180_000
+
+/** A server needs OAuth pi could not complete (headless, declined, or the flow
+ * failed). A typed marker so the SSE-fallback caller can tell an auth failure
+ * from a transport mismatch without matching on message text. */
+class OAuthRequiredError extends Error {}
+
+/** Whether a connect failure is an authentication problem: the SDK's own
+ * UnauthorizedError, a transport error carrying HTTP 401 (which is what a 401
+ * throws when no authProvider was attached, so a first-time login is detected),
+ * or our own marker. */
+function isUnauthorized(error: unknown): boolean {
+  if (error instanceof UnauthorizedError || error instanceof OAuthRequiredError) return true
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 401
+}
+
+/**
+ * Connect an http-family server, running Claude's OAuth login when the server
+ * demands one. Stored tokens ride the first attempt so the SDK refreshes
+ * silently; a 401 without tokens asks the user, opens the browser, catches the
+ * loopback redirect, and exchanges the code via the SDK's finishAuth.
+ * Bearer-token servers never enter the OAuth path: an explicit token is the
+ * user saying how auth works.
+ */
+async function connectHttpFamily(name: string, config: { url: string }, makeTransport: (authProvider?: OAuthClientProvider) => SSEClientTransport | StreamableHTTPClientTransport, label: string, bearerToken: string | undefined, authUi: AuthUi | undefined): Promise<Client> {
+  const newClient = () => new Client({ name: 'pi-code-mcp', version: '0.1.0' })
+  // Stored tokens ride the first attempt so the SDK refreshes them; with none, no
+  // provider is attached, so a 401 surfaces as a transport error carrying code 401
+  // (isUnauthorized detects it) and only the interactive provider below ever runs
+  // dynamic registration, keeping it bound to the real callback port.
+  const silent = bearerToken ? undefined : new FileOAuthProvider(name, () => {})
+  try {
+    const client = newClient()
+    await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)
+    return client
+  } catch (error) {
+    if (bearerToken || !isUnauthorized(error)) throw error
+    if (!authUi) throw new OAuthRequiredError(`${name} requires a login; run pi interactively to authenticate`)
+    const approved = await authUi.confirm(`MCP server "${name}" requires login`, `Open your browser to authorize ${config.url}?`)
+    if (!approved) throw new OAuthRequiredError(`login declined for ${name}`)
+    const provider = new FileOAuthProvider(name, (authorizationUrl) => {
+      openBrowser(String(authorizationUrl))
+      authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
+    })
+    const { server, port } = await startCallbackServer(provider.savedRedirectPort())
+    provider.bindRedirectPort(port)
+    try {
+      const transport = makeTransport(provider)
+      const pendingCode = waitForAuthCode(server, OAUTH_FLOW_TIMEOUT_MS)
+      pendingCode.catch(() => {}) // consumed below; an abandoned login must not surface as unhandled
+      const client = newClient()
+      try {
+        await connectWithTimeout(client, transport, label)
+        return client // authorized between attempts; nothing left to exchange
+      } catch (retryError) {
+        if (!isUnauthorized(retryError)) throw retryError
+        const code = await pendingCode
+        await transport.finishAuth(code)
+        const authed = newClient()
+        await connectWithTimeout(authed, makeTransport(provider), label)
+        return authed
+      }
+    } catch (flowError) {
+      // Past the confirm the server is known to need OAuth, so any failure here (a
+      // denied consent page, the 180s wait, a token exchange error) is an auth
+      // failure, not a transport mismatch. Marking it keeps the typeless-url caller
+      // from retrying over SSE and prompting the user to log in a second time.
+      throw flowError instanceof OAuthRequiredError ? flowError : new OAuthRequiredError(`login for ${name} failed: ${flowError instanceof Error ? flowError.message : String(flowError)}`)
+    } finally {
+      server.close()
+    }
   }
 }
 
@@ -390,6 +606,17 @@ async function listAllTools(client: Client): Promise<McpToolInfo[]> {
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
+  // Let other extensions (hooks' mcp_tool type) call a connected server's tool.
+  setMcpToolCaller(async (server, tool, input) => {
+    const client = clients.get(server)
+    if (!client) throw new Error(`MCP server "${server}" is not connected`)
+    const result = await client.callTool({ name: tool, arguments: input }, undefined, { timeout: callTimeoutMs() })
+    const text = mapContent(result.content as McpContentBlock[], result.structuredContent)
+      .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n')
+    return { text, isError: result.isError === true }
+  })
   // pi tool name -> owning server, so a refresh can tell its own tools from a conflict.
   const registered = new Map<string, string>()
   // Original server/tool names per registered pi name, for Claude-style hook matchers.
@@ -407,7 +634,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         continue
       }
       registered.set(toolName, name)
-      aliases.push({ pi: toolName, claude: `mcp__${name}__${tool.name}` })
+      aliases.push({ pi: toolName, claude: config.aliasPrefix ? `${config.aliasPrefix}${tool.name}` : `mcp__${name}__${tool.name}` })
       count++
       pi.registerTool({
         name: toolName,
@@ -457,7 +684,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
-  async function connectServers(servers: Record<string, ServerConfig>): Promise<void> {
+  async function connectServers(servers: Record<string, ServerConfig>, authUi?: AuthUi): Promise<void> {
     const pending: [string, ServerConfig][] = []
     for (const [name, config] of Object.entries(servers)) {
       // A later scope must not take the name of a server that already connected: it
@@ -476,7 +703,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       pending.map(async ([name, config]) => {
         warnOnTypelessUrl(name, config)
         try {
-          const client = await connect(name, config)
+          const client = await connect(name, config, authUi)
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
           const count = registerTools(name, config, client, tools)
@@ -510,13 +737,25 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   async function connectProjectScope(ctx: ExtensionContext): Promise<boolean> {
     // The stored decision, read without prompting: consent recorded inside the
     // project only counts once the project itself has been approved.
-    const policy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-    const { consented, gated } = splitByPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy)
-    if (Object.keys(consented).length > 0) await connectServers(consented)
+    const approved = isProjectApprovedSilently(ctx)
+    const policy = projectServerPolicy(ctx.cwd, os.homedir(), approved)
+    const { allowed, denied } = mcpAllowDeny()
+    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), policy)
+    const authUi = authUiFor(ctx)
+    if (Object.keys(consented).length > 0) await connectServers(consented, authUi)
     if (Object.keys(gated).length === 0) return true
     if (!(await isProjectApproved(ctx))) return false
-    await connectServers(gated)
+    await connectServers(gated, authUi)
     return true
+  }
+
+  /** The OAuth flow's UI seams, absent in headless runs. */
+  function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
+    if (!ctx.hasUI) return undefined
+    return {
+      confirm: (title, body) => ctx.ui.confirm(title, body),
+      notify: (message, level) => ctx.ui.notify(message, level),
+    }
   }
 
   let projectConnected = false
@@ -526,8 +765,13 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // the factory: pi runs the factory for invocations that never start a session.
     // Names still connected are filtered out, so a later session start only retries
     // servers that failed or whose transport dropped, without duplicate-name warnings.
-    const userServers = Object.fromEntries(Object.entries(loadUserScope(os.homedir(), ctx.cwd)).filter(([name]) => !clients.has(name)))
-    if (Object.keys(userServers).length > 0) await connectServers(userServers)
+    // Plugin servers merge under the user scope (plugins are user-installed);
+    // the user's own entry wins a name clash with a plugin's.
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
+    const { allowed, denied } = mcpAllowDeny()
+    const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
+    const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name)))
+    if (Object.keys(userServers).length > 0) await connectServers(userServers, authUiFor(ctx))
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once
     // the project is trusted. Per-server settings refine that: disabled servers never
     // connect, servers the user consented to individually connect without the

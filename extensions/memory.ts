@@ -15,6 +15,8 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { capForContext } from './internal/output-guard.js'
+import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { findNearestFile, repoRoot } from './internal/project-root.js'
 
 const INDEX_FILE = 'MEMORY.md'
 
@@ -45,21 +47,79 @@ function legacySlug(cwd: string): string {
     .replace(/^-+/, '-')
 }
 
-export function memoryDir(cwd: string): string {
-  return path.join(os.homedir(), '.pi', 'agent', 'memory', projectSlug(cwd))
+/** The project a memory store belongs to: the repository root, so subdirectory
+ * sessions share one store, matching Claude ("derived from the git repository, so
+ * all worktrees and subdirectories within the same repo share one auto memory
+ * directory. Outside a git repo, the project root is used instead."). Falls back
+ * to cwd when there is no project marker. */
+function memoryProject(cwd: string): string {
+  return repoRoot(cwd) ?? cwd
 }
 
-/** Move a store written under the pre-digest slug to the current one, once. Without
- * this the slug change would silently orphan every memory a user already has. */
+export function memoryDir(cwd: string): string {
+  return path.join(os.homedir(), '.pi', 'agent', 'memory', projectSlug(memoryProject(cwd)))
+}
+
+/** The store location, honoring an `autoMemoryDirectory` override. Claude requires
+ * it to be absolute or start with `~/`; a relative value is ignored, falling back
+ * to the default per-project directory. */
+export function resolveMemoryDir(cwd: string, override?: string): string {
+  const trimmed = override?.trim()
+  if (trimmed?.startsWith('~/')) return path.join(os.homedir(), trimmed.slice(2))
+  if (trimmed && path.isAbsolute(trimmed)) return trimmed
+  return memoryDir(cwd)
+}
+
+/** Whether auto memory runs: on by default, off when `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+ * is `1`/`true` or a settings scope sets `autoMemoryEnabled: false`. */
+export function autoMemoryEnabled(setting: unknown, env: NodeJS.ProcessEnv): boolean {
+  const disable = (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? '').trim().toLowerCase()
+  if (disable === '1' || disable === 'true') return false
+  return setting !== false
+}
+
+/** Set or replace the ISO 8601 `modified:` field inside a memory's YAML frontmatter.
+ * Files without frontmatter are returned untouched: Claude never adds frontmatter to
+ * a file that has none. */
+export function stampModified(content: string, iso: string): string {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
+  if (!match) return content
+  const inner = match[1]
+  const rest = content.slice(match[0].length)
+  const withoutModified = inner
+    .split('\n')
+    .filter((line) => !/^\s*modified\s*:/.test(line))
+    .join('\n')
+  const body = withoutModified.length > 0 ? `${withoutModified}\n` : ''
+  return `---\n${body}modified: ${iso}\n---${rest}`
+}
+
+/** The index content that actually loads: YAML frontmatter and block-level HTML
+ * comments are stripped, so they neither show in the prompt nor count toward the
+ * 200-line / 25KB read limits, matching Claude Code. */
+export function stripNonLoaded(text: string): string {
+  return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').replace(/<!--[\s\S]*?-->\r?\n?/g, '')
+}
+
+/** Move a store written under an older slug to the current one, once. Two earlier
+ * formats can orphan a user's memories on upgrade: the released digest-of-cwd slug
+ * (before the store was anchored on the repository root, so a subdirectory session
+ * resolved to a different dir), and the pre-digest slug. Newest format first. */
 export function migrateLegacyStore(cwd: string): void {
   const current = memoryDir(cwd)
   if (fs.existsSync(current)) return
-  const legacy = path.join(os.homedir(), '.pi', 'agent', 'memory', legacySlug(cwd))
-  if (!fs.existsSync(legacy)) return
-  try {
-    fs.renameSync(legacy, current)
-  } catch {
-    // A failed migration must not take down session start; the store stays legacy.
+  const base = path.join(os.homedir(), '.pi', 'agent', 'memory')
+  // projectSlug(cwd) differs from current only for a subdirectory session (current is
+  // keyed on the repo root); for a repo-root session it equals current and is skipped.
+  const candidates = [path.join(base, projectSlug(cwd)), path.join(base, legacySlug(cwd))]
+  for (const legacy of candidates) {
+    if (legacy === current || !fs.existsSync(legacy)) continue
+    try {
+      fs.renameSync(legacy, current)
+    } catch {
+      // A failed migration must not take down session start; the store stays put.
+    }
+    return
   }
 }
 
@@ -73,12 +133,13 @@ export function indexWouldOverflow(index: string, name: string, description: str
   // since the injected index is capped at read time.
   const isUpdate = index.split('\n').some((entry) => entry.startsWith(entryPrefix(name)))
   if (isUpdate) return false
-  const next = upsertIndexLine(index, name, description)
+  // Only the loaded content counts: frontmatter and comments are stripped first.
+  const next = stripNonLoaded(upsertIndexLine(index, name, description))
   return next.split('\n').length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
 }
 
 /** Write a memory and its index line, or say why it cannot be written. */
-export function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
+export function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
   if (!name || !description || !content) {
     return { content: [{ type: 'text', text: 'save requires name, description, and content.' }], details: {} }
   }
@@ -92,22 +153,24 @@ export function saveMemory(dir: string, indexPath: string, name: string | undefi
     }
   }
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, `${name}.md`), content)
+  // A memory with frontmatter records its write time; one without is left as-is.
+  fs.writeFileSync(path.join(dir, `${name}.md`), stampModified(content, now))
   writeIndex(indexPath, upsertIndexLine(index, name, description))
   return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
 }
 
 /** The index as injected into the prompt, bounded like Claude's startup load. */
 export function capIndexForPrompt(index: string): string {
-  const withinLines = index.split('\n').slice(0, INDEX_MAX_LINES)
-  let dropped = index.split('\n').length - withinLines.length
+  const loaded = stripNonLoaded(index)
+  const withinLines = loaded.split('\n').slice(0, INDEX_MAX_LINES)
+  let dropped = loaded.split('\n').length - withinLines.length
   let text = withinLines.join('\n')
   while (Buffer.byteLength(text, 'utf-8') > INDEX_MAX_BYTES && withinLines.length > 1) {
     withinLines.pop()
     dropped++
     text = withinLines.join('\n')
   }
-  if (dropped <= 0) return index
+  if (dropped <= 0) return loaded
   return `${text}\n(${dropped} more memories not shown; use the memory tool with action "list")`
 }
 
@@ -175,12 +238,55 @@ function writeIndex(indexPath: string, content: string): void {
   fs.renameSync(tmp, indexPath)
 }
 
+/** The settings chain that decides `autoMemoryEnabled` and `autoMemoryDirectory`:
+ * user settings always, then project settings (nearest at or above cwd) only when
+ * approved, since a project's `autoMemoryDirectory` is honored under the same trust
+ * rule as hooks in settings files. Later files win. */
+export function memorySettingsFiles(cwd: string, home: string, approved: boolean): string[] {
+  const files = [path.join(home, '.claude', 'settings.json')]
+  if (!approved) return files
+  for (const name of ['settings.json', 'settings.local.json']) {
+    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
+  }
+  return files
+}
+
+/** Merge the two memory settings across the chain, later files winning per key. */
+export function readMemorySettings(files: string[]): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
+  const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } = {}
+  for (const file of files) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (settings === null || typeof settings !== 'object') continue
+      if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
+      if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
+    } catch {
+      // missing or invalid settings file: skip
+    }
+  }
+  return merged
+}
+
 export default function memoryExtension(pi: ExtensionAPI) {
   let dir = memoryDir(process.cwd())
+  let enabled = true
+
+  // These extensions also load inside spawned subagent processes, which carry the
+  // PI_CODE_SUBAGENT marker. Claude does not load the main conversation's auto memory
+  // into subagents (they get their own store through the agent `memory:` field), so
+  // everything here no-ops there: no index injection, no notify, and the tool never
+  // touches the parent store. Read per call so tests can flip the env var.
+  const inSubagent = (): boolean => Boolean(process.env.PI_CODE_SUBAGENT)
 
   pi.on('session_start', async (_event, ctx) => {
+    if (inSubagent()) return
     migrateLegacyStore(ctx.cwd)
-    dir = memoryDir(ctx.cwd)
+    const approved = isProjectApprovedSilently(ctx)
+    const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, os.homedir(), approved))
+    enabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
+    const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
+    dir = enabled ? resolveMemoryDir(ctx.cwd, override) : memoryDir(ctx.cwd)
+    if (!enabled) return
     const count = readIndexQuietly(dir)
       .split('\n')
       .filter((l) => l.startsWith('- ')).length
@@ -188,6 +294,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   })
 
   pi.on('before_agent_start', async (event) => {
+    if (inSubagent() || !enabled) return
     const index = readIndexQuietly(dir)
     if (!index.trim()) return
     return {
@@ -201,6 +308,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
     description: 'Persistent memory across sessions. Save durable facts, user preferences, corrections, and project decisions that are not derivable from the code. Actions: save (name + description + content), read (name), delete (name), list.',
     parameters: MemoryParams,
     async execute(_id, params) {
+      if (inSubagent()) {
+        return { content: [{ type: 'text' as const, text: 'The memory tool is unavailable in a subagent; auto memory belongs to the main conversation. Use your agent memory directory instead if one was provided.' }], details: {} }
+      }
+      if (!enabled) {
+        return { content: [{ type: 'text' as const, text: 'Auto memory is disabled (autoMemoryEnabled is false or CLAUDE_CODE_DISABLE_AUTO_MEMORY is set). No memory was read or written.' }], details: {} }
+      }
       const name = params.name ? slugifyName(params.name) : undefined
       const indexPath = path.join(dir, INDEX_FILE)
 
