@@ -104,10 +104,9 @@ export default function notifyExtension(pi: ExtensionAPI) {
   // Claude's "appear to be away" check. Undefined until the first prompt this session.
   let lastInputAt: number | undefined
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (_event, _ctx) => {
     channel = resolveNotifChannel(readPreferredNotifChannel(os.homedir()))
     lastInputAt = undefined
-    void ctx
   })
 
   pi.on('input', async () => {

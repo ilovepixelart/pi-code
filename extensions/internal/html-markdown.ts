@@ -20,6 +20,16 @@ function decodeAllEntities(text: string): string {
 
 const stripInnerTags = (html: string): string => html.replace(/<[^<>]*>/g, '')
 
+// Strip leading and trailing newline runs in linear time. The equivalent
+// /^\n+|\n+$/g backtracks super-linearly on a long run of newlines (S8786).
+const trimNewlines = (value: string): string => {
+  let start = 0
+  let end = value.length
+  while (start < end && value[start] === '\n') start++
+  while (end > start && value[end - 1] === '\n') end--
+  return value.slice(start, end)
+}
+
 export function htmlToMarkdown(html: string): string {
   // Pre blocks are lifted out first so no later transform touches their content.
   const preBodies: string[] = []
@@ -27,7 +37,7 @@ export function htmlToMarkdown(html: string): string {
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<(script|style|noscript|head|svg)\b[^<>]*>[\s\S]*?<\/\1[^<>]*>/gi, ' ')
     .replace(/<pre\b[^<>]*>([\s\S]*?)<\/pre>/gi, (_whole, inner: string) => {
-      preBodies.push(decodeAllEntities(stripInnerTags(inner)).replace(/^\n+|\n+$/g, ''))
+      preBodies.push(trimNewlines(decodeAllEntities(stripInnerTags(inner))))
       return `\n\n\uE000PRE${preBodies.length - 1}\uE000\n\n`
     })
 

@@ -15,7 +15,7 @@ import * as fs from 'node:fs'
 export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json'
   // The legacy C:\ProgramData\ClaudeCode path was dropped in Claude Code v2.1.75.
-  if (platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json'
+  if (platform === 'win32') return String.raw`C:\Program Files\ClaudeCode\managed-settings.json`
   return '/etc/claude-code/managed-settings.json'
 }
 

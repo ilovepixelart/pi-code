@@ -64,6 +64,15 @@ function enabledMap(settingsFiles: string[]): Record<string, boolean> {
   return merged
 }
 
+/** Copy one plugin config's `options` into `target`, coercing scalars to strings and
+ * ignoring the rest, later keys winning. */
+function mergeOptionValues(target: Record<string, string>, options: object): void {
+  for (const [key, value] of Object.entries(options)) {
+    if (typeof value === 'string') target[key] = value
+    else if (typeof value === 'number' || typeof value === 'boolean') target[key] = String(value)
+  }
+}
+
 /** `pluginConfigs[id].options` per plugin id, later files winning per key. */
 function pluginConfigsMap(settingsFiles: string[]): Record<string, Record<string, string>> {
   const merged: Record<string, Record<string, string>> = {}
@@ -74,10 +83,7 @@ function pluginConfigsMap(settingsFiles: string[]): Record<string, Record<string
       const options = (config as Record<string, unknown>)?.options
       if (options === null || typeof options !== 'object') continue
       const values = merged[id] ?? {}
-      for (const [key, value] of Object.entries(options)) {
-        if (typeof value === 'string') values[key] = value
-        else if (typeof value === 'number' || typeof value === 'boolean') values[key] = String(value)
-      }
+      mergeOptionValues(values, options)
       merged[id] = values
     }
   }
@@ -99,20 +105,27 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   const plugins: InstalledPlugin[] = []
   for (const marketplace of listDirs(cacheDir)) {
     for (const pluginDir of listDirs(path.join(cacheDir, marketplace))) {
-      const qualified = `${pluginDir}@${marketplace}`
-      const state = enabled[qualified] ?? enabled[pluginDir]
-      if (state !== true) continue
-      const version = newestVersion(listDirs(path.join(cacheDir, marketplace, pluginDir)))
-      if (!version) continue
-      const root = path.join(cacheDir, marketplace, pluginDir, version)
-      const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
-      const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
-      const id = qualified.replace(/[^A-Za-z0-9]+/g, '-')
-      const userConfig = configs[qualified] ?? configs[pluginDir] ?? configs[name]
-      plugins.push({ name, root, dataDir: path.join(home, '.claude', 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) })
+      const plugin = resolvePlugin(home, cacheDir, marketplace, pluginDir, enabled, configs)
+      if (plugin) plugins.push(plugin)
     }
   }
   return plugins
+}
+
+/** Resolve one cached plugin directory into an enabled InstalledPlugin, or null to skip
+ * it: not turned on in settings, or no version directory on disk yet. */
+function resolvePlugin(home: string, cacheDir: string, marketplace: string, pluginDir: string, enabled: Record<string, boolean>, configs: Record<string, Record<string, string>>): InstalledPlugin | null {
+  const qualified = `${pluginDir}@${marketplace}`
+  const state = enabled[qualified] ?? enabled[pluginDir]
+  if (state !== true) return null
+  const version = newestVersion(listDirs(path.join(cacheDir, marketplace, pluginDir)))
+  if (!version) return null
+  const root = path.join(cacheDir, marketplace, pluginDir, version)
+  const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
+  const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
+  const id = qualified.replace(/[^A-Za-z0-9]+/g, '-')
+  const userConfig = configs[qualified] ?? configs[pluginDir] ?? configs[name]
+  return { name, root, dataDir: path.join(home, '.claude', 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
 }
 
 /** The two plugin path variables, textually substituted into plugin-shipped
@@ -121,5 +134,5 @@ export function substitutePluginVars(value: string, plugin: InstalledPlugin): st
   return value
     .replaceAll('${CLAUDE_PLUGIN_ROOT}', plugin.root)
     .replaceAll('${CLAUDE_PLUGIN_DATA}', plugin.dataDir)
-    .replace(/\$\{user_config\.([A-Za-z0-9_]+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '')
+    .replace(/\$\{user_config\.(\w+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '')
 }

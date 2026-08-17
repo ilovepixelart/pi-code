@@ -159,32 +159,58 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
   }
 }
 
+/** Optional controls for a collection run: the byte/file budget shared across the
+ * whole run, the path of the file this content came from (seeds each top-level
+ * import's `parent`), and the exclusion predicate. Recursion depth is internal. */
+export interface CollectImportsOptions {
+  budget?: ImportBudget
+  importer?: string
+  isExcluded?: (realPath: string) => boolean
+}
+
+/** The parts of a collection run that stay fixed across the recursion: resolution
+ * roots, the seen/budget accumulators, and the exclusion predicate. Only content,
+ * fromDir, depth and the parent path change from one level to the next. */
+interface ImportScan {
+  home: string
+  allowedRoots: string[]
+  seen: Set<string>
+  budget: ImportBudget
+  isExcluded?: (realPath: string) => boolean
+}
+
+/** One recursion level: read the imports named in `content`, then recurse into each. */
+function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: number, importer?: string): ImportedFile[] {
+  if (depth >= MAX_IMPORT_DEPTH) return []
+  const out: ImportedFile[] = []
+  for (const target of importTargets(content)) {
+    // Checked before the read so an exhausted budget costs no I/O.
+    if (scan.budget.files === 0 || scan.budget.bytes === 0) {
+      scan.budget.dropped += 1
+      continue
+    }
+    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded)
+    if (!file) continue
+    scan.budget.files -= 1
+    const kept = file.body.slice(0, scan.budget.bytes)
+    scan.budget.bytes -= kept.length
+    const body = kept.length < file.body.length ? `${kept.trim()}\n${IMPORT_TRUNCATED_MARKER}` : kept.trim()
+    // Comments are stripped before the scan for further imports, so a
+    // commented-out @import stays dead at every depth, matching the top level
+    // (whose bodies arrive here already stripped by the caller).
+    out.push({ path: file.real, body, parent: importer }, ...collectFrom(scan, stripBlockComments(kept), path.dirname(file.real), depth + 1, file.real))
+  }
+  return out
+}
+
 /**
  * Collect the contents of every file transitively imported via `@path`, in
  * discovery order. Imports are resolved through symlinks and kept within
  * `allowedRoots` (which must already be realpath'd).
  */
-export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, budget: ImportBudget = createImportBudget(), depth = 0, importer?: string, isExcluded?: (realPath: string) => boolean): ImportedFile[] {
-  if (depth >= MAX_IMPORT_DEPTH) return []
-  const out: ImportedFile[] = []
-  for (const target of importTargets(content)) {
-    // Checked before the read so an exhausted budget costs no I/O.
-    if (budget.files === 0 || budget.bytes === 0) {
-      budget.dropped += 1
-      continue
-    }
-    const file = readImport(target, fromDir, home, allowedRoots, seen, isExcluded)
-    if (!file) continue
-    budget.files -= 1
-    const kept = file.body.slice(0, budget.bytes)
-    budget.bytes -= kept.length
-    const body = kept.length < file.body.length ? `${kept.trim()}\n${IMPORT_TRUNCATED_MARKER}` : kept.trim()
-    // Comments are stripped before the scan for further imports, so a
-    // commented-out @import stays dead at every depth, matching the top level
-    // (whose bodies arrive here already stripped by the caller).
-    out.push({ path: file.real, body, parent: importer }, ...collectImports(stripBlockComments(kept), path.dirname(file.real), home, allowedRoots, seen, budget, depth + 1, file.real, isExcluded))
-  }
-  return out
+export function collectImports(content: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, options: CollectImportsOptions = {}): ImportedFile[] {
+  const scan: ImportScan = { home, allowedRoots, seen, budget: options.budget ?? createImportBudget(), isExcluded: options.isExcluded }
+  return collectFrom(scan, content, fromDir, 0, options.importer)
 }
 
 /**
@@ -357,6 +383,114 @@ export function isExcludedPath(absPath: string, globs: string[], home: string): 
   })
 }
 
+/** Apply claudeMdExcludes and comment-stripping to pi's native context blocks,
+ * rewriting the assembled prompt by exact substring: an excluded file's block is
+ * removed, a surviving file's block is replaced with its comment-stripped body. A
+ * wrapper not found in the prompt is skipped rather than risk corrupting it.
+ * Returns the rewritten prompt and the files that survived exclusion (stripped). */
+function rewriteNativeBlocks(prompt: string, native: Array<{ path: string; content: string }>, excluded: (absPath: string) => boolean): { prompt: string; changed: boolean; kept: Array<{ path: string; content: string }> } {
+  let changed = false
+  const kept: Array<{ path: string; content: string }> = []
+  for (const file of native) {
+    const wrapper = instructionsBlock(file.path, file.content)
+    if (excluded(file.path)) {
+      const removed = removeBlock(prompt, wrapper)
+      if (removed !== null) {
+        prompt = removed
+        changed = true
+      }
+      continue
+    }
+    const stripped = stripBlockComments(file.content)
+    if (stripped !== file.content) {
+      const replaced = replaceBlock(prompt, wrapper, instructionsBlock(file.path, stripped))
+      if (replaced !== null) {
+        prompt = replaced
+        changed = true
+      }
+    }
+    kept.push({ path: file.path, content: stripped })
+  }
+  return { prompt, changed, kept }
+}
+
+/** Claude's --add-dir memory files, minus any pi already loaded natively (added to
+ * `seenSet` here so an @import cannot pull one in twice) and any the excludes drop
+ * or that strip to nothing. Each survivor is comment-stripped and tagged with its
+ * additional dir, so its relative imports can resolve from there. */
+function additionalDirExtras(addDirs: string[], seenSet: Set<string>, excluded: (absPath: string) => boolean, includeLocal: boolean): Array<{ path: string; content: string; dir: string }> {
+  const extras: Array<{ path: string; content: string; dir: string }> = []
+  for (const dir of addDirs) {
+    for (const file of additionalDirContextFiles(dir, includeLocal)) {
+      const [real] = realRoots([file.path])
+      const key = real ?? file.path
+      if (seenSet.has(key)) continue // pi already loaded it natively
+      seenSet.add(key)
+      if (excluded(file.path)) continue
+      const stripped = stripBlockComments(file.content)
+      if (stripped.trim().length === 0) continue
+      extras.push({ path: file.path, content: stripped, dir })
+    }
+  }
+  return extras
+}
+
+/** Resolve every context and additional-dir file's @imports through the one shared
+ * budget, each with roots scoped to the importing file so a project file never
+ * reaches user config. */
+function expandImports(contextFiles: Array<{ path: string; content: string }>, extras: Array<{ path: string; content: string; dir: string }>, home: string, cwd: string, seenSet: Set<string>, excluded: (absPath: string) => boolean, budget: ImportBudget): ImportedFile[] {
+  const imported: ImportedFile[] = []
+  for (const file of contextFiles) {
+    const allowedRoots = rootsForImporter(file.path, home, cwd)
+    imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, { budget, importer: file.path, isExcluded: excluded }))
+  }
+  for (const extra of extras) {
+    // The additional dir itself is an allowed root, so its files' relative imports
+    // resolve even from .claude/rules two levels down.
+    const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, home, cwd)]
+    imported.push(...collectImports(extra.content, path.dirname(extra.path), home, allowedRoots, seenSet, { budget, importer: extra.path, isExcluded: excluded }))
+  }
+  return imported
+}
+
+/** The CLAUDE.local.md bodies appended after the native context, announced as they
+ * are added (only the non-empty ones, matching what actually reaches the prompt). */
+function localContextAddition(keptLocals: Array<{ path: string; content: string }>, announce: (event: InstructionLoadEvent) => void): string {
+  let addition = ''
+  for (const local of keptLocals) {
+    if (local.content.trim().length > 0) {
+      addition += `\n\n## CLAUDE.local.md (${local.path})\n\n${local.content.trim()}`
+      announce({ file_path: local.path, memory_type: 'Local', load_reason: 'session_start' })
+    }
+  }
+  return addition
+}
+
+/** The --add-dir memory files appended as extra project_instructions blocks.
+ * Additional dirs are extra working directories, so their files are Project-typed
+ * regardless of where the dir sits (Local for a CLAUDE.local.md). */
+function additionalDirsAddition(extras: Array<{ path: string; content: string; dir: string }>, announce: (event: InstructionLoadEvent) => void): string {
+  let addition = ''
+  for (const extra of extras) {
+    addition += `\n\n${instructionsBlock(extra.path, extra.content)}`
+    announce({ file_path: extra.path, memory_type: path.basename(extra.path) === 'CLAUDE.local.md' ? 'Local' : 'Project', load_reason: 'session_start' })
+  }
+  return addition
+}
+
+/** The `## Imported context (@)` section for every resolved @import, with the
+ * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
+ * was imported. */
+function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
+  if (imported.length === 0) return ''
+  const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')
+  const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
+  for (const entry of imported) {
+    announce({ file_path: entry.path, memory_type: memoryTypeForPath(entry.path, home, projectRoot), load_reason: 'include', ...(entry.parent === undefined ? {} : { parent_file_path: entry.parent }) })
+  }
+  return `\n\n## Imported context (@)\n\n${section}${notice}`
+}
+
 export default function contextImportsExtension(pi: ExtensionAPI) {
   let localContexts: Array<{ path: string; content: string }> = []
   // Whether project settings may contribute claudeMdExcludes; decided at session
@@ -416,37 +550,16 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const excluded = (absPath: string): boolean => isExcludedPath(absPath, excludeGlobs, home)
     const projectRoot = repoRoot(cwd) ?? cwd
 
-    let prompt = event.systemPrompt
-    let changed = false
-
     // claudeMdExcludes drops an excluded file's block from the assembled prompt and
     // from import expansion; surviving blocks get block-level comments stripped.
-    // Both rewrite by exact substring: a wrapper that is not found in the prompt is
-    // skipped rather than risk corrupting it.
-    const keptNative: Array<{ path: string; content: string }> = []
-    for (const file of native) {
-      const wrapper = instructionsBlock(file.path, file.content)
-      if (excluded(file.path)) {
-        const removed = removeBlock(prompt, wrapper)
-        if (removed !== null) {
-          prompt = removed
-          changed = true
-        }
-        continue
-      }
-      const stripped = stripBlockComments(file.content)
-      if (stripped !== file.content) {
-        const replaced = replaceBlock(prompt, wrapper, instructionsBlock(file.path, stripped))
-        if (replaced !== null) {
-          prompt = replaced
-          changed = true
-        }
-      }
-      keptNative.push({ path: file.path, content: stripped })
-      // Exclusion is owned here, so the session_start InstructionsLoaded events
-      // for pi's native context files are published here too, only for files
-      // that actually survived it: Claude fires no event for a file it never
-      // loaded. The hooks extension consumes them off the shared bus.
+    const rewrite = rewriteNativeBlocks(event.systemPrompt, native, excluded)
+    let prompt = rewrite.prompt
+    let changed = rewrite.changed
+    // Exclusion is owned here, so the session_start InstructionsLoaded events for
+    // pi's native context files are published here too, only for files that
+    // survived it: Claude fires no event for a file it never loaded. The hooks
+    // extension consumes them off the shared bus.
+    for (const file of rewrite.kept) {
       announce({ file_path: file.path, memory_type: memoryTypeForPath(file.path, home, projectRoot), load_reason: 'session_start' })
     }
 
@@ -460,69 +573,27 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     }
 
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
-    const contextFiles = [...keptNative, ...keptLocals]
+    const contextFiles = [...rewrite.kept, ...keptLocals]
 
     // Seed with every loaded context file path, excluded ones included, so pi's own
     // files are never re-imported and an excluded file cannot return as an import.
-    const seen = realRoots([...native, ...localContexts].map((file) => file.path))
-    const seenSet = new Set(seen)
+    const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
 
     // Claude's --add-dir memory loading, env-gated. The files join the seen set
     // before import expansion so an @import cannot pull one in twice, and they get
     // the same exclude and comment-strip treatment as native context files.
     const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
-    const extras: Array<{ path: string; content: string; dir: string }> = []
-    for (const dir of addDirs) {
-      for (const file of additionalDirContextFiles(dir, projectApproved)) {
-        const [real] = realRoots([file.path])
-        const key = real ?? file.path
-        if (seenSet.has(key)) continue // pi already loaded it natively
-        seenSet.add(key)
-        if (excluded(file.path)) continue
-        const stripped = stripBlockComments(file.content)
-        if (stripped.trim().length === 0) continue
-        extras.push({ path: file.path, content: stripped, dir })
-      }
-    }
+    const extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
 
-    const imported: ImportedFile[] = []
     // One budget for the whole run, so N context files cannot each spend a full one.
     // Exclusion applies inside the recursion: an excluded @import is skipped before
     // it is read, so its transitive imports never load and it spends no budget.
     const budget = createImportBudget()
-    for (const file of contextFiles) {
-      // Roots are scoped per importing file: a project file never reaches user config.
-      const allowedRoots = rootsForImporter(file.path, home, cwd)
-      imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, budget, 0, file.path, excluded))
-    }
-    for (const extra of extras) {
-      // The additional dir itself is an allowed root, so its files' relative
-      // imports resolve even from .claude/rules two levels down.
-      const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, home, cwd)]
-      imported.push(...collectImports(extra.content, path.dirname(extra.path), home, allowedRoots, seenSet, budget, 0, extra.path, excluded))
-    }
+    const imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
 
-    let addition = ''
-    for (const local of keptLocals) {
-      if (local.content.trim().length > 0) {
-        addition += `\n\n## CLAUDE.local.md (${local.path})\n\n${local.content.trim()}`
-        announce({ file_path: local.path, memory_type: 'Local', load_reason: 'session_start' })
-      }
-    }
-    for (const extra of extras) {
-      addition += `\n\n${instructionsBlock(extra.path, extra.content)}`
-      // Additional dirs are extra working directories, so their memory files are
-      // Project-typed regardless of where the dir sits (Local for CLAUDE.local.md).
-      announce({ file_path: extra.path, memory_type: path.basename(extra.path) === 'CLAUDE.local.md' ? 'Local' : 'Project', load_reason: 'session_start' })
-    }
-    if (imported.length > 0) {
-      const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')
-      const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
-      addition += `\n\n## Imported context (@)\n\n${section}${notice}`
-      for (const entry of imported) {
-        announce({ file_path: entry.path, memory_type: memoryTypeForPath(entry.path, home, projectRoot), load_reason: 'include', ...(entry.parent === undefined ? {} : { parent_file_path: entry.parent }) })
-      }
-    }
+    let addition = localContextAddition(keptLocals, announce)
+    addition += additionalDirsAddition(extras, announce)
+    addition += importedAddition(imported, budget, home, projectRoot, announce)
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }

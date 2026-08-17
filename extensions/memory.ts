@@ -159,6 +159,33 @@ export function saveMemory(dir: string, indexPath: string, name: string | undefi
   return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
 }
 
+/** The read action: a memory's body, capped for context, or a not-found message. */
+function readMemory(dir: string, name: string): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
+  try {
+    const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
+    return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
+  } catch {
+    return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
+  }
+}
+
+/** The delete action: remove a memory file and its index line. The index is read
+ * before anything is removed: refusing on a failed read must leave both the memory
+ * file and the index as they were. */
+function deleteMemory(dir: string, indexPath: string, name: string): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
+  let index: string
+  try {
+    index = readIndex(dir)
+  } catch (error) {
+    return { content: [{ type: 'text', text: `Memory delete failed: ${error instanceof Error ? error.message : String(error)}. Nothing was deleted.` }], details: {} }
+  }
+  fs.rmSync(path.join(dir, `${name}.md`), { force: true })
+  const remaining = removeIndexLine(index, name)
+  if (remaining) writeIndex(indexPath, remaining)
+  else fs.rmSync(indexPath, { force: true })
+  return { content: [{ type: 'text', text: `Deleted memory ${name}.` }], details: {} }
+}
+
 /** The index as injected into the prompt, bounded like Claude's startup load. */
 export function capIndexForPrompt(index: string): string {
   const loaded = stripNonLoaded(index)
@@ -327,29 +354,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       if (params.action === 'read') {
         if (!name) return { content: [{ type: 'text' as const, text: 'read requires name.' }], details: {} }
-        try {
-          const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
-          return { content: [{ type: 'text' as const, text: capForContext(body) }], details: {} }
-        } catch {
-          return { content: [{ type: 'text' as const, text: `No memory named ${name}.` }], details: {} }
-        }
+        return readMemory(dir, name)
       }
 
       if (params.action === 'delete') {
         if (!name) return { content: [{ type: 'text' as const, text: 'delete requires name.' }], details: {} }
-        // The index is read before anything is removed: refusing on a failed read
-        // must leave both the memory file and the index as they were.
-        let index: string
-        try {
-          index = readIndex(dir)
-        } catch (error) {
-          return { content: [{ type: 'text' as const, text: `Memory delete failed: ${error instanceof Error ? error.message : String(error)}. Nothing was deleted.` }], details: {} }
-        }
-        fs.rmSync(path.join(dir, `${name}.md`), { force: true })
-        const remaining = removeIndexLine(index, name)
-        if (remaining) writeIndex(indexPath, remaining)
-        else fs.rmSync(indexPath, { force: true })
-        return { content: [{ type: 'text' as const, text: `Deleted memory ${name}.` }], details: {} }
+        return deleteMemory(dir, indexPath, name)
       }
 
       const index = readIndexQuietly(dir)

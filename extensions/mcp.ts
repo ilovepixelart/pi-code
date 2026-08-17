@@ -207,6 +207,29 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
   return servers
 }
 
+/** The mcpServers one plugin declares: an inline map on the manifest, or the file it
+ * points to (default .mcp.json at the plugin root), with ${CLAUDE_PLUGIN_*} substituted
+ * before parsing. Malformed or missing JSON yields no entries. */
+function pluginServerEntries(plugin: InstalledPlugin): Record<string, ServerConfig> {
+  const declared = plugin.manifest.mcpServers
+  // An inline map of name -> config; an array is not a valid mcpServers map (it
+  // would register a server named '0'), so it falls through to the path branch.
+  if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
+    try {
+      return JSON.parse(substitutePluginVars(JSON.stringify(declared), plugin))
+    } catch {
+      return {}
+    }
+  }
+  const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : '.mcp.json')
+  try {
+    const parsed = JSON.parse(substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin))
+    return parsed.mcpServers ?? {}
+  } catch {
+    return {}
+  }
+}
+
 /** Servers shipped by enabled plugins (.mcp.json or the manifest's `mcpServers`,
  * inline or by path), with ${CLAUDE_PLUGIN_*} substituted before parsing. Their
  * tools alias as mcp__plugin_<plugin>_<server>__<tool> for hook matchers, as
@@ -215,26 +238,7 @@ export function loadPluginServers(plugins: InstalledPlugin[]): Record<string, Se
   const fold = (name: string): string => name.replaceAll('-', '_')
   const servers: Record<string, ServerConfig> = {}
   for (const plugin of plugins) {
-    const declared = plugin.manifest.mcpServers
-    let entries: Record<string, ServerConfig> = {}
-    // An inline map of name -> config; an array is not a valid mcpServers map (it
-    // would register a server named '0'), so it falls through to the path branch.
-    if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-      try {
-        entries = JSON.parse(substitutePluginVars(JSON.stringify(declared), plugin))
-      } catch {
-        continue
-      }
-    } else {
-      const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : '.mcp.json')
-      try {
-        const parsed = JSON.parse(substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin))
-        entries = parsed.mcpServers ?? {}
-      } catch {
-        continue
-      }
-    }
-    for (const [name, config] of Object.entries(entries)) {
+    for (const [name, config] of Object.entries(pluginServerEntries(plugin))) {
       servers[name] = { ...config, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__` }
     }
   }
@@ -273,7 +277,7 @@ export function parseHelperHeaders(stdout: string): Record<string, string> {
 export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json'
   // The legacy C:\ProgramData\ClaudeCode path was dropped in Claude Code v2.1.75.
-  if (platform === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json'
+  if (platform === 'win32') return String.raw`C:\Program Files\ClaudeCode\managed-settings.json`
   return '/etc/claude-code/managed-settings.json'
 }
 
@@ -296,8 +300,12 @@ export function mcpAllowDeny(managedFile: string = managedSettingsFileOverride ?
   } catch {
     // No managed policy on this machine: no restriction.
   }
-  const names = (value: unknown): string[] =>
-    Array.isArray(value) ? value.map((entry) => (typeof entry === 'string' ? entry : typeof (entry as { serverName?: unknown })?.serverName === 'string' ? (entry as { serverName: string }).serverName : undefined)).filter((name): name is string => typeof name === 'string' && name.length > 0) : []
+  const entryName = (entry: unknown): string | undefined => {
+    if (typeof entry === 'string') return entry
+    const serverName = (entry as { serverName?: unknown })?.serverName
+    return typeof serverName === 'string' ? serverName : undefined
+  }
+  const names = (value: unknown): string[] => (Array.isArray(value) ? value.map(entryName).filter((name): name is string => typeof name === 'string' && name.length > 0) : [])
   return {
     allowed: Array.isArray(settings.allowedMcpServers) ? new Set(names(settings.allowedMcpServers)) : null,
     denied: new Set(names(settings.deniedMcpServers)),
@@ -551,6 +559,15 @@ export interface AuthUi {
   notify: (message: string, level: 'info' | 'warning' | 'error') => void
 }
 
+/** The OAuth flow's UI seams, absent in headless runs. */
+function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
+  if (!ctx.hasUI) return undefined
+  return {
+    confirm: (title, body) => ctx.ui.confirm(title, body),
+    notify: (message, level) => ctx.ui.notify(message, level),
+  }
+}
+
 /** Browser logins are human-paced; a connect-sized timeout would cut them off. */
 const OAUTH_FLOW_TIMEOUT_MS = 180_000
 
@@ -558,6 +575,14 @@ const OAUTH_FLOW_TIMEOUT_MS = 180_000
  * failed). A typed marker so the SSE-fallback caller can tell an auth failure
  * from a transport mismatch without matching on message text. */
 class OAuthRequiredError extends Error {}
+
+/** Wrap a login-flow failure as OAuthRequiredError, passing an existing one through
+ * unchanged so its message is not doubled. */
+function asOAuthRequiredError(name: string, error: unknown): OAuthRequiredError {
+  if (error instanceof OAuthRequiredError) return error
+  const detail = error instanceof Error ? error.message : String(error)
+  return new OAuthRequiredError(`login for ${name} failed: ${detail}`)
+}
 
 /** Whether a connect failure is an authentication problem: the SDK's own
  * UnauthorizedError, a transport error carrying HTTP 401 (which is what a 401
@@ -568,6 +593,13 @@ function isUnauthorized(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 401
 }
 
+// SSEClientTransport is deprecated in favour of Streamable HTTP, but both concrete
+// transports expose finishAuth (the base Transport interface does not), so the union
+// stays as the http-family fallback type through the migration period.
+type HttpFamilyTransport = SSEClientTransport | StreamableHTTPClientTransport // NOSONAR typescript:S1874 - SSE fallback still required by the MCP SDK
+
+type MakeTransport = (authProvider?: OAuthClientProvider) => HttpFamilyTransport
+
 /**
  * Connect an http-family server, running Claude's OAuth login when the server
  * demands one. Stored tokens ride the first attempt so the SDK refreshes
@@ -576,7 +608,7 @@ function isUnauthorized(error: unknown): boolean {
  * Bearer-token servers never enter the OAuth path: an explicit token is the
  * user saying how auth works.
  */
-async function connectHttpFamily(name: string, config: { url: string }, makeTransport: (authProvider?: OAuthClientProvider) => SSEClientTransport | StreamableHTTPClientTransport, label: string, bearerToken: string | undefined, authUi: AuthUi | undefined): Promise<Client> {
+async function connectHttpFamily(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, bearerToken: string | undefined, authUi: AuthUi | undefined): Promise<Client> {
   const newClient = () => new Client({ name: 'pi-code-mcp', version: '0.1.0' })
   // Stored tokens ride the first attempt so the SDK refreshes them; with none, no
   // provider is attached, so a 401 surfaces as a transport error carrying code 401
@@ -590,39 +622,47 @@ async function connectHttpFamily(name: string, config: { url: string }, makeTran
   } catch (error) {
     if (bearerToken || !isUnauthorized(error)) throw error
     if (!authUi) throw new OAuthRequiredError(`${name} requires a login; run pi interactively to authenticate`)
-    const approved = await authUi.confirm(`MCP server "${name}" requires login`, `Open your browser to authorize ${config.url}?`)
-    if (!approved) throw new OAuthRequiredError(`login declined for ${name}`)
-    const provider = new FileOAuthProvider(name, (authorizationUrl) => {
-      openBrowser(String(authorizationUrl))
-      authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
-    })
-    const { server, port } = await startCallbackServer(provider.savedRedirectPort())
-    provider.bindRedirectPort(port)
+    return await runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient)
+  }
+}
+
+/**
+ * The interactive half of the OAuth login, reached only once a silent connect has
+ * failed with a 401 and a UI is present: confirm, open the browser, catch the loopback
+ * redirect, and exchange the code via the SDK's finishAuth. Past the confirm the server
+ * is known to need OAuth, so any failure here (a denied consent page, the 180s wait, a
+ * token exchange error) is wrapped as an auth failure, not a transport mismatch: that
+ * keeps the typeless-url caller from retrying over SSE and prompting for a second login.
+ */
+async function runInteractiveOAuth(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, authUi: AuthUi, newClient: () => Client): Promise<Client> {
+  const approved = await authUi.confirm(`MCP server "${name}" requires login`, `Open your browser to authorize ${config.url}?`)
+  if (!approved) throw new OAuthRequiredError(`login declined for ${name}`)
+  const provider = new FileOAuthProvider(name, (authorizationUrl) => {
+    openBrowser(String(authorizationUrl))
+    authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
+  })
+  const { server, port } = await startCallbackServer(provider.savedRedirectPort())
+  provider.bindRedirectPort(port)
+  try {
+    const transport = makeTransport(provider)
+    const pendingCode = waitForAuthCode(server, OAUTH_FLOW_TIMEOUT_MS)
+    pendingCode.catch(() => {}) // consumed below; an abandoned login must not surface as unhandled
+    const client = newClient()
     try {
-      const transport = makeTransport(provider)
-      const pendingCode = waitForAuthCode(server, OAUTH_FLOW_TIMEOUT_MS)
-      pendingCode.catch(() => {}) // consumed below; an abandoned login must not surface as unhandled
-      const client = newClient()
-      try {
-        await connectWithTimeout(client, transport, label)
-        return client // authorized between attempts; nothing left to exchange
-      } catch (retryError) {
-        if (!isUnauthorized(retryError)) throw retryError
-        const code = await pendingCode
-        await transport.finishAuth(code)
-        const authed = newClient()
-        await connectWithTimeout(authed, makeTransport(provider), label)
-        return authed
-      }
-    } catch (flowError) {
-      // Past the confirm the server is known to need OAuth, so any failure here (a
-      // denied consent page, the 180s wait, a token exchange error) is an auth
-      // failure, not a transport mismatch. Marking it keeps the typeless-url caller
-      // from retrying over SSE and prompting the user to log in a second time.
-      throw flowError instanceof OAuthRequiredError ? flowError : new OAuthRequiredError(`login for ${name} failed: ${flowError instanceof Error ? flowError.message : String(flowError)}`)
-    } finally {
-      server.close()
+      await connectWithTimeout(client, transport, label)
+      return client // authorized between attempts; nothing left to exchange
+    } catch (retryError) {
+      if (!isUnauthorized(retryError)) throw retryError
+      const code = await pendingCode
+      await transport.finishAuth(code)
+      const authed = newClient()
+      await connectWithTimeout(authed, makeTransport(provider), label)
+      return authed
     }
+  } catch (flowError) {
+    throw asOAuthRequiredError(name, flowError)
+  } finally {
+    server.close()
   }
 }
 
@@ -672,6 +712,62 @@ async function listAllPrompts(client: Client): Promise<McpPromptInfo[]> {
     cursor = page.nextCursor
   } while (cursor)
   return prompts
+}
+
+/** One resource's flat record for the list_mcp_resources output, dropping the optional
+ * description/mimeType when the server omits them. */
+function resourceEntry(server: string, resource: { uri: string; name: string; description?: string; mimeType?: string }): Record<string, unknown> {
+  return { server, uri: resource.uri, name: resource.name, ...(resource.description ? { description: resource.description } : {}), ...(resource.mimeType ? { mimeType: resource.mimeType } : {}) }
+}
+
+/** One resource template's flat record, likewise dropping absent optional fields. */
+function resourceTemplateEntry(server: string, template: { uriTemplate: string; name: string; description?: string; mimeType?: string }): Record<string, unknown> {
+  return { server, uriTemplate: template.uriTemplate, name: template.name, ...(template.description ? { description: template.description } : {}), ...(template.mimeType ? { mimeType: template.mimeType } : {}) }
+}
+
+/** Page a server's resources to exhaustion under the call budget, appending each as a
+ * flat record. Pushed into the caller's array incrementally so a mid-pagination failure
+ * still leaves the earlier pages in place. */
+async function collectResources(entries: Array<Record<string, unknown>>, name: string, client: Client, budget: number): Promise<void> {
+  let cursor: string | undefined
+  do {
+    const page = await withTimeout(client.listResources({ cursor }, { timeout: budget }), budget, `list resources ${name}`)
+    for (const resource of page.resources) entries.push(resourceEntry(name, resource))
+    cursor = page.nextCursor
+  } while (cursor)
+}
+
+/** Page a server's resource templates to exhaustion under the call budget. */
+async function collectResourceTemplates(entries: Array<Record<string, unknown>>, name: string, client: Client, budget: number): Promise<void> {
+  let cursor: string | undefined
+  do {
+    const page = await withTimeout(client.listResourceTemplates({ cursor }, { timeout: budget }), budget, `list resource templates ${name}`)
+    for (const template of page.resourceTemplates) entries.push(resourceTemplateEntry(name, template))
+    cursor = page.nextCursor
+  } while (cursor)
+}
+
+/** Append every resource and template one server exposes. A resource-listing failure
+ * surfaces inline as an error record, so one server cannot empty the whole listing; a
+ * template-listing failure is silent, templates being optional (a server with the
+ * resources capability but no templates answers method-not-found). */
+async function collectServerResourceEntries(entries: Array<Record<string, unknown>>, name: string, client: Client, budget: number): Promise<void> {
+  try {
+    await collectResources(entries, name, client, budget)
+  } catch (error) {
+    entries.push({ server: name, error: error instanceof Error ? error.message : String(error) })
+  }
+  try {
+    await collectResourceTemplates(entries, name, client, budget)
+  } catch {
+    // Templates are optional: a method-not-found here is not worth reporting.
+  }
+}
+
+/** The optional server-name filter for list_mcp_resources: a non-empty string, else undefined. */
+function resourceServerFilter(params: unknown): string | undefined {
+  const server = (params as { server?: unknown }).server
+  return typeof server === 'string' && server.length > 0 ? server : undefined
 }
 
 export default async function mcpExtension(pi: ExtensionAPI) {
@@ -828,34 +924,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       description: 'List available resources and resource templates from connected MCP servers. Optionally filter to a single server by name.',
       parameters: Type.Object({ server: Type.Optional(Type.String({ description: 'Only list resources from this server' })) }),
       async execute(_id, params) {
-        const filter = typeof (params as { server?: unknown }).server === 'string' && (params as { server: string }).server.length > 0 ? (params as { server: string }).server : undefined
+        const filter = resourceServerFilter(params)
         if (filter && !clients.has(filter)) throw new Error(`MCP server "${filter}" is not connected`)
         const entries: Array<Record<string, unknown>> = []
         for (const [name, client] of resourceServers()) {
           if (filter && name !== filter) continue
-          const budget = callTimeoutMs()
-          try {
-            let cursor: string | undefined
-            do {
-              const page = await withTimeout(client.listResources({ cursor }, { timeout: budget }), budget, `list resources ${name}`)
-              for (const resource of page.resources) entries.push({ server: name, uri: resource.uri, name: resource.name, ...(resource.description ? { description: resource.description } : {}), ...(resource.mimeType ? { mimeType: resource.mimeType } : {}) })
-              cursor = page.nextCursor
-            } while (cursor)
-          } catch (error) {
-            // One server failing must not empty the whole listing; surface it inline.
-            entries.push({ server: name, error: error instanceof Error ? error.message : String(error) })
-          }
-          try {
-            let cursor: string | undefined
-            do {
-              const page = await withTimeout(client.listResourceTemplates({ cursor }, { timeout: budget }), budget, `list resource templates ${name}`)
-              for (const template of page.resourceTemplates) entries.push({ server: name, uriTemplate: template.uriTemplate, name: template.name, ...(template.description ? { description: template.description } : {}), ...(template.mimeType ? { mimeType: template.mimeType } : {}) })
-              cursor = page.nextCursor
-            } while (cursor)
-          } catch {
-            // Templates are optional: a server with the resources capability but no
-            // templates answers method-not-found, which is not worth reporting.
-          }
+          await collectServerResourceEntries(entries, name, client, callTimeoutMs())
         }
         return { content: mapContent([{ type: 'text', text: JSON.stringify(entries, null, 2) }]), details: {} }
       },
@@ -987,15 +1061,6 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     if (!(await isProjectApproved(ctx))) return false
     await connectServers(gated, authUi)
     return true
-  }
-
-  /** The OAuth flow's UI seams, absent in headless runs. */
-  function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
-    if (!ctx.hasUI) return undefined
-    return {
-      confirm: (title, body) => ctx.ui.confirm(title, body),
-      notify: (message, level) => ctx.ui.notify(message, level),
-    }
   }
 
   let projectConnected = false

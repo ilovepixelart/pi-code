@@ -233,6 +233,40 @@ async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text:
 const FETCH_CACHE_TTL_MS = 15 * 60 * 1000
 const FETCH_CACHE_MAX_ENTRIES = 50
 
+type FetchCache = Map<string, { expires: number; body: string }>
+
+/** Store a freshly fetched body. Drop expired entries first, then evict the oldest
+ * live one if still full; deleting before set keeps Map insertion order a true
+ * recency order, so a refreshed URL moves to the newest slot instead of keeping its
+ * stale one. Only a delivered body reaches here, so a thrown fetch retries next call. */
+function rememberFetch(cache: FetchCache, url: string, body: string, now: number): void {
+  cache.delete(url)
+  for (const [key, entry] of cache) {
+    if (entry.expires <= now) cache.delete(key)
+  }
+  if (cache.size >= FETCH_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value
+    if (oldest !== undefined) cache.delete(oldest)
+  }
+  cache.set(url, { expires: now + FETCH_CACHE_TTL_MS, body })
+}
+
+/** Claude's WebFetch runs the prompt over the page with a fast model and returns
+ * that answer, not the raw page. Best-effort: any failure (no model, provider error)
+ * yields null so the caller falls back to the markdown. */
+async function answerFromPage(model: Parameters<typeof completeText>[0], prompt: string, url: string, body: string, signal?: AbortSignal): Promise<string | null> {
+  try {
+    const answer = await completeText(model, `${prompt}\n\nAnswer using only the page content below, fetched from ${url}:\n\n${body}`, {
+      system: 'You extract and answer questions from a web page. Answer only from the provided content, concisely. If the content does not contain the answer, say so.',
+      maxTokens: 1024,
+      signal,
+    })
+    return answer || null
+  } catch {
+    return null
+  }
+}
+
 export default function webExtension(pi: ExtensionAPI) {
   const fetchCache = new Map<string, { expires: number; body: string }>()
   pi.registerTool({
@@ -280,35 +314,14 @@ export default function webExtension(pi: ExtensionAPI) {
       } else {
         const { text, contentType } = await fetchText(params.url)
         body = capFetchChars(contentType.includes('html') ? htmlToMarkdown(text) : text)
-        // Only a delivered body is cached; a thrown fetch must retry next call.
-        // Drop expired entries first, then evict the oldest live one if still full;
-        // deleting before set keeps Map insertion order a true recency order, so a
-        // refreshed URL moves to the newest slot instead of keeping its stale one.
-        fetchCache.delete(params.url)
-        for (const [url, entry] of fetchCache) {
-          if (entry.expires <= now) fetchCache.delete(url)
-        }
-        if (fetchCache.size >= FETCH_CACHE_MAX_ENTRIES) {
-          const oldest = fetchCache.keys().next().value
-          if (oldest !== undefined) fetchCache.delete(oldest)
-        }
-        fetchCache.set(params.url, { expires: now + FETCH_CACHE_TTL_MS, body })
+        rememberFetch(fetchCache, params.url, body, now)
       }
 
-      // Claude's WebFetch runs the prompt over the page with a fast model and returns
-      // that answer, not the raw page. Best-effort: any failure (no model, provider
-      // error) falls back to the markdown, so web_fetch always returns something.
+      // Best-effort prompt-over-page: a failure returns null, so web_fetch always
+      // falls back to the raw markdown and returns something.
       if (params.prompt && ctx?.model) {
-        try {
-          const answer = await completeText(ctx.model, `${params.prompt}\n\nAnswer using only the page content below, fetched from ${params.url}:\n\n${body}`, {
-            system: 'You extract and answer questions from a web page. Answer only from the provided content, concisely. If the content does not contain the answer, say so.',
-            maxTokens: 1024,
-            signal,
-          })
-          if (answer) return { content: [{ type: 'text' as const, text: answer }], details: {} }
-        } catch {
-          // fall through to the raw markdown
-        }
+        const answer = await answerFromPage(ctx.model, params.prompt, params.url, body, signal)
+        if (answer) return { content: [{ type: 'text' as const, text: answer }], details: {} }
       }
       // The char cap alone admits thousands of short lines; pi's tool-output budget
       // bounds lines too, which the shared guard enforces.

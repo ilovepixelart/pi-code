@@ -16,6 +16,9 @@ import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
 
 import { splitSegments } from './shell-split.js'
 
+/** The pi file tools a Claude path rule can govern. */
+export type PathRuleTool = 'read' | 'edit' | 'write'
+
 export interface ParsedCommand {
   description: string
   argumentHint?: string
@@ -23,7 +26,7 @@ export interface ParsedCommand {
   /** Claude `Bash(...)` specifiers, present only when every bash grant is scoped. */
   bashRules?: string[]
   /** Claude path rules per pi file tool, from Read(...)/Edit(...)/Write(...) grants. */
-  pathRules?: Partial<Record<'read' | 'edit' | 'write', string[]>>
+  pathRules?: Partial<Record<PathRuleTool, string[]>>
   /** Names from the `arguments:` frontmatter list, mapped to positions in order. */
   argumentNames?: string[]
   /** Tools removed from the pool while the command's turn runs. */
@@ -122,16 +125,76 @@ export interface ToolGrants {
   /** Claude path rules per pi file tool, absent for a tool with an unscoped grant.
    * Edit scopes govern writes too, as Claude documents; Write scopes are honored
    * rather than Claude's accept-and-warn-then-ignore, which would fail open here. */
-  pathRules?: Partial<Record<'read' | 'edit' | 'write', string[]>>
+  pathRules?: Partial<Record<PathRuleTool, string[]>>
   /** Entries that carried an argument scope, in their original spelling. */
   scopedEntries: string[]
 }
 
 /** The pi file tools one Claude path-ruled entry governs. */
-const PATH_RULE_TOOLS: Record<string, Array<'read' | 'edit' | 'write'>> = {
+const PATH_RULE_TOOLS: Record<string, Array<PathRuleTool>> = {
   read: ['read'],
   edit: ['edit', 'write'],
   write: ['write'],
+}
+
+/** The tools, scopes, and path rules accumulated while scanning one grant list. */
+interface GrantAccumulator {
+  tools: string[]
+  scopedEntries: string[]
+  bashRules: string[]
+  bashUnscoped: boolean
+  pathScopes: Record<PathRuleTool, string[]>
+  pathUnscoped: Set<PathRuleTool>
+}
+
+function createGrantAccumulator(): GrantAccumulator {
+  return { tools: [], scopedEntries: [], bashRules: [], bashUnscoped: false, pathScopes: { read: [], edit: [], write: [] }, pathUnscoped: new Set() }
+}
+
+/** Coerce a raw grant value to its string entries: a YAML list stays a list, a
+ * comma-separated string is split, and anything else (or a list with a non-string
+ * member) is rejected as undefined, the same "not a grant" signal as an absent field. */
+function coerceGrantItems(raw: unknown): string[] | undefined {
+  let items: unknown[]
+  if (Array.isArray(raw)) items = raw
+  else if (typeof raw === 'string') items = toolEntries(raw)
+  else return undefined
+  if (items.some((item) => typeof item !== 'string')) return undefined
+  return items as string[]
+}
+
+/** Fold one grant entry into the accumulator: the base tool is granted, an unscoped
+ * entry marks its tools wide, and a scoped entry records the scope for bash and the
+ * file tools it governs. */
+function addGrantEntry(acc: GrantAccumulator, item: string): void {
+  const entry = item.trim()
+  const name = normalizeToolName(entry)
+  if (!name) return
+  if (!acc.tools.includes(name)) acc.tools.push(name)
+  const open = entry.indexOf('(')
+  if (open === -1) {
+    if (name === 'bash') acc.bashUnscoped = true
+    for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathUnscoped.add(tool)
+    return
+  }
+  acc.scopedEntries.push(entry)
+  const scope = entry.slice(open + 1, entry.endsWith(')') ? -1 : undefined).trim()
+  // An empty specifier (`Bash()`, `Read()`) matches nothing and must not read as
+  // the unscoped grant it explicitly is not: it is recorded so the tool stays
+  // restricted, and the matchers treat an empty rule as matching no input.
+  if (name === 'bash') acc.bashRules.push(scope)
+  for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathScopes[tool].push(scope)
+}
+
+/** The per-tool path rules from a scan: a tool with any unscoped grant is omitted
+ * (it is wide), one with only scoped grants keeps them, and the whole map is absent
+ * when no tool carries a rule. */
+function buildPathRules(acc: GrantAccumulator): ToolGrants['pathRules'] {
+  const pathRules: NonNullable<ToolGrants['pathRules']> = {}
+  for (const tool of ['read', 'edit', 'write'] as const) {
+    if (!acc.pathUnscoped.has(tool) && acc.pathScopes[tool].length > 0) pathRules[tool] = acc.pathScopes[tool]
+  }
+  return Object.keys(pathRules).length > 0 ? pathRules : undefined
 }
 
 /**
@@ -147,47 +210,15 @@ const PATH_RULE_TOOLS: Record<string, Array<'read' | 'edit' | 'write'>> = {
  * whose widening reaches everything, so it is the one enforced.
  */
 export function parseToolGrants(raw: unknown): ToolGrants | undefined {
-  if (raw === undefined || raw === null) return undefined
-  let items: unknown[]
-  if (Array.isArray(raw)) items = raw
-  else if (typeof raw === 'string') items = toolEntries(raw)
-  else return undefined
-  if (items.some((item) => typeof item !== 'string')) return undefined
-
-  const tools: string[] = []
-  const scopedEntries: string[] = []
-  const bashRules: string[] = []
-  let bashUnscoped = false
-  const pathScopes: Record<'read' | 'edit' | 'write', string[]> = { read: [], edit: [], write: [] }
-  const pathUnscoped = new Set<'read' | 'edit' | 'write'>()
-  for (const item of items as string[]) {
-    const entry = item.trim()
-    const name = normalizeToolName(entry)
-    if (!name) continue
-    if (!tools.includes(name)) tools.push(name)
-    const open = entry.indexOf('(')
-    if (open === -1) {
-      if (name === 'bash') bashUnscoped = true
-      for (const tool of PATH_RULE_TOOLS[name] ?? []) pathUnscoped.add(tool)
-      continue
-    }
-    scopedEntries.push(entry)
-    const scope = entry.slice(open + 1, entry.endsWith(')') ? -1 : undefined).trim()
-    // An empty specifier (`Bash()`, `Read()`) matches nothing and must not read as
-    // the unscoped grant it explicitly is not: it is recorded so the tool stays
-    // restricted, and the matchers treat an empty rule as matching no input.
-    if (name === 'bash') bashRules.push(scope)
-    for (const tool of PATH_RULE_TOOLS[name] ?? []) pathScopes[tool].push(scope)
-  }
-  const pathRules: ToolGrants['pathRules'] = {}
-  for (const tool of ['read', 'edit', 'write'] as const) {
-    if (!pathUnscoped.has(tool) && pathScopes[tool].length > 0) pathRules[tool] = pathScopes[tool]
-  }
+  const items = coerceGrantItems(raw)
+  if (items === undefined) return undefined
+  const acc = createGrantAccumulator()
+  for (const item of items) addGrantEntry(acc, item)
   return {
-    tools,
-    scopedEntries,
-    bashRules: !bashUnscoped && bashRules.length > 0 ? bashRules : undefined,
-    pathRules: Object.keys(pathRules).length > 0 ? pathRules : undefined,
+    tools: acc.tools,
+    scopedEntries: acc.scopedEntries,
+    bashRules: !acc.bashUnscoped && acc.bashRules.length > 0 ? acc.bashRules : undefined,
+    pathRules: buildPathRules(acc),
   }
 }
 
@@ -208,14 +239,14 @@ const isFlagEnabled = (value: unknown): boolean => value === true || YAML_TRUE.h
 /** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
 const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
 
-const ARGUMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+const ARGUMENT_NAME = /^[A-Za-z_]\w*$/
 
 /** The `arguments:` frontmatter: a YAML list or a space- or comma-separated string
  * of names mapping to positions in order. Invalid names are dropped, and ARGUMENTS
  * itself is reserved by the built-in placeholder. */
 function parseArgumentNames(raw: unknown): string[] | undefined {
   let items: string[]
-  if (Array.isArray(raw)) items = raw.map((entry) => String(entry))
+  if (Array.isArray(raw)) items = raw.map(String)
   else if (typeof raw === 'string') items = raw.split(/[\s,]+/)
   else return undefined
   const names = items.map((name) => name.trim()).filter((name) => ARGUMENT_NAME.test(name) && name !== 'ARGUMENTS')
@@ -312,8 +343,8 @@ export function substituteArgsDetailed(body: string, args: string, names: string
     return value
   }
   const text = body.replaceAll(argPattern(names), (token, bracketIdx?: string, defIdx?: string, defVal?: string, argsDefault?: string, shorthandIdx?: string, name?: string) => {
-    if (token === '\\\\') return token
-    if (token === '\\$') return '$'
+    if (token === String.raw`\\`) return token
+    if (token === String.raw`\$`) return '$'
     if (bracketIdx !== undefined) return fill(parts[Number(bracketIdx)], token)
     if (defIdx !== undefined) return fill(parts[Number(defIdx)], defVal ?? '')
     if (argsDefault !== undefined) {

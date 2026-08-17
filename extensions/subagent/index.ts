@@ -589,7 +589,8 @@ export function tasksStatusText(runs: ReadonlyArray<BackgroundRunView>): string 
   if (runs.length === 0) return 'No background subagent runs in this session.'
   return runs
     .map((run) => {
-      const label = run.state === 'running' ? 'running' : `${run.state} (${run.turns} turn${run.turns === 1 ? '' : 's'})`
+      const plural = run.turns === 1 ? '' : 's'
+      const label = run.state === 'running' ? 'running' : `${run.state} (${run.turns} turn${plural})`
       const head = `${run.id} ${run.agent}: ${label} - ${clipCodepoints(run.task, TASK_PREVIEW_CHARS)}`
       const tail = runOutputTail(run)
       return tail ? `${head}\n  ${tail}` : head
@@ -611,7 +612,8 @@ export function agentsListText(agents: ReadonlyArray<Pick<AgentConfig, 'name' | 
   for (const source of AGENT_SOURCE_ORDER) {
     const group = agents.filter((agent) => agent.source === source)
     if (group.length === 0) continue
-    sections.push(`${source}:\n${group.map((agent) => `  ${agent.name} - ${agent.filePath}`).join('\n')}`)
+    const lines = group.map((agent) => `  ${agent.name} - ${agent.filePath}`).join('\n')
+    sections.push(`${source}:\n${lines}`)
   }
   return `${sections.join('\n')}\n\n${AGENTS_DIR_HINT}`
 }
@@ -788,7 +790,20 @@ function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefine
   }
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>, projectApproved: boolean, onStarted?: (id: string) => void): Promise<ToolResult> {
+/** Everything runBackgroundMode needs from the surrounding execute() call, grouped so
+ * the parameter list stays in bounds. */
+interface BackgroundContext {
+  agents: AgentConfig[]
+  defaultCwd: string
+  pi: ExtensionAPI
+  makeDetails: MakeDetails
+  skillRoots: string[]
+  availableModels: ReadonlyArray<{ id: string }>
+  projectApproved: boolean
+}
+
+async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext, onStarted?: (id: string) => void): Promise<ToolResult> {
+  const { agents, defaultCwd, pi, makeDetails, skillRoots, availableModels, projectApproved } = context
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -1464,7 +1479,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved, (id) => rememberBackgroundRun(id))
+      if (params.background) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
 
       const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, projectApproved, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 

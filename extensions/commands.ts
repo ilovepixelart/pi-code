@@ -80,6 +80,16 @@ function substitutePathRule(rule: string, vars: Record<string, string | undefine
   return rule.trimStart().startsWith('${CLAUDE_') && path.isAbsolute(substituted) ? `/${substituted}` : substituted
 }
 
+/** The path rules that survive an allowed-tools intersection: only the tools the
+ * grant kept get their scopes, each rule ${CLAUDE_*}-substituted like the body. */
+function scopedPathRules(pathRules: Partial<Record<PathRuleTool, string[]>>, granted: string[], vars: Record<string, string | undefined>): Partial<Record<PathRuleTool, string[]>> {
+  const result: Partial<Record<PathRuleTool, string[]>> = {}
+  for (const [tool, rules] of Object.entries(pathRules)) {
+    if (granted.includes(tool)) result[tool as PathRuleTool] = rules.map((rule) => substitutePathRule(rule, vars))
+  }
+  return result
+}
+
 /** Wall-clock budget for one injected span: the Bash tool's documented 2-minute
  * default, which is what Claude runs these commands under. */
 const BASH_TIMEOUT_MS = 120_000
@@ -204,7 +214,7 @@ export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, a
   // `${user_config.KEY}` is a plugin-command variable only; leave it literal in an
   // ordinary command so a body that happens to contain the syntax is not stripped.
   const substituted = substituteVars(withArgs, vars)
-  const withVars = plugin ? substituted.replace(/\$\{user_config\.([A-Za-z0-9_]+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '') : substituted
+  const withVars = plugin ? substituted.replace(/\$\{user_config\.(\w+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '') : substituted
 
   const exec: CommandExec =
     (options?.allowShell ?? true)
@@ -259,7 +269,8 @@ export function slashCommandToolDescription(commands: SlashCommandEntry[], budge
   let used = 0
   let omitted = 0
   for (const command of commands) {
-    const entry = `/${command.name} - ${command.description}${command.argumentHint ? ` (${command.argumentHint})` : ''}`.slice(0, ENTRY_CHAR_CAP)
+    const hintSuffix = command.argumentHint ? ` (${command.argumentHint})` : ''
+    const entry = `/${command.name} - ${command.description}${hintSuffix}`.slice(0, ENTRY_CHAR_CAP)
     if (used + entry.length + 1 > budget) {
       omitted++
       continue // a shorter later entry may still fit the remaining budget
@@ -336,6 +347,57 @@ export default function commandsExtension(pi: ExtensionAPI) {
     }
   })
 
+  /** Take the tool set to restore when this run ends, captured once per turn so a
+   * second restricted command narrows against the original unrestricted set. */
+  function captureRestorePoint(): string[] {
+    const original = pendingRestore ?? pi.getActiveTools()
+    pendingRestore = original
+    return original
+  }
+
+  /** Apply a command's allowed-tools to the run it drives: intersect with the tools
+   * pi actually has, keep the bash and path scopes for the tool_call guard, and let
+   * agent_settled restore the previous set. */
+  function applyAllowedTools(parsed: ParsedCommand, vars: Record<string, string | undefined>): void {
+    const allowed = parsed.allowedTools
+    if (!allowed) return
+    // Only the first restriction in a turn sees the unrestricted set; a second
+    // command must grant and restore against that original set, or its own tools
+    // are intersected away by the first command's narrowing.
+    const original = captureRestorePoint()
+    const granted = allowed.filter((tool) => original.includes(tool))
+    // `allowed-tools: []` says no tools, and is honored. A non-empty list that
+    // intersects to nothing named only tools pi has none of: that restriction cannot
+    // be expressed, and applying it as "no tools" is not what the command asked for.
+    if (granted.length > 0 || allowed.length === 0) pi.setActiveTools(granted)
+    // The latest restricted command speaks for the turn: a later unscoped grant
+    // lifts an earlier command's scopes rather than stacking under them. Rules get
+    // the same ${CLAUDE_*} substitution as the body, so a rule can name a bundled
+    // script by its real path, as the skills docs show.
+    pendingBashRules = granted.includes('bash') ? parsed.bashRules?.map((rule) => substituteVars(rule, vars)) : undefined
+    pendingPathRules = parsed.pathRules ? scopedPathRules(parsed.pathRules, granted, vars) : undefined
+  }
+
+  /** Claude removes disallowed-tools from the pool while the command is active; with
+   * both fields present the removal wins, as in subagent tool lists. */
+  function applyDisallowedTools(parsed: ParsedCommand): void {
+    const disallowed = parsed.disallowedTools
+    if (!disallowed || disallowed.length === 0) return
+    captureRestorePoint()
+    pi.setActiveTools(pi.getActiveTools().filter((tool) => !disallowed.includes(tool)))
+  }
+
+  /** Claude's `model:` frontmatter overrides the model for this run only, then the
+   * session model resumes; restore happens on agent_settled like the tool-set restore.
+   * Applied before sendUserMessage so the run it drives happens on the new model. */
+  async function applyModelOverride(parsed: ParsedCommand, varCtx: VarContext): Promise<void> {
+    const target = resolveCommandModel(parsed.model, varCtx.modelRegistry?.getAvailable() ?? [])
+    if (target && varCtx.model && target.id !== varCtx.model.id) {
+      pendingModelRestore = pendingModelRestore ?? varCtx.model
+      await pi.setModel(target as Parameters<typeof pi.setModel>[0])
+    }
+  }
+
   async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext, filePath: string, plugin?: CommandPlugin): Promise<void> {
     const varCtx = ctx as unknown as VarContext
     const vars = commandVars(ctx, filePath, plugin)
@@ -354,46 +416,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // restored when that run ends. Restoring inline does not work: sendUserMessage is
     // fire-and-forget, so the restore would land before the agent ever read the tool
     // list, leaving the command running with everything enabled.
-    if (parsed.allowedTools) {
-      // Only the first restriction in a turn sees the unrestricted set; a second
-      // command must grant and restore against that original set, or its own tools
-      // are intersected away by the first command's narrowing.
-      const original = pendingRestore ?? pi.getActiveTools()
-      pendingRestore = original
-      const granted = parsed.allowedTools.filter((tool) => original.includes(tool))
-      // `allowed-tools: []` says no tools, and is honored. A non-empty list that
-      // intersects to nothing named only tools pi has none of: that restriction cannot
-      // be expressed, and applying it as "no tools" is not what the command asked for.
-      if (granted.length > 0 || parsed.allowedTools.length === 0) pi.setActiveTools(granted)
-      // The latest restricted command speaks for the turn: a later unscoped grant
-      // lifts an earlier command's scopes rather than stacking under them. Rules get
-      // the same ${CLAUDE_*} substitution as the body, so a rule can name a bundled
-      // script by its real path, as the skills docs show.
-      pendingBashRules = granted.includes('bash') ? parsed.bashRules?.map((rule) => substituteVars(rule, vars)) : undefined
-      pendingPathRules = undefined
-      if (parsed.pathRules) {
-        pendingPathRules = {}
-        for (const [tool, rules] of Object.entries(parsed.pathRules)) {
-          if (granted.includes(tool)) pendingPathRules[tool as PathRuleTool] = rules.map((rule) => substitutePathRule(rule, vars))
-        }
-      }
-    }
-    // Claude removes disallowed-tools from the pool while the skill is active;
-    // with both fields present the removal wins, as in subagent tool lists.
-    if (parsed.disallowedTools && parsed.disallowedTools.length > 0) {
-      const original = pendingRestore ?? pi.getActiveTools()
-      pendingRestore = original
-      const disallowed = parsed.disallowedTools
-      pi.setActiveTools(pi.getActiveTools().filter((tool) => !disallowed.includes(tool)))
-    }
-    // Claude's `model:` frontmatter overrides the model for this run only, then the
-    // session model resumes; restore happens on agent_settled like the tool-set restore.
-    // Applied before sendUserMessage so the run it drives happens on the new model.
-    const target = resolveCommandModel(parsed.model, varCtx.modelRegistry?.getAvailable() ?? [])
-    if (target && varCtx.model && target.id !== varCtx.model.id) {
-      pendingModelRestore = pendingModelRestore ?? varCtx.model
-      await pi.setModel(target as Parameters<typeof pi.setModel>[0])
-    }
+    applyAllowedTools(parsed, vars)
+    applyDisallowedTools(parsed)
+    await applyModelOverride(parsed, varCtx)
     pi.sendUserMessage(expanded)
   }
 
