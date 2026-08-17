@@ -64,6 +64,14 @@ describe('FileOAuthProvider', () => {
     await provider.saveTokens({ access_token: 'x', token_type: 'bearer' })
     expect(new FileOAuthProvider('github', () => {}).hasTokens()).toBe(true)
   })
+
+  it('generates a distinct, stable CSRF state per login attempt', () => {
+    const a = new FileOAuthProvider('srv-a', () => {})
+    const b = new FileOAuthProvider('srv-b', () => {})
+    expect(a.state()).toMatch(/^[0-9a-f]{32}$/)
+    expect(a.state()).toBe(a.state()) // stable within a single login
+    expect(a.state()).not.toBe(b.state()) // a fresh token per attempt
+  })
 })
 
 describe('callback server', () => {
@@ -101,5 +109,27 @@ describe('callback server', () => {
     expect(second.port).not.toBe(first.port)
     first.server.close()
     second.server.close()
+  })
+
+  it('ignores a request to a non-callback path so a stray hit cannot settle the login', async () => {
+    const { server, port } = await startCallbackServer()
+    const pending = waitForAuthCode(server, 5000, 'st8')
+    const stray = await fetch(`http://127.0.0.1:${port}/favicon.ico`)
+    expect(stray.status).toBe(404)
+    // The stray did not settle the promise: the genuine redirect still resolves it.
+    await fetch(`http://127.0.0.1:${port}/callback?code=real&state=st8`)
+    expect(await pending).toBe('real')
+    server.close()
+  })
+
+  it('ignores a callback whose state does not match, then accepts the genuine one', async () => {
+    const { server, port } = await startCallbackServer()
+    const pending = waitForAuthCode(server, 5000, 'expected-state')
+    // A forged redirect from another local process cannot inject its code or abort the login.
+    const forged = await fetch(`http://127.0.0.1:${port}/callback?code=attacker&state=wrong`)
+    expect(forged.status).toBe(400)
+    await fetch(`http://127.0.0.1:${port}/callback?code=genuine&state=expected-state`)
+    expect(await pending).toBe('genuine')
+    server.close()
   })
 })

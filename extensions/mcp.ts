@@ -11,8 +11,10 @@
  * per-project `projects[cwd].mcpServers` local scope, and ~/.pi/agent/mcp.json) is the
  * user's own and loads on the first session. Project config (.mcp.json, .pi/mcp.json)
  * can run arbitrary commands on connect, so it loads only once the project is approved
- * (see project-approval). The two scopes are loaded separately, not merged; user config
- * connects first, so a project server cannot take the name of a user server that connected.
+ * (see project-approval). The two scopes are loaded separately, not merged. Claude's
+ * precedence is project over user for a duplicate name, so a project server the user has
+ * consented to (or an approved project's) wins; a merely-present untrusted project entry
+ * cannot shadow a user server, and a gated project server does not preempt it.
  * Values support ${VAR} / ${VAR:-default} interpolation, connect and per-call timeouts
  * honor MCP_TIMEOUT / MCP_TOOL_TIMEOUT, and a stdio server receives only the SDK's default
  * environment plus its own `env` block, not the whole process environment.
@@ -108,11 +110,18 @@ export type ServerConfig = StdioServerConfig | HttpServerConfig
 
 /** Claude's .mcp.json expansion: ${VAR}, and ${VAR:-default}. The syntax borrows
  * shell's `:-`, which substitutes when the variable is unset OR empty. */
-export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env): string {
-  return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (_, name, hasDefault, fallback) => {
+export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env, onMissing?: (name: string) => void): string {
+  return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (fullMatch, name, hasDefault, fallback) => {
     const current = env[name]
     if (hasDefault !== undefined) return current || fallback
-    return current ?? ''
+    if (current === undefined) {
+      // A referenced variable with no value and no default: keep the literal ${VAR} and
+      // report it, matching Claude, rather than silently substituting an empty string that
+      // turns `Bearer ${TOKEN}` into a confusing `Bearer ` and a mystery 401.
+      onMissing?.(name)
+      return fullMatch
+    }
+    return current
   })
 }
 
@@ -387,11 +396,40 @@ export function promptMessageContent(messages: ReadonlyArray<{ content: unknown 
   return mapContent(messages.map((message) => message.content as McpContentBlock)).filter((block) => block.type !== 'text' || block.text.trim() !== '')
 }
 
+/** Merge the `properties` (and, for allOf, the `required`) of a root-level combinator's
+ * branches into one flat object schema. Without this a tool whose input schema is a bare
+ * anyOf/oneOf/allOf (no top-level `type`) would present no properties at all, so the model
+ * would be forced to call it with no arguments. */
+function mergeCombinatorBranches(branches: unknown[]): { properties: Record<string, unknown>; required: string[] } {
+  const properties: Record<string, unknown> = {}
+  const required = new Set<string>()
+  for (const branch of branches) {
+    if (!branch || typeof branch !== 'object') continue
+    const b = branch as Record<string, unknown>
+    if (b.properties && typeof b.properties === 'object') Object.assign(properties, b.properties as Record<string, unknown>)
+    if (Array.isArray(b.required)) for (const name of b.required) if (typeof name === 'string') required.add(name)
+  }
+  return { properties, required: [...required] }
+}
+
 export function normalizeSchema(schema: unknown): object {
   const base = (schema as Record<string, unknown>) ?? {}
   const { $schema: _dropSchema, additionalProperties: _dropAdditional, ...rest } = base
-  if (!rest.type) return { type: 'object', properties: {} }
-  return rest
+  if (rest.type) return rest
+  // A root-level combinator carries the real parameters in its branches; flatten them
+  // into one object schema rather than emptying it. allOf means every branch applies, so
+  // its required union is kept; anyOf/oneOf branches are alternatives, so required is left
+  // open (the server still enforces its own).
+  const allOf = Array.isArray(rest.allOf) ? rest.allOf : undefined
+  let branches = allOf
+  if (!branches && Array.isArray(rest.anyOf)) branches = rest.anyOf
+  if (!branches && Array.isArray(rest.oneOf)) branches = rest.oneOf
+  if (!branches) return { type: 'object', properties: {} }
+  const { properties, required } = mergeCombinatorBranches(branches)
+  const merged: Record<string, unknown> = { type: 'object', properties }
+  if (typeof rest.description === 'string') merged.description = rest.description
+  if (allOf && required.length > 0) merged.required = required
+  return merged
 }
 
 interface McpContentBlock {
@@ -494,23 +532,32 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 
 async function connect(name: string, config: ServerConfig, authUi?: AuthUi): Promise<Client> {
   const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
+  // Names referenced by ${VAR} with no value and no default, gathered across this
+  // server's interpolated fields so the connect can warn once rather than fail with a
+  // mystery 401 or a command that lost an argument.
+  const missing = new Set<string>()
+  const fill = (value: string): string => interpolateEnv(value, process.env, (varName) => missing.add(varName))
+  const warnMissing = (): void => {
+    if (missing.size > 0) console.warn(`pi-code-mcp: server ${name} references undefined variable(s) ${[...missing].join(', ')}; leaving them unexpanded`)
+  }
   if (isStdio(config)) {
     // Start from the SDK's allowlist (PATH, HOME, SHELL, ...) rather than the whole
     // process env: a server should not receive ANTHROPIC_API_KEY or GITHUB_TOKEN just
     // for being launched. A server that needs a variable names it in its own env block.
     const env: Record<string, string> = { ...getDefaultEnvironment() }
-    for (const [key, value] of Object.entries(config.env ?? {})) env[key] = interpolateEnv(value)
+    for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
     const transport = new StdioClientTransport({
-      command: interpolateEnv(config.command),
-      args: (config.args ?? []).map((arg) => interpolateEnv(arg)),
+      command: fill(config.command),
+      args: (config.args ?? []).map((arg) => fill(arg)),
       env,
       cwd: expandCwd(config.cwd),
       stderr: 'ignore',
     })
+    warnMissing()
     await connectWithTimeout(client, transport, `connect ${name}`)
     return client
   }
-  const url = new URL(interpolateEnv(config.url))
+  const url = new URL(fill(config.url))
   if (config.type === 'ws' || config.type === 'websocket') {
     // The SDK's WebSocket transport takes only a url: it carries no headers, bearer
     // token, or headersHelper output. Warn rather than silently dropping configured
@@ -520,16 +567,18 @@ async function connect(name: string, config: ServerConfig, authUi?: AuthUi): Pro
       console.warn(`pi-code-mcp: server ${name} is a WebSocket server; the SDK ws transport is url-only, so its headers/bearerToken/headersHelper are ignored`)
     }
     const transport = new WebSocketClientTransport(url)
+    warnMissing()
     await connectWithTimeout(client, transport, `connect ${name} (ws)`)
     return client
   }
   const headers: Record<string, string> = {}
-  for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = interpolateEnv(value)
+  for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = fill(value)
   const token = resolveBearerToken(config)
   if (token) headers.Authorization = `Bearer ${token}`
   // A headersHelper generates connect-time headers for non-OAuth auth schemes; its
   // JSON stdout merges over the static headers.
-  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(interpolateEnv(config.headersHelper)))
+  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(fill(config.headersHelper)))
+  warnMissing()
   const sseTransport = (authProvider?: OAuthClientProvider) => new SSEClientTransport(url, { requestInit: { headers }, authProvider }) // NOSONAR: explicitly declared or deliberate legacy transport
   if (config.type === 'sse') {
     return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, token, authUi)
@@ -645,7 +694,9 @@ async function runInteractiveOAuth(name: string, config: { url: string }, makeTr
   provider.bindRedirectPort(port)
   try {
     const transport = makeTransport(provider)
-    const pendingCode = waitForAuthCode(server, OAUTH_FLOW_TIMEOUT_MS)
+    // Verify the redirect echoes this login's state, so a stray or forged callback to the
+    // loopback port cannot inject a code or abort the login (see waitForAuthCode).
+    const pendingCode = waitForAuthCode(server, OAUTH_FLOW_TIMEOUT_MS, provider.state())
     pendingCode.catch(() => {}) // consumed below; an abandoned login must not surface as unhandled
     const client = newClient()
     try {
@@ -790,7 +841,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   const aliases: McpToolAlias[] = []
 
   /** Register every not-yet-registered tool of a server; returns how many were added. */
-  function registerTools(name: string, config: ServerConfig, client: Client, tools: McpToolInfo[]): number {
+  function registerTools(name: string, config: ServerConfig, tools: McpToolInfo[]): number {
     let count = 0
     for (const tool of tools) {
       const toolName = formatToolName(name, tool.name)
@@ -809,12 +860,18 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         description: tool.description ?? `MCP tool ${tool.name} from ${name}`,
         parameters: Type.Unsafe(normalizeSchema(tool.inputSchema)),
         async execute(_id, params) {
+          // Resolve the live client by name at call time rather than capturing the one
+          // present at registration: pi has no tool unregister, so after a server drops
+          // and a later session_start reconnects it, registerTools skips re-registration
+          // and this closure would otherwise keep calling the old, closed client.
+          const current = clients.get(name)
+          if (!current) throw new Error(`MCP server "${name}" is not connected`)
           // Pass the timeout to the SDK too: its own default request timeout is 60s and
           // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
           // Claude's per-server timeout wins over MCP_TOOL_TIMEOUT, with a 1s floor.
           const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
           const budget = declared ?? callTimeoutMs()
-          const result = await withTimeout(client.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
+          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
           const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
           const details: { error?: string } = {}
           if (result.isError) {
@@ -839,7 +896,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * no command unregister, so, like tools, a withdrawn prompt keeps its registration
    * and surfaces the server's own error when invoked; an edit to a prompt's declared
    * arguments only lands on new names, since an existing command keeps its binding. */
-  function registerPrompts(name: string, client: Client, prompts: McpPromptInfo[]): void {
+  function registerPrompts(name: string, prompts: McpPromptInfo[]): void {
     for (const prompt of prompts) {
       const commandName = formatPromptCommandName(name, prompt.name)
       const owner = registeredPrompts.get(commandName)
@@ -855,11 +912,19 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         description: hint ? `${base} ${hint}` : base,
         handler: async (args, ctx) => {
           try {
+            // Resolve the live client at call time, not the one captured at registration:
+            // pi has no command unregister, so after a reconnect this closure must not keep
+            // calling the old, closed client (see registerTools for the same reason).
+            const current = clients.get(name)
+            if (!current) {
+              ctx.ui.notify(`${commandName}: MCP server "${name}" is not connected`, 'error')
+              return
+            }
             const promptArgs = mapPromptArguments(prompt.arguments, args)
             const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
             if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
             const budget = callTimeoutMs()
-            const result = await withTimeout(client.getPrompt(params, { timeout: budget }), budget, commandName)
+            const result = await withTimeout(current.getPrompt(params, { timeout: budget }), budget, commandName)
             // The prompt drives a turn exactly the way a custom slash command does
             // (see commands.ts), carrying its image blocks through. A prompt that
             // yields no content is reported rather than sent as an empty turn.
@@ -882,7 +947,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   async function connectPrompts(name: string, client: Client): Promise<void> {
     if (!client.getServerCapabilities()?.prompts) return
     try {
-      registerPrompts(name, client, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
+      registerPrompts(name, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
     } catch (error) {
       console.warn(`pi-code-mcp: prompt listing failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -894,7 +959,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     try {
       client.setNotificationHandler(PromptListChangedNotificationSchema, async () => {
         try {
-          registerPrompts(name, client, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
+          registerPrompts(name, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
         } catch (error) {
           console.warn(`pi-code-mcp: prompt refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -978,7 +1043,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         try {
           const refreshed = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
-          const added = registerTools(name, config, client, refreshed)
+          const added = registerTools(name, config, refreshed)
           if (added === 0) return
           const current = status.get(name)
           status.set(name, { state: current?.state ?? 'connected', tools: (current?.tools ?? 0) + added })
@@ -1014,7 +1079,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           const client = await connect(name, config, authUi)
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
-          const count = registerTools(name, config, client, tools)
+          const count = registerTools(name, config, tools)
           subscribeToToolChanges(name, config, client)
           // Prompts and resources are additive surfaces: their failures warn (inside
           // connectPrompts) rather than flipping a tool-serving server to failed.
@@ -1075,7 +1140,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
     const { allowed, denied } = mcpAllowDeny()
     const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
-    const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name)))
+    // Claude's precedence is project over user for a duplicate name. A project .mcp.json
+    // server only outranks the user's own when it will actually connect (the user already
+    // consented to it, or an approved project's), so a merely-present untrusted project
+    // entry cannot shadow a trusted user server by reusing its name. A gated project
+    // server still awaiting the approval prompt does not preempt the user server: that is
+    // a deliberate narrowing of Claude's rule to keep the safe default.
+    const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+    const projectWinners = new Set(Object.keys(splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy).consented))
+    const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     if (Object.keys(userServers).length > 0) await connectServers(userServers, authUiFor(ctx))
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once
     // the project is trusted. Per-server settings refine that: disabled servers never

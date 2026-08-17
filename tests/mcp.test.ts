@@ -111,8 +111,19 @@ describe('mcp adapter helpers', () => {
   it('interpolates ${VAR} from the environment', () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what interpolateEnv parses
     expect(interpolateEnv('Bearer ${TOKEN}', { TOKEN: 'abc' } as NodeJS.ProcessEnv)).toBe('Bearer abc')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
-    expect(interpolateEnv('${MISSING}', {} as NodeJS.ProcessEnv)).toBe('')
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a set-but-empty variable still expands to empty
+    expect(interpolateEnv('${EMPTY}', { EMPTY: '' } as NodeJS.ProcessEnv)).toBe('')
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a default is used when the variable is unset
+    expect(interpolateEnv('${MISSING:-fallback}', {} as NodeJS.ProcessEnv)).toBe('fallback')
+  })
+
+  it('keeps a missing ${VAR} literal and reports it rather than silently emptying', () => {
+    const missing: string[] = []
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: exercising the unset-no-default path
+    const out = interpolateEnv('Bearer ${TOKEN}', {} as NodeJS.ProcessEnv, (name) => missing.push(name))
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is preserved so the failure is visible, not a blank Bearer
+    expect(out).toBe('Bearer ${TOKEN}')
+    expect(missing).toEqual(['TOKEN'])
   })
 
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR:-default} syntax Claude's .mcp.json supports
@@ -181,6 +192,24 @@ describe('mcp adapter helpers', () => {
     const schema = normalizeSchema({ $schema: 'x', additionalProperties: false, type: 'object', properties: { a: { type: 'string' } } })
     expect(schema).toEqual({ type: 'object', properties: { a: { type: 'string' } } })
     expect(normalizeSchema(undefined)).toEqual({ type: 'object', properties: {} })
+  })
+
+  it('flattens a root-level combinator schema so its parameters survive', () => {
+    // A bare anyOf/oneOf/allOf has no top-level `type`; emptying it would force the model
+    // to call the tool with no arguments. anyOf/oneOf are alternatives, so required stays open.
+    const anyOf = normalizeSchema({ anyOf: [{ properties: { a: { type: 'string' } }, required: ['a'] }, { properties: { b: { type: 'number' } } }] })
+    expect(anyOf).toEqual({ type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } } })
+    // allOf means every branch applies, so its required union is kept.
+    const allOf = normalizeSchema({
+      allOf: [
+        { properties: { a: { type: 'string' } }, required: ['a'] },
+        { properties: { b: { type: 'number' } }, required: ['b'] },
+      ],
+    })
+    expect(allOf).toEqual({ type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } }, required: ['a', 'b'] })
+    // A schema with neither a type nor a combinator is still the empty object schema,
+    // as before (a typeless schema carries no parameters to preserve).
+    expect(normalizeSchema({ foo: 'x' })).toEqual({ type: 'object', properties: {} })
   })
 
   it('maps text, image, and resource content blocks', () => {

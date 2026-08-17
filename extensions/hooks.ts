@@ -156,6 +156,42 @@ export function readDisableAllHooks(files: string[], managed: Record<string, unk
   return false
 }
 
+/** Claude's `allowedHttpHookUrls` setting: URL patterns http hooks may target, with
+ * `*` as a wildcard. Per Claude's documentation: undefined (no source sets the key)
+ * means no restrictions, an empty array blocks every http hook, and arrays merge
+ * across settings sources. Merging is a union of managed settings plus every file in
+ * the chain; the chain already gates project files on trust (see hookFiles), and a
+ * trusted project can run arbitrary shell hooks anyway, so letting it extend the
+ * allowlist is no escalation. */
+export function readAllowedHttpHookUrls(files: string[], managed: Record<string, unknown> = readManagedSettings()): string[] | undefined {
+  let found: string[] | undefined
+  const collect = (value: unknown): void => {
+    if (!Array.isArray(value)) return
+    found = [...(found ?? []), ...value.filter((entry): entry is string => typeof entry === 'string')]
+  }
+  collect(managed.allowedHttpHookUrls)
+  for (const file of files) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (isRecord(parsed)) collect(parsed.allowedHttpHookUrls)
+    } catch {
+      // missing or invalid file: skip
+    }
+  }
+  return found
+}
+
+/** Whether an http hook may target `url`. `*` in an allowlist entry matches any run
+ * of characters; everything else is literal and the whole URL must match. An
+ * undefined allowlist means the setting is absent, so there are no restrictions. */
+export function httpUrlAllowed(url: string, allowlist: string[] | undefined): boolean {
+  if (allowlist === undefined) return true
+  return allowlist.some((pattern) => {
+    const literal = pattern.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`))
+    return new RegExp(`^${literal.join('.*')}$`).test(url)
+  })
+}
+
 export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): HooksConfig {
   const config: HooksConfig = {}
   for (const file of files) {
@@ -459,12 +495,15 @@ function interpolateHeaders(headers: Record<string, string> | undefined, allowed
  * with a valid JSON body renders a decision, read exactly like command stdout.
  * Everything else, including non-2xx statuses, connection failures and timeouts,
  * is a non-blocking error by contract, so none of these outcomes ever reports
- * `timedOut`, which PreToolUse fails closed on. The user wrote the URL into their
- * own settings, so it carries the same trust as a command hook's shell string and
- * gets no SSRF screening.
+ * `timedOut`, which PreToolUse fails closed on. Claude's `allowedHttpHookUrls`
+ * allowlist gates the fetch itself: a URL matching no entry is never contacted,
+ * so a settings file cannot point a hook at an arbitrary endpoint and exfiltrate
+ * the payload; when the setting is absent there are no restrictions, as Claude
+ * documents. A blocked hook renders no decision, like every other http failure.
  */
-export async function runHttpHook(hook: { type?: string; command: string; url?: string; headers?: Record<string, string>; allowedEnvVars?: string[] }, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
+export async function runHttpHook(hook: { type?: string; command: string; url?: string; headers?: Record<string, string>; allowedEnvVars?: string[] }, payload: unknown, timeoutMs: number, allowedUrls?: string[]): Promise<HookRunResult> {
   const url = hook.url ?? hook.command
+  if (!httpUrlAllowed(url, allowedUrls)) return { code: 1, stdout: '', stderr: `${url} does not match allowedHttpHookUrls; the hook was not called`, timedOut: false }
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -615,8 +654,9 @@ function replaceRecord(target: Record<string, unknown>, next: Record<string, unk
   Object.assign(target, next)
 }
 
-/** Claude surfaces a hook error notice and the action proceeds; silence would read a
- * guard that never ran as a clean allow. */
+/** Claude surfaces a hook error notice; on ungated events the action proceeds, while
+ * PreToolUse and UserPromptSubmit additionally fail closed on the same results (see
+ * their spawnFailed checks). Silence would hide that a guard never ran. */
 function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], notify?: SystemMessageSink): void {
   if (!notify) return
   for (const [i, result] of results.entries()) {
@@ -648,6 +688,10 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
     // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
     // would otherwise read as a clean allow. Fail closed instead.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
+    // A hook that never spawned (EMFILE, missing /bin/sh) reached no verdict either;
+    // its code 0 must fail closed like a timeout, not read as an allow exactly when
+    // the machine is degraded.
+    if (result.spawnFailed) return { block: true, reason: `Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}` }
   }
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
@@ -698,6 +742,8 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
   surfaceHookFailures(commands, results, onSystemMessage)
   for (const [i, result] of results.entries()) {
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}`, context: '' }
+    // No verdict was delivered, so fail closed like a timeout (see runPreToolUse).
+    if (result.spawnFailed) return { block: true, reason: `Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}`, context: '' }
   }
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const contexts: string[] = []
@@ -742,6 +788,8 @@ function postToolFeedback(result: HookRunResult, eventName: string, isError: boo
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
+  /** Claude's allowedHttpHookUrls allowlist, resolved from the settings chain. */
+  let allowedHttpHookUrls: string[] | undefined
   let pendingSessionContext: string[] = []
   let stopHookActive = false
   let sessionCtx: ExtensionContext | undefined
@@ -763,7 +811,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
     (hook, payload, ms) => {
       const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
-      if (hook.type === 'http') return runHttpHook(hook, merged, ms)
+      if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
       if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
       if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
       if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
@@ -814,8 +862,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const ctx = sessionCtx
     const eventName = data.phase === 'start' ? 'SubagentStart' : 'SubagentStop'
     const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId }
-    const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
-    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    try {
+      const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
+      surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    } catch {
+      // The bus outlives the session: an event landing between /new disposing this
+      // ctx and the next session_start hits disposed getters, and nothing awaits a
+      // bus listener, so a throw here would escape as an unhandled rejection.
+    }
   })
 
   pi.on('session_start', async (event, ctx) => {
@@ -827,6 +881,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
     const files = hookFiles(ctx.cwd, os.homedir(), trusted)
     hookSources.clear()
+    allowedHttpHookUrls = readAllowedHttpHookUrls(files)
     // The disableAllHooks escape hatch, checked before any config loads: with no
     // config resolved, no event, plugin hooks included, can fire a hook.
     hooksDisabled = readDisableAllHooks(files)

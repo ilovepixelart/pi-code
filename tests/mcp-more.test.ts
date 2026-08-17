@@ -432,6 +432,20 @@ describe('mcp startup config scoping', () => {
     expect(closed).toHaveLength(1)
   })
 
+  it('lets a consented project server outrank a user server of the same name', async () => {
+    // Claude's precedence is project over user for a duplicate name. Here the user has
+    // consented to the project server in their own settings, so the project definition
+    // connects and the user server of the same name is not connected.
+    withTools([{ name: 'query' }])
+    const harness = await setup({ user: { shared: { command: 'user-server' } }, project: { shared: { command: 'proj-server' } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['shared'] }))
+    await harness.sessionStart(true)
+
+    expect(hoisted.transports).toHaveLength(1)
+    expect(hoisted.transports[0].options.command).toBe('proj-server')
+  })
+
   it('connects project config only once across repeated sessions', async () => {
     withTools([{ name: 'query' }])
     const harness = await setup({ project: { proj: { command: 'proj-server' } } })
@@ -1412,6 +1426,29 @@ describe('mcp client lifecycle', () => {
     client?.onclose?.()
 
     expect(await statusLinesOf(harness)).toEqual(['live: disconnected (0 tools)'])
+  })
+
+  it('routes a tool call to the reconnected client, not the closed one', async () => {
+    // pi has no tool unregister, so after a drop-and-reconnect the tool stays registered
+    // from the first connect; its execute must call the live client, not the closed one
+    // captured at registration, or every call fails with "Not connected".
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { live: { command: 'ok' } } })
+    const first = hoisted.clients.at(-1)
+    ;(first as unknown as { onclose?: () => void }).onclose?.()
+
+    withTools([{ name: 'go' }])
+    await harness.sessionStart()
+    const second = hoisted.clients.at(-1)
+    expect(second).not.toBe(first)
+
+    const calledOn: unknown[] = []
+    hoisted.control.callTool = async (_args, client) => {
+      calledOn.push(client)
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+    await harness.tools[0].execute('call-1', {})
+    expect(calledOn).toEqual([second])
   })
 })
 
