@@ -42,6 +42,7 @@ function setup() {
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>()
   const appended: Array<{ type: string; customType: string; data: any }> = []
   const notifications: string[] = []
+  const execLog: string[][] = []
 
   const repo = mkdtempSync(join(tmpdir(), 'gcs-test-'))
   hoisted.home = mkdtempSync(join(tmpdir(), 'gcs-home-'))
@@ -57,6 +58,7 @@ function setup() {
     registerCommand: (name: string, opts: any) => commands.set(name, opts),
     appendEntry: (customType: string, data: any) => appended.push({ type: 'custom', customType, data }),
     exec: async (cmd: string, args: string[], options?: { cwd?: string }) => {
+      execLog.push([cmd, ...args])
       try {
         return { stdout: execFileSync(cmd, args, { cwd: options?.cwd ?? repo, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }), stderr: '', code: 0, killed: false }
       } catch (err: any) {
@@ -77,7 +79,7 @@ function setup() {
     navigateTree: async () => ({ editorText: 'restored prompt', cancelled: false }),
   })
 
-  return { handlers, commands, appended, notifications, repo, makeCtx }
+  return { handlers, commands, appended, notifications, execLog, repo, makeCtx }
 }
 
 type Harness = ReturnType<typeof setup>
@@ -156,13 +158,31 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.appended).toHaveLength(1)
   })
 
+  it('snapshots once per run, not once per turn, and still records the checkpoint', async () => {
+    // A `git add -A` before every assistant turn (awaited, so it blocks the model call)
+    // is wasted when the run has already checkpointed the pre-run tree; snapshot once per
+    // run (gated by before_agent_start) instead.
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    await t.handlers.get('before_agent_start')?.({}, t.makeCtx([], [], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+
+    const addCalls = t.execLog.filter((c) => c[0] === 'git' && c.includes('add') && c.includes('-A')).length
+    expect(addCalls).toBe(1)
+    expect(t.appended).toHaveLength(1)
+  })
+
   it('reuses the existing HEAD ref when the tree has not changed', async () => {
     const t = setup()
     await checkpointOneTurn(t, 0)
 
-    // A distinct prompt gets past the per-entry dedupe, so the snapshot runs
-    // again; with an untouched work tree it must resolve to the same commit.
+    // A distinct prompt in a new run gets past the per-entry dedupe, so the snapshot
+    // runs again; with an untouched work tree it must resolve to the same commit.
     const secondPrompt = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'now add a regression test for it' } }
+    await t.handlers.get('before_agent_start')?.({}, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
 
