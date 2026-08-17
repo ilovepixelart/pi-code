@@ -153,7 +153,7 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   const key = [home, ...extraSettingsFiles].join('\n')
   const fingerprint = pluginFingerprint(cacheDir, settingsFiles)
   const cached = pluginCache.get(key)
-  if (cached && cached.fingerprint === fingerprint) return cached.plugins
+  if (cached?.fingerprint === fingerprint) return cached.plugins
   const enabled = enabledMap(settingsFiles)
   const configs = pluginConfigsMap(settingsFiles)
   const plugins: InstalledPlugin[] = []

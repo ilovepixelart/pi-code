@@ -538,6 +538,50 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       return false // a recorded file vanished: re-expand
     }
   }
+  // Memo lookup or recompute: a turn whose key matches the previous expansion and
+  // whose recorded stat tokens are all unchanged reuses that expansion outright;
+  // otherwise the imports are re-expanded and the memo (with a fresh revalidation
+  // set) is rebuilt for next turn.
+  const resolveImports = (
+    memoKey: string,
+    native: Array<{ path: string; content: string }>,
+    contextFiles: Array<{ path: string; content: string }>,
+    home: string,
+    cwd: string,
+    excluded: (absPath: string) => boolean,
+  ): { extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] } => {
+    if (importMemo?.key === memoKey && memoIsFresh(importMemo)) {
+      const { extras, budget, imported } = importMemo
+      return { extras, budget, imported }
+    }
+    // Seed with every loaded context file path, excluded ones included, so pi's own
+    // files are never re-imported and an excluded file cannot return as an import.
+    const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
+
+    // Claude's --add-dir memory loading, env-gated. The files join the seen set
+    // before import expansion so an @import cannot pull one in twice, and they get
+    // the same exclude and comment-strip treatment as native context files.
+    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
+    const extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
+
+    // One budget for the whole run, so N context files cannot each spend a full one.
+    // Exclusion applies inside the recursion: an excluded @import is skipped before
+    // it is read, so its transitive imports never load and it spends no budget.
+    const budget = createImportBudget()
+    const imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
+
+    // Revalidation set: every file the expansion read, plus each add-dir itself
+    // (a directory's mtime moves when a memory file is added or removed there).
+    const tokens: Array<[string, string]> = []
+    try {
+      for (const file of [...extras.map((extra) => extra.path), ...imported.map((entry) => entry.path)]) tokens.push([file, statToken(file)])
+      for (const dir of addDirs) tokens.push([dir, statToken(dir)])
+      importMemo = { key: memoKey, extras, budget, imported, tokens }
+    } catch {
+      importMemo = undefined // a file moved mid-expansion: just recompute next turn
+    }
+    return { extras, budget, imported }
+  }
 
   // Claude's --add-dir. Only the memory-loading half is meaningful here: pi has
   // no path-based permission system, so there is no access grant to mirror.
@@ -579,7 +623,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
     const native: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
 
-    if (!envCache || envCache.cwd !== cwd) {
+    if (envCache?.cwd !== cwd) {
       const managedNow = readManagedSettings()
       envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: repoRoot(cwd) ?? cwd }
     }
@@ -620,39 +664,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     for (const file of contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
     const memoKey = keyHash.digest('hex')
 
-    let extras: Array<{ path: string; content: string; dir: string }>
-    let budget: ImportBudget
-    let imported: ImportedFile[]
-    if (importMemo && importMemo.key === memoKey && memoIsFresh(importMemo)) {
-      ;({ extras, budget, imported } = importMemo)
-    } else {
-      // Seed with every loaded context file path, excluded ones included, so pi's own
-      // files are never re-imported and an excluded file cannot return as an import.
-      const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
-
-      // Claude's --add-dir memory loading, env-gated. The files join the seen set
-      // before import expansion so an @import cannot pull one in twice, and they get
-      // the same exclude and comment-strip treatment as native context files.
-      const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
-      extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
-
-      // One budget for the whole run, so N context files cannot each spend a full one.
-      // Exclusion applies inside the recursion: an excluded @import is skipped before
-      // it is read, so its transitive imports never load and it spends no budget.
-      budget = createImportBudget()
-      imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
-
-      // Revalidation set: every file the expansion read, plus each add-dir itself
-      // (a directory's mtime moves when a memory file is added or removed there).
-      const tokens: Array<[string, string]> = []
-      try {
-        for (const file of [...extras.map((extra) => extra.path), ...imported.map((entry) => entry.path)]) tokens.push([file, statToken(file)])
-        for (const dir of addDirs) tokens.push([dir, statToken(dir)])
-        importMemo = { key: memoKey, extras, budget, imported, tokens }
-      } catch {
-        importMemo = undefined // a file moved mid-expansion: just recompute next turn
-      }
-    }
+    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, home, cwd, excluded)
 
     let addition = localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)

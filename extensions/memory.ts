@@ -327,7 +327,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   const readIndexCached = (): string => {
     const token = indexStatToken()
-    if (indexCache === null || indexCache.token !== token) indexCache = { token, index: readIndexQuietly(dir) }
+    if (indexCache?.token !== token) indexCache = { token, index: readIndexQuietly(dir) }
     return indexCache.index
   }
 
