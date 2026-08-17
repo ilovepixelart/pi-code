@@ -58,13 +58,14 @@ const lines = (text: Text): string[] => text.render(200).map((line) => line.trim
 const OPTIONS: Option[] = [{ label: 'Alpha', description: 'first one' }, { label: 'Beta' }]
 
 /** Resolve ui.custom immediately, without ever building the overlay. */
-const uiCtx = (resolved: unknown) => ({ hasUI: true, ui: { custom: async () => resolved } })
+const uiCtx = (resolved: unknown) => ({ hasUI: true, mode: 'tui', ui: { custom: async () => resolved } })
 
 /** Start execute, capture the live overlay, and hand back the still-pending result. */
 const openOverlay = (tool: QuestionTool, options: Option[] = OPTIONS) => {
   let overlay: Overlay | undefined
   const ctx = {
     hasUI: true,
+    mode: 'tui',
     ui: {
       custom: (factory: CustomFactory) =>
         new Promise((resolve) => {
@@ -82,6 +83,7 @@ const openOverlayWith = (tool: QuestionTool, params: Record<string, unknown>) =>
   let overlay: Overlay | undefined
   const ctx = {
     hasUI: true,
+    mode: 'tui',
     ui: {
       custom: (factory: CustomFactory) =>
         new Promise((resolve) => {
@@ -117,6 +119,7 @@ describe('question execute', () => {
   it('refuses an empty option list without opening the overlay', async () => {
     const ctx = {
       hasUI: true,
+      mode: 'tui',
       ui: {
         custom: () => {
           throw new Error('ui.custom must not be called for an empty option list')
@@ -146,6 +149,94 @@ describe('question execute', () => {
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, uiCtx(typed))
     expect(result.content).toEqual([{ type: 'text', text: 'User wrote: something else' }])
     expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'something else', wasCustom: true })
+  })
+})
+
+describe('question over dialogs (hasUI without tui)', () => {
+  interface DialogCall {
+    kind: 'select' | 'input' | 'custom'
+    title?: string
+    options?: string[]
+  }
+
+  /** RPC-shaped ctx: hasUI is true, custom() resolves undefined (terminal-only),
+   * select/input answer from canned values. Every UI call is recorded. */
+  const rpcCtx = (selected: string | undefined, typed?: string | undefined) => {
+    const calls: DialogCall[] = []
+    const ctx = {
+      hasUI: true,
+      mode: 'rpc',
+      ui: {
+        custom: async () => {
+          calls.push({ kind: 'custom' })
+          return undefined
+        },
+        select: async (title: string, options: string[]) => {
+          calls.push({ kind: 'select', title, options })
+          return selected
+        },
+        input: async (title: string) => {
+          calls.push({ kind: 'input', title })
+          return typed
+        },
+      },
+    }
+    return { ctx, calls }
+  }
+
+  it('asks through ui.select with numbered labels and reports the picked option', async () => {
+    const { ctx, calls } = rpcCtx('2. Beta')
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, ctx)
+    expect(calls).toEqual([{ kind: 'select', title: 'Pick one', options: ['1. Alpha', '2. Beta', '3. Type something.'] }])
+    expect(result.content).toEqual([{ type: 'text', text: 'User selected: 2. Beta' }])
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'Beta', wasCustom: false })
+  })
+
+  it('routes the free-text option through ui.input', async () => {
+    const { ctx, calls } = rpcCtx('3. Type something.', 'my own words')
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, ctx)
+    expect(calls.map((c) => c.kind)).toEqual(['select', 'input'])
+    expect(result.content).toEqual([{ type: 'text', text: 'User wrote: my own words' }])
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'my own words', wasCustom: true })
+  })
+
+  it('disambiguates by number when an option is named like the free-text entry', async () => {
+    // The last numbered label is the real free-text entry, even though an option shares
+    // its text; picking it routes through ui.input rather than reporting a plain choice.
+    const { ctx, calls } = rpcCtx('3. Type something.', 'typed answer')
+    const result = await setup().execute('call-1', { question: 'Pick one', options: [{ label: 'Type something.' }, { label: 'Beta' }] as never }, undefined, undefined, ctx)
+    expect((calls[0] as { options: string[] }).options).toEqual(['1. Type something.', '2. Beta', '3. Type something.'])
+    expect(result.details).toMatchObject({ answer: 'typed answer', wasCustom: true })
+  })
+
+  it('reports a dismissed selector as cancelled', async () => {
+    const { ctx } = rpcCtx(undefined)
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, ctx)
+    expect(result.content).toEqual([{ type: 'text', text: 'User cancelled the selection' }])
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: null })
+  })
+
+  it('treats a dismissed free-text input as cancelled', async () => {
+    const { ctx } = rpcCtx('3. Type something.', undefined)
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, ctx)
+    expect(result.content).toEqual([{ type: 'text', text: 'User cancelled the selection' }])
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: null })
+  })
+
+  it('treats an empty free-text submit as an empty answer, not a cancel', async () => {
+    // A blank Enter is a (blank) answer; treating it as a cancel would abort the rest of
+    // a multi-question batch on one accidental keystroke.
+    const { ctx } = rpcCtx('3. Type something.', '  ')
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, ctx)
+    expect(result.details).toMatchObject({ answer: '', wasCustom: true })
+  })
+
+  it('offers no free-text entry for multiSelect and prefixes the header in the title', async () => {
+    const { ctx, calls } = rpcCtx('1. Alpha')
+    const result = await setup().execute('call-1', { question: 'Pick some', header: 'Scope', options: OPTIONS, multiSelect: true } as never, undefined, undefined, ctx)
+    expect(calls).toEqual([{ kind: 'select', title: '[Scope] Pick some', options: ['1. Alpha', '2. Beta'] }])
+    expect(result.content).toEqual([{ type: 'text', text: 'User selected: Alpha' }])
+    expect(result.details).toEqual({ question: 'Pick some', header: 'Scope', options: ['Alpha', 'Beta'], answer: 'Alpha', wasCustom: false, multiSelect: true })
   })
 })
 
@@ -394,6 +485,7 @@ describe('multiple questions per call', () => {
     const answers = ['Alpha', 'Beta']
     const ctx = {
       hasUI: true,
+      mode: 'tui',
       ui: {
         custom: async () => {
           const answer = answers[asked.length]
@@ -421,6 +513,7 @@ describe('multiple questions per call', () => {
     let calls = 0
     const ctx = {
       hasUI: true,
+      mode: 'tui',
       ui: {
         custom: async () => {
           calls++

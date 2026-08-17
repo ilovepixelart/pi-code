@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import memoryExtension, { memoryDir } from '../extensions/memory.ts'
@@ -124,6 +125,53 @@ describe('memory index robustness', () => {
 
     expect(result).not.toContain('Saved memory')
     expect(readFileSync(indexPath, 'utf-8')).toContain('- [first](first.md):')
+  })
+
+  it('waits for an in-flight queued index mutation instead of racing it', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'first', description: 'existing entry', content: 'kept' })
+    const indexPath = join(dir, 'MEMORY.md')
+
+    // A built-in edit holds the per-file mutation queue across its whole
+    // read-modify-write. A save that does not join that queue reads the same old
+    // index while the edit is parked mid-window, and one of the two updates is lost.
+    let releaseEdit = () => {}
+    const editParked = new Promise<void>((resolve) => {
+      releaseEdit = resolve
+    })
+    let editRead = () => {}
+    const editReadDone = new Promise<void>((resolve) => {
+      editRead = resolve
+    })
+    const edit = withFileMutationQueue(indexPath, async () => {
+      const before = readFileSync(indexPath, 'utf-8')
+      editRead()
+      await editParked
+      writeFileSync(indexPath, before.replace('existing entry', 'edited entry'))
+    })
+
+    await editReadDone
+    const save = tool.execute('2', { action: 'save', name: 'second', description: 'new entry', content: 'body' })
+    // Give the save time to reach the queue (or, unqueued, to run to completion).
+    await new Promise((resolve) => setImmediate(resolve))
+    releaseEdit()
+    await Promise.all([edit, save])
+
+    const index = readFileSync(indexPath, 'utf-8')
+    expect(index).toContain('- [first](first.md): edited entry')
+    expect(index).toContain('- [second](second.md): new entry')
+  })
+
+  it('lands both of two concurrent saves in the index', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+
+    await Promise.all([tool.execute('1', { action: 'save', name: 'alpha', description: 'first of a pair', content: 'a' }), tool.execute('2', { action: 'save', name: 'beta', description: 'second of a pair', content: 'b' })])
+
+    const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8')
+    expect(index).toContain('- [alpha](alpha.md): first of a pair')
+    expect(index).toContain('- [beta](beta.md): second of a pair')
   })
 
   it('refuses to delete while the index is unreadable, keeping the memory file', async () => {

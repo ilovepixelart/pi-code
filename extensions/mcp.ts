@@ -933,7 +933,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
               ctx.ui.notify(`${commandName}: prompt returned no content`, 'info')
               return
             }
-            pi.sendUserMessage(content)
+            // A bare send throws (and is silently swallowed) while the agent is
+            // streaming, so mid-stream invocations queue as a follow-up turn.
+            pi.sendUserMessage(content, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
           } catch (error) {
             ctx.ui.notify(`${commandName}: ${error instanceof Error ? error.message : String(error)}`, 'error')
           }

@@ -16,14 +16,14 @@ vi.mock('node:os', async (importOriginal) => {
 
 type Handler = (event: unknown, ctx: unknown) => Promise<void>
 
-function drive(): { sessionStart: (ctx?: unknown) => Promise<void>; input: () => Promise<void>; agentEnd: () => Promise<void> } {
+function drive(): { sessionStart: (ctx?: unknown) => Promise<void>; input: () => Promise<void>; agentEnd: () => Promise<void>; agentSettled: () => Promise<void> } {
   const handlers = new Map<string, Handler>()
   notifyExtension({ on: (name: string, fn: Handler) => handlers.set(name, fn) } as never)
   const call =
     (name: string) =>
     (ctx: unknown = {}) =>
       handlers.get(name)?.({}, ctx) ?? Promise.resolve()
-  return { sessionStart: call('session_start'), input: () => call('input')(), agentEnd: () => call('agent_end')() }
+  return { sessionStart: call('session_start'), input: () => call('input')(), agentEnd: () => call('agent_end')(), agentSettled: () => call('agent_settled')() }
 }
 
 describe('notify', () => {

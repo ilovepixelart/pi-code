@@ -84,6 +84,9 @@ const listMark = (status: TodoStatus): string => {
   return '[ ]'
 }
 
+/** Plain-text list, shared by the list action and the non-terminal /todos path. */
+const plainTodoList = (todos: Todo[]): string => (todos.length ? todos.map((t) => `${listMark(t.status)} #${t.id}: ${t.text}`).join('\n') : 'No todos')
+
 const overlayLabel = (todo: Todo, theme: Theme): string => {
   if (todo.status === 'completed') return theme.fg('dim', todo.text)
   if (todo.status === 'in_progress') return theme.fg('text', todo.activeForm ?? todo.text)
@@ -433,7 +436,7 @@ export default function todoExtension(pi: ExtensionAPI) {
     return ok('clear', `Cleared ${count} todos`)
   }
 
-  const handleList = () => ok('list', todos.length ? todos.map((t) => `${listMark(t.status)} #${t.id}: ${t.text}`).join('\n') : 'No todos')
+  const handleList = () => ok('list', plainTodoList(todos))
 
   // Register the todo tool for the LLM
   pi.registerTool({
@@ -513,6 +516,13 @@ export default function todoExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify('/todos requires interactive mode', 'error')
+        return
+      }
+
+      // ui.custom() is terminal-only: with a UI but no terminal (RPC mode) it
+      // resolves undefined without showing anything, so notify the plain list.
+      if (ctx.mode !== 'tui') {
+        ctx.ui.notify(plainTodoList(todos), 'info')
         return
       }
 

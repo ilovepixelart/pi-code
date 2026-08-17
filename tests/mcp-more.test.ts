@@ -194,6 +194,7 @@ interface Harness {
   warnings: string[]
   emitted: Array<{ channel: string; data: unknown }>
   sent: string[]
+  sentOptions: unknown[]
   home: string
   cwd: string
   sessionStart: (trusted?: boolean | undefined, approve?: boolean) => Promise<void>
@@ -201,7 +202,7 @@ interface Harness {
   mcpCommand: () => Promise<void>
   toolNames: () => string[]
   commandNames: () => string[]
-  runSlash: (name: string, args: string) => Promise<void>
+  runSlash: (name: string, args: string, idle?: boolean) => Promise<void>
 }
 
 const writeServers = (file: string, servers: Record<string, unknown>): void => {
@@ -223,6 +224,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
   const warnings: string[] = []
   const emitted: Array<{ channel: string; data: unknown }> = []
   const sent: string[] = []
+  const sentOptions: unknown[] = []
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>()
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
 
@@ -232,7 +234,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
 
   // Project config now needs approval as well as trust: pi reports a .claude-shaped repo
   // as trusted without ever asking, so project-approval prompts at the point of use.
-  const makeCtx = (trusted?: boolean, approve = true): unknown => ({
+  const makeCtx = (trusted?: boolean, approve = true, idle = true): unknown => ({
     cwd,
     hasUI: true,
     ui: {
@@ -240,13 +242,17 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
       confirm: async () => approve,
     },
     isProjectTrusted: trusted === undefined ? undefined : () => trusted,
+    isIdle: () => idle,
   })
 
   await mcpExtension({
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, fn),
     registerCommand: (name: string, opts2: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts2),
     registerTool: (tool: RegisteredTool) => tools.push(tool),
-    sendUserMessage: (text: string) => sent.push(text),
+    sendUserMessage: (text: string, options?: unknown) => {
+      sent.push(text)
+      sentOptions.push(options)
+    },
     events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
   } as never)
 
@@ -256,6 +262,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     warnings,
     emitted,
     sent,
+    sentOptions,
     home,
     cwd,
     sessionStart: async (trusted?: boolean, approve = true) => {
@@ -269,8 +276,8 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     },
     toolNames: () => tools.map((t) => t.name),
     commandNames: () => [...commands.keys()],
-    runSlash: async (name: string, args: string) => {
-      await commands.get(name)?.handler(args, makeCtx(true))
+    runSlash: async (name: string, args: string, idle = true) => {
+      await commands.get(name)?.handler(args, makeCtx(true, true, idle))
     },
   }
 }
@@ -1531,6 +1538,17 @@ describe('mcp prompts as slash commands', () => {
         { type: 'image', data: 'ZZZZ', mimeType: 'image/png' },
       ],
     ])
+  })
+
+  it('sends bare while idle but queues as a followUp while the agent is streaming', async () => {
+    withPrompts([{ name: 'greet' }])
+    hoisted.control.getPrompt = async () => ({ messages: [{ role: 'user', content: { type: 'text', text: 'hi' } }] })
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__greet', '')
+    await harness.runSlash('mcp__demo__greet', '', false)
+
+    expect(harness.sentOptions).toEqual([{}, { deliverAs: 'followUp' }])
   })
 
   it('reports instead of driving a turn when a prompt returns no content', async () => {

@@ -209,7 +209,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       planFromTool = false
       const refinement = await ctx.ui.editor('Refine the plan:', '')
       if (refinement?.trim()) {
-        pi.sendUserMessage(refinement.trim())
+        // A bare send throws (and is silently swallowed) while the agent is
+        // streaming, so mid-stream invocations queue as a follow-up turn.
+        pi.sendUserMessage(refinement.trim(), ctx.isIdle() ? {} : { deliverAs: 'followUp' })
       }
     }
   }

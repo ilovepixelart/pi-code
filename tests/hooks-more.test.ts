@@ -197,6 +197,7 @@ const setupExtension = () => {
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
+    agentSettled: () => handler('agent_settled')({}, defaultCtx),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
     compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),

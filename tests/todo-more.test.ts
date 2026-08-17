@@ -502,10 +502,29 @@ describe('/todos command', () => {
     expect(ui.customFactories).toHaveLength(0)
   })
 
+  it('notifies the plain list instead of a custom component in RPC mode', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.call({ action: 'add', text: 'first' })
+    await h.call({ action: 'add', text: 'second' })
+    await h.call({ action: 'complete', id: 1 })
+    await h.runCommand('todos', { hasUI: true, mode: 'rpc', ui: ui.ui })
+    expect(ui.customFactories).toHaveLength(0)
+    expect(ui.notices).toEqual([{ message: '[x] #1: first\n[ ] #2: second', type: 'info' }])
+  })
+
+  it('notifies the empty-list placeholder in RPC mode', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.runCommand('todos', { hasUI: true, mode: 'rpc', ui: ui.ui })
+    expect(ui.customFactories).toHaveLength(0)
+    expect(ui.notices).toEqual([{ message: 'No todos', type: 'info' }])
+  })
+
   it('renders an invitation when the list is empty', async () => {
     const h = setup()
     const ui = fakeUI()
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     const lines = ui.customFactories[0](null, theme, null, () => {}).render(60)
     expect(lines[3]).toBe('  No todos yet. Ask the agent to add some!')
     expect(lines.at(-2)).toBe('  Press Escape to close')
@@ -518,7 +537,7 @@ describe('/todos command', () => {
     await h.call({ action: 'add', text: 'second' })
     await h.call({ action: 'complete', id: 1 })
     await h.call({ action: 'start', id: 2, activeForm: 'Doing second' })
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
 
     const lines = ui.customFactories[0](null, theme, null, () => {}).render(60)
     expect(lines[0]).toBe('')
@@ -531,7 +550,7 @@ describe('/todos command', () => {
   it('closes the list on escape', async () => {
     const h = setup()
     const ui = fakeUI()
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     let closed = 0
     const component = ui.customFactories[0](null, theme, null, () => {
       closed++
@@ -543,7 +562,7 @@ describe('/todos command', () => {
   it('closes the list on ctrl+c', async () => {
     const h = setup()
     const ui = fakeUI()
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     let closed = 0
     const component = ui.customFactories[0](null, theme, null, () => {
       closed++
@@ -555,7 +574,7 @@ describe('/todos command', () => {
   it('ignores unrelated keystrokes', async () => {
     const h = setup()
     const ui = fakeUI()
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     let closed = 0
     const component = ui.customFactories[0](null, theme, null, () => {
       closed++
@@ -568,7 +587,7 @@ describe('/todos command', () => {
     const h = setup()
     const ui = fakeUI()
     await h.call({ action: 'add', text: 'first' })
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     const component = ui.customFactories[0](null, theme, null, () => {})
 
     const before = component.render(60)
@@ -583,7 +602,7 @@ describe('/todos command', () => {
     const h = setup()
     const ui = fakeUI()
     await h.call({ action: 'add', text: 'first' })
-    await h.runCommand('todos', { hasUI: true, ui: ui.ui })
+    await h.runCommand('todos', { hasUI: true, mode: 'tui', ui: ui.ui })
     const component = ui.customFactories[0](null, theme, null, () => {})
 
     component.render(60)

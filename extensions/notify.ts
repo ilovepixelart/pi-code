@@ -113,6 +113,11 @@ export default function notifyExtension(pi: ExtensionAPI) {
     lastInputAt = Date.now()
   })
 
+  // Fires on agent_end rather than agent_settled deliberately: agent_settled is only
+  // emitted after every agent_end handler returns, and a peer extension (plan mode)
+  // blocks its agent_end handler on a UI dialog, which would starve this notification
+  // exactly when the user has stepped away. agent_end can fire slightly early before a
+  // rare automatic retry or compaction, which is a better failure than never notifying.
   pi.on('agent_end', async () => {
     if (channel === 'off') return
     // Piped or headless stdout (pi -p, CI) must not receive raw escape bytes.

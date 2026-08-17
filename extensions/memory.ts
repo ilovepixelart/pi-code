@@ -12,7 +12,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
@@ -138,29 +138,39 @@ export function indexWouldOverflow(index: string, name: string, description: str
   return next.split('\n').length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
 }
 
-/** Write a memory and its index line, or say why it cannot be written. */
-export function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
+type MemoryToolResult = { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> }
+
+/** Write a memory and its index line, or say why it cannot be written. The whole
+ * read-modify-write holds the index's mutation queue: tool calls run in parallel, so
+ * two unqueued saves both read the same index and the second silently drops the first's
+ * line. The queue keys ONLY on the index, the shared file every save touches, and never
+ * also on the memory file: a second nested queue self-deadlocks when a memory name
+ * canonicalizes to the same key as the index (e.g. `memory.md` and `MEMORY.md` under a
+ * case-insensitive filesystem, since the queue keys on realpath). */
+export async function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): Promise<MemoryToolResult> {
   if (!name || !description || !content) {
     return { content: [{ type: 'text', text: 'save requires name, description, and content.' }], details: {} }
   }
-  const index = readIndex(dir)
-  // Claude reports an explicit error rather than writing a memory the next session
-  // would never load, and says what to do about it.
-  if (indexWouldOverflow(index, name, description)) {
-    return {
-      content: [{ type: 'text', text: `Memory index is full (${INDEX_MAX_LINES} entries or ${INDEX_MAX_BYTES} bytes). Delete or consolidate memories before saving ${name}.` }],
-      details: {},
+  return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
+    const index = readIndex(dir)
+    // Claude reports an explicit error rather than writing a memory the next session
+    // would never load, and says what to do about it.
+    if (indexWouldOverflow(index, name, description)) {
+      return {
+        content: [{ type: 'text', text: `Memory index is full (${INDEX_MAX_LINES} entries or ${INDEX_MAX_BYTES} bytes). Delete or consolidate memories before saving ${name}.` }],
+        details: {},
+      }
     }
-  }
-  fs.mkdirSync(dir, { recursive: true })
-  // A memory with frontmatter records its write time; one without is left as-is.
-  fs.writeFileSync(path.join(dir, `${name}.md`), stampModified(content, now))
-  writeIndex(indexPath, upsertIndexLine(index, name, description))
-  return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
+    fs.mkdirSync(dir, { recursive: true })
+    // A memory with frontmatter records its write time; one without is left as-is.
+    fs.writeFileSync(path.join(dir, `${name}.md`), stampModified(content, now))
+    writeIndex(indexPath, upsertIndexLine(index, name, description))
+    return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
+  })
 }
 
 /** The read action: a memory's body, capped for context, or a not-found message. */
-function readMemory(dir: string, name: string): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
+function readMemory(dir: string, name: string): MemoryToolResult {
   try {
     const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
     return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
@@ -169,21 +179,23 @@ function readMemory(dir: string, name: string): { content: Array<{ type: 'text';
   }
 }
 
-/** The delete action: remove a memory file and its index line. The index is read
- * before anything is removed: refusing on a failed read must leave both the memory
- * file and the index as they were. */
-function deleteMemory(dir: string, indexPath: string, name: string): { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> } {
-  let index: string
+/** The delete action: remove a memory file and its index line, queued on the index
+ * like save (single key, no deadlock). The index is read before anything is removed,
+ * and any failure (a bad index read, or an unreadable store the queue key cannot
+ * realpath) leaves both the memory file and the index as they were. */
+async function deleteMemory(dir: string, indexPath: string, name: string): Promise<MemoryToolResult> {
   try {
-    index = readIndex(dir)
+    return await withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
+      const index = readIndex(dir)
+      fs.rmSync(path.join(dir, `${name}.md`), { force: true })
+      const remaining = removeIndexLine(index, name)
+      if (remaining) writeIndex(indexPath, remaining)
+      else fs.rmSync(indexPath, { force: true })
+      return { content: [{ type: 'text', text: `Deleted memory ${name}.` }], details: {} }
+    })
   } catch (error) {
     return { content: [{ type: 'text', text: `Memory delete failed: ${error instanceof Error ? error.message : String(error)}. Nothing was deleted.` }], details: {} }
   }
-  fs.rmSync(path.join(dir, `${name}.md`), { force: true })
-  const remaining = removeIndexLine(index, name)
-  if (remaining) writeIndex(indexPath, remaining)
-  else fs.rmSync(indexPath, { force: true })
-  return { content: [{ type: 'text', text: `Deleted memory ${name}.` }], details: {} }
 }
 
 /** The index as injected into the prompt, bounded like Claude's startup load. */
@@ -346,7 +358,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       if (params.action === 'save') {
         try {
-          return saveMemory(dir, indexPath, name, params.description, params.content)
+          // Awaited here, not returned: the catch must see a queued write's rejection.
+          return await saveMemory(dir, indexPath, name, params.description, params.content)
         } catch (error) {
           return { content: [{ type: 'text' as const, text: `Memory save failed: ${error instanceof Error ? error.message : String(error)}. The index was left untouched.` }], details: {} }
         }

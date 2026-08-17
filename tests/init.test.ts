@@ -74,17 +74,19 @@ describe('findExistingContextFile', () => {
 const setup = () => {
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
   const sent: string[] = []
+  const sentOptions: unknown[] = []
   const pi = {
     on: () => {},
     registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
-    sendUserMessage: (text: string) => {
+    sendUserMessage: (text: string, options?: unknown) => {
       sent.push(text)
+      sentOptions.push(options)
     },
   }
   initExtension(pi as never)
-  return { commands, sent }
+  return { commands, sent, sentOptions }
 }
-const ctxFor = (cwd: string) => ({ cwd, hasUI: true, ui: { notify: () => {} } })
+const ctxFor = (cwd: string, idle = true) => ({ cwd, hasUI: true, isIdle: () => idle, ui: { notify: () => {} } })
 
 describe('init extension', () => {
   it('registers /init and sends one create prompt for a project with no context file', async () => {
@@ -127,6 +129,14 @@ describe('init extension', () => {
     expect(s.sent[0].toLowerCase()).toContain('propose improvements')
     expect(s.sent[0]).toContain('.cursorrules')
     expect(s.sent[0]).toContain('.github/copilot-instructions.md')
+  })
+
+  it('sends bare while idle but queues as a followUp while the agent is streaming', async () => {
+    const cwd = tempDir()
+    const s = setup()
+    await s.commands.get('init')?.handler('', ctxFor(cwd))
+    await s.commands.get('init')?.handler('', ctxFor(cwd, false))
+    expect(s.sentOptions).toEqual([{}, { deliverAs: 'followUp' }])
   })
 
   it('detects a .cursor/rules directory as cursor rules', async () => {

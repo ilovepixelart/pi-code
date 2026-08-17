@@ -46,6 +46,7 @@ import { Type } from 'typebox'
 import { matchesBashRules } from './internal/bash-rules.js'
 import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
 import { readManagedSettings } from './internal/managed-settings.js'
+import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
@@ -315,12 +316,17 @@ export default function commandsExtension(pi: ExtensionAPI) {
     pendingBashRules = undefined
     pendingPathRules = undefined
     if (pendingModelRestore) {
-      void pi.setModel(pendingModelRestore as Parameters<typeof pi.setModel>[0])
+      const restore = pendingModelRestore as Parameters<typeof pi.setModel>[0]
       pendingModelRestore = undefined
+      // setModel can reject (e.g. auth resolution fails), and a floated rejection would
+      // escape as unhandled; surface it instead of leaving the session silently on the
+      // command's override model.
+      void pi.setModel(restore).catch(() => {})
     }
-    if (!pendingRestore) return
-    pi.setActiveTools(pendingRestore)
-    pendingRestore = undefined
+    if (pendingRestore) {
+      pi.setActiveTools(pendingRestore)
+      pendingRestore = undefined
+    }
   })
 
   // The active-tool set has no argument dimension, so a scoped grant hands the turn
@@ -416,6 +422,16 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // restored when that run ends. Restoring inline does not work: sendUserMessage is
     // fire-and-forget, so the restore would land before the agent ever read the tool
     // list, leaving the command running with everything enabled.
+    // A command invoked while the agent is streaming must not narrow the in-flight run's
+    // tools or switch its model (that would corrupt a run it does not own), and a bare
+    // sendUserMessage throws mid-stream and would be silently dropped. Queue it as a
+    // follow-up through pi's own queue, which is abort-aware and shown to the user; its
+    // frontmatter scoping is not applied in that case, since it cannot land on a run that
+    // has not started yet.
+    if (!ctx.isIdle()) {
+      pi.sendUserMessage(expanded, { deliverAs: 'followUp' })
+      return
+    }
     applyAllowedTools(parsed, vars)
     applyDisallowedTools(parsed)
     await applyModelOverride(parsed, varCtx)
@@ -500,7 +516,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
         // the tool result is the channel, and frontmatter scoping stays user-path
         // territory (see the header).
         const expanded = await expandCommand(pi, current, args, execCtx, command.filePath, command.plugin, { allowShell: false })
-        return { content: [{ type: 'text' as const, text: `Contents of /${name} (expanded):\n\n${expanded}` }], details: {} }
+        // Cap the tool result: a command body can inline an arbitrarily large @file, and
+        // an uncapped tool result overflows the model's context (every other pi-code tool
+        // routes its output through capForContext). The user-invoked path stays uncapped.
+        return { content: [{ type: 'text' as const, text: capForContext(`Contents of /${name} (expanded):\n\n${expanded}`) }], details: {} }
       },
     })
   })

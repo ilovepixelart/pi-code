@@ -14,7 +14,7 @@
  * throw and the caller falls back to its non-model behavior.
  */
 
-import type { Api, AssistantMessage, Context, Model, ModelsSimpleStreamOptions } from '@earendil-works/pi-ai'
+import type { Api, AssistantMessage, Context, Model, ModelsSimpleStreamOptions, Usage } from '@earendil-works/pi-ai'
 import { ModelRuntime } from '@earendil-works/pi-coding-agent'
 
 /** The completion backend: model + context -> assistant message. Overridable for tests. */
@@ -52,11 +52,13 @@ export interface CompleteOptions {
 }
 
 /**
- * Run `prompt` through `model` as a single user turn and return the reply text.
+ * Run `prompt` through `model` as a single user turn and return the reply text plus
+ * the call's usage. A tool that makes a nested LLM call must return that usage on
+ * its tool result, or the call's tokens and cost vanish from pi's session totals.
  * Throws on any failure so the caller can fall back; never returns a partial or a
  * tool call, only assistant text.
  */
-export async function completeText(model: Model<Api>, prompt: string, options: CompleteOptions = {}): Promise<string> {
+export async function completeText(model: Model<Api>, prompt: string, options: CompleteOptions = {}): Promise<{ text: string; usage: Usage }> {
   backend ??= realBackend()
   const complete = await backend
   const context: Context = {
@@ -64,5 +66,5 @@ export async function completeText(model: Model<Api>, prompt: string, options: C
     messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
   }
   const message = await complete(model, context, { maxTokens: options.maxTokens ?? 1024, signal: options.signal })
-  return assistantText(message)
+  return { text: assistantText(message), usage: message.usage }
 }
