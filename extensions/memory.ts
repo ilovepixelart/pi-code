@@ -310,6 +310,27 @@ export default function memoryExtension(pi: ExtensionAPI) {
   let dir = memoryDir(process.cwd())
   let enabled = true
 
+  // The index is injected every turn but changes only through the tool or an external
+  // edit, so a turn costs one stat instead of a full read. The stat token (mtime plus
+  // size) catches external edits; save and delete drop the cache outright, since a
+  // rename landing within one mtime tick at the same size would slip past the token.
+  let indexCache: { token: string; index: string } | null = null
+
+  const indexStatToken = (): string => {
+    try {
+      const stat = fs.statSync(path.join(dir, INDEX_FILE))
+      return `${stat.mtimeMs}:${stat.size}`
+    } catch {
+      return 'missing'
+    }
+  }
+
+  const readIndexCached = (): string => {
+    const token = indexStatToken()
+    if (indexCache === null || indexCache.token !== token) indexCache = { token, index: readIndexQuietly(dir) }
+    return indexCache.index
+  }
+
   // These extensions also load inside spawned subagent processes, which carry the
   // PI_CODE_SUBAGENT marker. Claude does not load the main conversation's auto memory
   // into subagents (they get their own store through the agent `memory:` field), so
@@ -325,6 +346,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     enabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
     const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
     dir = enabled ? resolveMemoryDir(ctx.cwd, override) : memoryDir(ctx.cwd)
+    indexCache = null
     if (!enabled) return
     const count = readIndexQuietly(dir)
       .split('\n')
@@ -334,7 +356,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   pi.on('before_agent_start', async (event) => {
     if (inSubagent() || !enabled) return
-    const index = readIndexQuietly(dir)
+    const index = readIndexCached()
     if (!index.trim()) return
     return {
       systemPrompt: `${event.systemPrompt}\n\n## Memory\n\nPersistent memories from earlier sessions (index):\n\n${capIndexForPrompt(index)}\nUse the memory tool with action "read" to load a memory's full content when relevant.`,
@@ -362,6 +384,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
           return await saveMemory(dir, indexPath, name, params.description, params.content)
         } catch (error) {
           return { content: [{ type: 'text' as const, text: `Memory save failed: ${error instanceof Error ? error.message : String(error)}. The index was left untouched.` }], details: {} }
+        } finally {
+          indexCache = null
         }
       }
 
@@ -372,7 +396,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       if (params.action === 'delete') {
         if (!name) return { content: [{ type: 'text' as const, text: 'delete requires name.' }], details: {} }
-        return deleteMemory(dir, indexPath, name)
+        // In a finally like the save path: a delete that throws mid-write must still
+        // drop the cache, or the next turn injects a stale index.
+        try {
+          return await deleteMemory(dir, indexPath, name)
+        } finally {
+          indexCache = null
+        }
       }
 
       const index = readIndexQuietly(dir)

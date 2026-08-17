@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { globToRegExpSource, matchesPathRules } from '../extensions/internal/path-rules.ts'
+import { compileGlobs, globCompileStats, globToRegExpSource, matchesCompiledGlobs, matchesPathRules } from '../extensions/internal/path-rules.ts'
 
 const anchors = { cwd: '/repo/app', projectRoot: '/repo', home: '/home/alex' }
 
@@ -86,5 +86,25 @@ describe('brace expansion', () => {
     expect(overRegExp.test('abcd.ts')).toBe(false)
     const atLimit = `${group.repeat(3)}.ts` // exactly 1000, still expands
     expect(new RegExp(`^${globToRegExpSource(atLimit)}$`).test('adg.ts')).toBe(true)
+  })
+})
+
+describe('compileGlobs', () => {
+  it('compiles each glob once; matching compiled globs performs no further compilation', () => {
+    const before = globCompileStats().compiled
+    const compiled = compileGlobs(['db/**', '*.sql', 'docs/'])
+    expect(globCompileStats().compiled - before).toBe(3)
+    expect(matchesCompiledGlobs('db/schema.sql', compiled)).toBe(true)
+    expect(matchesCompiledGlobs('lib/deep/x.sql', compiled)).toBe(true)
+    expect(matchesCompiledGlobs('docs/api/v1.md', compiled)).toBe(true)
+    expect(matchesCompiledGlobs('src/app.ts', compiled)).toBe(false)
+    expect(globCompileStats().compiled - before).toBe(3)
+  })
+
+  it('matches like pathMatchesGlobs: anchors stripped, blank globs dropped, no globs match nothing', () => {
+    expect(matchesCompiledGlobs('src/app.ts', compileGlobs(['./src/**']))).toBe(true)
+    expect(matchesCompiledGlobs('src/app.ts', compileGlobs(['/src/**']))).toBe(true)
+    expect(compileGlobs(['', '   '])).toEqual([])
+    expect(matchesCompiledGlobs('anything', [])).toBe(false)
   })
 })

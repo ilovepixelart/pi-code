@@ -1352,7 +1352,16 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // available model list are captured per session so a hook run lands in the right repo.
   let hookCwd = process.cwd()
   let hookModels: ReadonlyArray<{ id: string }> = []
+
+  // Discovery walks the plugin cache, the builtin dir, and every agent dir, parsing
+  // each file: dozens of fs ops per call. The roster injection below runs every turn
+  // for a list that almost never changes mid-session, so it reuses one discovery per
+  // (cwd, scope), dropped on session_start. The tool's execute() keeps rediscovering
+  // per invocation, so a just-added agent is still runnable without a restart.
+  let rosterCache: { key: string; agents: AgentConfig[] } | null = null
+
   pi.on('session_start', async (_event, ctx) => {
+    rosterCache = null
     hookCwd = ctx.cwd
     try {
       hookModels = ctx.modelRegistry?.getAvailable?.() ?? []
@@ -1378,12 +1387,15 @@ export default function subagentExtension(pi: ExtensionAPI) {
   })
 
   // Claude surfaces each agent's description so the model can pick one autonomously.
-  // Rebuilt per turn (agents are rediscovered per invocation too); project agents are
-  // included only when the project is already approved, read without prompting, since
-  // a trust dialog must not appear mid-turn and their descriptions are project text.
+  // Served from the session-level cache above (keyed on cwd and scope, so an approval
+  // granted mid-session still widens it); project agents are included only when the
+  // project is already approved, read without prompting, since a trust dialog must
+  // not appear mid-turn and their descriptions are project text.
   pi.on('before_agent_start', async (event, ctx) => {
-    const scope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
-    const { agents } = discoverAgents(ctx.cwd, scope)
+    const scope: AgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
+    const key = `${scope}\n${ctx.cwd}`
+    if (rosterCache?.key !== key) rosterCache = { key, agents: discoverAgents(ctx.cwd, scope).agents }
+    const { agents } = rosterCache
     if (agents.length === 0) return
     const line = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 200)
     const roster = agents.map((agent) => `- ${agent.name} (${agent.source}): ${line(agent.description)}`).join('\n')

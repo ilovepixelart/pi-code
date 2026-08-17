@@ -90,16 +90,70 @@ function pluginConfigsMap(settingsFiles: string[]): Record<string, Record<string
   return merged
 }
 
+/** Memoized discovery per (home, extra settings files), revalidated by fingerprint. */
+const pluginCache = new Map<string, { fingerprint: string; plugins: InstalledPlugin[] }>()
+
+/** Drop every memoized discovery; the next installedPlugins call walks afresh. */
+export function resetInstalledPluginsCache(): void {
+  pluginCache.clear()
+}
+
+/** mtime plus size, so a same-instant rewrite with different content still differs. */
+function statToken(target: string): string {
+  try {
+    const stat = fs.statSync(target)
+    return `${stat.mtimeMs}:${stat.size}`
+  } catch {
+    return 'missing'
+  }
+}
+
+/**
+ * A cheap change signature for one home's plugin config: the settings files' stat
+ * tokens plus the cache tree's directory names and mtimes down through each plugin's
+ * version directories, and the stat token of the resolved (newest) version's manifest
+ * so an in-place edit of it invalidates the cache. Costs a few stats where the full
+ * walk reads and parses the settings and every manifest.
+ */
+function pluginFingerprint(cacheDir: string, settingsFiles: string[]): string {
+  const parts = settingsFiles.map(statToken)
+  for (const marketplace of listDirs(cacheDir)) {
+    const marketplaceDir = path.join(cacheDir, marketplace)
+    parts.push(`${marketplace}:${statToken(marketplaceDir)}`)
+    for (const pluginDir of listDirs(marketplaceDir)) {
+      const pluginPath = path.join(marketplaceDir, pluginDir)
+      parts.push(`${marketplace}/${pluginDir}:${statToken(pluginPath)}`)
+      const versions = listDirs(pluginPath)
+      for (const version of versions) {
+        parts.push(`${marketplace}/${pluginDir}/${version}:${statToken(path.join(pluginPath, version))}`)
+      }
+      // resolvePlugin reads only the newest version's manifest, so its stat token is
+      // what an in-place edit (no directory entry changing) must move.
+      const newest = newestVersion(versions)
+      if (newest) parts.push(`${marketplace}/${pluginDir}/${newest}/manifest:${statToken(path.join(pluginPath, newest, '.claude-plugin', 'plugin.json'))}`)
+    }
+  }
+  return parts.join('\n')
+}
+
 /**
  * Enabled plugins from the cache. Enablement is decided by the user's own
  * settings only: plugins install to the user's machine and carry code (hook
  * scripts, MCP server commands), so a checked-out repo must not be able to flip
  * which of them run. `extraSettingsFiles`, when given, are additional
  * user-controlled settings sources, not project files.
+ *
+ * Several extensions call this at session start and per discovery, so the walk
+ * is memoized behind the fingerprint above; callers always see current data
+ * because any settings edit or cache-tree change invalidates it.
  */
 export function installedPlugins(home: string, extraSettingsFiles: string[] = []): InstalledPlugin[] {
   const cacheDir = path.join(home, '.claude', 'plugins', 'cache')
   const settingsFiles = [path.join(home, '.claude', 'settings.json'), ...extraSettingsFiles]
+  const key = [home, ...extraSettingsFiles].join('\n')
+  const fingerprint = pluginFingerprint(cacheDir, settingsFiles)
+  const cached = pluginCache.get(key)
+  if (cached && cached.fingerprint === fingerprint) return cached.plugins
   const enabled = enabledMap(settingsFiles)
   const configs = pluginConfigsMap(settingsFiles)
   const plugins: InstalledPlugin[] = []
@@ -109,6 +163,7 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
       if (plugin) plugins.push(plugin)
     }
   }
+  pluginCache.set(key, { fingerprint, plugins })
   return plugins
 }
 

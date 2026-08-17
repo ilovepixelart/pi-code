@@ -28,11 +28,13 @@ function setup() {
     cwd: mkdtempSync(join(tmpdir(), 'sl-cwd-')),
     isProjectTrusted: () => true,
     ui: { theme, setStatus: (_key: string, text: string) => status.push(text), confirm: async () => true, notify: () => {} },
-    sessionManager: { getBranch: () => branch, getSessionId: () => 's', getSessionFile: () => undefined },
+    sessionManager: { getBranch: vi.fn(() => branch), getSessionId: () => 's', getSessionFile: () => undefined },
     getContextUsage: () => ({ tokens: 0, contextWindow: 0, percent: 0 }),
   })
   return { handlers, status, makeCtx }
 }
+
+const usageEntry = (total: number) => ({ type: 'message', message: { usage: { cost: { total } } } })
 
 describe('status-line', () => {
   it('shows "ready" with no turns or cost at session start', async () => {
@@ -50,19 +52,54 @@ describe('status-line', () => {
   })
 
   it('sums session cost from branch usage and formats it to cents', async () => {
+    // The branch is walked once at session start (a resumed or forked session
+    // carries history); renders reuse the running total.
     const { handlers, status, makeCtx } = setup()
-    const branch = [
-      { type: 'message', message: { usage: { cost: { total: 0.5 } } } },
-      { type: 'message', message: { usage: { cost: { total: 0.25 } } } },
-    ]
-    await handlers.get('turn_end')?.({}, makeCtx(branch))
+    const ctx = makeCtx([usageEntry(0.5), usageEntry(0.25)])
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
     expect(status.at(-1)).toContain('$0.75')
   })
 
   it('uses four decimals for sub-cent costs', async () => {
     const { handlers, status, makeCtx } = setup()
-    await handlers.get('turn_end')?.({}, makeCtx([{ type: 'message', message: { usage: { cost: { total: 0.0012 } } } }]))
+    const ctx = makeCtx([usageEntry(0.0012)])
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
     expect(status.at(-1)).toContain('$0.0012')
+  })
+
+  it('accumulates cost from message_end usage without re-walking the branch per render', async () => {
+    const { handlers, status, makeCtx } = setup()
+    const ctx = makeCtx([])
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.5 } } } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    expect(status.at(-1)).toContain('$0.50')
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.25 } } } }, ctx)
+    await handlers.get('agent_end')?.({}, ctx)
+    expect(status.at(-1)).toContain('$0.75')
+    // Only the session_start seed touched the branch; renders must not walk it.
+    expect(ctx.sessionManager.getBranch.mock.calls.length).toBe(1)
+  })
+
+  it('reseeds the cost from the branch when compaction or tree navigation reshapes it', async () => {
+    const { handlers, status, makeCtx } = setup()
+    const branch = [usageEntry(0.75)]
+    const ctx = makeCtx(branch)
+    await handlers.get('session_start')?.({}, ctx)
+    // Compaction replaces the branch; the running total must follow it, not double.
+    branch.splice(0, branch.length, usageEntry(0.1))
+    await handlers.get('session_compact')?.({ reason: 'manual' }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    expect(status.at(-1)).toContain('$0.10')
+    // Tree navigation swaps the branch wholesale with no message_end events.
+    branch.push(usageEntry(0.05))
+    await handlers.get('session_tree')?.({ newLeafId: null, oldLeafId: null }, ctx)
+    await handlers.get('agent_end')?.({}, ctx)
+    expect(status.at(-1)).toContain('$0.15')
+    // One walk per reshaping event (start, compact, tree), none per render.
+    expect(ctx.sessionManager.getBranch.mock.calls.length).toBe(3)
   })
 
   it('keeps the running turn count after agent_end', async () => {

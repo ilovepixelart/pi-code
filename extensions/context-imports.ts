@@ -52,6 +52,7 @@
  * Docs: https://code.claude.com/docs/en/memory.md (imports)
  */
 
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -507,6 +508,37 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     publishInstructionLoad(pi.events, event)
   }
 
+  // before_agent_start fires every turn, but its inputs almost never change
+  // mid-session. The settings-derived environment (managed settings, exclude
+  // globs, repo root) is cached per cwd, and the whole import expansion is
+  // memoized on its inputs and revalidated by a stat token (mtime and size): a
+  // turn where nothing changed costs a handful of stats instead of re-reading and
+  // re-recursing every @import. A brand-new file satisfying a previously missing
+  // @import is picked up when any recorded stat token moves (or next session),
+  // which is already fresher than Claude, which loads context once at session start.
+  let envCache: { cwd: string; managed: Record<string, unknown>; excludeGlobs: string[]; projectRoot: string } | undefined
+  let importMemo:
+    | {
+        key: string
+        extras: Array<{ path: string; content: string; dir: string }>
+        imported: ImportedFile[]
+        budget: ImportBudget
+        tokens: Array<[string, string]>
+      }
+    | undefined
+  // mtime plus size, so a same-mtime rewrite of a different length still invalidates.
+  const statToken = (file: string): string => {
+    const stat = fs.statSync(file)
+    return `${stat.mtimeMs}:${stat.size}`
+  }
+  const memoIsFresh = (memo: NonNullable<typeof importMemo>): boolean => {
+    try {
+      return memo.tokens.every(([file, token]) => statToken(file) === token)
+    } catch {
+      return false // a recorded file vanished: re-expand
+    }
+  }
+
   // Claude's --add-dir. Only the memory-loading half is meaningful here: pi has
   // no path-based permission system, so there is no access grant to mirror.
   // Optional-called so the extension still wires under stub hosts without flags.
@@ -520,6 +552,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // a reload anyway; a reload simply re-fires InstructionsLoaded once per file,
     // which is fine, since a reload re-loads the instruction files.
     announced.clear()
+    envCache = undefined
+    importMemo = undefined
     // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
     // skips it. A cloned repo can ship one, so it is gated like other project config.
     // Claude loads local context from the whole hierarchy above the working
@@ -545,10 +579,12 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
     const native: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
 
-    const managed = readManagedSettings()
-    const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managed)
+    if (!envCache || envCache.cwd !== cwd) {
+      const managedNow = readManagedSettings()
+      envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: repoRoot(cwd) ?? cwd }
+    }
+    const { managed, excludeGlobs, projectRoot } = envCache
     const excluded = (absPath: string): boolean => isExcludedPath(absPath, excludeGlobs, home)
-    const projectRoot = repoRoot(cwd) ?? cwd
 
     // claudeMdExcludes drops an excluded file's block from the assembled prompt and
     // from import expansion; surviving blocks get block-level comments stripped.
@@ -575,21 +611,48 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
     const contextFiles = [...rewrite.kept, ...keptLocals]
 
-    // Seed with every loaded context file path, excluded ones included, so pi's own
-    // files are never re-imported and an excluded file cannot return as an import.
-    const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
+    // Everything the expansion depends on, hashed: a turn whose inputs match the memo
+    // and whose recorded mtimes are unchanged reuses the previous expansion outright.
+    const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
+    const keyHash = createHash('sha256')
+    keyHash.update(`${cwd}\0${home}\0${projectApproved}\0${addDirsRaw}\0${excludeGlobs.join(',')}\0`)
+    for (const file of [...native, ...localContexts]) keyHash.update(`${file.path}\0`)
+    for (const file of contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
+    const memoKey = keyHash.digest('hex')
 
-    // Claude's --add-dir memory loading, env-gated. The files join the seen set
-    // before import expansion so an @import cannot pull one in twice, and they get
-    // the same exclude and comment-strip treatment as native context files.
-    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
-    const extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
+    let extras: Array<{ path: string; content: string; dir: string }>
+    let budget: ImportBudget
+    let imported: ImportedFile[]
+    if (importMemo && importMemo.key === memoKey && memoIsFresh(importMemo)) {
+      ;({ extras, budget, imported } = importMemo)
+    } else {
+      // Seed with every loaded context file path, excluded ones included, so pi's own
+      // files are never re-imported and an excluded file cannot return as an import.
+      const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
 
-    // One budget for the whole run, so N context files cannot each spend a full one.
-    // Exclusion applies inside the recursion: an excluded @import is skipped before
-    // it is read, so its transitive imports never load and it spends no budget.
-    const budget = createImportBudget()
-    const imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
+      // Claude's --add-dir memory loading, env-gated. The files join the seen set
+      // before import expansion so an @import cannot pull one in twice, and they get
+      // the same exclude and comment-strip treatment as native context files.
+      const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
+      extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
+
+      // One budget for the whole run, so N context files cannot each spend a full one.
+      // Exclusion applies inside the recursion: an excluded @import is skipped before
+      // it is read, so its transitive imports never load and it spends no budget.
+      budget = createImportBudget()
+      imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
+
+      // Revalidation set: every file the expansion read, plus each add-dir itself
+      // (a directory's mtime moves when a memory file is added or removed there).
+      const tokens: Array<[string, string]> = []
+      try {
+        for (const file of [...extras.map((extra) => extra.path), ...imported.map((entry) => entry.path)]) tokens.push([file, statToken(file)])
+        for (const dir of addDirs) tokens.push([dir, statToken(dir)])
+        importMemo = { key: memoKey, extras, budget, imported, tokens }
+      } catch {
+        importMemo = undefined // a file moved mid-expansion: just recompute next turn
+      }
+    }
 
     let addition = localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)

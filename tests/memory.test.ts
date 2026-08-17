@@ -11,6 +11,18 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => hoisted.home || actual.homedir() }
 })
 
+// Records every readFileSync path, so the index-cache test can count index reads.
+// The builtin namespace is not spyable either, so the module is wrapped like os.
+const fsHoisted = vi.hoisted(() => ({ reads: [] as string[] }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
+    fsHoisted.reads.push(String(args[0]))
+    return actual.readFileSync(...args)
+  }) as typeof actual.readFileSync
+  return { ...actual, readFileSync }
+})
+
 import memoryExtension, { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, indexWouldOverflow, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, resolveMemoryDir, slugifyName, stampModified, stripNonLoaded, upsertIndexLine } from '../extensions/memory.ts'
 
 describe('memory helpers', () => {
@@ -297,6 +309,42 @@ describe('memory extension', () => {
       if (savedMarker === undefined) delete process.env.PI_CODE_SUBAGENT
       else process.env.PI_CODE_SUBAGENT = savedMarker
     }
+  })
+
+  it('reads the index once across turns, re-reading only after a change', async () => {
+    const cwd = cwdDir()
+    const dir = memoryDir(cwd)
+    mkdirSync(dir, { recursive: true })
+    const indexPath = join(dir, 'MEMORY.md')
+    writeFileSync(indexPath, '# Memory index\n- [a](a.md): first\n')
+
+    const { handlers, getTool } = wire()
+    await handlers.get('session_start')?.({}, ctxFor(cwd))
+
+    const indexReads = () => fsHoisted.reads.filter((p) => p === indexPath).length
+    const mark = indexReads()
+    for (let i = 0; i < 3; i++) {
+      const injected = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
+      expect(injected.systemPrompt).toContain('- [a](a.md): first')
+    }
+    // One read for the first turn; the later turns revalidate with a stat only.
+    expect(indexReads()).toBe(mark + 1)
+
+    // A save invalidates the cache, so the next turn carries the new entry.
+    await getTool().execute('id', { action: 'save', name: 'b', description: 'second', content: 'body' })
+    const afterSave = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
+    expect(afterSave.systemPrompt).toContain('- [b](b.md): second')
+
+    // An external rewrite (different size) is caught by the stat gate.
+    writeFileSync(indexPath, '# Memory index\n- [c](c.md): replaced externally\n')
+    const afterEdit = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
+    expect(afterEdit.systemPrompt).toContain('- [c](c.md): replaced externally')
+    expect(afterEdit.systemPrompt).not.toContain('- [b](b.md)')
+
+    // The delete invalidates too: the next turn no longer lists the removed entry.
+    await getTool().execute('id', { action: 'delete', name: 'c' })
+    const afterDelete = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
+    expect(afterDelete.systemPrompt).not.toContain('- [c](c.md)')
   })
 
   it('stamps a modified timestamp when saving a memory that has frontmatter', async () => {

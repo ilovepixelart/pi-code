@@ -158,13 +158,25 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.appended).toHaveLength(1)
   })
 
+  it('awaits the pre-run snapshot in turn_start so it captures the tree before the model acts', async () => {
+    // The snapshot must capture the tree before the model's first edit, so turn_start
+    // awaits it to completion rather than deferring the git work to turn_end. By the
+    // time turn_start resolves, the commit has run; an un-awaited kickoff would still
+    // be mid-flight, having reached only `git add -A`.
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
+
+    expect(t.execLog.some((c) => c[0] === 'git' && c.includes('commit'))).toBe(true)
+  })
+
   it('snapshots once per run, not once per turn, and still records the checkpoint', async () => {
     // A `git add -A` before every assistant turn (awaited, so it blocks the model call)
     // is wasted when the run has already checkpointed the pre-run tree; snapshot once per
-    // run (gated by before_agent_start) instead.
+    // run (gated by agent_start) instead.
     const t = setup()
     await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
-    await t.handlers.get('before_agent_start')?.({}, t.makeCtx([], [], []))
+    await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
@@ -182,7 +194,7 @@ describe('shadow-repo checkpoint lifecycle', () => {
     // A distinct prompt in a new run gets past the per-entry dedupe, so the snapshot
     // runs again; with an untouched work tree it must resolve to the same commit.
     const secondPrompt = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'now add a regression test for it' } }
-    await t.handlers.get('before_agent_start')?.({}, t.makeCtx([], [], []))
+    await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
 

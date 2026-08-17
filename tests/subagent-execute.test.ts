@@ -1045,6 +1045,31 @@ describe('agent roster', () => {
     // Discovery is module-mocked here; builtin discovery is covered in the agents suite.
     expect(result.systemPrompt).toMatch(/- scout \(user\): /)
   })
+
+  it('discovers the roster once and reuses it across turns until the next session', async () => {
+    discoverAgentsMock.mockClear()
+    for (let i = 0; i < 3; i++) {
+      const result = (await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)) as { systemPrompt: string }
+      expect(result.systemPrompt).toContain('## Subagents')
+    }
+    expect(discoverAgentsMock).toHaveBeenCalledTimes(1)
+
+    // A new session drops the cache, so an agent added between sessions shows up.
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)
+    expect(discoverAgentsMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps per-invocation discovery in execute() while the roster is cached', async () => {
+    discoverAgentsMock.mockClear()
+    await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)
+    expect(discoverAgentsMock).toHaveBeenCalledTimes(1)
+
+    // Mid-session freshness matters for actual runs: the tool still rediscovers per call.
+    await execute('c1', { status: true }, undefined, undefined, trustedCtx)
+    await execute('c2', { status: true }, undefined, undefined, trustedCtx)
+    expect(discoverAgentsMock).toHaveBeenCalledTimes(3)
+  })
 })
 
 describe('single mode', () => {

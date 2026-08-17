@@ -7,11 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
 
-const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined }))
+const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, fsReads: [] as string[] }))
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()
   return { ...actual, homedir: () => hoisted.home }
+})
+
+// Pass-through readFileSync that records every path, so tests can assert the
+// settings chain is not re-read per refresh (deterministic, no wall-clock).
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const readFileSync = (...args: Parameters<typeof actual.readFileSync>) => {
+    hoisted.fsReads.push(String(args[0]))
+    return actual.readFileSync(...args)
+  }
+  return { ...actual, readFileSync: readFileSync as typeof actual.readFileSync }
 })
 
 vi.mock('../extensions/hooks.js', async (importOriginal) => {
@@ -48,6 +59,7 @@ beforeEach(() => {
   hoisted.runs.length = 0
   hoisted.result = { code: 0, stdout: '', stderr: '', timedOut: false }
   hoisted.gate = undefined
+  hoisted.fsReads.length = 0
   // Hermetic managed settings: the disableAllHooks read must never resolve to this
   // machine's real policy file.
   setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
@@ -338,5 +350,53 @@ describe('statusLine model payload', () => {
     await vi.advanceTimersByTimeAsync(400)
 
     expect((hoisted.runs[0].payload as { model: { display_name: string } }).model.display_name).toBe('bare-id')
+  })
+})
+
+describe('statusLine settings caching', () => {
+  const styleOf = (run: { payload: unknown } | undefined) => (run?.payload as { output_style?: { name: string } } | undefined)?.output_style?.name
+  const settingsReads = () => hoisted.fsReads.filter((p) => p.includes('settings')).length
+
+  it('does not re-read the settings chain on interval refreshes', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', refreshInterval: 1 }, outputStyle: 'Explanatory' })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs).toHaveLength(1)
+    expect(styleOf(hoisted.runs[0])).toBe('Explanatory')
+
+    // Three interval ticks, each debounced into a command run: the style name and
+    // the resolved settings-file list come from the session cache, not the disk.
+    const afterFirstRun = settingsReads()
+    await vi.advanceTimersByTimeAsync(3400)
+    expect(hoisted.runs.length).toBeGreaterThan(1)
+    expect(settingsReads()).toBe(afterFirstRun)
+    await handlers.get('session_shutdown')?.({}, ctx)
+  })
+
+  it('re-reads the active style at the next turn, not on refreshes between turns', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' }, outputStyle: 'Explanatory' })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, busHandlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(styleOf(hoisted.runs.at(-1))).toBe('Explanatory')
+
+    // /output-style persists straight to settings with no bus event, and the new
+    // style applies from the next turn; a refresh between turns keeps the old name.
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' }, outputStyle: 'Terse' })
+    busHandlers.get('pi-code:plan-mode')?.({ active: true })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(styleOf(hoisted.runs.at(-1))).toBe('Explanatory')
+
+    await handlers.get('turn_start')?.({}, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(styleOf(hoisted.runs.at(-1))).toBe('Terse')
   })
 })

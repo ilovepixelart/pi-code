@@ -260,15 +260,23 @@ function foldName(name: string): string {
   return name.toLowerCase().replaceAll('-', '_')
 }
 
-function exactListApplies(matcher: string, names: readonly string[]): boolean {
-  const tokens = new Set(
+/** A matcher string's compiled form: a set of folded exact names, or a regex. */
+type CompiledMatcher = { tokens: Set<string> } | { regex: RegExp }
+
+function exactTokens(matcher: string): Set<string> {
+  return new Set(
     matcher
       .split(/[|,]/)
       .map((token) => foldName(token.trim()))
       .filter(Boolean),
   )
-  return names.some((name) => tokens.has(foldName(name)))
 }
+
+/** Hook config is static per session and dispatch consults every matcher on every
+ * event, so each matcher string compiles once. Matchers are few; the bound is a
+ * safety net, clearing the (cheap to rebuild) cache rather than evicting. */
+const compiledMatchers = new Map<string, CompiledMatcher>()
+const COMPILED_MATCHER_BOUND = 1000
 
 /** A matcher entry pi-code can run: an object whose `hooks` is a list. Anything else
  * is reported by name and skipped, so one bad entry costs its own hooks, not the
@@ -290,15 +298,48 @@ function isUsableMatcher(entry: unknown, file: string, event: string): entry is 
   return true
 }
 
+let matcherCompiles = 0
+
+/** Test seam: matcher compilations performed, for asserting memoization. */
+export function matcherCompileCount(): number {
+  return matcherCompiles
+}
+
+/** Test seam: drop compiled matchers so a test observes fresh compiles. */
+export function resetMatcherCache(): void {
+  compiledMatchers.clear()
+  matcherCompiles = 0
+}
+
+function compileMatcher(matcher: string): CompiledMatcher {
+  const cached = compiledMatchers.get(matcher)
+  if (cached !== undefined) return cached
+  matcherCompiles += 1
+  let compiled: CompiledMatcher
+  if (EXACT_MATCHER.test(matcher)) {
+    compiled = { tokens: exactTokens(matcher) }
+  } else {
+    try {
+      compiled = { regex: new RegExp(matcher, 'i') }
+    } catch {
+      // An invalid regex matcher falls back to exact-name matching, as before.
+      compiled = { tokens: exactTokens(matcher) }
+    }
+  }
+  if (compiledMatchers.size >= COMPILED_MATCHER_BOUND) compiledMatchers.clear()
+  compiledMatchers.set(matcher, compiled)
+  return compiled
+}
+
 function matcherApplies(matcher: string | undefined, names: readonly string[]): boolean {
   if (!matcher || matcher === '*') return true
-  if (EXACT_MATCHER.test(matcher)) return exactListApplies(matcher, names)
-  try {
-    const regex = new RegExp(matcher, 'i')
+  const compiled = compileMatcher(matcher)
+  if ('regex' in compiled) {
+    const { regex } = compiled
     return names.some((name) => regex.test(name))
-  } catch {
-    return exactListApplies(matcher, names)
   }
+  const { tokens } = compiled
+  return names.some((name) => tokens.has(foldName(name)))
 }
 
 /** A hook entry pi-code can run: a shell command, an http POST, an in-process

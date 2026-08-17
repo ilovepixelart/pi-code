@@ -1,10 +1,22 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { installedPlugins, substitutePluginVars } from '../extensions/internal/plugins.ts'
+// Counts file reads so the cache tests can assert a repeat call re-reads nothing.
+// The builtin namespace is not spyable, so the module is wrapped instead, like os.
+const fsHoisted = vi.hoisted(() => ({ reads: 0 }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
+    fsHoisted.reads++
+    return actual.readFileSync(...args)
+  }) as typeof actual.readFileSync
+  return { ...actual, readFileSync }
+})
+
+import { installedPlugins, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
 
 describe('substitutePluginVars user_config', () => {
   const plugin = { name: 'p', root: '/r', dataDir: '/d', manifest: {}, userConfig: { token: 'secret-x', region: 'eu' } }
@@ -87,5 +99,73 @@ describe('installedPlugins', () => {
     // sources) is user settings alone, and no surface passes a project file.
     expect(installedPlugins(h, [join(later, 'settings.json')])).toEqual([])
     expect(installedPlugins(h)).toHaveLength(1)
+  })
+})
+
+describe('installedPlugins cache', () => {
+  it('serves a repeat call without re-reading settings or manifests', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+    const first = installedPlugins(h)
+    expect(first).toHaveLength(1)
+
+    const mark = fsHoisted.reads
+    expect(installedPlugins(h)).toEqual(first)
+    // The walk is memoized; a repeat call revalidates with stats, not file reads.
+    expect(fsHoisted.reads).toBe(mark)
+  })
+
+  it('re-reads after resetInstalledPluginsCache', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+    installedPlugins(h)
+
+    resetInstalledPluginsCache()
+    const mark = fsHoisted.reads
+    expect(installedPlugins(h)).toHaveLength(1)
+    expect(fsHoisted.reads).toBeGreaterThan(mark)
+  })
+
+  it('sees a settings edit on the next call', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+    expect(installedPlugins(h)).toHaveLength(1)
+
+    enable(h, { formatter: false })
+    expect(installedPlugins(h)).toEqual([])
+  })
+
+  it('sees a plugin installed under an existing marketplace on the next call', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true, linter: true })
+    expect(installedPlugins(h)).toHaveLength(1)
+
+    install(h, 'community', 'linter', '1.0.0')
+    expect(
+      installedPlugins(h)
+        .map((p) => p.name)
+        .sort(),
+    ).toEqual(['formatter', 'linter'])
+  })
+
+  it('sees an in-place edit of the resolved manifest on the next call', () => {
+    const h = home()
+    const dir = install(h, 'community', 'formatter', '1.0.0', { displayName: 'Original' })
+    enable(h, { formatter: true })
+    expect(installedPlugins(h)[0].manifest.displayName).toBe('Original')
+
+    // Rewrite plugin.json in place: no cache-tree directory entry changes, so only a
+    // fingerprint that stats the manifest itself can notice. Pin a distinct mtime so
+    // the stat token differs even for a same-instant rewrite.
+    const manifest = join(dir, '.claude-plugin', 'plugin.json')
+    writeFileSync(manifest, JSON.stringify({ name: 'formatter', displayName: 'Edited' }))
+    const future = new Date(Date.now() + 5000)
+    utimesSync(manifest, future, future)
+
+    expect(installedPlugins(h)[0].manifest.displayName).toBe('Edited')
   })
 })
