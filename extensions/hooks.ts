@@ -3,7 +3,14 @@
  *
  * Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events, so
  * a project's existing hooks work under pi:
- * - PreToolUse      -> pi `tool_call` (can block the tool or rewrite its input)
+ * - PreToolUse      -> pi `tool_call` (can block the tool or rewrite its input), plus
+ *                      pi `user_bash` for a `!`/`!!` command the user runs directly (the
+ *                      model never issues these, so a deny-list guard would otherwise miss
+ *                      them). No pi tool call exists there, so the payload reports the
+ *                      Claude name "Bash"; a deny hands pi a synthetic failed result so
+ *                      the command never runs. UserBashEvent carries no execution result
+ *                      and fires only before the command runs, so it has no PostToolUse
+ *                      counterpart (pi never delivers the output to observe).
  * - PostToolUse     -> pi `tool_result` (block reasons and additionalContext are
  *                      appended next to the tool result, as Claude documents)
  * - SessionStart    -> pi `session_start` (stdout/additionalContext is injected as
@@ -1019,6 +1026,31 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const feedback = results.flatMap((result) => postToolFeedback(result, eventName, event.isError))
     if (feedback.length === 0) return
     return { content: [...event.content, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
+  })
+
+  // Claude's PreToolUse for Bash, extended to a command the user runs directly with the
+  // `!`/`!!` prefix. pi fires user_bash before executing it, and the model never sees it,
+  // so without this a guard that blocks `git push -f` from the model would not stop the
+  // same command typed by hand. There is no pi tool call, so the matcher sees both pi's
+  // "bash" and the Claude name "Bash" (exactly as an MCP alias is bridged) and the payload
+  // reports "Bash", the tool_name a Claude-written PreToolUse Bash hook expects. The
+  // payload carries no tool_use_id (no model tool call produced it). UserBashEventResult
+  // exposes no block flag: a deny is enforced through `result` ("extension handled
+  // execution, use this result"), a synthetic failed BashResult that stands in for the
+  // command so it never runs and its deny reason shows as the output. The event delivers
+  // no execution result and fires only before the command runs, so there is deliberately
+  // no PostToolUse for it.
+  pi.on('user_bash', async (event, ctx) => {
+    const decision = await runPreToolUse(config, 'bash', { command: event.command }, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'))
+    if (!decision.block) return undefined
+    // Claude's "ask": prompt before running and let the command through on approval; with
+    // no UI (headless) the block stands, the same safe default as the tool_call path.
+    if (decision.ask && ctx.hasUI) {
+      const approved = await ctx.ui.confirm('Allow this command?', decision.reason ?? 'A hook asks you to confirm this command.')
+      if (approved) return undefined
+    }
+    const reason = decision.reason ?? 'Command blocked by hook'
+    return { result: { output: `Blocked by hook: ${reason}`, exitCode: 1, cancelled: false, truncated: false } }
   })
 
   pi.on('input', async (event, ctx) => {

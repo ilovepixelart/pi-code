@@ -2,9 +2,17 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import skillsExt, { skillDirs } from '../extensions/skills.ts'
+// Point os.homedir() at a hermetic temp home so the extension-wiring test never reads the
+// developer's real ~/.claude skills. The other suites pass home explicitly and are unaffected.
+const hoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => hoisted.home }
+})
+
+const { default: skillsExt, skillDirs } = await import('../extensions/skills.ts')
 
 const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
 
@@ -72,19 +80,34 @@ describe('skillDirs', () => {
 })
 
 describe('extension wiring', () => {
+  // A mocked homedir plus a fresh agent dir make the discovery hermetic: the trust store
+  // and the home skills both live in temp dirs, never the developer's real config.
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    hoisted.home = tempDir('cs-home-')
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = tempDir('cs-agent-')
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
   it('returns skillPaths from resources_discover when skills exist', async () => {
     const cwd = tempDir('cs-proj-')
     mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true })
+    const homeSkills = join(hoisted.home, '.claude', 'skills')
+    mkdirSync(homeSkills, { recursive: true })
 
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     skillsExt({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
-    // A .claude/skills directory is itself claude-shaped config, so a project pi
-    // trusts silently still has no stored decision and contributes nothing.
-    const ctx = { cwd, isProjectTrusted: () => true }
-    const result = (await handlers.get('resources_discover')?.({ reason: 'startup' }, ctx)) as { skillPaths: string[] } | undefined
-    expect(result?.skillPaths ?? []).not.toContain(join(cwd, '.claude', 'skills'))
+    // A .claude/skills directory is itself claude-shaped config, so a project pi trusts
+    // silently but has no stored decision for contributes nothing: only the hermetic home
+    // skills survive, and never the project's, trusted or not.
+    const trusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => true })) as { skillPaths: string[] } | undefined
+    expect(trusted).toEqual({ skillPaths: [homeSkills] })
 
     const untrusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => false })) as { skillPaths: string[] } | undefined
-    expect(untrusted?.skillPaths ?? []).not.toContain(join(cwd, '.claude', 'skills'))
+    expect(untrusted).toEqual({ skillPaths: [homeSkills] })
   })
 })

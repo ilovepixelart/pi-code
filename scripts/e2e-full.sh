@@ -48,7 +48,8 @@ git -C "$FX" -c user.name=e2e -c user.email=e2e@local commit -q --allow-empty -m
 mkdir -p "$FX/.claude/rules" "$FX/.claude/commands" "$FX/.claude/skills/greet" "$FX/.claude/output-styles" "$FX/.claude/agents" "$FX/notes"
 printf -- '- Tests must be deterministic.\n' > "$FX/.claude/rules/testing.md"
 printf 'Reply with exactly the word HELLO_MARKER and nothing else.\n' > "$FX/.claude/commands/hello.md"
-printf -- '---\nname: greet\ndescription: Greets people for the e2e test\n---\nSay a friendly greeting.\n' > "$FX/.claude/skills/greet/SKILL.md"
+printf 'Reply with exactly the word SLASHTOOL_MARKER and nothing else.\n' > "$FX/.claude/commands/slashtool.md"
+printf -- '---\nname: greet\ndescription: Greets people for the e2e test\n---\nWhen this skill runs, reply with exactly the word GREET_SKILL_MARKER and nothing else.\n' > "$FX/.claude/skills/greet/SKILL.md"
 # A tone-only style that still codes keeps the coding instructions, per Claude's docs;
 # without the flag the new replace semantics would strip tool guidance mid-suite.
 printf -- '---\nname: Pirate\ndescription: e2e style\nkeep-coding-instructions: true\n---\nYou may speak like a pirate.\n' > "$FX/.claude/output-styles/pirate.md"
@@ -71,13 +72,29 @@ ln -s "$REPO/node_modules" "$FX/node_modules"
 cat > "$FX/mcp-server.mjs" <<'EOF'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { CallToolRequestSchema, GetPromptRequestSchema, ListPromptsRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 
-const server = new Server({ name: 'e2e', version: '1.0.0' }, { capabilities: { tools: {} } })
+const server = new Server({ name: 'e2e', version: '1.0.0' }, { capabilities: { tools: {}, prompts: {}, resources: {} } })
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [{ name: 'ping', description: 'Health check; always replies with the marker E2EPONG', inputSchema: { type: 'object', properties: {} } }],
 }))
 server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text', text: 'E2EPONG' }] }))
+// prompts capability: the extension registers this prompt as the /mcp__e2e__greet slash
+// command; its returned message is sent as a user message, driving a marker turn.
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  prompts: [{ name: 'greet', description: 'e2e greeting prompt that drives a marker turn' }],
+}))
+server.setRequestHandler(GetPromptRequestSchema, async () => ({
+  messages: [{ role: 'user', content: { type: 'text', text: 'Reply with exactly the word GREET_PROMPT_MARKER and nothing else.' } }],
+}))
+// resources capability: one text resource, reachable through the global
+// list_mcp_resources / read_mcp_resource tools the extension registers.
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [{ uri: 'e2e://greeting', name: 'greeting', mimeType: 'text/plain', description: 'e2e text resource' }],
+}))
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => ({
+  contents: [{ uri: request.params.uri, mimeType: 'text/plain', text: 'MCP_RESOURCE_MARKER' }],
+}))
 await server.connect(new StdioServerTransport())
 EOF
 printf '{"mcpServers": {"e2e": {"command": "node", "args": ["mcp-server.mjs"]}}}\n' > "$FX/.mcp.json"
@@ -188,6 +205,12 @@ if capture | grep -q '⏸ plan'; then bad "plan-mode: badge stuck"; else ok "pla
 send "/rewind" Enter
 if wait_for 'No checkpoints recorded yet' 15; then ok "checkpoint: empty-session notice"; else bad "checkpoint: no empty notice"; fi
 
+# The /hooks viewer resolves the settings chain; the fixture's PreToolUse guard (its
+# command carries FORBIDDEN_MARKER) must show under the PreToolUse heading. This runs
+# before the FORBIDDEN_MARKER model turn below, so the match cannot be a stale echo.
+send "/hooks" Enter
+if wait_for 'PreToolUse:' 15 && capture | grep -q 'FORBIDDEN_MARKER'; then ok "hooks: /hooks viewer shows the PreToolUse guard"; else bad "hooks: /hooks viewer missing the guard"; fi
+
 # --- Model turns ----------------------------------------------------------------------
 type_prompt "/hello"
 if wait_for 'HELLO_MARKER' 200; then ok "commands: /hello template drove the turn"; else bad "commands: no HELLO_MARKER"; fi
@@ -265,6 +288,41 @@ else
 fi
 if wait_for 'SUBAGENT_OK' 280; then ok "subagent: child pi ran and reported back"; else bad "subagent: no SUBAGENT_OK"; fi
 
+# --- MCP prompts/resources, slash_command, skills, background tasks --------------------
+# The fixture MCP server also advertises the prompts and resources capabilities. The
+# extension exposes the greet prompt as /mcp__e2e__greet, whose returned message is sent
+# as a user message and drives the marker turn (the marker rides in on that message, so
+# it appears only when the prompt was actually fetched).
+type_prompt "/mcp__e2e__greet"
+if wait_for 'GREET_PROMPT_MARKER' 200; then ok "mcp-prompts: prompt command drove a turn"; else bad "mcp-prompts: no GREET_PROMPT_MARKER"; fi
+
+# The resources capability registers the global list_mcp_resources / read_mcp_resource
+# tools; the marker only surfaces if the model lists then reads the fixture resource.
+type_prompt "List MCP resources with the list_mcp_resources tool, then read the first one with the read_mcp_resource tool and quote its text verbatim."
+if wait_for 'MCP_RESOURCE_MARKER' 240; then ok "mcp-resources: model listed and read the resource"; else bad "mcp-resources: no MCP_RESOURCE_MARKER"; fi
+
+# The slash_command tool expands a discovered custom command into its own tool result;
+# /slashtool carries a marker distinct from /hello so an earlier turn cannot false-green.
+type_prompt "Use the slash_command tool to run /slashtool. Do nothing else."
+if wait_for 'SLASHTOOL_MARKER' 200; then ok "slash-command: slash_command tool expanded /slashtool"; else bad "slash-command: no SLASHTOOL_MARKER"; fi
+
+# The greet skill's body instructs the marker, so it appears only when the model actually
+# invokes the skill pi surfaced from .claude/skills.
+type_prompt "Use the greet skill now."
+if wait_for 'GREET_SKILL_MARKER' 200; then ok "skills: model invoked the greet skill"; else bad "skills: no GREET_SKILL_MARKER"; fi
+
+# A background subagent returns a run id immediately; /tasks then lists it without
+# interrupting. general-purpose is builtin, so no project-agent consent prompt fires.
+type_prompt "Use the subagent tool with background true, agent general-purpose, and task: print the exact word BGTASK_MARKER. Do nothing else."
+if wait_for 'Started background run' 200; then
+  ok "subagent: background run started"
+  sleep 2
+  send "/tasks" Enter
+  if wait_for 'general-purpose: (running|done)' 30; then ok "tasks: /tasks lists the background run"; else bad "tasks: no background run entry"; fi
+else
+  bad "subagent: background run did not start"
+fi
+
 send "/plan" Enter
 sleep 2
 type_prompt "Create a two step plan for adding an FAQ section to the README, then call the plan_mode_complete tool with the numbered plan."
@@ -280,9 +338,23 @@ send "/plan" Enter
 sleep 2
 
 # --- Second session: persistence checks -----------------------------------------------
+# A custom statusLine command replaces the built-in ready/turn segments the first session
+# asserts, so it is added only now, for the re-boot below. Editing the project settings
+# does not disturb the stored trust decision (keyed on the path, not the file contents).
+python3 - "$FX/.claude/settings.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+settings = json.load(open(path))
+settings["statusLine"] = {"type": "command", "command": "echo STATUS_E2E"}
+json.dump(settings, open(path, "w"))
+PY
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE pi"
 if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
+# The statusLine command runs on the first status refresh after boot; its output replaces
+# the built-in segment, so STATUS_E2E in the pane proves the configured command drove it.
+if wait_for 'STATUS_E2E' 30; then ok "statusline: custom statusLine command output rendered"; else bad "statusline: no STATUS_E2E segment"; fi
 # Known pi TUI interaction: this banner renders standalone but not always in the full
 # extension load; the memory feature itself is asserted above via the on-disk file.
 if wait_for 'Memory: 1 memories loaded' 20; then ok "memory: index banner on next session"; else warn "memory: index banner not rendered (known pi TUI interaction)"; fi

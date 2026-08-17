@@ -2,9 +2,24 @@ import { mkdtempSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FileOAuthProvider, startCallbackServer, waitForAuthCode } from '../extensions/internal/mcp-oauth.ts'
+// Record spawn so openBrowser's per-platform launch can be asserted without opening a browser.
+// importOriginal keeps the rest of child_process intact for any other consumer in the graph.
+const spawnMock = vi.hoisted(() => ({ calls: [] as Array<{ command: string; args: string[] }>, throwOnCall: false }))
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    spawn: (command: string, args: string[]) => {
+      spawnMock.calls.push({ command, args })
+      if (spawnMock.throwOnCall) throw new Error('spawn failed')
+      return { unref: () => {} }
+    },
+  }
+})
+
+const { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } = await import('../extensions/internal/mcp-oauth.ts')
 
 let savedAgentDir: string | undefined
 beforeEach(() => {
@@ -72,6 +87,13 @@ describe('FileOAuthProvider', () => {
     expect(a.state()).toBe(a.state()) // stable within a single login
     expect(a.state()).not.toBe(b.state()) // a fresh token per attempt
   })
+
+  it('fails closed when the code verifier is read before one is saved', () => {
+    // The SDK asks for the PKCE verifier during the token exchange; a fresh provider has
+    // none, so it must throw rather than hand back an empty proof.
+    const provider = new FileOAuthProvider('no-verifier', () => {})
+    expect(() => provider.codeVerifier()).toThrow(/no code verifier saved/)
+  })
 })
 
 describe('callback server', () => {
@@ -131,5 +153,41 @@ describe('callback server', () => {
     await fetch(`http://127.0.0.1:${port}/callback?code=genuine&state=expected-state`)
     expect(await pending).toBe('genuine')
     server.close()
+  })
+})
+
+describe('openBrowser', () => {
+  const realPlatform = process.platform
+  const setPlatform = (value: NodeJS.Platform): void => {
+    Object.defineProperty(process, 'platform', { value, configurable: true })
+  }
+  afterEach(() => {
+    setPlatform(realPlatform)
+    spawnMock.calls.length = 0
+    spawnMock.throwOnCall = false
+  })
+
+  it('selects the launch command and args per platform', () => {
+    const url = 'https://auth.example/authorize?x=1'
+    const cases: Array<[NodeJS.Platform, string, string[]]> = [
+      ['darwin', 'open', [url]],
+      ['win32', 'cmd', ['/c', 'start', '', url]],
+      ['linux', 'xdg-open', [url]],
+    ]
+    for (const [platform, command, args] of cases) {
+      spawnMock.calls.length = 0
+      setPlatform(platform)
+      openBrowser(url)
+      expect(spawnMock.calls).toEqual([{ command, args }])
+    }
+  })
+
+  it('swallows a spawn failure so the notified url stays the only fallback', () => {
+    // A machine with no launcher throws on spawn; openBrowser must not surface it, since
+    // the caller already printed the URL for the user to open by hand.
+    setPlatform('linux')
+    spawnMock.throwOnCall = true
+    expect(() => openBrowser('https://auth.example/authorize')).not.toThrow()
+    expect(spawnMock.calls).toHaveLength(1)
   })
 })

@@ -62,6 +62,8 @@ const hoisted = vi.hoisted(() => {
     clients: [] as ClientRecord[],
     callOptions: [] as Array<unknown>,
     closed: [] as ClientRecord[],
+    // Codes handed to a transport's finishAuth, so the interactive OAuth exchange is observable.
+    finishAuthCalls: [] as string[],
     notify: new Map<string, () => void | Promise<void>>(),
     control: {} as {
       connect: (transport: TransportRecord, client: ClientRecord) => Promise<void>
@@ -149,6 +151,11 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
       public options: Record<string, unknown>,
     ) {
       hoisted.transports.push(this)
+    }
+    // The SDK exchanges the authorization code here; recording it lets a test drive the
+    // interactive login and assert the code reached the transport.
+    async finishAuth(code: string): Promise<void> {
+      hoisted.finishAuthCalls.push(code)
     }
   },
 }))
@@ -301,6 +308,15 @@ const withTools = (tools: ToolDef[]): void => {
   hoisted.control.listTools = async () => ({ tools })
 }
 
+/** Poll a condition to a deadline; for interleaving a step into an in-flight connect flow. */
+const waitFor = async (predicate: () => boolean, timeoutMs = 3000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not met within timeout')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 const defaultControl = (): typeof hoisted.control => ({
   connect: async () => {},
   listTools: async () => ({ tools: [] }),
@@ -337,6 +353,7 @@ beforeEach(() => {
   hoisted.clients.length = 0
   hoisted.callOptions.length = 0
   hoisted.closed.length = 0
+  hoisted.finishAuthCalls.length = 0
   hoisted.control = defaultControl()
   hoisted.notify.clear()
 })
@@ -786,6 +803,43 @@ describe('interactive OAuth serialization', () => {
     // The queued login proceeded once the first settled, and both servers connected.
     expect(confirmCount).toBe(2)
     expect(harness.toolNames().sort()).toEqual(['alpha_go', 'beta_go'])
+  })
+
+  it('exchanges the code through finishAuth and reconnects when the server 401s until authorized', async () => {
+    // The most real path: FileOAuthProvider, startCallbackServer and waitForAuthCode all run
+    // for real, so the loopback listener, the CSRF state echo and the code exchange are
+    // exercised end to end. Only the transport connect and the http client are stubbed, since
+    // the harness cannot reach a real OAuth server. Tradeoff: driving the real loopback means
+    // interleaving a fetch mid-flow (poll for the provider transport, then deliver the code),
+    // rather than stubbing waitForAuthCode, which would leave the callback plumbing untested.
+    withTools([{ name: 'go' }])
+    hoisted.control.connect = async (transport) => {
+      const authProvider = (transport.options as { authProvider?: unknown }).authProvider
+      // No provider is the silent first attempt; a provider before the exchange is the
+      // still-unauthorized retry. Both 401. Only a provider carrying the exchanged code connects.
+      if (!authProvider || hoisted.finishAuthCalls.length === 0) throw Object.assign(new Error('needs login'), { code: 401 })
+    }
+
+    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp' } }, confirm: async () => true })
+    const started = harness.sessionStart()
+
+    // The interactive login builds a transport carrying the real provider; its redirect url
+    // reveals the loopback port the callback server actually bound.
+    const providerTransport = (): TransportRecord | undefined => hoisted.transports.find((t) => t.options.authProvider !== undefined)
+    await waitFor(() => providerTransport() !== undefined)
+    const provider = providerTransport()?.options.authProvider as { redirectUrl: string; state: () => string }
+
+    // Deliver the code to the real listener, echoing the provider's state so the CSRF check
+    // in waitForAuthCode passes; a wrong state would 400 and the login would hang.
+    const port = new URL(provider.redirectUrl).port
+    const redirect = await fetch(`http://127.0.0.1:${port}/callback?code=exchange-me&state=${provider.state()}`)
+    expect(redirect.status).toBe(200)
+
+    await started
+
+    expect(hoisted.finishAuthCalls).toEqual(['exchange-me'])
+    expect(harness.toolNames()).toEqual(['remote_go'])
+    expect(await statusLinesOf(harness)).toEqual(['remote: connected (1 tools)'])
   })
 })
 

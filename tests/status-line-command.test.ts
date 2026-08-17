@@ -339,6 +339,131 @@ describe('statusLine disableAllHooks', () => {
   })
 })
 
+describe('statusLine rate limits', () => {
+  it('surfaces the five-hour and seven-day windows from provider response headers', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 200,
+        headers: {
+          'anthropic-ratelimit-unified-5h-utilization': '35.5',
+          'anthropic-ratelimit-unified-5h-reset': '2026-08-16T12:00:00Z',
+          'anthropic-ratelimit-unified-7d-utilization': '12',
+          'anthropic-ratelimit-unified-7d-reset': '2026-08-22T00:00:00Z',
+        },
+      },
+      ctx,
+    )
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toEqual({
+      five_hour: { used_percentage: 35.5, resets_at: '2026-08-16T12:00:00Z' },
+      seven_day: { used_percentage: 12, resets_at: '2026-08-22T00:00:00Z' },
+    })
+  })
+
+  it('computes utilization from limit and remaining when no utilization header is sent', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    // Header casing varies by provider, and a null value must be tolerated, not crash.
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 200,
+        headers: {
+          'Anthropic-RateLimit-Unified-5h-Limit': '1000',
+          'Anthropic-RateLimit-Unified-5h-Remaining': '250',
+          'anthropic-ratelimit-unified-7d-utilization': null,
+        },
+      },
+      ctx,
+    )
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 75 } })
+  })
+
+  it('omits rate_limits when the response carries no rate-limit headers', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: {} }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toBeUndefined()
+  })
+
+  it('warns once per session on a 429 with the retry-after delay', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    const notify = vi.fn()
+    ctx.ui.notify = notify
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 429, headers: { 'retry-after': '30' } }, ctx)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 429, headers: {} }, ctx)
+
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][1]).toBe('warning')
+    expect(String(notify.mock.calls[0][0])).toContain('30')
+  })
+})
+
+describe('statusLine instant refresh', () => {
+  it('refreshes immediately when the model changes', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const initial = hoisted.runs.length
+    await handlers.get('model_select')?.({ type: 'model_select', model: { id: 'other' }, previousModel: undefined, source: 'set' }, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs.length).toBe(initial + 1)
+  })
+
+  it('refreshes immediately when the thinking level changes', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const initial = hoisted.runs.length
+    await handlers.get('thinking_level_select')?.({ type: 'thinking_level_select', level: 'low', previousLevel: 'high' }, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs.length).toBe(initial + 1)
+  })
+})
+
 describe('statusLine model payload', () => {
   it('falls back to the model id when pi reports no display name', async () => {
     const cwd = tempDir()
