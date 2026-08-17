@@ -64,6 +64,66 @@ function formatCost(cost: number): string {
   return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`
 }
 
+interface RateLimitWindow {
+  used_percentage: number
+  resets_at?: string
+}
+interface RateLimitSnapshot {
+  five_hour?: RateLimitWindow
+  seven_day?: RateLimitWindow
+}
+
+/** Lowercase every header name (HTTP names are case-insensitive) and drop null
+ * values, so a single lookup shape works regardless of how the provider cased
+ * them. ProviderHeaders values are string | null. */
+function normalizeHeaders(raw: Record<string, string | null> | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (typeof value === 'string') out[key.toLowerCase()] = value
+  }
+  return out
+}
+
+function toNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/** One rate-limit window from the `anthropic-ratelimit-<prefix>-*` header family,
+ * taking a direct `-utilization` percentage when present, else computing it from
+ * `-limit` and `-remaining`. resets_at comes from `-reset` when the header is set.
+ * Header names vary, so only what is present is read and a bare number is enough. */
+function readRateLimitWindow(headers: Record<string, string>, prefix: string): RateLimitWindow | undefined {
+  const base = `anthropic-ratelimit-${prefix}`
+  let usedPercentage = toNumber(headers[`${base}-utilization`])
+  if (usedPercentage === undefined) {
+    const limit = toNumber(headers[`${base}-limit`])
+    const remaining = toNumber(headers[`${base}-remaining`])
+    if (limit !== undefined && limit > 0 && remaining !== undefined) {
+      usedPercentage = ((limit - remaining) / limit) * 100
+    }
+  }
+  if (usedPercentage === undefined) return undefined
+  const window: RateLimitWindow = { used_percentage: usedPercentage }
+  const resetsAt = headers[`${base}-reset`] ?? headers[`${base}-resets-at`]
+  if (resetsAt) window.resets_at = resetsAt
+  return window
+}
+
+/** The five-hour and seven-day utilization windows Claude's statusline reports,
+ * from the unified rate-limit response headers. Undefined when neither is present
+ * so a response without them never clobbers an earlier snapshot. */
+function parseRateLimits(headers: Record<string, string>): RateLimitSnapshot | undefined {
+  const fiveHour = readRateLimitWindow(headers, 'unified-5h')
+  const sevenDay = readRateLimitWindow(headers, 'unified-7d')
+  if (!fiveHour && !sevenDay) return undefined
+  const snapshot: RateLimitSnapshot = {}
+  if (fiveHour) snapshot.five_hour = fiveHour
+  if (sevenDay) snapshot.seven_day = sevenDay
+  return snapshot
+}
+
 export interface StatusLineConfig {
   command: string
   padding: number
@@ -120,6 +180,10 @@ export default function statusLine(pi: ExtensionAPI) {
   let apiDurationMs = 0
   let requestStartMs: number | undefined
   let lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number } | undefined
+  // The most recent rate-limit snapshot parsed from provider response headers, and
+  // a once-per-session guard so a 429 warns the user only the first time it lands.
+  let rateLimits: RateLimitSnapshot | undefined
+  let rateLimitWarned = false
   let refreshTimer: ReturnType<typeof setInterval> | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
   let running = false
@@ -193,6 +257,9 @@ export default function statusLine(pi: ExtensionAPI) {
       payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
     }
     if (styleName) payload.output_style = { name: styleName }
+    // The current utilization of the account's rate-limit windows, when the
+    // provider reported them; omitted entirely until a response has carried them.
+    if (rateLimits) payload.rate_limits = rateLimits
     return payload
   }
 
@@ -260,9 +327,24 @@ export default function statusLine(pi: ExtensionAPI) {
   pi.on('before_provider_request', async () => {
     requestStartMs = Date.now()
   })
-  pi.on('after_provider_response', async () => {
+  pi.on('after_provider_response', async (event, ctx) => {
     if (requestStartMs !== undefined) apiDurationMs += Date.now() - requestStartMs
     requestStartMs = undefined
+    // Rate-limit windows and 429 handling ride on the same response event. Header
+    // names and presence vary, so parse only what is there and never throw.
+    const headers = normalizeHeaders(event.headers)
+    const snapshot = parseRateLimits(headers)
+    if (snapshot) rateLimits = snapshot
+    if (event.status === 429 && !rateLimitWarned) {
+      rateLimitWarned = true
+      const retryAfter = headers['retry-after']
+      const detail = retryAfter ? `; retry after ${retryAfter}s` : ''
+      try {
+        ctx.ui.notify(`Provider rate limit reached (429)${detail}`, 'warning')
+      } catch {
+        // The session may be gone by the time a late response lands; nothing to warn.
+      }
+    }
   })
   // The last message's token usage, for the breakdown getContextUsage() omits,
   // and the running cost total, so renders never re-walk the branch.
@@ -284,6 +366,8 @@ export default function statusLine(pi: ExtensionAPI) {
     apiDurationMs = 0
     requestStartMs = undefined
     lastUsage = undefined
+    rateLimits = undefined
+    rateLimitWarned = false
     clearInterval(refreshTimer)
     // Seed the running cost from the branch: a resumed or forked session starts
     // with history, and message_end only accumulates from here on.
@@ -324,6 +408,15 @@ export default function statusLine(pi: ExtensionAPI) {
 
   pi.on('agent_end', async (_event, ctx) => {
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('success', '✓')))
+    scheduleRefresh()
+  })
+
+  // The model and effort segments of the payload go stale between turns; a switch
+  // fires these events, so refresh at once instead of waiting for the next tick.
+  pi.on('model_select', async () => {
+    scheduleRefresh()
+  })
+  pi.on('thinking_level_select', async () => {
     scheduleRefresh()
   })
 

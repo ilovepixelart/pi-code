@@ -684,6 +684,25 @@ describe('system prompt rewriting: managed claudeMd, excludes, comment strip', (
     expect(await fire([], tempDir())).toBeUndefined()
   })
 
+  it('excludes a .txt context file via a brace-glob claudeMdExcludes', async () => {
+    // `{md,txt}` must expand for the .txt block to drop; a literal-brace fallback would
+    // match neither and leave both in the prompt. `.log` is outside the group and survives.
+    userSettings({ claudeMdExcludes: ['**/*.{md,txt}'] })
+    const dir = tempDir()
+    const files = [
+      { path: join(dir, 'CLAUDE.md'), content: 'MD BODY' },
+      { path: join(dir, 'notes.txt'), content: 'TXT BODY' },
+      { path: join(dir, 'keep.log'), content: 'LOG BODY' },
+    ]
+
+    const result = await fire(files, dir)
+    const prompt = result?.systemPrompt ?? ''
+
+    expect(prompt).not.toContain('MD BODY')
+    expect(prompt).not.toContain('TXT BODY')
+    expect(prompt).toContain('LOG BODY')
+  })
+
   it('skips the imports of an excluded context file', async () => {
     userSettings({ claudeMdExcludes: ['**/CLAUDE.md'] })
     const dir = tempDir()

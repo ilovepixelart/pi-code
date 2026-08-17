@@ -247,6 +247,33 @@ describe('extension wiring', () => {
     expect(notes.some((n) => n.includes('Unknown output style: no-such-style'))).toBe(true)
   })
 
+  it('completes /output-style names by prefix, returning every style for an empty prefix', async () => {
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'output-styles', 'a.md'), '---\nname: QqzAlpha\ndescription: First\n---\nbody')
+    writeFileSync(join(cwd, '.claude', 'output-styles', 'b.md'), '---\nname: QqzBeta\n---\nbody')
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { getArgumentCompletions?: (prefix: string) => Promise<{ value: string; label: string; description?: string }[] | null> | { value: string; label: string; description?: string }[] | null }>()
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { getArgumentCompletions?: (prefix: string) => unknown }) => commands.set(name, opts as never),
+    } as never)
+    const ctx = { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {}, confirm: async () => true, select: async () => undefined } }
+    await handlers.get('session_start')?.({}, ctx)
+    const complete = commands.get('output-style')?.getArgumentCompletions
+    if (!complete) throw new Error('output-style registered no getArgumentCompletions')
+
+    // Prefix match is case-insensitive; the Qqz prefix cannot collide with builtins.
+    expect((await complete('Qqz'))?.map((item) => item.value).sort()).toEqual(['QqzAlpha', 'QqzBeta'])
+    expect((await complete('qqza'))?.map((item) => item.value)).toEqual(['QqzAlpha'])
+    // The completion carries the style description when one exists.
+    expect((await complete('QqzAlpha'))?.[0]).toEqual({ value: 'QqzAlpha', label: 'QqzAlpha', description: 'First' })
+
+    // An empty prefix offers every discovered style, builtins included.
+    const expectedAll = loadStyles([BUILTIN_STYLES_DIR, join(cwd, '.claude', 'output-styles')]).map((style) => style.name)
+    expect((await complete(''))?.map((item) => item.value).sort()).toEqual([...expectedAll].sort())
+  })
+
   it('appends the active style body and the command persists a new choice', async () => {
     const cwd = projectWithStyle('Explain', 'Explain everything.')
 

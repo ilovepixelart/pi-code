@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import * as http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -578,10 +578,33 @@ describe('runHookCommand timeout (real shell)', () => {
   })
 
   it('kills the shell descendants rather than leaving them running past the timeout', async () => {
-    const flag = join(tempDir(), 'grandchild-survived')
-    await runHookCommand(`(sleep 1; touch ${flag}) & sleep 30`, {}, 200)
-    await delay(2000)
+    const dir = tempDir()
+    const flag = join(dir, 'grandchild-survived')
+    const pidFile = join(dir, 'group.pid')
+    // The detached shell records its own pid (the process-group leader) so the test can
+    // watch the whole group, then backgrounds a grandchild that would touch the flag after
+    // 500ms. A 200ms timeout must SIGKILL the group before the grandchild's delay elapses.
+    await runHookCommand(`echo $$ > ${pidFile}; (sleep 0.5; touch ${flag}) & sleep 30`, {}, 200)
+    const pgid = Number(readFileSync(pidFile, 'utf8').trim())
+    expect(pgid).toBeGreaterThan(0)
 
+    // Bounded poll rather than a fixed sleep: watch for the group to disappear (kill -0
+    // throws ESRCH once every member is gone) while asserting the grandchild's flag never
+    // lands. Fast when the kill is prompt, flake-free in both directions.
+    const groupGone = (): boolean => {
+      try {
+        process.kill(-pgid, 0)
+        return false
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ESRCH'
+      }
+    }
+    const deadline = Date.now() + 2000
+    while (!groupGone()) {
+      expect(existsSync(flag)).toBe(false)
+      if (Date.now() > deadline) throw new Error('shell process group still alive 2s past the timeout')
+      await delay(50)
+    }
     expect(existsSync(flag)).toBe(false)
   })
 
@@ -602,6 +625,10 @@ describe('http hooks', () => {
   }
 
   const httpRunner: HookRunner = (hook, payload, ms) => runHttpHook(hook, payload, ms)
+
+  // Env stubs restore even if an assertion throws mid-test, so a failure cannot leak
+  // HOOK_TOKEN/HOOK_SECRET into sibling tests.
+  afterEach(() => vi.unstubAllEnvs())
 
   it('loads an http entry and blocks on a 2xx body carrying a deny decision', async () => {
     const srv = await serve((_req, res) => {
@@ -636,14 +663,12 @@ describe('http hooks', () => {
         res.end()
       })
     })
-    process.env.HOOK_TOKEN = 'tok123'
-    process.env.HOOK_SECRET = 'leakme'
+    vi.stubEnv('HOOK_TOKEN', 'tok123')
+    vi.stubEnv('HOOK_SECRET', 'leakme')
     const hook = { type: 'http', command: srv.url, url: srv.url, headers: { Authorization: 'Bearer $HOOK_TOKEN', 'X-Other': '${HOOK_SECRET}' }, allowedEnvVars: ['HOOK_TOKEN'] }
 
     const result = await runHttpHook(hook, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, 5000)
     await srv.close()
-    delete process.env.HOOK_TOKEN
-    delete process.env.HOOK_SECRET
 
     expect(result).toMatchObject({ code: 0, timedOut: false })
     expect(seenAuth).toBe('Bearer tok123')

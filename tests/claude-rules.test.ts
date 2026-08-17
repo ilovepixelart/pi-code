@@ -154,6 +154,19 @@ describe('extension wiring', () => {
     expect(failed).toBeUndefined()
   })
 
+  it('expands a brace glob in a scoped rule when matching a touched file', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "src/{a,b}/**"\n---\nMind the shared modules.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+
+    // `{a,b}` must expand: src/c is outside it, and the second alternative (src/b) matches.
+    const miss = await handlers.get('tool_result')?.(readResult('src/c/mod.ts'), { cwd })
+    expect(miss).toBeUndefined()
+
+    const hit = await handlers.get('tool_result')?.(readResult('src/b/mod.ts'), { cwd })
+    expect(injectedTexts(hit).join('\n')).toContain('Mind the shared modules.')
+  })
+
   it('attaches on edit and write, not only read', async () => {
     const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
     const handlers = wire()

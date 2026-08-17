@@ -200,6 +200,13 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
 
   pi.registerCommand('output-style', {
     description: 'Choose the active Claude output style (or /output-style <name>)',
+    // /output-style <name> takes a style name, so complete the discovered names by the
+    // typed prefix (case-insensitive, like the handler's own name lookup). An empty
+    // prefix offers every style.
+    getArgumentCompletions: (argumentPrefix) => {
+      const prefix = argumentPrefix.trim().toLowerCase()
+      return styles.filter((style) => style.name.toLowerCase().startsWith(prefix)).map((style) => ({ value: style.name, label: style.name, ...(style.description ? { description: style.description } : {}) }))
+    },
     handler: async (args, ctx) => {
       const requested = args.trim()
       if (requested) {

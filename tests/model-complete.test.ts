@@ -1,6 +1,32 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { assistantText, completeText, setCompleteBackend } from '../extensions/internal/model-complete.ts'
+// The real completion backend is ModelRuntime.create().completeSimple(...). Stub the runtime
+// with a recorder so a break in that production wiring is caught, rather than every test
+// overriding the backend and leaving realBackend() itself unexercised.
+const runtimeMock = vi.hoisted(() => ({
+  createCalls: 0,
+  completeCalls: [] as Array<{ model: unknown; context: { systemPrompt?: string; messages: Array<{ content: unknown }> }; options: { maxTokens?: number; signal?: AbortSignal } }>,
+  reply: { role: 'assistant', content: [{ type: 'text', text: 'real answer' }], api: 'x', provider: 'x', model: 'm', usage: { input: 3, output: 5, totalTokens: 8 }, stopReason: 'stop', timestamp: 0 },
+}))
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>()
+  return {
+    ...actual,
+    ModelRuntime: {
+      create: async () => {
+        runtimeMock.createCalls += 1
+        return {
+          completeSimple: async (model: unknown, context: unknown, options: unknown) => {
+            runtimeMock.completeCalls.push({ model, context, options } as never)
+            return runtimeMock.reply
+          },
+        }
+      },
+    },
+  }
+})
+
+const { assistantText, completeText, setCompleteBackend } = await import('../extensions/internal/model-complete.ts')
 
 const msg = (parts: Array<{ type: string; text?: string }>, usage: unknown = {}) => ({ role: 'assistant', content: parts, api: 'x', provider: 'x', model: 'm', usage, stopReason: 'stop', timestamp: 0 }) as never
 
@@ -40,5 +66,36 @@ describe('completeText', () => {
       throw new Error('no credentials')
     })
     await expect(completeText({} as never, 'q')).rejects.toThrow(/no credentials/)
+  })
+})
+
+describe('completeText realBackend wiring', () => {
+  it('creates the ModelRuntime once, caches it, and forwards model, message and options', async () => {
+    runtimeMock.createCalls = 0
+    runtimeMock.completeCalls.length = 0
+    // Reset to the real backend so realBackend() actually runs ModelRuntime.create(); restore
+    // in finally so the cached mock runtime never leaks into a later test.
+    setCompleteBackend(null)
+    try {
+      const model = { id: 'test-model' } as never
+      const signal = new AbortController().signal
+      const first = await completeText(model, 'the question', { maxTokens: 321, signal })
+      const second = await completeText(model, 'again', { maxTokens: 50 })
+
+      // Created once and cached: both completions share the one runtime.
+      expect(runtimeMock.createCalls).toBe(1)
+      expect(runtimeMock.completeCalls).toHaveLength(2)
+      // {text, usage} flows back out of completeSimple.
+      expect(first).toEqual({ text: 'real answer', usage: runtimeMock.reply.usage })
+      expect(second.text).toBe('real answer')
+      // completeSimple received the model, the user message, and the resolved options.
+      const call = runtimeMock.completeCalls[0]
+      expect(call.model).toBe(model)
+      expect(call.context.messages[0]?.content).toBe('the question')
+      expect(call.options.maxTokens).toBe(321)
+      expect(call.options.signal).toBe(signal)
+    } finally {
+      setCompleteBackend(null)
+    }
   })
 })

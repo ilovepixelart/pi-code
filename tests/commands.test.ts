@@ -821,6 +821,21 @@ describe('allowed-tools argument scopes', () => {
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'src/secret.ts' } }, s.ctx)).toBeUndefined()
   })
 
+  it('expands a brace glob in an Edit path scope at the tool_call guard', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'edit.md', '---\nallowed-tools: Edit(src/{x,y}/**)\n---\nEdit x or y.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('edit')?.handler('', s.ctx)
+
+    // `{x,y}` must expand: edits under src/x and src/y (both alternatives) pass, src/z blocks.
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'edit', input: { path: 'src/x/app.ts' } }, s.ctx)).toBeUndefined()
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'edit', input: { path: 'src/y/util.ts' } }, s.ctx)).toBeUndefined()
+    const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'edit', input: { path: 'src/z/other.ts' } }, s.ctx)) as { block?: boolean; reason?: string }
+    expect(blocked?.block).toBe(true)
+    expect(blocked?.reason).toContain('src/{x,y}/**')
+  })
+
   it('lifts the scope when a later command in the turn grants bash unscoped', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'a.md', '---\nallowed-tools: Bash(git add:*)\n---\nStage.')

@@ -195,6 +195,7 @@ const setupExtension = () => {
     toolCall: (toolName: string, input: unknown, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_call')({ toolName, input, toolCallId }, { ...defaultCtx, ...ctxOverride }),
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
+    userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
@@ -616,7 +617,7 @@ describe('malformed hook config', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'user_bash', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
   })
 })
 
@@ -848,6 +849,64 @@ describe('hooks extension tool_call', () => {
   it('runs no hook and allows the tool before any session_start has loaded a config', async () => {
     writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] })
     expect(await setupExtension().toolCall('bash', {})).toBeUndefined()
+    expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('hooks extension user_bash (PreToolUse for direct ! commands)', () => {
+  const withPreHook = async (behavior: Behavior) => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] })
+    script('guard', behavior)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('runs the matching PreToolUse hook with the Bash tool payload and no tool_use_id', async () => {
+    const ext = await withPreHook({ code: 0 })
+    await ext.userBash('git status')
+    expect(commandsRun()).toEqual(['guard'])
+    // The Bash tool has no pi tool call here, so the payload reports the Claude name
+    // "Bash", the tool_name a Claude-written PreToolUse Bash hook expects; there is no
+    // tool_use_id because no model tool call produced this command.
+    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git status' } })
+  })
+
+  it('blocks the command with a synthetic failed result when the hook exits 2', async () => {
+    const ext = await withPreHook({ stderr: ['force push is not allowed'], code: 2 })
+    // UserBashEvent has no block flag; the honest block is UserBashEventResult.result
+    // ("extension handled execution, use this result"), so the command never runs and
+    // the deny reason stands in as its output.
+    expect(await ext.userBash('git push -f')).toEqual({ result: { output: 'Blocked by hook: force push is not allowed', exitCode: 1, cancelled: false, truncated: false } })
+  })
+
+  it('blocks with the deny reason from hookSpecificOutput', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'secrets file' } })], code: 0 })
+    expect(await ext.userBash('cat .env')).toEqual({ result: { output: 'Blocked by hook: secrets file', exitCode: 1, cancelled: false, truncated: false } })
+  })
+
+  it('returns undefined so the command runs when the hook allows it', async () => {
+    const ext = await withPreHook({ code: 0 })
+    expect(await ext.userBash('ls')).toBeUndefined()
+  })
+
+  it('prompts on permissionDecision ask, letting the command through when approved', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
+    const ui = { notify: () => {}, confirm: async () => true }
+    expect(await ext.userBash('rm x', { hasUI: true, ui })).toBeUndefined()
+  })
+
+  it('blocks on permissionDecision ask when the user declines the prompt', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
+    const ui = { notify: () => {}, confirm: async () => false }
+    expect(await ext.userBash('rm x', { hasUI: true, ui })).toEqual({ result: { output: 'Blocked by hook: confirm this', exitCode: 1, cancelled: false, truncated: false } })
+  })
+
+  it('does not interfere when no PreToolUse hooks are configured', async () => {
+    writeSettings(hoisted.home, 'settings.json', {})
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(await ext.userBash('rm -rf /')).toBeUndefined()
     expect(commandsRun()).toEqual([])
   })
 })
