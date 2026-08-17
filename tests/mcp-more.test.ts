@@ -211,7 +211,7 @@ const writeServers = (file: string, servers: Record<string, unknown>): void => {
 }
 
 /** Boots a fresh extension instance against temp-dir user/project config. */
-const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown> } = {}): Promise<Harness> => {
+const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown>; confirm?: () => Promise<boolean> } = {}): Promise<Harness> => {
   const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
   const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
   tempDirs.push(home, cwd)
@@ -239,7 +239,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     hasUI: true,
     ui: {
       notify: (message: string, level: string) => notifications.push({ message, level }),
-      confirm: async () => approve,
+      confirm: opts.confirm ?? (async () => approve),
     },
     isProjectTrusted: trusted === undefined ? undefined : () => trusted,
     isIdle: () => idle,
@@ -462,6 +462,33 @@ describe('mcp startup config scoping', () => {
 
     expect(harness.toolNames()).toEqual(['proj_query'])
     expect(hoisted.transports).toHaveLength(1)
+  })
+
+  it('initiates the user scope and consented project scope connects concurrently', async () => {
+    withTools([{ name: 'go' }])
+    // Defer every connect: neither resolves until the test releases it, so the
+    // assertion below observes which transports exist while both are still pending.
+    const release = new Map<string, () => void>()
+    hoisted.control.connect = (transport) =>
+      new Promise<void>((resolve) => {
+        release.set(String(transport.options.command), resolve)
+      })
+    const harness = await setup({ user: { local: { command: 'user-server' } }, project: { proj: { command: 'proj-server' } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+
+    const started = harness.sessionStart(true)
+    // Drain microtasks without resolving either connect. The consented project server
+    // has no ordering dependency on the user scope, so its transport must already be
+    // constructed instead of waiting behind the unresolved user connect.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(hoisted.transports.map((t) => t.options.command).sort()).toEqual(['proj-server', 'user-server'])
+
+    release.get('user-server')?.()
+    release.get('proj-server')?.()
+    await started
+    expect(harness.toolNames().sort()).toEqual(['local_go', 'proj_go'])
+    expect(hoisted.transports).toHaveLength(2)
   })
 })
 
@@ -717,6 +744,48 @@ describe('mcp transport selection', () => {
     const [line] = await statusLinesOf(harness)
     expect(line.startsWith('remote: failed: ')).toBe(true)
     expect(line.endsWith(' (0 tools)')).toBe(true)
+  })
+})
+
+describe('interactive OAuth serialization', () => {
+  it('runs interactive OAuth logins one at a time, and both servers still connect', async () => {
+    // The user scope and consented project scope connect concurrently, so two servers
+    // that both 401 would otherwise pop two confirm dialogs and open two browser tabs
+    // at once. The interactive flow is serialized: the second confirm must not fire
+    // until the first login settles. Silent connects stay parallel.
+    withTools([{ name: 'go' }])
+    // A silent connect (no authProvider) 401s; the interactive retry carries an
+    // authProvider, so it succeeds and the server ends connected.
+    hoisted.control.connect = async (transport) => {
+      if ((transport.options as { authProvider?: unknown }).authProvider === undefined) {
+        throw Object.assign(new Error('needs login'), { code: 401 })
+      }
+    }
+
+    let confirmCount = 0
+    let releaseFirst!: (value: boolean) => void
+    const firstGate = new Promise<boolean>((resolve) => {
+      releaseFirst = resolve
+    })
+    const confirm = async (): Promise<boolean> => {
+      confirmCount++
+      return confirmCount === 1 ? firstGate : true
+    }
+
+    const harness = await setup({ user: { alpha: { url: 'https://alpha.example/mcp' }, beta: { url: 'https://beta.example/mcp' } }, confirm })
+    const started = harness.sessionStart()
+
+    // Both silent connects 401 in parallel and both reach the interactive stage, but
+    // only the first login's confirm has fired; the second is queued behind it.
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(confirmCount).toBe(1)
+
+    releaseFirst(true)
+    await started
+
+    // The queued login proceeded once the first settled, and both servers connected.
+    expect(confirmCount).toBe(2)
+    expect(harness.toolNames().sort()).toEqual(['alpha_go', 'beta_go'])
   })
 })
 

@@ -149,6 +149,10 @@ async function restoreConversation(ctx: ExtensionCommandContext, entryId: string
 export default function gitCheckpointExtension(pi: ExtensionAPI) {
   const checkpoints = new Map<string, Checkpoint>()
   let pending: { ref: string; createdAt: string } | undefined
+  // A run (one user message) needs a single pre-run snapshot, no matter how many
+  // assistant turns it drives. before_agent_start starts a run; the first turn_start
+  // then snapshots and clears this, so turns 2..n skip the wasted git work.
+  let runNeedsSnapshot = true
   let shadowDir: string | undefined
   let workTree: string | undefined
 
@@ -258,10 +262,24 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
   })
 
-  // Snapshot code state before the LLM acts in this turn. The user message
-  // that started the turn is not persisted yet at turn_start (it lands on
-  // message_end), so the checkpoint is only keyed and saved at turn_end.
+  // A new agent loop starts a run: the next turn_start snapshots the pre-run tree.
+  // agent_start, not before_agent_start: before_agent_start does not fire for a queued
+  // follow-up message delivered through agent.continue, so gating on it would leave that
+  // follow-up's user message with no checkpoint. agent_start re-fires per agent.continue
+  // (a retry, a compaction, or a follow-up), and the extra snapshot a retry produces is
+  // discarded at turn_end, since that user message already has its checkpoint.
+  pi.on('agent_start', async () => {
+    runNeedsSnapshot = true
+  })
+
+  // Snapshot code state before the LLM acts, once per run. The user message that
+  // started the turn is not persisted yet at turn_start (it lands on message_end), so
+  // the checkpoint is only keyed and saved at turn_end. The snapshot is awaited here so
+  // `git add -A` captures the tree before the model's first edit; turn_end reads the
+  // resolved value.
   pi.on('turn_start', async () => {
+    if (!runNeedsSnapshot) return
+    runNeedsSnapshot = false
     pending = await snapshot()
   })
 

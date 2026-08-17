@@ -688,6 +688,7 @@ describe('resume from a different working directory', () => {
     const t = setup()
     const { other } = await resumeElsewhere(t)
 
+    await t.handlers.get('agent_start')?.({}, t.makeCtx({ cwd: other }))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other }))
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other, branch: [messageEntry('user0002', 'work here')] }))
     expect(t.appended).toHaveLength(2)

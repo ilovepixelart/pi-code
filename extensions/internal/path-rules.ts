@@ -132,6 +132,51 @@ function resolveRule(rule: string, anchors: PathAnchors): string {
   return path.join(anchors.cwd, rel)
 }
 
+/** One rule glob precompiled for repeated matching: its anchored regex, and whether
+ * it applies to the basename (a slashless pattern, gitignore-style) or the full
+ * root-relative path. */
+export interface CompiledGlob {
+  regex: RegExp
+  matchesBasename: boolean
+}
+
+let globsCompiled = 0
+let globsEvaluated = 0
+
+/** Test seam: cumulative compiled-glob work, for asserting that callers compile
+ * each glob once upfront and stop evaluating rules that no longer apply. */
+export function globCompileStats(): { compiled: number; evaluated: number } {
+  return { compiled: globsCompiled, evaluated: globsEvaluated }
+}
+
+/** Rule `paths:` globs compiled once for repeated matching, with claude-rules'
+ * pathMatchesGlobs semantics: `./` and leading `/` anchors are stripped, a trailing
+ * slash scopes to the directory's contents, and blank entries drop out. */
+export function compileGlobs(globs: string[]): CompiledGlob[] {
+  const compiled: CompiledGlob[] = []
+  for (const raw of globs) {
+    let glob = raw.trim()
+    if (!glob) continue
+    if (glob.startsWith('./')) glob = glob.slice(2)
+    else if (glob.startsWith('/')) glob = glob.slice(1)
+    // A trailing slash means the directory's contents, like gitignore; `docs/` alone
+    // would compile to `^docs/$` and match nothing.
+    if (glob.endsWith('/')) glob += '**'
+    globsCompiled += 1
+    compiled.push({ regex: new RegExp(`^${globToRegExpSource(glob)}$`), matchesBasename: !glob.includes('/') })
+  }
+  return compiled
+}
+
+/** Whether a root-relative path matches at least one compiled glob. No globs means
+ * no match. */
+export function matchesCompiledGlobs(relPath: string, globs: CompiledGlob[]): boolean {
+  globsEvaluated += 1
+  const posix = relPath.split(path.sep).join('/')
+  const base = posix.split('/').pop() ?? posix
+  return globs.some((glob) => glob.regex.test(glob.matchesBasename ? base : posix))
+}
+
 /** Whether the accessed file matches at least one rule. No rules means no match:
  * a granted-but-scoped tool with an empty scope set stays blocked, never open. */
 export function matchesPathRules(filePath: string, rules: string[], anchors: PathAnchors): boolean {

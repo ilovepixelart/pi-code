@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -915,6 +915,67 @@ describe('--add-dir additional directories', () => {
     const prompt = await wire(extra).fire(tempDir())
 
     expect(prompt).not.toContain('EXTRA DIR RULES')
+  })
+
+  it('reuses the expanded imports across turns until an imported file actually changes', async () => {
+    // before_agent_start fires every turn; re-reading and re-recursing every @import
+    // per turn is wasted I/O when nothing changed. The expansion is memoized and
+    // validated by mtime: an edit that bumps the mtime is picked up, and the memo
+    // serves the run when mtimes are unchanged.
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'extra.md'), 'ORIGINAL IMPORT BODY')
+    // Pin the mtime to a whole second: the filesystem stores sub-ms precision that
+    // utimesSync cannot reproduce, and the memo compares mtimeMs exactly.
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+    utimesSync(join(cwd, 'extra.md'), pinned, pinned)
+    const files = [{ path: join(cwd, 'CLAUDE.md'), content: 'Rules.\n@extra.md' }]
+    const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    const fireOnce = async () => (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: files } })) as { systemPrompt: string } | undefined
+
+    const first = await fireOnce()
+    expect(first?.systemPrompt).toContain('ORIGINAL IMPORT BODY')
+
+    // Rewrite the import with the SAME mtime AND the same byte length: the stat token
+    // (mtime plus size) is unchanged, so the memo must serve the cached body (this is
+    // the perf property under test; a per-turn re-read would see the edit). A
+    // different-length edit would trip the size half of the token, covered separately.
+    const sameLengthEdit = 'SILENT SAME EDIT'.padEnd('ORIGINAL IMPORT BODY'.length, '.')
+    expect(Buffer.byteLength(sameLengthEdit)).toBe(Buffer.byteLength('ORIGINAL IMPORT BODY'))
+    writeFileSync(join(cwd, 'extra.md'), sameLengthEdit)
+    utimesSync(join(cwd, 'extra.md'), pinned, pinned)
+    const second = await fireOnce()
+    expect(second?.systemPrompt).toContain('ORIGINAL IMPORT BODY')
+    expect(second?.systemPrompt).not.toContain(sameLengthEdit)
+
+    // An edit that bumps the mtime invalidates the memo and is picked up.
+    writeFileSync(join(cwd, 'extra.md'), 'UPDATED IMPORT BODY')
+    utimesSync(join(cwd, 'extra.md'), new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    const third = await fireOnce()
+    expect(third?.systemPrompt).toContain('UPDATED IMPORT BODY')
+  })
+
+  it('invalidates the memo when an imported file changes size at the same mtime', async () => {
+    // The memo revalidates on mtime AND size, like memory.ts's stat token: a
+    // length-changing rewrite that lands within one mtime tick would otherwise be
+    // served stale. Pin the same whole-second mtime across the edit so only the size
+    // differs, and the memo must still invalidate.
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'extra.md'), 'SHORT BODY')
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+    utimesSync(join(cwd, 'extra.md'), pinned, pinned)
+    const files = [{ path: join(cwd, 'CLAUDE.md'), content: 'Rules.\n@extra.md' }]
+    const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    const fireOnce = async () => (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: files } })) as { systemPrompt: string } | undefined
+
+    const first = await fireOnce()
+    expect(first?.systemPrompt).toContain('SHORT BODY')
+
+    writeFileSync(join(cwd, 'extra.md'), 'A MUCH LONGER REPLACEMENT BODY')
+    utimesSync(join(cwd, 'extra.md'), pinned, pinned)
+    const second = await fireOnce()
+    expect(second?.systemPrompt).toContain('A MUCH LONGER REPLACEMENT BODY')
   })
 
   it('publishes session_start and include instruction events once per session', async () => {

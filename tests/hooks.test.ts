@@ -5,7 +5,26 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { formatHooksSummary, type HookRunner, hookFiles, httpUrlAllowed, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, readAllowedHttpHookUrls, readDisableAllHooks, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
+import {
+  formatHooksSummary,
+  type HookRunner,
+  hookFiles,
+  httpUrlAllowed,
+  interpretHookResult,
+  lastAssistantText,
+  loadHooks,
+  matcherCompileCount,
+  matchingCommands,
+  readAllowedHttpHookUrls,
+  readDisableAllHooks,
+  resetMatcherCache,
+  runAgentHook,
+  runHookCommand,
+  runHttpHook,
+  runMcpToolHook,
+  runPreToolUse,
+  runPromptHook,
+} from '../extensions/hooks.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
@@ -386,6 +405,39 @@ describe('matchingCommands', () => {
     expect(matchingCommands([hook], 'startup')).toEqual([{ command: 'setup.sh' }])
     expect(matchingCommands([hook], 'resume')).toEqual([])
     expect(matchingCommands([hook], '')).toEqual([])
+  })
+})
+
+describe('matcher compilation', () => {
+  it('compiles each distinct matcher once across repeated dispatches, not once per event', () => {
+    resetMatcherCache()
+    const matchers = [
+      { matcher: 'Edit, Write', hooks: [{ command: 'fmt' }] },
+      { matcher: 'Edit.*', hooks: [{ command: 'lint' }] },
+    ]
+    for (let i = 0; i < 5; i += 1) {
+      expect(matchingCommands(matchers, 'write').map((hook) => hook.command)).toEqual(['fmt'])
+      expect(matchingCommands(matchers, 'notebookedit').map((hook) => hook.command)).toEqual(['lint'])
+    }
+    expect(matcherCompileCount()).toBe(2)
+  })
+
+  it('memoizes the exact-list fallback of an invalid regex without changing its outcome', () => {
+    resetMatcherCache()
+    // `Bash(, Edit` fails the exact-matcher shape and does not compile as a regex,
+    // so it falls back to exact-name matching on its comma-split tokens.
+    const invalid = [{ matcher: 'Bash(, Edit', hooks: [{ command: 'guard.sh' }] }]
+    for (let i = 0; i < 5; i += 1) {
+      expect(matchingCommands(invalid, 'edit')).toEqual([{ command: 'guard.sh' }])
+      expect(matchingCommands(invalid, 'bash')).toEqual([])
+    }
+    expect(matcherCompileCount()).toBe(1)
+  })
+
+  it('does not compile an absent or wildcard matcher', () => {
+    resetMatcherCache()
+    matchingCommands([{ hooks: [{ command: 'a' }] }, { matcher: '*', hooks: [{ command: 'b' }] }], 'anything')
+    expect(matcherCompileCount()).toBe(0)
   })
 })
 

@@ -13,8 +13,10 @@
  * the built-in segment stands in.
  *
  * Without a configured statusLine, the built-in segment shows turn state plus
- * running session cost, summed from per-message usage on the current branch so it
- * stays correct across /tree navigation and forks. The built-in segment is also
+ * running session cost: a total seeded from the branch's per-message usage at
+ * session start, accumulated per message_end, and reseeded when compaction or
+ * /tree navigation reshapes the branch, so it stays correct across navigation
+ * and forks without re-walking the branch on every render. The built-in segment is also
  * the fallback while a configured command produces no output. Multi-line output
  * is truncated to its first line: the segment is one footer row in pi.
  *
@@ -48,6 +50,8 @@ interface UsageEntry {
   message?: { usage?: { cost?: { total?: number } } }
 }
 
+/** Full branch walk: used only to (re)seed the running total, at session start
+ * and on the events that reshape the branch. Renders read the total instead. */
 function sessionCost(ctx: ExtensionContext): number {
   let total = 0
   for (const entry of ctx.sessionManager.getBranch() as UsageEntry[]) {
@@ -95,8 +99,17 @@ export default function statusLine(pi: ExtensionAPI) {
   let sessionCtx: ExtensionContext | undefined
   let commandLine: string | undefined
   let permissionMode = 'default'
-  let projectApproved = false
   let sessionStartMs = Date.now()
+  // Running session cost; seeded and reseeded by sessionCost(), see below.
+  let costTotal = 0
+  // The output-style settings chain and active style name, resolved once at
+  // session start: the chain's upward walk and per-file reads are too costly for
+  // every refresh tick. /output-style persists a choice straight to settings with
+  // no bus event, and the new style applies from the next turn anyway, so the
+  // cached name is re-read lazily at most once per turn (styleDirty, turn_start).
+  let styleFiles: string[] = []
+  let styleName: string | undefined
+  let styleDirty = false
   // Lines changed, counted from successful edit/write inputs: newText and content
   // lines add, oldText lines remove. An approximation of Claude's counters, which
   // is honest for the tools pi has; bash-side changes are invisible to both.
@@ -114,8 +127,7 @@ export default function statusLine(pi: ExtensionAPI) {
 
   function segmentText(ctx: ExtensionContext, symbol: string): string {
     const theme = ctx.ui.theme
-    const cost = sessionCost(ctx)
-    const costText = cost > 0 ? theme.fg('muted', ` ${formatCost(cost)}`) : ''
+    const costText = costTotal > 0 ? theme.fg('muted', ` ${formatCost(costTotal)}`) : ''
     const turnText = turnCount > 0 ? theme.fg('dim', ` turn ${turnCount}`) : theme.fg('dim', ' ready')
     return symbol + turnText + costText
   }
@@ -128,9 +140,11 @@ export default function statusLine(pi: ExtensionAPI) {
   function buildPayload(ctx: ExtensionContext): Record<string, unknown> {
     const usage = ctx.getContextUsage() ?? { tokens: null, contextWindow: 0, percent: null }
     const model = ctx.model as { id?: string; name?: string } | undefined
-    // Same gate as the config read above: an unapproved project's style is not applied,
-    // so reporting it here would describe a style the session is not using.
-    const styleName = readActiveStyleName(settingsFiles(ctx.cwd, os.homedir(), projectApproved))
+    // Refresh the cached style name only when a turn boundary may have changed it.
+    if (styleDirty) {
+      styleName = readActiveStyleName(styleFiles)
+      styleDirty = false
+    }
     const payload: Record<string, unknown> = {
       hook_event_name: 'Status',
       session_id: ctx.sessionManager.getSessionId(),
@@ -141,7 +155,7 @@ export default function statusLine(pi: ExtensionAPI) {
       // read .model.display_name and render the literal "null" when it is missing.
       model: { id: model?.id ?? '', display_name: model?.name ?? model?.id ?? '' },
       cost: {
-        total_cost_usd: sessionCost(ctx),
+        total_cost_usd: costTotal,
         total_duration_ms: Date.now() - sessionStartMs,
         total_api_duration_ms: apiDurationMs,
         total_lines_added: linesAdded,
@@ -250,10 +264,13 @@ export default function statusLine(pi: ExtensionAPI) {
     if (requestStartMs !== undefined) apiDurationMs += Date.now() - requestStartMs
     requestStartMs = undefined
   })
-  // The last message's token usage, for the breakdown getContextUsage() omits.
+  // The last message's token usage, for the breakdown getContextUsage() omits,
+  // and the running cost total, so renders never re-walk the branch.
   pi.on('message_end', async (event) => {
-    const usage = (event as { message?: { usage?: NonNullable<typeof lastUsage> } }).message?.usage
-    if (usage) lastUsage = usage
+    const usage = (event as { message?: { usage?: NonNullable<typeof lastUsage> & { cost?: { total?: number } } } }).message?.usage
+    if (!usage) return
+    lastUsage = usage
+    costTotal += usage.cost?.total ?? 0
   })
 
   pi.on('session_start', async (_event, ctx) => {
@@ -268,11 +285,18 @@ export default function statusLine(pi: ExtensionAPI) {
     requestStartMs = undefined
     lastUsage = undefined
     clearInterval(refreshTimer)
+    // Seed the running cost from the branch: a resumed or forked session starts
+    // with history, and message_end only accumulates from here on.
+    costTotal = sessionCost(ctx)
     // Reading config must never open a trust dialog: several extensions resolve
     // approval at session start, and a second prompt stacks over the first and eats
     // the keys meant for it. An undecided project simply skips project settings.
     const trusted = isProjectApprovedSilently(ctx)
-    projectApproved = trusted
+    // Same gate for the style chain: an unapproved project's style is not applied,
+    // so reporting it in the payload would describe a style the session is not using.
+    styleFiles = settingsFiles(ctx.cwd, os.homedir(), trusted)
+    styleName = readActiveStyleName(styleFiles)
+    styleDirty = false
     const files = hookFiles(ctx.cwd, os.homedir(), trusted)
     // Claude's disableAllHooks also turns off the custom statusLine command; the
     // built-in segment still renders as the fallback.
@@ -286,6 +310,9 @@ export default function statusLine(pi: ExtensionAPI) {
 
   pi.on('turn_start', async (_event, ctx) => {
     turnCount++
+    // A /output-style between turns lands in settings silently; its style applies
+    // from this turn, so this is the moment the cached name can go stale.
+    styleDirty = true
     const theme = ctx.ui.theme
     show(ctx, theme.fg('accent', '●') + theme.fg('dim', ` turn ${turnCount}...`))
   })
@@ -300,8 +327,15 @@ export default function statusLine(pi: ExtensionAPI) {
     scheduleRefresh()
   })
 
-  pi.on('session_compact', async (_event, _ctx) => {
+  pi.on('session_compact', async (_event, ctx) => {
+    // Compaction replaces the branch entries; reseed the total from what remains.
+    costTotal = sessionCost(ctx)
     scheduleRefresh()
+  })
+
+  pi.on('session_tree', async (_event, ctx) => {
+    // Tree navigation swaps the branch wholesale with no message_end events.
+    costTotal = sessionCost(ctx)
   })
 
   pi.on('session_shutdown', async () => {

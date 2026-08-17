@@ -649,6 +649,23 @@ type HttpFamilyTransport = SSEClientTransport | StreamableHTTPClientTransport //
 
 type MakeTransport = (authProvider?: OAuthClientProvider) => HttpFamilyTransport
 
+/** Interactive OAuth logins block on a confirm dialog and open a browser tab, so two
+ * at once (a user-scope and a consented project-scope server both 401ing, connecting in
+ * parallel) would stack dialogs and browser tabs. This chains them so a second
+ * interactive login waits for the first to settle; the tail is reset to a resolved
+ * promise regardless of outcome, so a failed login never poisons the queue. Silent
+ * (stored-token) connects do not pass through here and stay fully parallel. */
+let oauthQueue: Promise<unknown> = Promise.resolve()
+
+function serializeInteractiveOAuth<T>(run: () => Promise<T>): Promise<T> {
+  const result = oauthQueue.then(run, run)
+  oauthQueue = result.then(
+    () => {},
+    () => {},
+  )
+  return result
+}
+
 /**
  * Connect an http-family server, running Claude's OAuth login when the server
  * demands one. Stored tokens ride the first attempt so the SDK refreshes
@@ -671,7 +688,7 @@ async function connectHttpFamily(name: string, config: { url: string }, makeTran
   } catch (error) {
     if (bearerToken || !isUnauthorized(error)) throw error
     if (!authUi) throw new OAuthRequiredError(`${name} requires a login; run pi interactively to authenticate`)
-    return await runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient)
+    return await serializeInteractiveOAuth(() => runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient))
   }
 }
 
@@ -1113,17 +1130,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     )
   }
 
-  /** Connect the project scope under the per-server policy. Returns whether the scope
-   * is settled, so a refused confirm can be retried on a later session start. */
-  async function connectProjectScope(ctx: ExtensionContext): Promise<boolean> {
-    // The stored decision, read without prompting: consent recorded inside the
-    // project only counts once the project itself has been approved.
-    const approved = isProjectApprovedSilently(ctx)
-    const policy = projectServerPolicy(ctx.cwd, os.homedir(), approved)
-    const { allowed, denied } = mcpAllowDeny()
-    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), policy)
-    const authUi = authUiFor(ctx)
-    if (Object.keys(consented).length > 0) await connectServers(consented, authUi)
+  /** Connect the approval-gated project servers, behind the whole-project confirm.
+   * Returns whether the scope is settled, so a refused confirm can be retried on a
+   * later session start. The consented half of the project scope connects earlier,
+   * concurrently with the user scope, from session_start itself. */
+  async function connectGatedProjectServers(ctx: ExtensionContext, gated: Record<string, ServerConfig>, authUi?: AuthUi): Promise<boolean> {
     if (Object.keys(gated).length === 0) return true
     if (!(await isProjectApproved(ctx))) return false
     await connectServers(gated, authUi)
@@ -1148,16 +1159,28 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // entry cannot shadow a trusted user server by reusing its name. A gated project
     // server still awaiting the approval prompt does not preempt the user server: that is
     // a deliberate narrowing of Claude's rule to keep the safe default.
+    // The stored project decision, read without prompting: consent recorded inside
+    // the project only counts once the project itself has been approved.
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-    const projectWinners = new Set(Object.keys(splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy).consented))
+    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy)
+    const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
-    if (Object.keys(userServers).length > 0) await connectServers(userServers, authUiFor(ctx))
+    const authUi = authUiFor(ctx)
+    // The consented project servers carry no ordering dependency on the user scope:
+    // projectWinners already excludes their names from userServers, so the two batches
+    // are disjoint and connect concurrently, and startup pays the slower scope rather
+    // than the sum of both. Reconnect attempts after a refused confirm are safe:
+    // connectServers skips names that already connected.
+    const connects: Promise<void>[] = []
+    if (Object.keys(userServers).length > 0) connects.push(connectServers(userServers, authUi))
+    if (!projectConnected && Object.keys(consented).length > 0) connects.push(connectServers(consented, authUi))
+    await Promise.all(connects)
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once
     // the project is trusted. Per-server settings refine that: disabled servers never
-    // connect, servers the user consented to individually connect without the
-    // whole-project confirm, and the rest stay behind it. Reconnect attempts after a
-    // refusal are safe: connectServers skips names that already connected.
-    if (!projectConnected) projectConnected = await connectProjectScope(ctx)
+    // connect, servers the user consented to individually connected above without the
+    // whole-project confirm, and the rest stay behind it, sequentially after both
+    // scopes so the confirm dialog never races a connect.
+    if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
 

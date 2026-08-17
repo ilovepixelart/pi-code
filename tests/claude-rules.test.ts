@@ -4,8 +4,9 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import claudeRules, { formatRulePointer, parseFrontmatter, pathMatchesGlobs } from '../extensions/claude-rules.ts'
+import claudeRules, { formatRulePointer, parseFrontmatter, pathMatchesGlobs, pendingScopedRuleCount } from '../extensions/claude-rules.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
+import { globCompileStats } from '../extensions/internal/path-rules.ts'
 
 // Global rules load from the home directory; point it at a throwaway dir so the
 // developer's real ~/.claude/rules cannot influence assertions.
@@ -160,6 +161,43 @@ describe('extension wiring', () => {
 
     const edited = await handlers.get('tool_result')?.({ toolName: 'edit', input: { path: 'db/schema.sql' }, content: [], isError: false }, { cwd })
     expect(injectedTexts(edited).join('\n')).toContain('Use parameterized queries.')
+  })
+
+  it('compiles scoped-rule globs once at session start, not on every tool result', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    const handlers = wire()
+    const before = globCompileStats().compiled
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    expect(globCompileStats().compiled - before).toBe(1)
+
+    await handlers.get('tool_result')?.(readResult('src/a.ts'), { cwd })
+    await handlers.get('tool_result')?.(readResult('src/b.ts'), { cwd })
+    await handlers.get('tool_result')?.(readResult('src/c.ts'), { cwd })
+    expect(globCompileStats().compiled - before).toBe(1)
+  })
+
+  it('drops a fully attached rule from the working list so later touches skip it', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    writeFileSync(join(cwd, '.claude', 'rules', 'docs.md'), '---\npaths:\n  - "docs/**"\n---\nKeep docs current.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    expect(pendingScopedRuleCount()).toBe(2)
+
+    await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })
+    expect(pendingScopedRuleCount()).toBe(1)
+
+    // Only the docs rule is still pending, so this touch evaluates one rule, not two.
+    const evaluated = globCompileStats().evaluated
+    await handlers.get('tool_result')?.(readResult('db/other.sql'), { cwd })
+    expect(globCompileStats().evaluated - evaluated).toBe(1)
+
+    await handlers.get('tool_result')?.(readResult('docs/readme.md'), { cwd })
+    expect(pendingScopedRuleCount()).toBe(0)
+
+    // With every rule attached, a later touch compiles and evaluates nothing.
+    const done = globCompileStats()
+    await handlers.get('tool_result')?.(readResult('db/third.sql'), { cwd })
+    expect(globCompileStats()).toEqual(done)
   })
 
   it('strips block comments from an inlined rule body', async () => {
