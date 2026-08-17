@@ -24,6 +24,7 @@ import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme,
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
 import { type AgentRunRequest, setAgentRunner } from '../internal/agent-run.js'
+import { claudeConfigDir } from '../internal/config-dir.js'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
@@ -697,7 +698,7 @@ export function agentMemoryDir(scope: AgentMemoryScope, name: string, cwd: strin
   const sanitized = name.replace(/[^\w.-]+/g, '_')
   // A name of only dots ('.', '..') survives the character filter but still traverses.
   const segment = /^\.+$/.test(sanitized) ? '_' : sanitized
-  if (scope === 'user') return path.join(home, '.claude', 'agent-memory', segment)
+  if (scope === 'user') return path.join(claudeConfigDir(home), 'agent-memory', segment)
   const root = repoRoot(cwd) ?? cwd
   return path.join(root, '.claude', scope === 'project' ? 'agent-memory' : 'agent-memory-local', segment)
 }

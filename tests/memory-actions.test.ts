@@ -28,6 +28,7 @@ describe('memory tool actions', () => {
       registerTool: (t: Tool) => {
         tool = t
       },
+      registerCommand: () => {},
     } as never)
     if (!tool) throw new Error('memory tool not registered')
     return { handlers, tool, cwd, dir: memoryDir(cwd) }
@@ -106,6 +107,7 @@ describe('memory index robustness', () => {
       registerTool: (t: Tool) => {
         tool = t
       },
+      registerCommand: () => {},
     } as never)
     if (!tool) throw new Error('memory tool not registered')
     return { handlers, tool, cwd, dir: memoryDir(cwd) }

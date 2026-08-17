@@ -24,6 +24,7 @@ import {
   runMcpToolHook,
   runPreToolUse,
   runPromptHook,
+  stopHookBlockCap,
 } from '../extensions/hooks.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
@@ -88,6 +89,33 @@ describe('runPromptHook', () => {
     })
     const result = await runPromptHook({ type: 'prompt', command: '', prompt: 'x' }, {}, fakeModel, 30)
     expect(result.timedOut).toBe(true)
+  })
+})
+
+describe('stopHookBlockCap', () => {
+  it('defaults to 8 and honors a positive integer CLAUDE_CODE_STOP_HOOK_BLOCK_CAP override', () => {
+    expect(stopHookBlockCap({})).toBe(8)
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '3' })).toBe(3)
+    // Non-positive or malformed values fall back to the default rather than capping at 0.
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '0' })).toBe(8)
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '-2' })).toBe(8)
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 'lots' })).toBe(8)
+  })
+})
+
+describe('runHookCommand exec form (real shell)', () => {
+  it('spawns the executable directly with no shell, so metacharacters in args stay literal', async () => {
+    // Through /bin/sh these would be command-substituted or split; exec-form passes
+    // each arg through untouched.
+    const result = await runHookCommand('/bin/echo', {}, 5000, undefined, ['$(whoami)', 'a;b', '$HOME'])
+    expect(result.code).toBe(0)
+    expect(result.stdout).toBe('$(whoami) a;b $HOME\n')
+  })
+
+  it('delivers the payload on stdin and substitutes $ARGUMENTS per arg from the payload', async () => {
+    const payload = { k: 'v' }
+    const result = await runHookCommand('/bin/echo', payload, 5000, undefined, ['$ARGUMENTS'])
+    expect(result.stdout).toBe(`${JSON.stringify(payload)}\n`)
   })
 })
 

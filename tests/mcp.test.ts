@@ -4,7 +4,24 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { applyServerPolicy, formatPromptCommandName, formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, managedSettingsPath, mapContent, mapPromptArguments, mcpAllowDeny, normalizeSchema, parseHelperHeaders, projectConfigPaths, promptMessageContent, userConfigPaths } from '../extensions/mcp.ts'
+import {
+  applyServerPolicy,
+  formatPromptCommandName,
+  formatToolName,
+  interpolateEnv,
+  loadConfigFrom,
+  loadUserScope,
+  managedSettingsPath,
+  mapContent,
+  mapPromptArguments,
+  mcpAllowDeny,
+  normalizeSchema,
+  parseHelperHeaders,
+  projectConfigPaths,
+  projectServerPolicy,
+  promptMessageContent,
+  userConfigPaths,
+} from '../extensions/mcp.ts'
 
 describe('parseHelperHeaders', () => {
   it('keeps string-valued header entries and drops the rest', () => {
@@ -163,6 +180,27 @@ describe('mcp adapter helpers', () => {
   it('separates always-loaded user config from trust-gated project config', () => {
     expect(userConfigPaths('/home')).toEqual(['/home/.claude.json', '/home/.pi/agent/mcp.json'])
     expect(projectConfigPaths('/proj')).toEqual(['/proj/.mcp.json', '/proj/.pi/mcp.json'])
+  })
+
+  it('resolves HOME-scope config under CLAUDE_CONFIG_DIR while leaving project scope alone', () => {
+    // Claude relocates ~/.claude.json and ~/.claude/settings.json inside CLAUDE_CONFIG_DIR;
+    // the sweep must follow, or the user-scope MCP config splits across extensions.
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    const cfg = mkdtempSync(join(tmpdir(), 'mcp-cfg-'))
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      // .claude.json now lives inside the config dir; .pi is pi's own tree, untouched.
+      expect(userConfigPaths('/home')).toEqual([join(cfg, '.claude.json'), join('/home', '.pi', 'agent', 'mcp.json')])
+      // The per-project local scope is read from the relocated .claude.json too.
+      writeFileSync(join(cfg, '.claude.json'), JSON.stringify({ projects: { '/work/p': { mcpServers: { local: { command: 'l' } } } } }))
+      expect(Object.keys(loadUserScope('/home', '/work/p'))).toEqual(['local'])
+      // projectServerPolicy reads the user settings.json from the config dir.
+      writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ enableAllProjectMcpServers: true }))
+      expect(projectServerPolicy('/proj', '/home', false).consentAll).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
   })
 
   it('finds project mcp config at the repository root from a subdirectory session', () => {

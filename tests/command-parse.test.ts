@@ -26,6 +26,7 @@ describe('parseCommandFile', () => {
       allowedTools: ['bash', 'read', 'find'],
       model: 'sonnet',
       disableModelInvocation: true,
+      userInvocable: true,
       body: 'Do the thing with $1.',
     })
   })
@@ -178,6 +179,38 @@ describe('parseCommandFile', () => {
   it('reads a space-separated arguments declaration', () => {
     expect(parseCommandFile('---\narguments: issue branch\n---\nB.').argumentNames).toEqual(['issue', 'branch'])
   })
+
+  it('reads user-invocable and when_to_use, defaulting them when absent', () => {
+    const md = ['---', 'description: Generate', 'user-invocable: false', 'when_to_use: when the tests are red', '---', 'Body.'].join('\n')
+    const parsed = parseCommandFile(md)
+    expect(parsed.userInvocable).toBe(false)
+    expect(parsed.whenToUse).toBe('when the tests are red')
+    // Absent fields: user-invocable defaults true, when_to_use to undefined.
+    const bare = parseCommandFile('Body only.')
+    expect(bare.userInvocable).toBe(true)
+    expect(bare.whenToUse).toBeUndefined()
+  })
+
+  it('honors the YAML falsy spellings of user-invocable, the mirror of disable-model-invocation', () => {
+    // user-invocable defaults to true, so only an explicit false spelling turns it off;
+    // an unrelated value like `maybe` leaves the command user-invocable.
+    for (const value of ['false', 'False', 'no', 'NO', 'off', '0', 'n']) {
+      expect(parseCommandFile(`---\nuser-invocable: ${value}\n---\nx`).userInvocable).toBe(false)
+    }
+    for (const value of ['true', 'yes', 'on', '1', 'maybe']) {
+      expect(parseCommandFile(`---\nuser-invocable: ${value}\n---\nx`).userInvocable).toBe(true)
+    }
+  })
+
+  it('parses a valid effort thinking-level override, rejecting anything outside the union', () => {
+    for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(parseCommandFile(`---\neffort: ${level}\n---\nx`).effort).toBe(level)
+    }
+    // Case-insensitive, and an unknown value is dropped rather than passed to setThinkingLevel.
+    expect(parseCommandFile('---\neffort: MAX\n---\nx').effort).toBe('max')
+    expect(parseCommandFile('---\neffort: turbo\n---\nx').effort).toBeUndefined()
+    expect(parseCommandFile('x').effort).toBeUndefined()
+  })
 })
 
 describe('substituteVars', () => {
@@ -247,6 +280,8 @@ describe('spanExec', () => {
     expect(run.command).toBe('/bin/sh')
     expect(run.args[0]).toBe('-c')
     expect(run.args[1]).toContain("export CLAUDE_PROJECT_DIR='/proj'")
+    // Claude marks every subprocess it spawns with CLAUDECODE=1.
+    expect(run.args[1]).toContain('export CLAUDECODE=1')
     expect(run.args[1]).toContain('git status')
     expect(run.args[1]).toContain('2>&1')
     // The sh script merges in-line; nothing asks the caller to merge again.
@@ -283,6 +318,7 @@ describe('spanExec', () => {
     const script = run.args[3]
     // PowerShell single-quote escaping doubles the quote, never sh's '\'' splice.
     expect(script).toContain("$env:CLAUDE_PROJECT_DIR='/it''s/proj'")
+    expect(script).toContain("$env:CLAUDECODE='1'")
     expect(script).toContain('Get-ChildItem')
     expect(script).toContain("$ErrorActionPreference='Continue'")
   })

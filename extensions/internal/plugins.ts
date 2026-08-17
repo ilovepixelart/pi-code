@@ -15,6 +15,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { claudeConfigDir } from './config-dir.js'
+
 export interface InstalledPlugin {
   name: string
   /** The version directory: ${CLAUDE_PLUGIN_ROOT}. */
@@ -148,8 +150,8 @@ function pluginFingerprint(cacheDir: string, settingsFiles: string[]): string {
  * because any settings edit or cache-tree change invalidates it.
  */
 export function installedPlugins(home: string, extraSettingsFiles: string[] = []): InstalledPlugin[] {
-  const cacheDir = path.join(home, '.claude', 'plugins', 'cache')
-  const settingsFiles = [path.join(home, '.claude', 'settings.json'), ...extraSettingsFiles]
+  const cacheDir = path.join(claudeConfigDir(home), 'plugins', 'cache')
+  const settingsFiles = [path.join(claudeConfigDir(home), 'settings.json'), ...extraSettingsFiles]
   const key = [home, ...extraSettingsFiles].join('\n')
   const fingerprint = pluginFingerprint(cacheDir, settingsFiles)
   const cached = pluginCache.get(key)
@@ -180,7 +182,7 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
   const id = qualified.replace(/[^A-Za-z0-9]+/g, '-')
   const userConfig = configs[qualified] ?? configs[pluginDir] ?? configs[name]
-  return { name, root, dataDir: path.join(home, '.claude', 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
+  return { name, root, dataDir: path.join(claudeConfigDir(home), 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
 }
 
 /** The two plugin path variables, textually substituted into plugin-shipped

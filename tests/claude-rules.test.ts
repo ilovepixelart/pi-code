@@ -307,6 +307,23 @@ describe('extension wiring', () => {
     expect(prompt).toContain('Use parameterized queries.')
   })
 
+  it('resolves the global rules directory under CLAUDE_CONFIG_DIR', async () => {
+    // Global rules live under the relocated config dir when CLAUDE_CONFIG_DIR is set,
+    // not ~/.claude/rules.
+    const cfg = mkdtempSync(join(tmpdir(), 'rules-cfg-'))
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      mkdirSync(join(cfg, 'rules'), { recursive: true })
+      writeFileSync(join(cfg, 'rules', 'style.md'), 'Prefer guard clauses.')
+      const prompt = await sessionPrompt(globalCtx())
+      expect(prompt).toContain('Prefer guard clauses.')
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
+  })
+
   it('keeps a path-scoped global rule as a scoped pointer instead of inlining it', async () => {
     // Claude Code attaches scoped rules only when matching files are touched; inlining
     // one unconditionally applied it everywhere and lost the scope entirely.

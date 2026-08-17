@@ -14,11 +14,12 @@ import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
+import { claudeConfigDir } from './internal/config-dir.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { findNearestFile, repoRoot } from './internal/project-root.js'
 
-const INDEX_FILE = 'MEMORY.md'
+export const INDEX_FILE = 'MEMORY.md'
 
 /** Claude loads the first 200 lines or 25KB of the memory index at startup. */
 export const INDEX_MAX_LINES = 200
@@ -282,7 +283,7 @@ function writeIndex(indexPath: string, content: string): void {
  * approved, since a project's `autoMemoryDirectory` is honored under the same trust
  * rule as hooks in settings files. Later files win. */
 export function memorySettingsFiles(cwd: string, home: string, approved: boolean): string[] {
-  const files = [path.join(home, '.claude', 'settings.json')]
+  const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!approved) return files
   for (const name of ['settings.json', 'settings.local.json']) {
     files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
@@ -304,6 +305,40 @@ export function readMemorySettings(files: string[]): { autoMemoryEnabled?: unkno
     }
   }
   return merged
+}
+
+/** Write `autoMemoryEnabled` into the user settings file, preserving every other key
+ * and creating the file and its config directory when absent. Claude's /memory toggle
+ * writes to the user scope (relocated by CLAUDE_CONFIG_DIR); the value takes effect from
+ * the next session start, which is where autoMemoryEnabled is read.
+ *
+ * An absent file starts from an empty object so the toggle still lands. A file that is
+ * PRESENT but unparseable is refused, not overwritten: clobbering it would destroy the
+ * user's hooks, env and permissions config. The caller surfaces the returned failure. */
+export function setAutoMemoryEnabledSetting(home: string, value: boolean): { ok: true } | { ok: false; error: string } {
+  const dir = claudeConfigDir(home)
+  const file = path.join(dir, 'settings.json')
+  let current: Record<string, unknown> = {}
+  let raw: string | undefined
+  try {
+    raw = fs.readFileSync(file, 'utf-8')
+  } catch (error) {
+    // Only a missing file means start fresh; any other read failure propagates.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (raw !== undefined) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed !== null && typeof parsed === 'object') current = parsed as Record<string, unknown>
+    } catch {
+      // Present but unparseable: refuse rather than overwrite the user's config.
+      return { ok: false, error: 'settings.json is not valid JSON; not modified' }
+    }
+  }
+  current.autoMemoryEnabled = value
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(file, `${JSON.stringify(current, null, 2)}\n`)
+  return { ok: true }
 }
 
 export default function memoryExtension(pi: ExtensionAPI) {
@@ -407,6 +442,55 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
       const index = readIndexQuietly(dir)
       return { content: [{ type: 'text' as const, text: index.trim() || 'No memories saved for this project yet.' }], details: {} }
+    },
+  })
+
+  // Claude's /memory lists the memory locations and toggles auto memory. pi has no
+  // editor seam, so the paths are printed rather than opened. The listing reads the
+  // settings chain live so it reflects a toggle written in the same session.
+  pi.registerCommand('memory', {
+    description: 'Show memory file locations and toggle auto memory (/memory [on|off])',
+    handler: async (args, ctx) => {
+      const home = os.homedir()
+      const arg = args.trim().toLowerCase()
+
+      if (arg === 'on' || arg === 'off') {
+        const next = arg === 'on'
+        let result: { ok: true } | { ok: false; error: string }
+        try {
+          result = setAutoMemoryEnabledSetting(home, next)
+        } catch (error) {
+          ctx.ui.notify(`Could not update auto memory: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          return
+        }
+        if (!result.ok) {
+          ctx.ui.notify(result.error, 'error')
+          return
+        }
+        ctx.ui.notify(`Auto memory ${next ? 'enabled' : 'disabled'} in ${path.join(claudeConfigDir(home), 'settings.json')} (applies next session).`, 'info')
+        return
+      }
+
+      if (arg.length > 0) {
+        ctx.ui.notify('Usage: /memory [on|off]', 'error')
+        return
+      }
+
+      const approved = isProjectApprovedSilently(ctx)
+      const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, home, approved))
+      const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
+      const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
+      const store = resolveMemoryDir(ctx.cwd, override)
+      const lines = [
+        'Memory',
+        `  Auto memory: ${isEnabled ? 'on' : 'off'}`,
+        `  Store:       ${store}`,
+        `  Index:       ${path.join(store, INDEX_FILE)}`,
+        `  User memory (CLAUDE.md):    ${path.join(home, '.claude', 'CLAUDE.md')}`,
+        `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
+        'Toggle with /memory on or /memory off.',
+      ]
+      ctx.ui.notify(lines.join('\n'), 'info')
     },
   })
 }

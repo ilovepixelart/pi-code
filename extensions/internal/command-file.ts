@@ -35,7 +35,16 @@ export interface ParsedCommand {
    * command's injected spans run (see spanExec). */
   shell?: string
   model?: string
+  /** `effort:` per-command thinking-level override, one of pi's ThinkingLevel values
+   * (off/minimal/low/medium/high/xhigh/max); undefined when absent or unrecognized. */
+  effort?: string
+  /** `when_to_use:` extra trigger text appended to the slash_command tool listing only,
+   * never to the user-facing command description. */
+  whenToUse?: string
   disableModelInvocation: boolean
+  /** `user-invocable:` false hides the command from the slash-command surface while
+   * keeping it callable by the model through the slash_command tool. Default true. */
+  userInvocable: boolean
   body: string
 }
 
@@ -236,6 +245,15 @@ const text = (value: unknown): string => {
 const YAML_TRUE = new Set(['true', 'yes', 'on', 'y', '1'])
 const isFlagEnabled = (value: unknown): boolean => value === true || YAML_TRUE.has(text(value).toLowerCase())
 
+/** YAML's negative boolean spellings, the mirror of YAML_TRUE. A flag that defaults to
+ * true (user-invocable) is turned off only by one of these; any other value, absent
+ * included, leaves it on, so an unrelated string never silently hides a command. */
+const YAML_FALSE = new Set(['false', 'no', 'off', 'n', '0'])
+const isFlagDisabled = (value: unknown): boolean => value === false || YAML_FALSE.has(text(value).toLowerCase())
+
+/** pi's ThinkingLevel union, the values a command's `effort:` override may name. */
+const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
 /** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
 const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
 
@@ -265,6 +283,7 @@ export function parseCommandFile(content: string): ParsedCommand {
   const disable = frontmatter['disable-model-invocation']
   const grants = parseToolGrants(frontmatter['allowed-tools'])
   const shell = text(frontmatter.shell).toLowerCase()
+  const effort = text(frontmatter.effort).toLowerCase()
   return {
     description: text(frontmatter.description) || firstLine.slice(0, 60),
     argumentHint: hint(frontmatter['argument-hint']) || undefined,
@@ -276,7 +295,11 @@ export function parseCommandFile(content: string): ParsedCommand {
     disallowedTools: parseToolGrants(frontmatter['disallowed-tools'])?.tools,
     shell: SHELLS.has(shell) ? shell : undefined,
     model: text(frontmatter.model) || undefined,
+    // An unrecognized effort is dropped rather than passed to setThinkingLevel.
+    effort: THINKING_LEVELS.has(effort) ? effort : undefined,
+    whenToUse: text(frontmatter.when_to_use) || undefined,
     disableModelInvocation: isFlagEnabled(disable),
+    userInvocable: !isFlagDisabled(frontmatter['user-invocable']),
     body,
   }
 }
@@ -453,7 +476,9 @@ export function spanExec(shell: string | undefined, projectDir: string, script: 
   if (shell === 'powershell') {
     const binary = resolveBinary()
     if (binary !== undefined) {
-      const preamble = `$ErrorActionPreference='Continue'\n$env:CLAUDE_PROJECT_DIR='${powershellQuote(projectDir)}'`
+      // CLAUDECODE=1 marks every subprocess Claude spawns; pi.exec takes no env, so
+      // it is exported in the script alongside CLAUDE_PROJECT_DIR.
+      const preamble = `$ErrorActionPreference='Continue'\n$env:CLAUDE_PROJECT_DIR='${powershellQuote(projectDir)}'\n$env:CLAUDECODE='1'`
       // No in-script 2>&1: under pwsh 7 it does not merge a native command's
       // stderr on a script block, so mergeStreams has the caller append it. The
       // trailing exit forwards a failed native command's code, which pwsh
@@ -470,7 +495,7 @@ export function spanExec(shell: string | undefined, projectDir: string, script: 
   // comment-only span is a hard sh syntax error (exit 2) that aborted the whole
   // invocation, and `:` keeps such a span the harmless no-op it was on HEAD
   // while the group still merges stderr for real spans.
-  return { command: '/bin/sh', args: ['-c', `export CLAUDE_PROJECT_DIR='${quoted}'\n{ :\n${script}\n} 2>&1`] }
+  return { command: '/bin/sh', args: ['-c', `export CLAUDE_PROJECT_DIR='${quoted}'\nexport CLAUDECODE=1\n{ :\n${script}\n} 2>&1`] }
 }
 
 interface FenceBlock {

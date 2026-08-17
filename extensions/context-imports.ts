@@ -10,14 +10,23 @@
  * imported content plus the approval-gated CLAUDE.local.md body. The base
  * files pi already injected are never re-appended.
  *
+ * It also loads the Claude Code memory locations pi's own loader misses, each
+ * through the same exclude/strip/announce/import pipeline: the user-scope
+ * ~/.claude/CLAUDE.md (the user's own file, no approval gate, @imports at
+ * user-config roots), the project-scope alternate ./.claude/CLAUDE.md (nearest at
+ * or above cwd, approval-gated, deduped against pi's native blocks, @imports at
+ * project roots), and the enterprise managed CLAUDE.md file deployed beside
+ * managed-settings.json.
+ *
  * It also rewrites the context blocks pi assembled, by exact-substring
  * replacement of the wrapper reconstructed from each file's path+content (a
- * wrapper that is not found is skipped, never guessed at): a managed-settings
- * `claudeMd` block is prepended at the top of <project_context> (managed
- * settings only; the key is ignored elsewhere and the block is never
- * excludable), files matching the merged `claudeMdExcludes` globs are removed
- * along with their imports, and block-level HTML comments are stripped from
- * every surviving body (see internal/strip-comments).
+ * wrapper that is not found is skipped, never guessed at): the managed claudeMd
+ * (the managed CLAUDE.md file first, then the managed-settings `claudeMd` key)
+ * and the user CLAUDE.md are prepended at the top of <project_context> in Claude's
+ * order (managed, user, then pi's native project blocks; managed is managed-source
+ * only and never excludable), files matching the merged `claudeMdExcludes` globs
+ * are removed along with their imports, and block-level HTML comments are stripped
+ * from every surviving body (see internal/strip-comments).
  *
  * Security: context files can come from an untrusted project, so imports are
  * confined (after resolving symlinks) to the working directory plus its
@@ -43,11 +52,13 @@
  *
  * Loads are also announced on the shared instruction-events bus for the
  * InstructionsLoaded hook: `include` for each resolved @import, `session_start`
- * for the native context files that survived claudeMdExcludes plus
- * CLAUDE.local.md and additional-dir files, once per file per session. This
- * extension owns exclusion, so it owns the announcements too: a file the
- * exclusion removed never announces, and the hooks extension only consumes the
- * bus (emit is synchronous, so extension order does not matter).
+ * for the native context files that survived claudeMdExcludes plus CLAUDE.local.md,
+ * the user (User) and project ./.claude/CLAUDE.md (Project), the managed file
+ * (Managed) and additional-dir files, once per file per session. This extension
+ * owns exclusion, so it owns the announcements too: a file the exclusion removed
+ * never announces, and the hooks extension only consumes the bus (emit is
+ * synchronous, so extension order does not matter). The managed-settings `claudeMd`
+ * key is not a file pi loaded, so like today it is inserted but not announced.
  *
  * Docs: https://code.claude.com/docs/en/memory.md (imports)
  */
@@ -58,8 +69,9 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './internal/config-dir.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
-import { readManagedSettings } from './internal/managed-settings.js'
+import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
@@ -223,7 +235,7 @@ export function collectImports(content: string, fromDir: string, home: string, a
  * would let it read them into the system prompt.
  */
 export function rootsForImporter(importer: string, home: string, cwd: string): string[] {
-  const userRoots = realRoots([path.join(home, '.claude'), path.join(home, '.pi')])
+  const userRoots = realRoots([claudeConfigDir(home), path.join(home, '.pi')])
   const [real] = realRoots([importer])
   const fromUserConfig = real !== undefined && isUnder(real, userRoots)
   if (fromUserConfig) return realRoots([cwd, ...userRoots])
@@ -287,8 +299,33 @@ export function additionalDirContextFiles(dir: string, includeLocal: boolean): A
   return files
 }
 
-/** Path label given to the managed claudeMd block; not a file pi loaded. */
+/** Path label given to the managed claudeMd settings-key block; not a file pi loaded. */
 export const MANAGED_CLAUDE_MD_PATH = 'managed-settings.json (claudeMd)'
+
+let managedClaudeMdPathOverride: string | undefined
+
+/** Test seam mirroring setManagedSettingsPath: point the managed CLAUDE.md file
+ * readers consult at a writable directory. */
+export function setManagedClaudeMdPath(file?: string): void {
+  managedClaudeMdPathOverride = file
+}
+
+/** The managed CLAUDE.md file path: alongside managed-settings.json, in the same OS
+ * directory IT deploys the enterprise policy to (managed-settings.ts owns that
+ * directory per platform). Organizations ship a CLAUDE.md there to load before user
+ * and project context. Overridable for tests. */
+export function managedClaudeMdPath(): string {
+  return managedClaudeMdPathOverride ?? path.join(path.dirname(managedSettingsPath()), 'CLAUDE.md')
+}
+
+/** The managed CLAUDE.md file body, or '' when absent or unreadable. */
+export function readManagedClaudeMdFile(): string {
+  try {
+    return fs.readFileSync(managedClaudeMdPath(), 'utf-8')
+  } catch {
+    return ''
+  }
+}
 
 /** pi's exact per-file wrapper inside <project_context>, reconstructed from
  * path+content for exact-substring rewriting. tests/context-imports.test.ts pins
@@ -318,10 +355,12 @@ function replaceBlock(prompt: string, wrapper: string, replacement: string): str
   return prompt.slice(0, at) + replacement + prompt.slice(at + wrapper.length)
 }
 
-/** Insert the managed claudeMd block at the top of <project_context>, before the
- * files pi loaded (Claude documents managed claudeMd loading before user and
- * project CLAUDE.md); when pi assembled no context block, add one in pi's shape. */
-function withManagedBlock(prompt: string, block: string): string {
+/** Insert a block at the top of <project_context>, before the files pi loaded;
+ * when pi assembled no context block, add one in pi's shape. Used for the blocks
+ * Claude loads ahead of pi's native project context: managed claudeMd (file then
+ * key) and the user CLAUDE.md. Each call prepends, so the last block inserted ends
+ * up highest, which is how the managed/user/native order is built (see caller). */
+function withTopBlock(prompt: string, block: string): string {
   for (const anchor of [CONTEXT_OPENER, '<project_context>\n\n']) {
     const at = prompt.indexOf(anchor)
     if (at === -1) continue
@@ -336,7 +375,7 @@ function withManagedBlock(prompt: string, block: string): string {
  * settings.local.json (nearest at or above cwd) only when the project is
  * approved. Managed settings are read separately by the caller. */
 export function claudeMdExcludeFiles(cwd: string, home: string, approved: boolean): string[] {
-  const files = [path.join(home, '.claude', 'settings.json')]
+  const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!approved) return files
   for (const name of ['settings.json', 'settings.local.json']) {
     files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
@@ -454,6 +493,16 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
   return imported
 }
 
+/** The project-scope ./.claude/CLAUDE.md appended as a project_instructions block,
+ * announced as it is added (only when non-empty, matching what reaches the prompt).
+ * Claude reads project instructions from ./CLAUDE.md OR ./.claude/CLAUDE.md; pi loads
+ * the former natively, so this fills the alternate location as an extra project block. */
+function projectContextAddition(kept: { path: string; content: string } | undefined, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
+  if (kept === undefined || kept.content.trim().length === 0) return ''
+  announce({ file_path: kept.path, memory_type: memoryTypeForPath(kept.path, home, projectRoot), load_reason: 'session_start' })
+  return `\n\n${instructionsBlock(kept.path, kept.content.trim())}`
+}
+
 /** The CLAUDE.local.md bodies appended after the native context, announced as they
  * are added (only the non-empty ones, matching what actually reaches the prompt). */
 function localContextAddition(keptLocals: Array<{ path: string; content: string }>, announce: (event: InstructionLoadEvent) => void): string {
@@ -492,8 +541,74 @@ function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: 
   return `\n\n## Imported context (@)\n\n${section}${notice}`
 }
 
+/** Prepend the managed and user memory blocks Claude loads ahead of pi's native project
+ * context, top to bottom: managed file, managed key, then the user CLAUDE.md. withTopBlock
+ * prepends, so they are inserted bottom-up (user, then managed key, then managed file just
+ * below) to land in that order. keptUser was already exclude-checked and comment-stripped by
+ * the caller like every other file; the managed claudeMd is never excludable and comes from
+ * two managed-only surfaces, the settings key (ignored in user/project settings) and the file
+ * IT deploys beside managed-settings.json, re-read every turn so a policy change applies
+ * immediately (only its announce is deduped per session). Returns the grown prompt, whether
+ * anything was added, and the managed file body (reused for the import memo key). */
+function prependMemoryBlocks(prompt: string, changed: boolean, keptUser: { path: string; content: string } | undefined, managed: Record<string, unknown>, announce: (event: InstructionLoadEvent) => void): { prompt: string; changed: boolean; managedFile: string } {
+  if (keptUser !== undefined && keptUser.content.trim().length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(keptUser.path, keptUser.content.trim()))
+    changed = true
+    announce({ file_path: keptUser.path, memory_type: 'User', load_reason: 'session_start' })
+  }
+  const managedKey = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
+  if (managedKey.length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(MANAGED_CLAUDE_MD_PATH, managedKey))
+    changed = true
+  }
+  const managedFile = stripBlockComments(readManagedClaudeMdFile()).trim()
+  if (managedFile.length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(managedClaudeMdPath(), managedFile))
+    changed = true
+    announce({ file_path: managedClaudeMdPath(), memory_type: 'Managed', load_reason: 'session_start' })
+  }
+  return { prompt, changed, managedFile }
+}
+
+/** Everything the import expansion depends on, hashed to a memo key: a turn whose inputs
+ * match a prior key and whose recorded mtimes are unchanged reuses the previous expansion
+ * outright. The native/local paths, the user/project-.claude additions, and the managed file
+ * body seed the "seen" set, so a change in which of them exist (even an excluded one that
+ * never reaches contextFiles) changes the key; the managed file is re-read every turn, so a
+ * change in its content re-expands and keeps the seed self-consistent. */
+function buildImportMemoKey(input: {
+  cwd: string
+  home: string
+  projectApproved: boolean
+  addDirsRaw: string
+  excludeGlobs: string[]
+  native: Array<{ path: string; content: string }>
+  localContexts: Array<{ path: string; content: string }>
+  userContext: { path: string; content: string } | undefined
+  projectDotClaude: { path: string; content: string } | undefined
+  managedFile: string
+  contextFiles: Array<{ path: string; content: string }>
+}): string {
+  const keyHash = createHash('sha256')
+  keyHash.update(`${input.cwd}\0${input.home}\0${input.projectApproved}\0${input.addDirsRaw}\0${input.excludeGlobs.join(',')}\0`)
+  for (const file of [...input.native, ...input.localContexts]) keyHash.update(`${file.path}\0`)
+  if (input.userContext !== undefined) keyHash.update(`${input.userContext.path}\0`)
+  if (input.projectDotClaude !== undefined) keyHash.update(`${input.projectDotClaude.path}\0`)
+  keyHash.update(`${input.managedFile}\0`)
+  for (const file of input.contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
+  return keyHash.digest('hex')
+}
+
 export default function contextImportsExtension(pi: ExtensionAPI) {
   let localContexts: Array<{ path: string; content: string }> = []
+  // ~/.claude/CLAUDE.md, Claude's user-scope memory (all projects). The user's own
+  // file, so it needs no project approval; read once at session start like the
+  // locals, so a mid-session body edit applies next session, matching Claude.
+  let userContext: { path: string; content: string } | undefined
+  // The project-scope alternate location ./.claude/CLAUDE.md. pi loads ./CLAUDE.md
+  // natively but not this one; repo-controlled, so it is approval-gated like the
+  // locals and read once at session start.
+  let projectDotClaude: { path: string; content: string } | undefined
   // Whether project settings may contribute claudeMdExcludes; decided at session
   // start with the silent check, so no prompt fires mid-flight.
   let projectApproved = false
@@ -556,7 +671,13 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     }
     // Seed with every loaded context file path, excluded ones included, so pi's own
     // files are never re-imported and an excluded file cannot return as an import.
-    const seenSet = new Set(realRoots([...native, ...localContexts].map((file) => file.path)))
+    // The user, project-.claude and managed-file additions join the seed too, so a
+    // context file's @import cannot pull any of them in a second time.
+    const ownPaths = [...native, ...localContexts].map((file) => file.path)
+    if (userContext !== undefined) ownPaths.push(userContext.path)
+    if (projectDotClaude !== undefined) ownPaths.push(projectDotClaude.path)
+    ownPaths.push(managedClaudeMdPath())
+    const seenSet = new Set(realRoots(ownPaths))
 
     // Claude's --add-dir memory loading, env-gated. The files join the seen set
     // before import expansion so an @import cannot pull one in twice, and they get
@@ -598,17 +719,39 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     announced.clear()
     envCache = undefined
     importMemo = undefined
+    localContexts = []
+    userContext = undefined
+    projectDotClaude = undefined
+
+    // ~/.claude/CLAUDE.md, Claude's user-scope memory. The user's own file, so no
+    // project approval is required; a missing file simply leaves it unset.
+    try {
+      const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
+      userContext = { path: userClaudeMd, content: fs.readFileSync(userClaudeMd, 'utf-8') }
+    } catch {
+      // no user CLAUDE.md
+    }
+
     // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
     // skips it. A cloned repo can ship one, so it is gated like other project config.
     // Claude loads local context from the whole hierarchy above the working
     // directory, ordered root down to cwd; the walk is bounded at the repository
-    // root like every other project-config search here.
-    localContexts = []
+    // root like every other project-config search here. The project-scope alternate
+    // ./.claude/CLAUDE.md (nearest at or above cwd) is repo-controlled too, so both
+    // ride the one approval decision.
     const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
-    if (candidates.length > 0 && (await isProjectApproved(ctx))) {
+    const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+    if ((candidates.length > 0 || dotClaudeMd !== null) && (await isProjectApproved(ctx))) {
       for (const candidate of candidates) {
         try {
           localContexts.push({ path: candidate, content: fs.readFileSync(candidate, 'utf-8') })
+        } catch {
+          // unreadable: treat as absent
+        }
+      }
+      if (dotClaudeMd !== null) {
+        try {
+          projectDotClaude = { path: dotClaudeMd, content: fs.readFileSync(dotClaudeMd, 'utf-8') }
         } catch {
           // unreadable: treat as absent
         }
@@ -643,30 +786,45 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       announce({ file_path: file.path, memory_type: memoryTypeForPath(file.path, home, projectRoot), load_reason: 'session_start' })
     }
 
-    // Managed claudeMd is honored from managed settings ONLY (the key is ignored in
-    // user and project settings) and is never excludable; it loads before user and
-    // project context, so it goes to the top of the <project_context> block.
-    const managedClaudeMd = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
-    if (managedClaudeMd.length > 0) {
-      prompt = withManagedBlock(prompt, instructionsBlock(MANAGED_CLAUDE_MD_PATH, managedClaudeMd))
-      changed = true
-    }
+    // The user CLAUDE.md is the user's own file (no approval gate) but respects
+    // claudeMdExcludes and comment-stripping like every other file. It is kept here so it
+    // both gets its own block (via prependMemoryBlocks) and joins the import-expansion set
+    // below, so its @imports resolve.
+    const keptUser = userContext !== undefined && !excluded(userContext.path) ? { path: userContext.path, content: stripBlockComments(userContext.content) } : undefined
+
+    // Prepend the managed and user memory blocks (managed file, managed key, user), the
+    // blocks Claude loads ahead of pi's native project context. managedFile comes back
+    // because it also seeds the import memo key below.
+    const top = prependMemoryBlocks(prompt, changed, keptUser, managed, announce)
+    prompt = top.prompt
+    changed = top.changed
+    const managedFile = top.managedFile
 
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
-    const contextFiles = [...rewrite.kept, ...keptLocals]
+
+    // ./.claude/CLAUDE.md, deduped against pi's native context so that if pi ever
+    // loads it too there is no double block, then exclude-checked and comment-stripped
+    // like the rest. Its @imports resolve at project roots (rootsForImporter).
+    const nativeReal = new Set(realRoots(native.map((file) => file.path)))
+    const [dotReal] = projectDotClaude !== undefined ? realRoots([projectDotClaude.path]) : []
+    const keptProjectDotClaude = projectDotClaude !== undefined && !(dotReal !== undefined && nativeReal.has(dotReal)) && !excluded(projectDotClaude.path) ? { path: projectDotClaude.path, content: stripBlockComments(projectDotClaude.content) } : undefined
+
+    // The user CLAUDE.md and ./.claude/CLAUDE.md join the import-expansion set so their
+    // @imports resolve (each at roots scoped to it, via rootsForImporter); their own
+    // bodies are placed separately, so expansion only surfaces what they import.
+    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
 
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
-    const keyHash = createHash('sha256')
-    keyHash.update(`${cwd}\0${home}\0${projectApproved}\0${addDirsRaw}\0${excludeGlobs.join(',')}\0`)
-    for (const file of [...native, ...localContexts]) keyHash.update(`${file.path}\0`)
-    for (const file of contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
-    const memoKey = keyHash.digest('hex')
+    const memoKey = buildImportMemoKey({ cwd, home, projectApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
 
     const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, home, cwd, excluded)
 
-    let addition = localContextAddition(keptLocals, announce)
+    // Project memory precedes local memory, so the ./.claude/CLAUDE.md block leads the
+    // additions, ahead of the CLAUDE.local.md bodies.
+    let addition = projectContextAddition(keptProjectDotClaude, home, projectRoot, announce)
+    addition += localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)
     addition += importedAddition(imported, budget, home, projectRoot, announce)
     if (!changed && addition.length === 0) return

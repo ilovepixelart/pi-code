@@ -974,8 +974,10 @@ describe('mcp tool execution', () => {
     vi.useFakeTimers()
 
     const pending = harness.tools[0].execute('call-1', {})
-    const assertion = expect(pending).rejects.toThrow('sonar_qube_search_issues timed out after 120000ms')
-    await vi.advanceTimersByTimeAsync(120_000)
+    // The outer race now uses the 4h wall budget (the idle timeout lives inside the SDK,
+    // which is stubbed here), so a fully hung call rejects at the wall.
+    const assertion = expect(pending).rejects.toThrow('sonar_qube_search_issues timed out after 14400000ms')
+    await vi.advanceTimersByTimeAsync(14_400_000)
     await assertion
   })
 
@@ -992,13 +994,89 @@ describe('mcp tool execution', () => {
     expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 5000 })
   })
 
-  it('passes the call timeout to the SDK so its shorter default cannot fire first', async () => {
+  it('passes the two-tier timeout to the SDK so its shorter default cannot fire first', async () => {
     hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
     const harness = await registerOne()
 
     await harness.tools[0].execute('call-1', {})
 
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 120_000 })
+    // The SDK gets the idle window as its per-quiet-period deadline (reset on progress),
+    // capped at the 4h wall; its own 60s default can no longer fire first.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+  })
+})
+
+describe('mcp tool-call idle timeout', () => {
+  const registerGo = async (config: Record<string, unknown> = { command: 'x' }): Promise<Harness> => {
+    withTools([{ name: 'go' }])
+    return setupStarted({ user: { srv: config } })
+  }
+
+  it('layers the default 300s idle window under the 4h wall budget, resetting on progress', async () => {
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo()
+
+    await harness.tools[0].execute('c1', {})
+
+    // The idle window is the SDK's per-quiet-period deadline, reset on every progress
+    // notification; maxTotalTimeout caps the wall clock; onprogress is required so the
+    // server addresses progress here and the SDK resets the timer on it.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+  })
+
+  it('honors CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT for the idle window', async () => {
+    setEnv('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT', '60000')
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo()
+
+    await harness.tools[0].execute('c1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 60_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+  })
+
+  it('disables the idle window for CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0, leaving only the wall budget', async () => {
+    setEnv('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT', '0')
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo()
+
+    await harness.tools[0].execute('c1', {})
+
+    // A plain wall-clock timeout, no progress machinery.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 14_400_000 })
+  })
+
+  it('keeps a per-server timeout as the wall-clock ceiling above the idle window', async () => {
+    // A 10 min per-server budget, wider than the 5 min idle window: the idle timeout still
+    // guards each quiet period, and the per-server value caps the wall clock.
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo({ command: 'x', timeout: 600_000 })
+
+    await harness.tools[0].execute('c1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 600_000, onprogress: expect.any(Function) })
+  })
+
+  it('uses a plain wall timeout when a per-server budget is tighter than the idle window', async () => {
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo({ command: 'x', timeout: 2000 })
+
+    await harness.tools[0].execute('c1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 2000 })
+  })
+
+  it('rejects a fully hung call at the wall budget, not the idle window', async () => {
+    // The stubbed SDK never enforces the idle timeout (that lives inside the real SDK), so
+    // the outer race is what fires: it must use the wall budget so a legitimately
+    // progressing call is never cut off at the idle window.
+    const harness = await registerGo({ command: 'x', timeout: 600_000 })
+    hoisted.control.callTool = () => new Promise<CallResult>(() => {})
+    vi.useFakeTimers()
+
+    const pending = harness.tools[0].execute('c1', {})
+    const assertion = expect(pending).rejects.toThrow('srv_go timed out after 600000ms')
+    await vi.advanceTimersByTimeAsync(600_000)
+    await assertion
   })
 })
 
@@ -1292,11 +1370,13 @@ describe('small MCP parity', () => {
     withTools([{ name: 'quick' }])
     const harness = await setupStarted({ user: { srv: { command: 'x', timeout: 1500 }, floored: { command: 'y', timeout: 10 } } })
     await harness.tools[0].execute('c1', {})
-    expect((hoisted.callOptions.at(-1) as { timeout: number }).timeout).toBe(1500)
+    // A per-server budget below the idle window is the plain wall-clock timeout.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1500 })
 
-    // Below Claude's documented 1s minimum the per-server value is ignored.
+    // Below Claude's documented 1s minimum the per-server value is ignored, so the call
+    // falls back to the global default, whose SDK deadline is the idle window under the 4h wall.
     await harness.tools[1].execute('c2', {})
-    expect((hoisted.callOptions.at(-1) as { timeout: number }).timeout).toBe(120_000)
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
   })
 
   it('expands environment variables in cwd', async () => {
@@ -1798,5 +1878,107 @@ describe('mcp resource tools', () => {
 
     expect(harness.toolNames()).not.toContain('read_mcp_resource')
     expect(harness.warnings.join('\n')).toContain('read_mcp_resource')
+  })
+})
+
+describe('managed-mcp.json exclusive control', () => {
+  // managed-mcp.json lives beside managed-settings.json; point the extension at a throwaway
+  // pair in a temp dir so managedMcpPath resolves the sibling from the managed settings path.
+  const withManagedMcp = (mcp: unknown, settings: unknown = {}): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-managed-'))
+    tempDirs.push(dir)
+    writeFileSync(join(dir, 'managed-settings.json'), JSON.stringify(settings))
+    writeFileSync(join(dir, 'managed-mcp.json'), typeof mcp === 'string' ? mcp : JSON.stringify(mcp))
+    setManagedSettingsPath(join(dir, 'managed-settings.json'))
+  }
+  const withoutManagedMcp = (settings: unknown = {}): void => {
+    // Managed settings present, but no managed-mcp.json sibling: normal loading.
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-managed-'))
+    tempDirs.push(dir)
+    writeFileSync(join(dir, 'managed-settings.json'), JSON.stringify(settings))
+    setManagedSettingsPath(join(dir, 'managed-settings.json'))
+  }
+  afterEach(() => setManagedSettingsPath(undefined))
+
+  it('loads only the managed servers, suppressing user and project scopes', async () => {
+    withTools([{ name: 'go' }])
+    withManagedMcp({ mcpServers: { managed: { command: 'm' } } })
+    const harness = await setup({ user: { fromUser: { command: 'u' } }, project: { fromProject: { command: 'p' } } })
+
+    await harness.sessionStart(true)
+
+    expect(harness.toolNames()).toEqual(['managed_go'])
+    expect(hoisted.transports.map((t) => t.options.command)).toEqual(['m'])
+  })
+
+  it('disables MCP entirely for an empty managed map', async () => {
+    withTools([{ name: 'go' }])
+    withManagedMcp({ mcpServers: {} })
+    const harness = await setup({ user: { fromUser: { command: 'u' } } })
+
+    await harness.sessionStart(true)
+
+    expect(harness.toolNames()).toEqual([])
+    expect(hoisted.transports).toEqual([])
+  })
+
+  it('still filters the managed set through the managed allow/deny lists', async () => {
+    withTools([{ name: 'go' }])
+    withManagedMcp({ mcpServers: { keep: { command: 'k' }, drop: { command: 'd' } } }, { deniedMcpServers: [{ serverName: 'drop' }] })
+    const harness = await setup()
+
+    await harness.sessionStart(true)
+
+    expect(harness.toolNames()).toEqual(['keep_go'])
+  })
+
+  it('leaves normal loading untouched when no managed-mcp.json is present', async () => {
+    withTools([{ name: 'go' }])
+    withoutManagedMcp()
+    const harness = await setup({ user: { fromUser: { command: 'u' } } })
+
+    await harness.sessionStart(true)
+
+    expect(harness.toolNames()).toEqual(['fromUser_go'])
+  })
+
+  it('fails closed (deny-all) when a present managed-mcp.json is invalid JSON', async () => {
+    // Deliberately the opposite of the old regression guard, which failed OPEN: a
+    // corrupt policy file used to reopen the user/project/plugin scopes. Under the
+    // lockdown intent a deployed-but-unparseable managed-mcp.json is a deny-all, exactly
+    // like an empty map, so a truncated write cannot silently allow every server.
+    withTools([{ name: 'go' }])
+    withManagedMcp('{not json')
+    const harness = await setup({ user: { fromUser: { command: 'u' } } })
+
+    await harness.sessionStart(true)
+
+    expect(harness.toolNames()).toEqual([])
+    expect(hoisted.transports).toEqual([])
+    expect(harness.warnings.join('\n')).toMatch(/managed-mcp\.json.*not valid JSON/)
+  })
+
+  it('evicts an already-connected non-managed server when a policy is deployed mid-process', async () => {
+    // A user server connects on the first session with no managed policy present. A later
+    // managed-mcp.json takes exclusive control, so re-firing session_start must close the
+    // surviving user client and leave only the managed set connected, not let it linger.
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { fromUser: { command: 'u' } } })
+
+    withoutManagedMcp()
+    await harness.sessionStart(true)
+    const userClient = hoisted.clients.find((c) => c.transport?.options?.command === 'u')
+    expect(userClient).toBeDefined()
+    expect(hoisted.closed).not.toContain(userClient)
+
+    withManagedMcp({ mcpServers: { managed: { command: 'm' } } })
+    await harness.sessionStart(true)
+
+    // The user client was closed; only the managed server remains connected.
+    expect(hoisted.closed).toContain(userClient)
+    const lines = await statusLinesOf(harness)
+    expect(lines).toContain('fromUser: disabled by managed policy (0 tools)')
+    expect(lines.some((l) => l.startsWith('managed: connected'))).toBe(true)
+    expect(hoisted.transports.map((t) => t.options.command)).toEqual(['u', 'm'])
   })
 })

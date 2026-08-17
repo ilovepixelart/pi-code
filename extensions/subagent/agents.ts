@@ -11,6 +11,7 @@ import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
 import { parseToolGrants } from '../internal/command-file.js'
+import { claudeConfigDir } from '../internal/config-dir.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { findNearestDir } from '../internal/project-root.js'
 
@@ -291,7 +292,7 @@ function pluginAgentDirs(home: string): string[] {
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), 'agents')
-  const claudeUserDir = path.join(os.homedir(), '.claude', 'agents')
+  const claudeUserDir = path.join(claudeConfigDir(os.homedir()), 'agents')
   const projectPiDir = findNearestDir(cwd, path.join('.pi', 'agents'))
   const projectClaudeDir = findNearestDir(cwd, path.join('.claude', 'agents'))
 

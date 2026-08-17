@@ -17,9 +17,11 @@ import contextImports, {
   MANAGED_CLAUDE_MD_PATH,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_FILES,
+  managedClaudeMdPath,
   parseAdditionalDirs,
   readClaudeMdExcludes,
   rootsForImporter,
+  setManagedClaudeMdPath,
 } from '../extensions/context-imports.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
 import { managedSettingsPath, readManagedSettings, setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
@@ -43,13 +45,28 @@ const importsFor = (file: string, home: string, cwd: string, content?: string) =
 // realpath so allowed-root prefix checks hold on macOS (/tmp -> /private/tmp)
 const tempDir = (): string => realpathSync(mkdtempSync(join(tmpdir(), 'ci-')))
 
+/** Assemble a prompt exactly as pi's buildSystemPrompt does (pinned by the wrapper
+ * regression tests above); shared by the ordering tests for the added blocks. */
+const assembledPrompt = (files: Array<{ path: string; content: string }>): string => {
+  let prompt = 'BASE PROMPT'
+  if (files.length === 0) return prompt
+  prompt += '\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n'
+  for (const { path: filePath, content } of files) prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`
+  prompt += '</project_context>\n'
+  return prompt
+}
+
 beforeEach(() => {
   hoisted.home = tempDir()
   setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
+  // The managed CLAUDE.md file sits alongside managed-settings.json; point it at the
+  // same throwaway dir (dirname of the overridden settings path) so tests can write it.
+  setManagedClaudeMdPath(join(hoisted.home, 'CLAUDE.md'))
 })
 afterEach(() => {
   hoisted.home = ''
   setManagedSettingsPath(undefined)
+  setManagedClaudeMdPath(undefined)
 })
 
 describe('expandHome', () => {
@@ -395,6 +412,25 @@ describe('user config is off limits to project context files', () => {
     expect(handler.map((f) => f.body)).toEqual(['user extra'])
   })
 
+  it('grants user-config roots to an importer under CLAUDE_CONFIG_DIR', () => {
+    // With CLAUDE_CONFIG_DIR set, the user config tree moves; a context file living there
+    // must still be able to import from that same relocated config dir.
+    const home = tempDir()
+    const cwd = tempDir()
+    const cfg = tempDir()
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      writeFileSync(join(cfg, 'CLAUDE.md'), 'user context')
+      writeFileSync(join(cfg, 'extra.md'), 'user extra')
+      const handler = importsFor(join(cfg, 'CLAUDE.md'), home, cwd, '@extra.md')
+      expect(handler.map((f) => f.body)).toEqual(['user extra'])
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
+  })
+
   it('still lets a project file import within the project', () => {
     const { home, cwd } = scenario()
     writeFileSync(join(cwd, 'notes.md'), 'project notes')
@@ -478,6 +514,22 @@ describe('claudeMdExcludes settings chain', () => {
     const home = tempDir()
     expect(claudeMdExcludeFiles(cwd, home, false)).toEqual([join(home, '.claude', 'settings.json')])
     expect(claudeMdExcludeFiles(cwd, home, true)).toEqual([join(home, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('resolves the user settings.json under CLAUDE_CONFIG_DIR, leaving project scope alone', () => {
+    const cwd = tempDir()
+    const home = tempDir()
+    const cfg = tempDir()
+    const saved = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      // The user entry relocates; the approval-gated project entries do not.
+      expect(claudeMdExcludeFiles(cwd, home, false)).toEqual([join(cfg, 'settings.json')])
+      expect(claudeMdExcludeFiles(cwd, home, true)).toEqual([join(cfg, 'settings.json'), join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')])
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = saved
+    }
   })
 
   it('merges exclude globs across settings files and managed settings', () => {
@@ -1050,5 +1102,338 @@ describe('--add-dir additional directories', () => {
     await wired.fire(cwd)
 
     expect(wired.instructionEvents()).toEqual([{ file_path: join(cwd, 'CLAUDE.local.md'), memory_type: 'Local', load_reason: 'session_start' }])
+  })
+})
+
+/** Wire the extension with an instruction-event bus, session_start and per-turn fire.
+ * Shared by the user, project .claude/CLAUDE.md and managed-file describes below. */
+const wireWithBus = () => {
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+  const emitted: Array<{ channel: string; data: unknown }> = []
+  contextImports({
+    on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+    events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
+  } as never)
+  return {
+    instructionEvents: () => emitted.filter((entry) => entry.channel === INSTRUCTIONS_CHANNEL).map((entry) => entry.data),
+    start: (ctx: Record<string, unknown>) => handlers.get('session_start')?.({}, ctx),
+    fire: async (cwd: string, contextFiles: Array<{ path: string; content: string }> = [], systemPrompt = 'BASE') => {
+      const result = (await handlers.get('before_agent_start')?.({ systemPrompt, systemPromptOptions: { cwd, contextFiles } }, {})) as { systemPrompt: string } | undefined
+      return result?.systemPrompt ?? systemPrompt
+    },
+  }
+}
+
+/** A session_start ctx that approves the project (Claude-shaped config trusted). */
+const approvingCtx = (cwd: string) => ({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+
+describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  /** Write ~/.claude/CLAUDE.md under the mocked home and return its path. */
+  const writeUserClaudeMd = (content: string): string => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const file = join(hoisted.home, '.claude', 'CLAUDE.md')
+    writeFileSync(file, content)
+    return file
+  }
+
+  it('loads ~/.claude/CLAUDE.md as a User memory block, announced once at session_start', async () => {
+    const file = writeUserClaudeMd('USER GLOBAL RULES')
+    const cwd = tempDir()
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain('USER GLOBAL RULES')
+    expect(wired.instructionEvents()).toEqual([{ file_path: file, memory_type: 'User', load_reason: 'session_start' }])
+
+    // before_agent_start fires every turn; the User announce must not repeat.
+    await wired.fire(cwd)
+    expect(wired.instructionEvents()).toHaveLength(1)
+  })
+
+  it('places the user block after the managed block and before pi native project blocks', async () => {
+    // Claude's order: managed, then user, then project.
+    writeUserClaudeMd('USER RULES')
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ claudeMd: 'ORG POLICY' }))
+    const cwd = tempDir()
+    const native = { path: join(cwd, 'CLAUDE.md'), content: 'PROJECT NATIVE RULES' }
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, [native], assembledPrompt([native]))
+
+    expect(prompt.indexOf('ORG POLICY')).toBeLessThan(prompt.indexOf('USER RULES'))
+    expect(prompt.indexOf('USER RULES')).toBeLessThan(prompt.indexOf('PROJECT NATIVE RULES'))
+  })
+
+  it('resolves @imports in the user CLAUDE.md against user-scope roots', async () => {
+    // A user-config file may reach the rest of the user config; @extra.md sits in
+    // ~/.claude, which only the user-scope roots allow.
+    writeUserClaudeMd('USER RULES\n@extra.md')
+    writeFileSync(join(hoisted.home, '.claude', 'extra.md'), 'USER EXTRA CONTENT')
+    const cwd = tempDir()
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain('USER RULES')
+    expect(prompt).toContain('USER EXTRA CONTENT')
+  })
+
+  it('excludes the user CLAUDE.md when claudeMdExcludes matches it', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: ['~/.claude/CLAUDE.md'] }))
+    writeUserClaudeMd('USER RULES\n@extra.md')
+    writeFileSync(join(hoisted.home, '.claude', 'extra.md'), 'USER EXTRA CONTENT')
+    const cwd = tempDir()
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).not.toContain('USER RULES')
+    // An excluded file's imports must not be pulled in either.
+    expect(prompt).not.toContain('USER EXTRA CONTENT')
+    expect(wired.instructionEvents()).toEqual([])
+  })
+
+  it('strips block comments from the user CLAUDE.md body', async () => {
+    writeUserClaudeMd('USER KEEP\n<!-- user secret -->\nUSER TAIL')
+    const cwd = tempDir()
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain('USER KEEP')
+    expect(prompt).toContain('USER TAIL')
+    expect(prompt).not.toContain('user secret')
+  })
+
+  it('does nothing when there is no ~/.claude/CLAUDE.md', async () => {
+    const cwd = tempDir()
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    expect(await wired.fire(cwd)).toBe('BASE')
+    expect(wired.instructionEvents()).toEqual([])
+  })
+})
+
+describe('project CLAUDE.md alternate location (./.claude/CLAUDE.md)', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  /** Write ./.claude/CLAUDE.md under `dir` and return its path. */
+  const writeDotClaudeMd = (dir: string, content: string): string => {
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    const file = join(dir, '.claude', 'CLAUDE.md')
+    writeFileSync(file, content)
+    return file
+  }
+
+  const declining = (cwd: string) => ({ cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
+
+  it('loads the nearest ./.claude/CLAUDE.md as a Project block when the project is approved', async () => {
+    const cwd = tempDir()
+    const file = writeDotClaudeMd(cwd, 'DOT CLAUDE RULES')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain(instructionsBlock(file, 'DOT CLAUDE RULES'))
+    expect(wired.instructionEvents()).toContainEqual({ file_path: file, memory_type: 'Project', load_reason: 'session_start' })
+  })
+
+  it('does not load ./.claude/CLAUDE.md when the project is not approved', async () => {
+    // A cloned repo can ship .claude/CLAUDE.md; without approval it must not reach the prompt.
+    const cwd = tempDir()
+    writeDotClaudeMd(cwd, 'DOT CLAUDE RULES')
+
+    const wired = wireWithBus()
+    await wired.start(declining(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).not.toContain('DOT CLAUDE RULES')
+  })
+
+  it('finds ./.claude/CLAUDE.md at the repository root from a subdirectory session, imports included', async () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const file = writeDotClaudeMd(repo, 'ROOT DOT RULES\n@style.md')
+    writeFileSync(join(repo, '.claude', 'style.md'), 'DOT STYLE CONTENT')
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(sub))
+    const prompt = await wired.fire(sub)
+
+    expect(prompt).toContain('ROOT DOT RULES')
+    expect(prompt).toContain('DOT STYLE CONTENT')
+    expect(wired.instructionEvents()).toContainEqual({ file_path: file, memory_type: 'Project', load_reason: 'session_start' })
+  })
+
+  it('resolves @imports of ./.claude/CLAUDE.md against project roots', async () => {
+    // The importer sits in .claude; @../notes.md climbs to the project root, which
+    // the project-scope roots (cwd, repo root) allow.
+    const cwd = tempDir()
+    writeDotClaudeMd(cwd, 'DOT RULES\n@../notes.md')
+    writeFileSync(join(cwd, 'notes.md'), 'PROJECT NOTES CONTENT')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain('PROJECT NOTES CONTENT')
+  })
+
+  it('dedupes against a native context file: no double block if pi already loaded it', async () => {
+    const cwd = tempDir()
+    const file = writeDotClaudeMd(cwd, 'DOT CLAUDE RULES')
+    const native = { path: file, content: 'DOT CLAUDE RULES' }
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, [native], assembledPrompt([native]))
+
+    expect(prompt.match(/DOT CLAUDE RULES/g)).toHaveLength(1)
+  })
+
+  it('excludes ./.claude/CLAUDE.md when claudeMdExcludes matches, imports and all', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: ['**/.claude/CLAUDE.md'] }))
+    const cwd = tempDir()
+    writeDotClaudeMd(cwd, 'DOT CLAUDE RULES\n@notes.md')
+    writeFileSync(join(cwd, 'notes.md'), 'PROJECT NOTES CONTENT')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).not.toContain('DOT CLAUDE RULES')
+    expect(prompt).not.toContain('PROJECT NOTES CONTENT')
+    expect(wired.instructionEvents()).toEqual([])
+  })
+
+  it('strips block comments from ./.claude/CLAUDE.md', async () => {
+    const cwd = tempDir()
+    writeDotClaudeMd(cwd, 'DOT KEEP\n<!-- dot secret -->\nDOT TAIL')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain('DOT KEEP')
+    expect(prompt).toContain('DOT TAIL')
+    expect(prompt).not.toContain('dot secret')
+  })
+})
+
+describe('managed CLAUDE.md file', () => {
+  /** Write the managed CLAUDE.md file (alongside managed-settings.json) and return its path. */
+  const writeManagedFile = (content: string): string => {
+    const file = managedClaudeMdPath()
+    writeFileSync(file, content)
+    return file
+  }
+
+  const writeManagedSettings = (settings: Record<string, unknown>): void => {
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify(settings))
+  }
+
+  const writeUserSettings = (settings: Record<string, unknown>): void => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify(settings))
+  }
+
+  it('loads the managed CLAUDE.md file as a Managed block, announced at session_start', async () => {
+    const file = writeManagedFile('ORG FILE POLICY')
+    const cwd = tempDir()
+
+    const wired = wireWithBus()
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toContain(instructionsBlock(file, 'ORG FILE POLICY'))
+    expect(wired.instructionEvents()).toEqual([{ file_path: file, memory_type: 'Managed', load_reason: 'session_start' }])
+
+    // before_agent_start fires every turn; the Managed announce must not repeat.
+    await wired.fire(cwd)
+    expect(wired.instructionEvents()).toHaveLength(1)
+  })
+
+  it('loads the managed file before user and project context', async () => {
+    const file = writeManagedFile('ORG FILE POLICY')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'CLAUDE.md'), 'USER RULES')
+    const cwd = tempDir()
+    const native = { path: join(cwd, 'CLAUDE.md'), content: 'PROJECT NATIVE RULES' }
+
+    const wired = wireWithBus()
+    await wired.start({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+    const prompt = await wired.fire(cwd, [native], assembledPrompt([native]))
+
+    expect(prompt).toContain(instructionsBlock(file, 'ORG FILE POLICY'))
+    expect(prompt.indexOf('ORG FILE POLICY')).toBeLessThan(prompt.indexOf('USER RULES'))
+    expect(prompt.indexOf('USER RULES')).toBeLessThan(prompt.indexOf('PROJECT NATIVE RULES'))
+  })
+
+  it('merges the managed file before the managed settings-key when both exist', async () => {
+    // File content first, then the settings-key content, both managed policy.
+    const file = writeManagedFile('ORG FILE POLICY')
+    writeManagedSettings({ claudeMd: 'ORG KEY POLICY' })
+    const cwd = tempDir()
+
+    const prompt = await wireWithBus().fire(cwd)
+
+    expect(prompt).toContain(instructionsBlock(file, 'ORG FILE POLICY'))
+    expect(prompt).toContain(instructionsBlock(MANAGED_CLAUDE_MD_PATH, 'ORG KEY POLICY'))
+    expect(prompt.indexOf('ORG FILE POLICY')).toBeLessThan(prompt.indexOf('ORG KEY POLICY'))
+  })
+
+  it('never excludes the managed file, even with a catch-all claudeMdExcludes', async () => {
+    writeManagedFile('ORG FILE POLICY')
+    writeUserSettings({ claudeMdExcludes: ['**'] })
+    const cwd = tempDir()
+    const native = { path: join(cwd, 'CLAUDE.md'), content: 'PROJECT RULES' }
+
+    const prompt = await wireWithBus().fire(cwd, [native], assembledPrompt([native]))
+
+    expect(prompt).toContain('ORG FILE POLICY')
+    expect(prompt).not.toContain('PROJECT RULES')
+  })
+
+  it('strips block comments from the managed file body', async () => {
+    writeManagedFile('ORG KEEP\n<!-- managed note -->\nORG TAIL')
+    const cwd = tempDir()
+
+    const prompt = await wireWithBus().fire(cwd)
+
+    expect(prompt).toContain('ORG KEEP')
+    expect(prompt).toContain('ORG TAIL')
+    expect(prompt).not.toContain('managed note')
+  })
+
+  it('does nothing when there is no managed file and no managed key', async () => {
+    expect(await wireWithBus().fire(tempDir())).toBe('BASE')
   })
 })

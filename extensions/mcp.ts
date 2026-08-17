@@ -48,6 +48,7 @@ import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/webso
 import { PromptListChangedNotificationSchema, ResourceListChangedNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
 import { splitArgs } from './internal/command-file.js'
+import { claudeConfigDir } from './internal/config-dir.js'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
 import { setMcpToolCaller } from './internal/mcp-call.js'
 import { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } from './internal/mcp-oauth.js'
@@ -57,7 +58,14 @@ import { isProjectApproved, isProjectApprovedSilently } from './internal/project
 import { findNearestFile } from './internal/project-root.js'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
-const DEFAULT_CALL_TIMEOUT_MS = 120_000
+// Claude's MCP_TOOL_TIMEOUT default is effectively hours: the per-call wall-clock budget
+// is only a ceiling, and the idle timeout below is the real guard. 4h matches that model,
+// so a legitimately slow-but-progressing tool is not killed at the old 2 minutes.
+const DEFAULT_CALL_TIMEOUT_MS = 14_400_000
+// The idle timeout: the longest a call may go with no response or progress before it is
+// abandoned. Claude uses a separate idle guard (minutes) rather than the hours-long
+// wall-clock budget; the SDK resets this window on every progress notification.
+const DEFAULT_CALL_IDLE_TIMEOUT_MS = 300_000
 
 /** A positive-integer env override, or the default when unset or unparseable. */
 function envTimeout(name: string, fallback: number): number {
@@ -70,6 +78,33 @@ function envTimeout(name: string, fallback: number): number {
 // Claude honors MCP_TIMEOUT (connect) and MCP_TOOL_TIMEOUT (per-call), both in ms.
 const connectTimeoutMs = (): number => envTimeout('MCP_TIMEOUT', DEFAULT_CONNECT_TIMEOUT_MS)
 const callTimeoutMs = (): number => envTimeout('MCP_TOOL_TIMEOUT', DEFAULT_CALL_TIMEOUT_MS)
+
+/** The idle timeout in ms: the longest a call may go with no response or progress before
+ * it is abandoned, overridable by CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, with 0 disabling it
+ * (leaving only the wall-clock budget). Unlike envTimeout, an explicit 0 is honored as
+ * "disabled" rather than falling back to the default. */
+function idleTimeoutMs(): number {
+  const raw = process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT
+  if (raw === undefined) return DEFAULT_CALL_IDLE_TIMEOUT_MS
+  const value = Number.parseInt(raw, 10)
+  if (value === 0) return 0
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_CALL_IDLE_TIMEOUT_MS
+}
+
+/** The SDK RequestOptions for a call under pi's two-tier timeout: a wall-clock ceiling and,
+ * under it, an idle timeout the SDK resets on every progress notification. When the idle
+ * window is enabled and tighter than the wall budget, `timeout` is that per-quiet-period
+ * deadline (resetTimeoutOnProgress), maxTotalTimeout caps the wall clock, and an onprogress
+ * handler is required: it makes the server address progress to this request and lets the
+ * SDK reset the timer on it. When the idle timeout is disabled, or already looser than the
+ * wall budget, only the wall budget applies. The outer withTimeout race is a wall-clock
+ * backstop and must be raced against `wall`, never the idle window, so a legitimately
+ * progressing call is not cut off. */
+function callRequestOptions(wall: number): { timeout: number; resetTimeoutOnProgress?: boolean; maxTotalTimeout?: number; onprogress?: () => void } {
+  const idle = idleTimeoutMs()
+  if (idle === 0 || idle >= wall) return { timeout: wall }
+  return { timeout: idle, resetTimeoutOnProgress: true, maxTotalTimeout: wall, onprogress: () => {} }
+}
 // Tool names an MCP server must never take over. formatToolName always emits
 // `<server>_<tool>`, so only names containing an underscore are actually reachable:
 // pi's own built-ins (read, bash, edit, ...) cannot be produced and are not listed.
@@ -125,9 +160,19 @@ export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.e
   })
 }
 
-/** User-scoped MCP config (the user's own; safe to load without project trust). */
+/** The user's ~/.claude.json (top-level mcpServers plus the per-project `projects` map).
+ * When CLAUDE_CONFIG_DIR is set, Claude relocates .claude.json inside that directory; by
+ * default it stays at the home root, since .claude.json does NOT live inside ~/.claude. A
+ * blank value is treated as unset, matching claudeConfigDir. */
+function claudeJsonPath(home: string): string {
+  const override = process.env.CLAUDE_CONFIG_DIR
+  return override && override.trim().length > 0 ? path.join(claudeConfigDir(home), '.claude.json') : path.join(home, '.claude.json')
+}
+
+/** User-scoped MCP config (the user's own; safe to load without project trust). The .pi
+ * tree is pi's own and is not relocated by CLAUDE_CONFIG_DIR. */
 export function userConfigPaths(home: string): string[] {
-  return [path.join(home, '.claude.json'), path.join(home, '.pi', 'agent', 'mcp.json')]
+  return [claudeJsonPath(home), path.join(home, '.pi', 'agent', 'mcp.json')]
 }
 
 /** Project-scoped MCP config, each file the nearest of its name at or above cwd
@@ -163,7 +208,7 @@ export function projectServerPolicy(cwd: string, home: string, projectApproved: 
     }
   }
   const names = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [])
-  const userSettings = read(path.join(home, '.claude', 'settings.json'))
+  const userSettings = read(path.join(claudeConfigDir(home), 'settings.json'))
   const projectSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.json')) ?? path.join(cwd, '.claude', 'settings.json'))
   const localSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.local.json')) ?? path.join(cwd, '.claude', 'settings.local.json'))
   const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...names(localSettings.disabledMcpjsonServers)])
@@ -208,7 +253,7 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
 export function loadUserScope(home: string, cwd: string): Record<string, ServerConfig> {
   const servers = loadConfigFrom(userConfigPaths(home))
   try {
-    const claudeJson = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8'))
+    const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath(home), 'utf-8'))
     Object.assign(servers, claudeJson.projects?.[cwd]?.mcpServers ?? {})
   } catch {
     // missing or invalid ~/.claude.json: the top-level user servers already loaded
@@ -319,6 +364,47 @@ export function mcpAllowDeny(managedFile: string = managedSettingsFileOverride ?
     allowed: Array.isArray(settings.allowedMcpServers) ? new Set(names(settings.allowedMcpServers)) : null,
     denied: new Set(names(settings.deniedMcpServers)),
   }
+}
+
+/** The managed-mcp.json path: a sibling of managed-settings.json (same directory). Derived
+ * through the same test seam so a test can write both into one temp dir. */
+export function managedMcpPath(managedFile: string = managedSettingsFileOverride ?? managedSettingsPath()): string {
+  return path.join(path.dirname(managedFile), 'managed-mcp.json')
+}
+
+/** Claude's managed-mcp.json: when it exists beside managed-settings.json it takes
+ * exclusive control of MCP. Only its `mcpServers` load; user, project, and plugin servers
+ * are all suppressed (and the project-approval flow with them), and an empty map disables
+ * MCP entirely. Returns the managed server map (possibly empty) when the file exists and
+ * parses, or null only when the file is absent, in which case MCP loads from the usual
+ * scopes exactly as before. A file that parses but carries no `mcpServers` object is an
+ * empty managed set, so a deployed-but-bodyless policy locks down rather than silently
+ * reopening the other scopes. A file that is PRESENT but not valid JSON fails closed to
+ * the same empty set (deny-all) rather than reopening those scopes: the lockdown intent
+ * means a corrupt or truncated policy file must not become an allow-all. The allow/deny
+ * lists still filter the returned set. */
+export function loadManagedMcpServers(managedFile: string = managedSettingsFileOverride ?? managedSettingsPath()): Record<string, ServerConfig> | null {
+  const file = managedMcpPath(managedFile)
+  let raw: string
+  try {
+    raw = fs.readFileSync(file, 'utf-8')
+  } catch {
+    // Absent (or unreadable) managed-mcp.json: no managed MCP control, load normally.
+    return null
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    // Present but corrupt: fail closed to an empty managed set, exactly like an empty map,
+    // rather than reopening the user/project/plugin scopes.
+    console.warn(`pi-code-mcp: managed-mcp.json is present but not valid JSON (${file}); failing closed to no MCP servers: ${error instanceof Error ? error.message : String(error)}`)
+    return {}
+  }
+  if (parsed === null || typeof parsed !== 'object') return {}
+  const servers = (parsed as { mcpServers?: unknown }).mcpServers
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) return {}
+  return servers as Record<string, ServerConfig>
 }
 
 /** Claude's managed allow/deny lists: `allowed` null means no allow list (keep all);
@@ -799,7 +885,7 @@ function resourceTemplateEntry(server: string, template: { uriTemplate: string; 
 async function collectResources(entries: Array<Record<string, unknown>>, name: string, client: Client, budget: number): Promise<void> {
   let cursor: string | undefined
   do {
-    const page = await withTimeout(client.listResources({ cursor }, { timeout: budget }), budget, `list resources ${name}`)
+    const page = await withTimeout(client.listResources({ cursor }, callRequestOptions(budget)), budget, `list resources ${name}`)
     for (const resource of page.resources) entries.push(resourceEntry(name, resource))
     cursor = page.nextCursor
   } while (cursor)
@@ -809,7 +895,7 @@ async function collectResources(entries: Array<Record<string, unknown>>, name: s
 async function collectResourceTemplates(entries: Array<Record<string, unknown>>, name: string, client: Client, budget: number): Promise<void> {
   let cursor: string | undefined
   do {
-    const page = await withTimeout(client.listResourceTemplates({ cursor }, { timeout: budget }), budget, `list resource templates ${name}`)
+    const page = await withTimeout(client.listResourceTemplates({ cursor }, callRequestOptions(budget)), budget, `list resource templates ${name}`)
     for (const template of page.resourceTemplates) entries.push(resourceTemplateEntry(name, template))
     cursor = page.nextCursor
   } while (cursor)
@@ -845,7 +931,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   setMcpToolCaller(async (server, tool, input) => {
     const client = clients.get(server)
     if (!client) throw new Error(`MCP server "${server}" is not connected`)
-    const result = await client.callTool({ name: tool, arguments: input }, undefined, { timeout: callTimeoutMs() })
+    const result = await client.callTool({ name: tool, arguments: input }, undefined, callRequestOptions(callTimeoutMs()))
     const text = mapContent(result.content as McpContentBlock[], result.structuredContent)
       .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
       .map((part) => part.text)
@@ -883,12 +969,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           // and this closure would otherwise keep calling the old, closed client.
           const current = clients.get(name)
           if (!current) throw new Error(`MCP server "${name}" is not connected`)
-          // Pass the timeout to the SDK too: its own default request timeout is 60s and
-          // would otherwise reject first, so the outer race at CALL_TIMEOUT_MS was dead.
-          // Claude's per-server timeout wins over MCP_TOOL_TIMEOUT, with a 1s floor.
+          // The per-server timeout (Claude's, 1s floor) or MCP_TOOL_TIMEOUT is the
+          // wall-clock ceiling; callRequestOptions layers the idle timeout under it, which
+          // the SDK enforces (resetting on progress). Pass the options to the SDK too: its
+          // own default request timeout is 60s and would otherwise reject first. The outer
+          // race uses the wall budget, never the idle window, so a progressing call is not
+          // cut off at the idle timeout.
           const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
-          const budget = declared ?? callTimeoutMs()
-          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, { timeout: budget }), budget, toolName)
+          const wall = declared ?? callTimeoutMs()
+          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, callRequestOptions(wall)), wall, toolName)
           const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
           const details: { error?: string } = {}
           if (result.isError) {
@@ -940,8 +1029,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             const promptArgs = mapPromptArguments(prompt.arguments, args)
             const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
             if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
-            const budget = callTimeoutMs()
-            const result = await withTimeout(current.getPrompt(params, { timeout: budget }), budget, commandName)
+            const wall = callTimeoutMs()
+            const result = await withTimeout(current.getPrompt(params, callRequestOptions(wall)), wall, commandName)
             // The prompt drives a turn exactly the way a custom slash command does
             // (see commands.ts), carrying its image blocks through. A prompt that
             // yields no content is reported rather than sent as an empty turn.
@@ -1027,8 +1116,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         const { server, uri } = params as { server: string; uri: string }
         const client = clients.get(server)
         if (!client) throw new Error(`MCP server "${server}" is not connected`)
-        const budget = callTimeoutMs()
-        const result = await withTimeout(client.readResource({ uri }, { timeout: budget }), budget, `read ${uri}`)
+        const wall = callTimeoutMs()
+        const result = await withTimeout(client.readResource({ uri }, callRequestOptions(wall)), wall, `read ${uri}`)
         const blocks = (result.contents as Array<{ uri: string; text?: string; blob?: string; mimeType?: string }>).map((entry): McpContentBlock => {
           if (typeof entry.text === 'string') return { type: 'resource', resource: { uri: entry.uri, text: entry.text } }
           if (entry.blob && entry.mimeType?.startsWith('image/')) return { type: 'image', data: entry.blob, mimeType: entry.mimeType }
@@ -1143,15 +1232,32 @@ export default async function mcpExtension(pi: ExtensionAPI) {
 
   let projectConnected = false
 
-  pi.on('session_start', async (_event, ctx) => {
-    // Connecting spawns processes and opens sockets, so it belongs here rather than in
-    // the factory: pi runs the factory for invocations that never start a session.
-    // Names still connected are filtered out, so a later session start only retries
-    // servers that failed or whose transport dropped, without duplicate-name warnings.
+  /** managed-mcp.json exclusive mode: a policy deployed mid-process must not leave
+   * already-connected user/project servers running alongside the managed set. Evict every
+   * connected client not in the managed set (delete it from the map first so the onclose
+   * handler's guard sees it gone and does not overwrite the status, then close it
+   * best-effort and mark it disabled), then connect only the managed servers. */
+  async function connectManagedExclusive(managed: Record<string, ServerConfig>, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
+    const managedServers = applyServerPolicy(managed, allowed, denied)
+    const managedNames = new Set(Object.keys(managedServers))
+    for (const [name, client] of Array.from(clients.entries())) {
+      if (managedNames.has(name)) continue
+      clients.delete(name)
+      await client.close().catch(() => {})
+      status.set(name, { state: 'disabled by managed policy', tools: 0 })
+    }
+    await connectServers(managedServers, authUi)
+  }
+
+  /** The normal user + plugin + project scopes, when no managed-mcp.json is present.
+   * Connecting spawns processes and opens sockets, so it belongs here rather than in the
+   * factory: pi runs the factory for invocations that never start a session. Names still
+   * connected are filtered out, so a later session start only retries servers that failed
+   * or whose transport dropped, without duplicate-name warnings. */
+  async function connectNormalScopes(ctx: ExtensionContext, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
     // Plugin servers merge under the user scope (plugins are user-installed);
     // the user's own entry wins a name clash with a plugin's.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
-    const { allowed, denied } = mcpAllowDeny()
     const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
@@ -1165,7 +1271,6 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy)
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
-    const authUi = authUiFor(ctx)
     // The consented project servers carry no ordering dependency on the user scope:
     // projectWinners already excludes their names from userServers, so the two batches
     // are disjoint and connect concurrently, and startup pays the slower scope rather
@@ -1181,6 +1286,23 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // whole-project confirm, and the rest stay behind it, sequentially after both
     // scopes so the confirm dialog never races a connect.
     if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
+  }
+
+  pi.on('session_start', async (_event, ctx) => {
+    const authUi = authUiFor(ctx)
+    // The managed allow/deny lists filter every scope, including a managed-mcp.json set.
+    const { allowed, denied } = mcpAllowDeny()
+    // managed-mcp.json (beside managed-settings.json) takes exclusive control when present:
+    // only its servers load, and the user, project, and plugin scopes plus the whole
+    // project-approval flow below are skipped. An empty map disables MCP entirely. An absent
+    // file leaves the normal scopes untouched; a present but corrupt file fails closed to an
+    // empty set (see loadManagedMcpServers).
+    const managed = loadManagedMcpServers()
+    if (managed !== null) {
+      await connectManagedExclusive(managed, allowed, denied, authUi)
+    } else {
+      await connectNormalScopes(ctx, allowed, denied, authUi)
+    }
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
 

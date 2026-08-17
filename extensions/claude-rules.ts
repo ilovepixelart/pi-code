@@ -21,6 +21,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './internal/config-dir.js'
 import { publishInstructionLoad } from './internal/instruction-events.js'
 import { type CompiledGlob, compileGlobs, matchesCompiledGlobs } from './internal/path-rules.js'
 import { isProjectApproved } from './internal/project-approval.js'
@@ -210,7 +211,7 @@ export function pendingScopedRuleCount(): number {
 }
 
 export default function claudeRulesExtension(pi: ExtensionAPI) {
-  const globalRulesDir = path.join(os.homedir(), '.claude', 'rules')
+  const globalRulesDir = path.join(claudeConfigDir(os.homedir()), 'rules')
   let globalRules: RuleSet = EMPTY_RULES
   let projectRules: RuleSet = EMPTY_RULES
   // The base a scoped-rule pointer is written against, so the model's read resolves.

@@ -15,6 +15,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { findNearestDir } from './internal/project-root.js'
@@ -33,7 +34,7 @@ function isDirectory(target: string): boolean {
  * name and description to the model, so an untrusted repository would otherwise get
  * text into the prompt without the user ever agreeing to load its config. */
 export function skillDirs(cwd: string, home: string, trusted: boolean): string[] {
-  const candidates = [path.join(home, '.claude', 'skills')]
+  const candidates = [path.join(claudeConfigDir(home), 'skills')]
   // Enabled plugins contribute their skills directories. pi's loader names a
   // skill by its directory, so a plugin skill registers without Claude's
   // /plugin: prefix; a rename-free approximation, disclosed in the README.
