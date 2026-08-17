@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { matchesPathRules } from '../extensions/internal/path-rules.ts'
+import { globToRegExpSource, matchesPathRules } from '../extensions/internal/path-rules.ts'
 
 const anchors = { cwd: '/repo/app', projectRoot: '/repo', home: '/home/alex' }
 
@@ -38,5 +38,53 @@ describe('matchesPathRules', () => {
     expect(matchesPathRules('../secrets.txt', ['**'], anchors)).toBe(false)
     expect(matchesPathRules('../secrets.txt', ['//repo/**'], anchors)).toBe(true)
     expect(matchesPathRules('a.ts', [], anchors)).toBe(false)
+  })
+})
+
+describe('brace expansion', () => {
+  it('expands {ts,tsx} so one rule covers both extensions', () => {
+    const rules = ['src/**/*.{ts,tsx}']
+    expect(matchesPathRules('src/a.ts', rules, anchors)).toBe(true)
+    expect(matchesPathRules('src/b.tsx', rules, anchors)).toBe(true)
+    expect(matchesPathRules('src/nested/deep/b.tsx', rules, anchors)).toBe(true)
+    expect(matchesPathRules('src/c.js', rules, anchors)).toBe(false)
+  })
+
+  it('takes the Cartesian product across groups and expands nested groups', () => {
+    const cartesian = ['{a,b}/{c,d}.ts']
+    expect(matchesPathRules('a/c.ts', cartesian, anchors)).toBe(true)
+    expect(matchesPathRules('a/d.ts', cartesian, anchors)).toBe(true)
+    expect(matchesPathRules('b/c.ts', cartesian, anchors)).toBe(true)
+    expect(matchesPathRules('b/d.ts', cartesian, anchors)).toBe(true)
+    expect(matchesPathRules('a/e.ts', cartesian, anchors)).toBe(false)
+    const nested = ['src/{a,{b,c}}.ts']
+    expect(matchesPathRules('src/a.ts', nested, anchors)).toBe(true)
+    expect(matchesPathRules('src/b.ts', nested, anchors)).toBe(true)
+    expect(matchesPathRules('src/c.ts', nested, anchors)).toBe(true)
+    expect(matchesPathRules('src/d.ts', nested, anchors)).toBe(false)
+  })
+
+  it('allows an empty alternative', () => {
+    const rules = ['file.{ts,}']
+    expect(matchesPathRules('file.ts', rules, anchors)).toBe(true)
+    expect(matchesPathRules('file.', rules, anchors)).toBe(true)
+    expect(matchesPathRules('file.tsx', rules, anchors)).toBe(false)
+  })
+
+  it('keeps a comma-less group, an unmatched brace, and a bare comma literal', () => {
+    expect(matchesPathRules('a{b}c.ts', ['a{b}c.ts'], anchors)).toBe(true)
+    expect(matchesPathRules('abc.ts', ['a{b}c.ts'], anchors)).toBe(false)
+    expect(matchesPathRules('weird{name.ts', ['weird{name.ts'], anchors)).toBe(true)
+    expect(matchesPathRules('a,b.ts', ['a,b.ts'], anchors)).toBe(true)
+  })
+
+  it('falls back to the unexpanded pattern past the expansion budget', () => {
+    const group = '{a,b,c,d,e,f,g,h,i,j}'
+    const over = `${group.repeat(4)}.ts` // 10^4 alternatives, over the 1000 budget
+    const overRegExp = new RegExp(`^${globToRegExpSource(over)}$`)
+    expect(overRegExp.test(`${group.repeat(4)}.ts`)).toBe(true)
+    expect(overRegExp.test('abcd.ts')).toBe(false)
+    const atLimit = `${group.repeat(3)}.ts` // exactly 1000, still expands
+    expect(new RegExp(`^${globToRegExpSource(atLimit)}$`).test('adg.ts')).toBe(true)
   })
 })

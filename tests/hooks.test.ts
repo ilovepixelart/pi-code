@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { formatHooksSummary, type HookRunner, hookFiles, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, readDisableAllHooks, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
+import { formatHooksSummary, type HookRunner, hookFiles, httpUrlAllowed, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, readAllowedHttpHookUrls, readDisableAllHooks, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
@@ -597,6 +597,88 @@ describe('http hooks', () => {
     const config = { PreToolUse: [{ hooks: [{ type: 'http', command: srvError.url, url: srvError.url }] }] }
     const decision = await runPreToolUse(config, 'bash', {}, async () => failing)
     expect(decision.block).toBe(false)
+  })
+
+  it('fetches a URL matching the allowlist and never fetches one that misses it', async () => {
+    let hits = 0
+    const srv = await serve((_req, res) => {
+      hits++
+      res.writeHead(200)
+      res.end()
+    })
+    const hook = { type: 'http', command: srv.url, url: srv.url }
+
+    const allowed = await runHttpHook(hook, {}, 5000, ['http://127.0.0.1:*/hook'])
+    const denied = await runHttpHook(hook, {}, 5000, ['https://hooks.example.com/*'])
+    const blockedAll = await runHttpHook(hook, {}, 5000, [])
+    await srv.close()
+
+    expect(allowed).toMatchObject({ code: 0, timedOut: false })
+    expect(hits).toBe(1)
+    // A denied hook renders no decision, like every other http failure: non-blocking.
+    for (const result of [denied, blockedAll]) {
+      expect(result.timedOut).toBe(false)
+      expect(result.code).not.toBe(0)
+      expect(result.code).not.toBe(2)
+      expect(result.stderr).toContain('allowedHttpHookUrls')
+    }
+  })
+})
+
+describe('httpUrlAllowed', () => {
+  it('matches allowlist entries with * as a wildcard, whole-URL otherwise', () => {
+    expect(httpUrlAllowed('https://hooks.example.com/pre', ['https://hooks.example.com/*'])).toBe(true)
+    expect(httpUrlAllowed('https://hooks.example.com/pre', ['*'])).toBe(true)
+    expect(httpUrlAllowed('https://evil.example.com/pre', ['https://hooks.example.com/*'])).toBe(false)
+    // Without a wildcard the whole URL must match; a prefix is not enough.
+    expect(httpUrlAllowed('https://hooks.example.com/pre', ['https://hooks.example.com'])).toBe(false)
+    expect(httpUrlAllowed('https://hooks.example.com', ['https://hooks.example.com'])).toBe(true)
+  })
+
+  it('treats regex characters in a pattern as literals', () => {
+    expect(httpUrlAllowed('https://hooksXexample.com/', ['https://hooks.example.com/'])).toBe(false)
+    expect(httpUrlAllowed('https://h.example.com/a+b', ['https://h.example.com/a+b'])).toBe(true)
+  })
+
+  it('is unrestricted when undefined and blocks everything on an empty list', () => {
+    // Claude: undefined = no restrictions, empty array = block all http hooks.
+    expect(httpUrlAllowed('https://anywhere.example/', undefined)).toBe(true)
+    expect(httpUrlAllowed('https://anywhere.example/', [])).toBe(false)
+  })
+})
+
+describe('readAllowedHttpHookUrls', () => {
+  it('is undefined when no settings source sets the key', () => {
+    const dir = tempDir()
+    const file = join(dir, 'settings.json')
+    writeFileSync(file, JSON.stringify({ hooks: {} }))
+    expect(readAllowedHttpHookUrls([file, join(dir, 'absent.json')], {})).toBeUndefined()
+  })
+
+  it('merges entries across managed settings and the chain, skipping non-strings', () => {
+    // Claude documents allowedHttpHookUrls arrays as merging across settings sources.
+    const dir = tempDir()
+    const user = join(dir, 'user.json')
+    const local = join(dir, 'local.json')
+    writeFileSync(user, JSON.stringify({ allowedHttpHookUrls: ['https://a.example/*'] }))
+    writeFileSync(local, JSON.stringify({ allowedHttpHookUrls: ['https://b.example/*', 42] }))
+    expect(readAllowedHttpHookUrls([user, local], { allowedHttpHookUrls: ['https://m.example/*'] })).toEqual(['https://m.example/*', 'https://a.example/*', 'https://b.example/*'])
+  })
+
+  it('keeps an empty array as enforce-and-block-all rather than reading it as absent', () => {
+    const dir = tempDir()
+    const file = join(dir, 'settings.json')
+    writeFileSync(file, JSON.stringify({ allowedHttpHookUrls: [] }))
+    expect(readAllowedHttpHookUrls([file], {})).toEqual([])
+  })
+
+  it('ignores a non-array value and malformed files', () => {
+    const dir = tempDir()
+    const junk = join(dir, 'junk.json')
+    const broken = join(dir, 'broken.json')
+    writeFileSync(junk, JSON.stringify({ allowedHttpHookUrls: 'https://a.example/*' }))
+    writeFileSync(broken, '{not json')
+    expect(readAllowedHttpHookUrls([junk, broken], {})).toBeUndefined()
   })
 })
 

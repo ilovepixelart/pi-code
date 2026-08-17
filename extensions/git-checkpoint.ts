@@ -13,12 +13,15 @@
  * the checkpoint (files created after the checkpoint are left in place).
  */
 
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 const CUSTOM_TYPE = 'git-checkpoint'
+/** Sidecar inside the bare shadow repo recording the work tree it snapshots. */
+const WORK_TREE_FILE = 'pi-work-tree'
 const PROMPT_SNIPPET_LENGTH = 60
 const RESTORE_MODES = ['Code and conversation', 'Conversation only', 'Code only']
 
@@ -70,6 +73,31 @@ export function pruneCheckpointRepos(root: string, retentionDays: number, keepDi
 export function sessionSlug(sessionFile: string | undefined): string {
   if (!sessionFile) return `ephemeral-${process.pid}`
   return path.basename(sessionFile).replace(/[^\w.-]+/g, '_')
+}
+
+/** A stable per-directory key, so a session resumed elsewhere gets its own shadow. */
+function cwdSlug(cwd: string): string {
+  const resolved = path.resolve(cwd)
+  const hash = createHash('sha256').update(resolved).digest('hex').slice(0, 8)
+  return `${path.basename(resolved).replace(/[^\w.-]+/g, '_')}-${hash}`
+}
+
+/** The work tree a shadow repo was created against, or undefined for a repo that
+ * predates the sidecar or does not exist yet. */
+function recordedWorkTree(shadowDir: string): string | undefined {
+  try {
+    return fs.readFileSync(path.join(shadowDir, WORK_TREE_FILE), 'utf8').trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function rememberWorkTree(shadowDir: string, cwd: string): void {
+  try {
+    fs.writeFileSync(path.join(shadowDir, WORK_TREE_FILE), `${cwd}\n`)
+  } catch {
+    // best effort: without the marker the next resume simply cannot detect a move
+  }
 }
 
 function extractText(content: unknown): string {
@@ -134,6 +162,16 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.()
     const checkpointsRoot = path.join(os.homedir(), '.pi', 'agent', 'checkpoints')
     shadowDir = path.join(checkpointsRoot, sessionSlug(sessionFile))
+    // A resumed session can arrive from a different directory than the one the shadow
+    // snapshotted; restoring those commits here would silently overwrite unrelated
+    // same-named files. Key a fresh shadow to this directory instead of ever checking
+    // one tree out into another. Resuming back in the recorded directory takes the
+    // original shadow again, so its checkpoints stay restorable there.
+    const recorded = recordedWorkTree(shadowDir)
+    if (recorded && path.resolve(recorded) !== path.resolve(ctx.cwd)) {
+      shadowDir = path.join(checkpointsRoot, `${sessionSlug(sessionFile)}-${cwdSlug(ctx.cwd)}`)
+      ctx.ui.notify(`Checkpoints for this session were recorded in ${recorded}; starting fresh checkpoints for ${ctx.cwd} (earlier ones are not restorable here)`, 'warning')
+    }
     pruneCheckpointRepos(checkpointsRoot, CHECKPOINT_RETENTION_DAYS, shadowDir)
     const check = await pi.exec('git', ['--git-dir', shadowDir, 'rev-parse', '--git-dir'], { cwd: ctx.cwd })
     if (check.code !== 0) {
@@ -147,6 +185,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       await pi.exec('git', ['--git-dir', shadowDir, 'config', 'user.email', 'checkpoint@pi-code'], { cwd: ctx.cwd })
       await pi.exec('git', ['--git-dir', shadowDir, 'config', 'user.name', 'pi-code-checkpoint'], { cwd: ctx.cwd })
     }
+    // Written on every start, so repos that predate the sidecar pick it up too.
+    rememberWorkTree(shadowDir, ctx.cwd)
   }
 
   /** `checkout -f <ref> -- .` errors when the ref's tree holds no files, so an empty

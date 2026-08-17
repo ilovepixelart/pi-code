@@ -687,6 +687,32 @@ describe('startBackgroundRun', () => {
   })
 })
 
+describe('finished-run eviction', () => {
+  const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
+
+  it('evicts the earliest-finished run past the cap, not the earliest-started', async () => {
+    const { startBackgroundRun, backgroundRun, MAX_FINISHED_RUNS } = await loadBackground()
+    // The long run starts first but outlives every short run.
+    const longId = startBackgroundRun('scout', 'long survey', invocation, () => {}) as string
+    const shortIds: string[] = []
+    for (let i = 0; i <= MAX_FINISHED_RUNS; i++) {
+      shortIds.push(startBackgroundRun('scout', `short ${i}`, invocation, () => {}) as string)
+      spawned.children[i + 1].emit('close', 0)
+    }
+    // One more short finished than the cap keeps: the earliest-finished one is gone.
+    expect(backgroundRun(shortIds[0])).toBeUndefined()
+    expect(backgroundRun(longId)?.state).toBe('running')
+
+    // The long run finishes last of all. Eviction in start order would delete it the
+    // instant it completes; it must survive as the newest finisher, with the
+    // next-earliest-finished short run going instead.
+    spawned.children[0].emit('close', 0)
+    expect(backgroundRun(longId)?.state).toBe('done')
+    expect(backgroundRun(shortIds[1])).toBeUndefined()
+    expect(backgroundRun(shortIds.at(-1) as string)).toBeDefined()
+  })
+})
+
 describe('agent skills preload', () => {
   it('parses a skills list and appends the named skill bodies to the prompt', () => {
     const skillsRoot = join(fakeHome.path, '.claude', 'skills')

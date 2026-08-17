@@ -651,6 +651,65 @@ describe('empty snapshots', () => {
   })
 })
 
+describe('resume from a different working directory', () => {
+  /** Checkpoint in the original repo, then resume the same session from another
+   * directory holding an unrelated file of the same name. */
+  async function resumeElsewhere(t: Harness): Promise<{ other: string; entry: any }> {
+    writeFileSync(join(t.repo, 'only-in-original.txt'), 'from the original tree\n')
+    await checkpointOneTurn(t)
+    const entry = checkpointEntry({ entryId: 'user0001', ref: t.appended[0].data.ref, prompt: 'earlier prompt' })
+    const other = mkdtempSync(join(tmpdir(), 'gcm-moved-'))
+    tempDirs.push(other)
+    writeFileSync(join(other, 'tracked.txt'), 'unrelated file, same name\n')
+    await t.handlers.get('session_start')?.({ reason: 'resume' }, t.makeCtx({ cwd: other, entries: [entry] }))
+    return { other, entry }
+  }
+
+  it('never restores the original directory snapshot over the resumed directory', async () => {
+    const t = setup()
+    const { other, entry } = await resumeElsewhere(t)
+
+    await rewind(t, { cwd: other, entries: [entry], branch: [userEntry], answers: [0, 'Code only'] })
+
+    // The snapshot holds the original tree; checking it out here would silently
+    // overwrite this unrelated same-named file and materialize the original's files.
+    expect(readFileSync(join(other, 'tracked.txt'), 'utf8')).toBe('unrelated file, same name\n')
+    expect(existsSync(join(other, 'only-in-original.txt'))).toBe(false)
+  })
+
+  it('notifies that earlier checkpoints belong to another directory', async () => {
+    const t = setup()
+    await resumeElsewhere(t)
+
+    expect(t.notifications.some((n) => n.startsWith('[warning]') && n.includes(t.repo))).toBe(true)
+  })
+
+  it('checkpoints the resumed directory in a fresh shadow and restores it normally', async () => {
+    const t = setup()
+    const { other } = await resumeElsewhere(t)
+
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other }))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other, branch: [messageEntry('user0002', 'work here')] }))
+    expect(t.appended).toHaveLength(2)
+    writeFileSync(join(other, 'tracked.txt'), 'edited after the move\n')
+
+    await rewind(t, { cwd: other, answers: [0, 'Code only'] })
+
+    expect(readFileSync(join(other, 'tracked.txt'), 'utf8')).toBe('unrelated file, same name\n')
+  })
+
+  it('keeps the original checkpoints restorable when resumed back in the original directory', async () => {
+    const t = setup()
+    const { entry } = await resumeElsewhere(t)
+    writeFileSync(join(t.repo, 'tracked.txt'), 'edited meanwhile\n')
+
+    await t.handlers.get('session_start')?.({ reason: 'resume' }, t.makeCtx({ entries: [entry] }))
+    await rewind(t, { entries: [entry], branch: [userEntry], answers: [0, 'Code only'] })
+
+    expect(readFileSync(join(t.repo, 'tracked.txt'), 'utf8')).toBe('v1\n')
+  })
+})
+
 describe('shadow repo init failure', () => {
   it('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
     const t = setup()

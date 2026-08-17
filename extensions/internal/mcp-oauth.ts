@@ -49,6 +49,11 @@ export class FileOAuthProvider implements OAuthClientProvider {
   private readonly data: StoredAuth
   private port = 0
   private readonly onRedirect: (authorizationUrl: URL) => void
+  // A fresh random CSRF token per login attempt. The SDK puts it in the authorization
+  // URL's `state` param, the server echoes it back on the redirect, and waitForAuthCode
+  // rejects any callback that does not carry it, so another local process or an open web
+  // page cannot inject an authorization code into this login (RFC 8252 8.9).
+  private readonly loginState = crypto.randomBytes(16).toString('hex')
 
   constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void) {
     this.storePath = storeFileFor(serverName)
@@ -117,6 +122,12 @@ export class FileOAuthProvider implements OAuthClientProvider {
     return this.data.tokens !== undefined
   }
 
+  /** The CSRF token the SDK adds to the authorization URL as `state`; waitForAuthCode
+   * verifies the redirect echoes exactly this value. */
+  state(): string {
+    return this.loginState
+  }
+
   redirectToAuthorization(authorizationUrl: URL): void {
     this.onRedirect(authorizationUrl)
   }
@@ -147,11 +158,30 @@ export async function startCallbackServer(preferredPort?: number): Promise<{ ser
   return { server, port: (server.address() as { port: number }).port }
 }
 
-export function waitForAuthCode(server: http.Server, timeoutMs: number): Promise<string> {
+export function waitForAuthCode(server: http.Server, timeoutMs: number, expectedState?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`authorization timed out after ${timeoutMs}ms`)), timeoutMs)
+    // Do not let the pending timer keep the process alive on its own: if the login is
+    // abandoned or resolved out of band, the event loop can still drain.
+    timer.unref?.()
     server.on('request', (request, response) => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      // Only the redirect path settles the login. A stray request (a favicon fetch, a
+      // local port scan, or a forged redirect from another process or an open web page)
+      // is answered but ignored, so it can neither inject a code nor abort the login by
+      // rejecting the promise (a repeatable DoS on a stable, guessable loopback port).
+      if (url.pathname !== '/callback') {
+        response.writeHead(404, { 'content-type': 'text/plain' })
+        response.end('not found')
+        return
+      }
+      // The CSRF check: a callback that does not echo this login's state is rejected
+      // without settling, so an attacker who cannot read the state cannot complete it.
+      if (expectedState !== undefined && url.searchParams.get('state') !== expectedState) {
+        response.writeHead(400, { 'content-type': 'text/plain' })
+        response.end('state mismatch')
+        return
+      }
       const code = url.searchParams.get('code')
       const error = url.searchParams.get('error')
       response.writeHead(200, { 'content-type': 'text/html' })

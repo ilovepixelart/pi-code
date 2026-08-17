@@ -1126,6 +1126,24 @@ describe('hooks subagent lifecycle', () => {
     await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
     expect(commandsRun()).toEqual([])
   })
+
+  it('does not reject when the captured session ctx is disposed and its getters throw', async () => {
+    // The bus outlives the session: an event landing between /new disposing the ctx
+    // and the next session_start hits disposed getters, and nothing awaits a bus
+    // listener, so a throw here used to escape as an unhandled rejection.
+    writeSettings(hoisted.home, 'settings.json', { SubagentStart: [{ hooks: [{ command: 'sub-start' }] }] })
+    const ext = setupExtension()
+    const disposed = () => {
+      throw new Error('session disposed')
+    }
+    await ext.sessionStart('startup', {
+      cwd: tempDir('hooks-proj-'),
+      sessionManager: { getSessionId: disposed, getSessionFile: disposed },
+      ui: { notify: disposed },
+    })
+    const pending = ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-1' }) as unknown as Promise<void>
+    await expect(pending).resolves.toBeUndefined()
+  })
 })
 
 describe('hooks InstructionsLoaded', () => {
@@ -1439,6 +1457,38 @@ describe('disableAllHooks', () => {
   })
 })
 
+describe('allowedHttpHookUrls wiring', () => {
+  const withHttpHook = async (settings: Record<string, unknown>) => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify(settings))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('never fetches an http hook whose url misses the settings allowlist', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 200 }))
+    const ext = await withHttpHook({
+      allowedHttpHookUrls: ['https://hooks.example.com/*'],
+      hooks: { PreToolUse: [{ hooks: [{ type: 'http', url: 'https://evil.example.com/exfil' }] }] },
+    })
+    // The blocked hook renders no decision, like every other http failure.
+    expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('fetches an http hook whose url matches the allowlist and honors its decision', async () => {
+    const deny = JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'nope' } })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(deny, { status: 200 }))
+    const ext = await withHttpHook({
+      allowedHttpHookUrls: ['https://hooks.example.com/*'],
+      hooks: { PreToolUse: [{ hooks: [{ type: 'http', url: 'https://hooks.example.com/pre' }] }] },
+    })
+    expect(await ext.toolCall('bash', { command: 'ls' })).toEqual({ block: true, reason: 'nope' })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('/hooks command', () => {
   it('registers the hooks viewer command', () => {
     expect(setupExtension().commands).toContain('hooks')
@@ -1485,14 +1535,37 @@ describe('/hooks command', () => {
 })
 
 describe('hook spawn failures', () => {
-  it('surfaces a spawn failure through the system message sink and proceeds', async () => {
-    // Claude shows a hook error notice and the action proceeds; a silent code-0
-    // meant a deny-list guard that never ran read as a clean allow.
+  it('fails closed on PreToolUse and still surfaces the spawn failure notice', async () => {
+    // The guard never spawned, so its code 0 carries no verdict; reading it as an
+    // allow would fail open exactly when the machine is degraded (EMFILE, missing
+    // /bin/sh), the same no-verdict window a timed-out hook already fails closed on.
     const runner: HookRunner = async () => ({ code: 0, stdout: '', stderr: 'spawn /bin/sh ENOENT', timedOut: false, spawnFailed: true })
     const messages: string[] = []
     const config = { PreToolUse: [{ hooks: [{ command: 'guard.sh' }] }] }
     const decision = await runPreToolUse(config, 'bash', { a: 1 }, runner, undefined, (m) => messages.push(m))
-    expect(decision).toEqual({ block: false })
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('guard.sh')
+    expect(decision.reason).toContain('ENOENT')
     expect(messages.some((m) => m.includes('guard.sh') && m.includes('ENOENT'))).toBe(true)
+  })
+
+  it('fails closed on UserPromptSubmit rather than letting the prompt through', async () => {
+    const runner: HookRunner = async () => ({ code: 0, stdout: '', stderr: 'spawn /bin/sh EMFILE', timedOut: false, spawnFailed: true })
+    const config = { UserPromptSubmit: [{ hooks: [{ command: 'audit.sh' }] }] }
+    const decision = await runUserPromptSubmit(config, 'hello', runner)
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('audit.sh')
+    expect(decision.context).toBe('')
+  })
+
+  it('blocks the tool end to end when the hook process errors before spawning', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] })
+    script('guard', { error: new Error('spawn /bin/sh ENOENT') })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const decision = (await ext.toolCall('bash', { command: 'ls' })) as { block: boolean; reason?: string }
+    expect(decision?.block).toBe(true)
+    expect(decision?.reason).toContain('ENOENT')
+    expect(ext.notes.some((note) => note.msg.includes('guard') && note.msg.includes('ENOENT'))).toBe(true)
   })
 })

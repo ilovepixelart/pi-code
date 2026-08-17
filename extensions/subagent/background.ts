@@ -26,6 +26,10 @@ export interface BackgroundRun {
   /** True until the child process actually closes: a cancelled child that ignores
    * SIGTERM is still alive and must keep holding its concurrency slot. */
   live?: boolean
+  /** Monotonic finish order, stamped when the run completes. Eviction drops the
+   * earliest-finished runs by this, not Map insertion (start) order: a long run
+   * started first but finished last must not vanish the instant it completes. */
+  finishedAt?: number
   /** pi session the child ran under, so a follow-up can continue its context. */
   sessionId: string
   /** How the child was spawned, so a follow-up can repeat it with a new task. */
@@ -63,8 +67,13 @@ export function activeBackgroundRuns(): number {
   return [...runs.values()].filter((run) => run.live || run.state === 'running').length
 }
 
+/** Stamps BackgroundRun.finishedAt; a counter rather than a clock so two runs
+ * completing in the same millisecond still evict in their true finish order. */
+let finishSequence = 0
+
 function evictFinishedRuns(): void {
   const finished = [...runs.values()].filter((run) => !run.live && run.state !== 'running')
+  finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
   for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_RUNS))) runs.delete(stale.id)
 }
 
@@ -160,6 +169,7 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   run.output = undefined
   run.exitCode = undefined
   run.stderr = undefined
+  run.finishedAt = undefined
   driveRun(run, { ...run.spawn, args }, onComplete)
   return 'resumed'
 }
@@ -256,6 +266,7 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   const complete = (): void => {
     if (completed) return
     completed = true
+    run.finishedAt = ++finishSequence
     evictFinishedRuns()
     // A run outlives the session that started it, and pi's loader wires assertActive()
     // into every runtime call, so notifying a disposed session throws. This fires from
