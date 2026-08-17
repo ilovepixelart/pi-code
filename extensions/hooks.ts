@@ -276,6 +276,23 @@ function isRunnableHook(hook: HookCommand): boolean {
   return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
 }
 
+/** The synthetic identity of a non-shell hook entry: an http/prompt/agent/mcp_tool
+ * entry has no `command`, so its url / prompt / server:tool stands in. A shell hook
+ * (undefined or `command` type) already has one, so this is undefined. */
+function syntheticCommand(hook: HookCommand): string | undefined {
+  if (hook.type === 'http') return hook.url
+  if (hook.type === 'prompt' || hook.type === 'agent') return hook.prompt
+  if (hook.type === 'mcp_tool') return `${hook.server}:${hook.tool}`
+  return undefined
+}
+
+/** A matched entry with its `command` filled in: mirroring the synthetic identity into
+ * `command` keeps dedup, timeout messages and display working for non-shell hooks. */
+function withCommand(raw: HookCommand): HookCommand {
+  const identity = syntheticCommand(raw)
+  return identity !== undefined && typeof raw.command !== 'string' ? { ...raw, command: identity } : raw
+}
+
 /** Command specs whose matcher applies to any of the given tool/source names.
  * Multiple candidates let one event offer both the pi name and its Claude alias. */
 export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
@@ -285,11 +302,7 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
   for (const entry of matchers ?? []) {
     if (!matcherApplies(entry.matcher, candidates)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
-      // An http/prompt/agent/mcp_tool entry has no `command`; its identity is the
-      // url / prompt / server:tool. Mirroring it into `command` keeps dedup, timeout
-      // messages and display working.
-      const identity = raw.type === 'http' ? raw.url : raw.type === 'prompt' || raw.type === 'agent' ? raw.prompt : raw.type === 'mcp_tool' ? `${raw.server}:${raw.tool}` : undefined
-      const hook = identity !== undefined && typeof raw.command !== 'string' ? { ...raw, command: identity } : raw
+      const hook = withCommand(raw)
       // Claude runs a handler defined in more than one settings file once.
       if (seen.has(hook.command)) continue
       seen.add(hook.command)
@@ -325,8 +338,9 @@ export function formatHooksSummary(config: HooksConfig, sources?: Map<HookMatche
     for (const entry of matchers) {
       const matcher = entry.matcher || '*'
       const source = sources?.get(entry)
+      const suffix = source ? ` (${source})` : ''
       for (const hook of entry.hooks ?? []) {
-        entryLines.push(`  [${matcher}] ${hookIdentity(hook)}${source ? ` (${source})` : ''}`)
+        entryLines.push(`  [${matcher}] ${hookIdentity(hook)}${suffix}`)
       }
     }
     if (entryLines.length > 0) lines.push(`${event}:`, ...entryLines)
@@ -432,7 +446,7 @@ function interpolateHeaders(headers: Record<string, string> | undefined, allowed
   const allowedSet = new Set(allowed ?? [])
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(headers ?? {})) {
-    out[key] = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_token, braced?: string, bare?: string) => {
+    out[key] = value.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_token, braced?: string, bare?: string) => {
       const name = braced ?? bare ?? ''
       return allowedSet.has(name) ? (process.env[name] ?? '') : ''
     })
@@ -709,6 +723,22 @@ function claudeSpelling(map: Record<string, string>, raw: string): { names: stri
   return { names: value === raw ? [raw] : [raw, value], value }
 }
 
+/** The feedback lines one PostToolUse/PostToolUseFailure result appends next to the
+ * tool result: a block notice (exit-2 stderr, or decision:block on success) followed
+ * by any additionalContext. A failed tool cannot be blocked, so its stderr is shown
+ * but never a decision:block verdict. */
+function postToolFeedback(result: HookRunResult, eventName: string, isError: boolean): string[] {
+  const lines: string[] = []
+  const parsed = tryParseJson(result.stdout)
+  // A failed tool cannot be blocked, but the hook's stderr is still shown; on
+  // success, exit-2 / decision:block feed back as a block notice.
+  if (!result.timedOut && result.code === 2) lines.push(`${eventName} hook: ${result.stderr.trim() || (isError ? 'hook reported an error' : 'Blocked by hook')}`)
+  else if (!isError && parsed?.decision === 'block') lines.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
+  const context = parsed?.hookSpecificOutput?.additionalContext
+  if (context) lines.push(context)
+  return lines
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -861,16 +891,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
-    const feedback: string[] = []
-    for (const result of results) {
-      const parsed = tryParseJson(result.stdout)
-      // A failed tool cannot be blocked, but the hook's stderr is still shown; on
-      // success, exit-2 / decision:block feed back as a block notice.
-      if (!result.timedOut && result.code === 2) feedback.push(`${eventName} hook: ${result.stderr.trim() || (event.isError ? 'hook reported an error' : 'Blocked by hook')}`)
-      else if (!event.isError && parsed?.decision === 'block') feedback.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
-      const context = parsed?.hookSpecificOutput?.additionalContext
-      if (context) feedback.push(context)
-    }
+    const feedback = results.flatMap((result) => postToolFeedback(result, eventName, event.isError))
     if (feedback.length === 0) return
     return { content: [...event.content, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
   })

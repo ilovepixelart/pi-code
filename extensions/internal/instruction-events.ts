@@ -15,7 +15,7 @@ export const INSTRUCTIONS_CHANNEL = 'pi-code:instructions'
 /** Claude's memory_type vocabulary for InstructionsLoaded payloads. */
 export type InstructionMemoryType = 'User' | 'Project' | 'Local' | 'Managed'
 
-const MEMORY_TYPES: readonly string[] = ['User', 'Project', 'Local', 'Managed']
+const MEMORY_TYPES: ReadonlySet<string> = new Set(['User', 'Project', 'Local', 'Managed'])
 
 export interface InstructionLoadEvent {
   /** Absolute path of the instruction file that entered context. */
@@ -35,7 +35,7 @@ export function isInstructionLoadEvent(data: unknown): data is InstructionLoadEv
   const event = data as InstructionLoadEvent | null
   if (event === null || typeof event !== 'object') return false
   if (typeof event.file_path !== 'string' || typeof event.load_reason !== 'string') return false
-  if (!MEMORY_TYPES.includes(event.memory_type)) return false
+  if (!MEMORY_TYPES.has(event.memory_type)) return false
   if (event.globs !== undefined && !(Array.isArray(event.globs) && event.globs.every((glob) => typeof glob === 'string'))) return false
   if (event.trigger_file_path !== undefined && typeof event.trigger_file_path !== 'string') return false
   if (event.parent_file_path !== undefined && typeof event.parent_file_path !== 'string') return false

@@ -252,7 +252,7 @@ export default function statusLine(pi: ExtensionAPI) {
   })
   // The last message's token usage, for the breakdown getContextUsage() omits.
   pi.on('message_end', async (event) => {
-    const usage = (event as { message?: { usage?: typeof lastUsage } }).message?.usage
+    const usage = (event as { message?: { usage?: NonNullable<typeof lastUsage> } }).message?.usage
     if (usage) lastUsage = usage
   })
 

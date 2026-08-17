@@ -32,17 +32,21 @@ interface StoredAuth {
  * the store directory and distinct names from colliding after sanitization. */
 function storeFileFor(serverName: string): string {
   const digest = crypto.createHash('sha256').update(serverName).digest('hex').slice(0, 8)
-  const safe =
-    serverName
-      .replace(/[^A-Za-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 40) || 'server'
+  // Collapse disallowed runs to a single hyphen, then strip leading and trailing
+  // hyphens by index. The old /^-+|-+$/g trim rescanned on every hyphen of a long run
+  // (its trailing-anchored branch backtracks per start position), which is quadratic.
+  const collapsed = serverName.replace(/[^A-Za-z0-9_-]+/g, '-')
+  let start = 0
+  let end = collapsed.length
+  while (start < end && collapsed[start] === '-') start++
+  while (end > start && collapsed[end - 1] === '-') end--
+  const safe = collapsed.slice(start, end).slice(0, 40) || 'server'
   return path.join(getAgentDir(), 'mcp-oauth', `${safe}-${digest}.json`)
 }
 
 export class FileOAuthProvider implements OAuthClientProvider {
   private readonly storePath: string
-  private data: StoredAuth
+  private readonly data: StoredAuth
   private port = 0
   private readonly onRedirect: (authorizationUrl: URL) => void
 
@@ -161,7 +165,9 @@ export function waitForAuthCode(server: http.Server, timeoutMs: number): Promise
 
 /** Best-effort browser launch; the caller also surfaces the URL as text. */
 export function openBrowser(url: string): void {
-  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
+  let command = 'xdg-open'
+  if (process.platform === 'darwin') command = 'open'
+  else if (process.platform === 'win32') command = 'cmd'
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
   try {
     spawn(command, args, { stdio: 'ignore', detached: true }).unref()

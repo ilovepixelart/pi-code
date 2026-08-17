@@ -249,7 +249,7 @@ describe('collectImports', () => {
     writeFileSync(join(dir, 'docs', 'child.md'), 'CHILD')
     const budget = createImportBudget()
 
-    const out = collectImports('@docs/secret.md', dir, dir, [dir], new Set(), budget, 0, undefined, (real) => real.endsWith('secret.md'))
+    const out = collectImports('@docs/secret.md', dir, dir, [dir], new Set(), { budget, isExcluded: (real) => real.endsWith('secret.md') })
 
     expect(out).toEqual([])
     expect(budget.files).toBe(MAX_IMPORT_FILES)
@@ -289,7 +289,7 @@ describe('import budget', () => {
     const { dir, body } = fanOut(MAX_IMPORT_FILES + excess)
     const budget = createImportBudget()
 
-    const out = collectImports(body, dir, dir, [dir], new Set(), budget)
+    const out = collectImports(body, dir, dir, [dir], new Set(), { budget })
 
     expect(out).toHaveLength(MAX_IMPORT_FILES)
     expect(budget.dropped).toBe(excess)
@@ -300,7 +300,7 @@ describe('import budget', () => {
     writeFileSync(join(dir, 'big.md'), 'a'.repeat(MAX_IMPORT_BYTES + 1024))
     const budget = createImportBudget()
 
-    const out = collectImports('@big.md', dir, dir, [dir], new Set(), budget)
+    const out = collectImports('@big.md', dir, dir, [dir], new Set(), { budget })
 
     expect(out).toHaveLength(1)
     expect(out[0].body.endsWith(IMPORT_TRUNCATED_MARKER)).toBe(true)
@@ -313,8 +313,8 @@ describe('import budget', () => {
     writeFileSync(join(dir, 'extra.md'), 'extra')
     const budget = createImportBudget()
 
-    collectImports(body, dir, dir, [dir], new Set(), budget)
-    const second = collectImports('@extra.md', dir, dir, [dir], new Set(), budget)
+    collectImports(body, dir, dir, [dir], new Set(), { budget })
+    const second = collectImports('@extra.md', dir, dir, [dir], new Set(), { budget })
 
     expect(second).toEqual([])
     expect(budget.dropped).toBe(1)
