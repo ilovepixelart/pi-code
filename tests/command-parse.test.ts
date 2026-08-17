@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { commandNameFor, discoverCommandFiles, expandDynamicContent, parseCommandFile, powershellQuote, resolvePowershellBinary, spanExec, substituteArgs, substituteVars } from '../extensions/internal/command-file.ts'
+import { commandNameFor, discoverCommandFiles, expandDynamicContent, normalizeToolName, parseCommandFile, powershellQuote, resolvePowershellBinary, spanExec, substituteArgs, substituteVars } from '../extensions/internal/command-file.ts'
 
 const dirs: string[] = []
 const tempDir = (): string => {
@@ -146,6 +146,25 @@ describe('parseCommandFile', () => {
     expect(parsed.description).toBe('Summarize the diff.')
     expect(parsed.allowedTools).toBeUndefined()
     expect(parsed.disableModelInvocation).toBe(false)
+  })
+
+  it('honors the YAML truthy spellings of disable-model-invocation, not just literal true', () => {
+    // pi's frontmatter parser hands `yes`/`on` back as strings and `1` as a number,
+    // so a flag that gates a user-only command off from the model must treat them all
+    // as true; missing any of them silently exposes the command the user marked off.
+    for (const value of ['true', 'True', 'yes', 'YES', 'on', '1', 'y']) {
+      expect(parseCommandFile(`---\ndisable-model-invocation: ${value}\n---\nx`).disableModelInvocation).toBe(true)
+    }
+    for (const value of ['false', 'no', 'off', '0', 'maybe']) {
+      expect(parseCommandFile(`---\ndisable-model-invocation: ${value}\n---\nx`).disableModelInvocation).toBe(false)
+    }
+  })
+
+  it('maps Claude SlashCommand onto the registered slash_command tool so the grant lands', () => {
+    // Without this a command's `allowed-tools: SlashCommand` matched no pi tool and the
+    // grant could neither keep nor drop the model's slash-command tool.
+    expect(normalizeToolName('SlashCommand')).toBe('slash_command')
+    expect(normalizeToolName('slashcommand')).toBe('slash_command')
   })
 
   it('reads arguments, disallowed-tools and shell frontmatter', () => {

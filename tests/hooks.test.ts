@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { type HookRunner, hookFiles, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
+import { formatHooksSummary, type HookRunner, hookFiles, interpretHookResult, lastAssistantText, loadHooks, matchingCommands, readDisableAllHooks, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPreToolUse, runPromptHook } from '../extensions/hooks.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
@@ -244,6 +244,92 @@ describe('loadHooks', () => {
     const config = loadHooks([a, join(dir, 'absent.json'), broken, b])
     expect(config.PreToolUse).toHaveLength(2)
     expect(config.PreToolUse.map((m) => m.matcher)).toEqual(['Bash', 'Edit'])
+  })
+
+  it('records the source settings file for each merged entry', () => {
+    const dir = tempDir()
+    const a = join(dir, 'a.json')
+    const b = join(dir, 'b.json')
+    writeFileSync(a, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'one' }] }] } }))
+    writeFileSync(b, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Edit', hooks: [{ command: 'two' }] }] } }))
+
+    const sources = new Map()
+    const config = loadHooks([a, b], sources)
+    expect(sources.get(config.PreToolUse[0])).toBe(a)
+    expect(sources.get(config.PreToolUse[1])).toBe(b)
+  })
+})
+
+describe('readDisableAllHooks', () => {
+  it('is false when no settings file sets it or files are missing', () => {
+    const dir = tempDir()
+    const file = join(dir, 'settings.json')
+    writeFileSync(file, JSON.stringify({ hooks: {} }))
+    expect(readDisableAllHooks([file, join(dir, 'absent.json')], {})).toBe(false)
+  })
+
+  it('is true when any file in the chain sets it, and a later false cannot re-enable', () => {
+    // The escape hatch reading: a repository file must not be able to turn back on
+    // the hooks a user settings file just disabled.
+    const dir = tempDir()
+    const user = join(dir, 'user.json')
+    const local = join(dir, 'local.json')
+    writeFileSync(user, JSON.stringify({ disableAllHooks: true }))
+    writeFileSync(local, JSON.stringify({ disableAllHooks: false }))
+    expect(readDisableAllHooks([user, local], {})).toBe(true)
+    expect(readDisableAllHooks([local], {})).toBe(false)
+  })
+
+  it('ignores non-boolean truthy values and malformed files', () => {
+    const dir = tempDir()
+    const junk = join(dir, 'junk.json')
+    const broken = join(dir, 'broken.json')
+    writeFileSync(junk, JSON.stringify({ disableAllHooks: 'yes' }))
+    writeFileSync(broken, '{not json')
+    expect(readDisableAllHooks([junk, broken], {})).toBe(false)
+  })
+
+  it('honors a managed-settings disableAllHooks with no chain file setting it', () => {
+    expect(readDisableAllHooks([], { disableAllHooks: true })).toBe(true)
+    expect(readDisableAllHooks([], { disableAllHooks: false })).toBe(false)
+  })
+})
+
+describe('formatHooksSummary', () => {
+  it('groups hooks by event with matcher, identity and source settings file', () => {
+    const preA = { matcher: 'Bash', hooks: [{ command: 'guard.sh' }] }
+    const preB = {
+      hooks: [
+        { type: 'http', url: 'https://ci.example/hook' },
+        { type: 'mcp_tool', server: 'gh', tool: 'lint' },
+      ],
+    }
+    const stop = { matcher: '*', hooks: [{ type: 'prompt', prompt: 'done yet?' }] }
+    const config = { PreToolUse: [preA, preB], Stop: [stop] }
+    const sources = new Map<object, string>([
+      [preA, '/home/.claude/settings.json'],
+      [preB, '/proj/.claude/settings.json'],
+    ])
+
+    expect(formatHooksSummary(config as never, sources as never)).toBe(['PreToolUse:', '  [Bash] command: guard.sh (/home/.claude/settings.json)', '  [*] http: https://ci.example/hook (/proj/.claude/settings.json)', '  [*] mcp_tool: gh:lint (/proj/.claude/settings.json)', 'Stop:', '  [*] prompt: done yet?'].join('\n'))
+  })
+
+  it('shows an agent hook by its prompt and a typeless entry as a command', () => {
+    const text = formatHooksSummary({
+      Stop: [{ hooks: [{ type: 'agent', prompt: 'verify the tests ran' }, { command: 'notify.sh' }] }],
+    } as never)
+    expect(text).toContain('  [*] agent: verify the tests ran')
+    expect(text).toContain('  [*] command: notify.sh')
+  })
+
+  it('notes when no hooks are configured, including for entries with empty hook lists', () => {
+    expect(formatHooksSummary({})).toContain('No hooks configured')
+    expect(formatHooksSummary({ PreToolUse: [{ matcher: 'Bash', hooks: [] }] } as never)).toContain('No hooks configured')
+  })
+
+  it('names a null hook entry instead of crashing the viewer', () => {
+    const text = formatHooksSummary({ PreToolUse: [{ matcher: 'Bash', hooks: [null] }] } as never)
+    expect(text).toContain('  [Bash] command: (missing command)')
   })
 })
 

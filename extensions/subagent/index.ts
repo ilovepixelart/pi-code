@@ -30,8 +30,8 @@ import { repoRoot } from '../internal/project-root.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
-import { type AgentConfig, type AgentMemoryScope, type AgentScope, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
-import { activeBackgroundRuns, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
+import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
+import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -557,6 +557,65 @@ export function cancelResultText(id: string): string {
   return `Unknown background run: ${id}.\n\n${backgroundStatusText()}`
 }
 
+/** The registry fields the /tasks listing prints. */
+type BackgroundRunView = Pick<BackgroundRun, 'id' | 'agent' | 'task' | 'state' | 'turns' | 'output' | 'stderr'>
+
+const TASK_PREVIEW_CHARS = 60
+const TAIL_PREVIEW_CHARS = 200
+
+/** Truncate to at most `max` codepoints, iterating by codepoint so a multi-byte
+ * character on the boundary is never cut into a lone surrogate. Returns the whole
+ * string when it already fits, so a caller can tell it did not clip. */
+function clipCodepoints(text: string, max: number): string {
+  const points = Array.from(text)
+  return points.length > max ? points.slice(0, max).join('') : text
+}
+
+/** A one-line tail of what a run last said: the stderr tail for a failure (the only
+ * diagnostics a boot failure leaves), the latest assistant text otherwise. */
+function runOutputTail(run: BackgroundRunView): string | undefined {
+  const stderrTail = run.state === 'failed' ? run.stderr?.trim() : undefined
+  const raw = (stderrTail || run.output)?.trim()
+  if (!raw) return undefined
+  const last = raw.split('\n').at(-1)?.trim() ?? ''
+  const shortened = clipCodepoints(last, TAIL_PREVIEW_CHARS)
+  const clipped = shortened === last ? last : `${shortened}...`
+  return stderrTail ? `stderr: ${clipped}` : clipped
+}
+
+/** The /tasks listing: one line per background run, plus the short output tail the
+ * registry's own status lines omit. A pure formatter so it tests against a plain list. */
+export function tasksStatusText(runs: ReadonlyArray<BackgroundRunView>): string {
+  if (runs.length === 0) return 'No background subagent runs in this session.'
+  return runs
+    .map((run) => {
+      const label = run.state === 'running' ? 'running' : `${run.state} (${run.turns} turn${run.turns === 1 ? '' : 's'})`
+      const head = `${run.id} ${run.agent}: ${label} - ${clipCodepoints(run.task, TASK_PREVIEW_CHARS)}`
+      const tail = runOutputTail(run)
+      return tail ? `${head}\n  ${tail}` : head
+    })
+    .join('\n')
+}
+
+/** Listing order for /agents: lowest to highest precedence, matching how discovery
+ * lets a later source win a name clash. */
+const AGENT_SOURCE_ORDER: ReadonlyArray<AgentSource> = ['builtin', 'plugin', 'user', 'project']
+
+const AGENTS_DIR_HINT = 'Add agents as markdown files under ~/.claude/agents (user) or .claude/agents (project).'
+
+/** The /agents listing: the discovered roster grouped by source, with file paths.
+ * A pure formatter so it tests against a sample roster. */
+export function agentsListText(agents: ReadonlyArray<Pick<AgentConfig, 'name' | 'source' | 'filePath'>>): string {
+  if (agents.length === 0) return `No agents discovered.\n${AGENTS_DIR_HINT}`
+  const sections: string[] = []
+  for (const source of AGENT_SOURCE_ORDER) {
+    const group = agents.filter((agent) => agent.source === source)
+    if (group.length === 0) continue
+    sections.push(`${source}:\n${group.map((agent) => `  ${agent.name} - ${agent.filePath}`).join('\n')}`)
+  }
+  return `${sections.join('\n')}\n\n${AGENTS_DIR_HINT}`
+}
+
 /** Everything a mode handler needs from the surrounding execute() call. */
 interface ModeContext {
   agents: AgentConfig[]
@@ -729,7 +788,7 @@ function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefine
   }
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>, projectApproved: boolean): Promise<ToolResult> {
+async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>, projectApproved: boolean, onStarted?: (id: string) => void): Promise<ToolResult> {
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -775,6 +834,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
     removeTmpPrompt(tmpPrompt)
     return backgroundCapResult(makeDetails)
   }
+  onStarted?.(id)
   pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: agent.name, agentId: id })
   return {
     content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
@@ -1249,6 +1309,21 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
+  // /tasks resolves these against the registry at print time. background.ts owns the
+  // run records but does not enumerate them, so the ids started here are remembered;
+  // a run the registry has since evicted simply drops out of the listing.
+  const startedBackgroundRuns = new Set<string>()
+
+  // The registry self-caps and evicts old runs, so an id kept here after its record is
+  // gone is dead weight. Drop those on every add, bounding the set to the registry's
+  // live capacity rather than letting it grow for the whole session.
+  const rememberBackgroundRun = (id: string): void => {
+    for (const known of startedBackgroundRuns) {
+      if (!backgroundRun(known)) startedBackgroundRuns.delete(known)
+    }
+    startedBackgroundRuns.add(id)
+  }
+
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.
     // The stop event fires here too, so SubagentStop hooks see resumed runs end.
@@ -1344,7 +1419,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
         })
 
       if (params.resume) {
-        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, (run) => pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })) }], details: makeDetails('single')([]) }
+        const onResumed = (run: { id: string; agent: string }): void => {
+          rememberBackgroundRun(run.id)
+          pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })
+        }
+        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, onResumed) }], details: makeDetails('single')([]) }
       }
 
       if (params.cancel) {
@@ -1385,7 +1464,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved)
+      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved, (id) => rememberBackgroundRun(id))
 
       const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, projectApproved, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 
@@ -1424,6 +1503,26 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
       const text = result.content[0]
       return new Text(text?.type === 'text' ? text.text : '(no output)', 0, 0)
+    },
+  })
+
+  // Claude's /tasks: background-run status at a glance, returning immediately without
+  // interrupting the agent; the only other way to see these is to ask the model.
+  pi.registerCommand('tasks', {
+    description: 'Show background subagent runs',
+    handler: async (_args, ctx) => {
+      const runs = [...startedBackgroundRuns].map((id) => backgroundRun(id)).filter((run): run is BackgroundRun => run !== undefined)
+      ctx.ui.notify(tasksStatusText(runs), 'info')
+    },
+  })
+
+  // Claude's /agents: the discovered roster with sources and paths. Approval is read
+  // silently, like the roster above: project agents list only once the project is trusted.
+  pi.registerCommand('agents', {
+    description: 'List discovered subagents and where they come from',
+    handler: async (_args, ctx) => {
+      const { agents } = discoverAgents(ctx.cwd, isProjectApprovedSilently(ctx) ? 'both' : 'user')
+      ctx.ui.notify(agentsListText(agents), 'info')
     },
   })
 }

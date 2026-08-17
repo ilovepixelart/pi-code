@@ -40,6 +40,21 @@ interface CallResult {
   isError?: boolean
 }
 
+interface PromptDef {
+  name: string
+  description?: string
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>
+}
+
+interface PromptPage {
+  prompts: PromptDef[]
+  nextCursor?: string
+}
+
+interface PromptResult {
+  messages: Array<{ role: string; content: Record<string, unknown> }>
+}
+
 const hoisted = vi.hoisted(() => {
   const state = {
     home: '',
@@ -53,6 +68,12 @@ const hoisted = vi.hoisted(() => {
       listTools: (args: { cursor?: string }, client: ClientRecord) => Promise<ListPage>
       callTool: (args: { name: string; arguments: unknown }, client: ClientRecord) => Promise<CallResult>
       close: (client: ClientRecord) => Promise<void>
+      getServerCapabilities: (client: ClientRecord) => Record<string, unknown> | undefined
+      listPrompts: (args: { cursor?: string }, client: ClientRecord) => Promise<{ prompts: PromptDef[]; nextCursor?: string }>
+      getPrompt: (args: { name: string; arguments?: Record<string, string> }, client: ClientRecord) => Promise<{ messages: Array<{ role: string; content: Record<string, unknown> }> }>
+      listResources: (args: { cursor?: string }, client: ClientRecord) => Promise<{ resources: Array<Record<string, unknown>>; nextCursor?: string }>
+      listResourceTemplates: (args: { cursor?: string }, client: ClientRecord) => Promise<{ resourceTemplates: Array<Record<string, unknown>>; nextCursor?: string }>
+      readResource: (args: { uri: string }, client: ClientRecord) => Promise<{ contents: Array<Record<string, unknown>> }>
     },
   }
   return state
@@ -88,6 +109,24 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
       // The SDK passes a zod schema whose method is a literal in its shape.
       const shape = (schema as { shape?: { method?: { value?: string } } })?.shape
       hoisted.notify.set(shape?.method?.value ?? 'unknown', handler)
+    }
+    getServerCapabilities(): Record<string, unknown> | undefined {
+      return hoisted.control.getServerCapabilities(this)
+    }
+    listPrompts(args?: { cursor?: string }): Promise<PromptPage> {
+      return hoisted.control.listPrompts(args ?? {}, this)
+    }
+    getPrompt(args: { name: string; arguments?: Record<string, string> }, _options?: unknown): Promise<PromptResult> {
+      return hoisted.control.getPrompt(args, this)
+    }
+    listResources(args?: { cursor?: string }, _options?: unknown): Promise<{ resources: Array<Record<string, unknown>>; nextCursor?: string }> {
+      return hoisted.control.listResources(args ?? {}, this)
+    }
+    listResourceTemplates(args?: { cursor?: string }, _options?: unknown): Promise<{ resourceTemplates: Array<Record<string, unknown>>; nextCursor?: string }> {
+      return hoisted.control.listResourceTemplates(args ?? {}, this)
+    }
+    readResource(args: { uri: string }, _options?: unknown): Promise<{ contents: Array<Record<string, unknown>> }> {
+      return hoisted.control.readResource(args, this)
     }
   },
 }))
@@ -144,7 +183,7 @@ interface RegisteredTool {
   label: string
   description: string
   parameters: unknown
-  execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text?: string }>; details: { error?: string } }>
+  execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; details: { error?: string } }>
 }
 
 type Notification = { message: string; level: string }
@@ -154,12 +193,15 @@ interface Harness {
   notifications: Notification[]
   warnings: string[]
   emitted: Array<{ channel: string; data: unknown }>
+  sent: string[]
   home: string
   cwd: string
   sessionStart: (trusted?: boolean | undefined, approve?: boolean) => Promise<void>
   shutdown: () => Promise<void>
   mcpCommand: () => Promise<void>
   toolNames: () => string[]
+  commandNames: () => string[]
+  runSlash: (name: string, args: string) => Promise<void>
 }
 
 const writeServers = (file: string, servers: Record<string, unknown>): void => {
@@ -180,6 +222,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
   const notifications: Notification[] = []
   const warnings: string[] = []
   const emitted: Array<{ channel: string; data: unknown }> = []
+  const sent: string[] = []
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>()
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
 
@@ -203,6 +246,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(name, fn),
     registerCommand: (name: string, opts2: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts2),
     registerTool: (tool: RegisteredTool) => tools.push(tool),
+    sendUserMessage: (text: string) => sent.push(text),
     events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
   } as never)
 
@@ -211,6 +255,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     notifications,
     warnings,
     emitted,
+    sent,
     home,
     cwd,
     sessionStart: async (trusted?: boolean, approve = true) => {
@@ -223,6 +268,10 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
       await commands.get('mcp')?.handler('', makeCtx(true))
     },
     toolNames: () => tools.map((t) => t.name),
+    commandNames: () => [...commands.keys()],
+    runSlash: async (name: string, args: string) => {
+      await commands.get(name)?.handler(args, makeCtx(true))
+    },
   }
 }
 
@@ -250,6 +299,12 @@ const defaultControl = (): typeof hoisted.control => ({
   listTools: async () => ({ tools: [] }),
   callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
   close: async () => {},
+  getServerCapabilities: () => undefined,
+  listPrompts: async () => ({ prompts: [] }),
+  getPrompt: async () => ({ messages: [] }),
+  listResources: async () => ({ resources: [] }),
+  listResourceTemplates: async () => ({ resourceTemplates: [] }),
+  readResource: async () => ({ contents: [] }),
 })
 
 const savedEnv: Record<string, string | undefined> = {}
@@ -1357,5 +1412,267 @@ describe('mcp client lifecycle', () => {
     client?.onclose?.()
 
     expect(await statusLinesOf(harness)).toEqual(['live: disconnected (0 tools)'])
+  })
+})
+
+describe('mcp prompts as slash commands', () => {
+  const withPrompts = (prompts: PromptDef[]): void => {
+    hoisted.control.getServerCapabilities = () => ({ prompts: {} })
+    hoisted.control.listPrompts = async () => ({ prompts })
+  }
+
+  it('registers a normalized /mcp__server__prompt command for each advertised prompt', async () => {
+    withPrompts([{ name: 'code-review', description: 'Review code' }])
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    expect(harness.commandNames()).toContain('mcp__demo__code_review')
+  })
+
+  it('does not list prompts from a server that lacks the prompts capability', async () => {
+    let listed = false
+    hoisted.control.listPrompts = async () => {
+      listed = true
+      return { prompts: [] }
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    expect(listed).toBe(false)
+    expect(harness.commandNames()).toEqual(['mcp'])
+  })
+
+  it('registers every page of a paginated prompt list', async () => {
+    hoisted.control.getServerCapabilities = () => ({ prompts: {} })
+    hoisted.control.listPrompts = async ({ cursor }) => {
+      if (!cursor) return { prompts: [{ name: 'one' }], nextCursor: 'page-2' }
+      return { prompts: [{ name: 'two' }] }
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    expect(harness.commandNames()).toEqual(expect.arrayContaining(['mcp__demo__one', 'mcp__demo__two']))
+  })
+
+  it('maps args onto the declared arguments and sends the prompt content as a user message', async () => {
+    const calls: unknown[] = []
+    withPrompts([{ name: 'greet', arguments: [{ name: 'who', required: true }] }])
+    hoisted.control.getPrompt = async (args) => {
+      calls.push(args)
+      return {
+        messages: [
+          { role: 'user', content: { type: 'text', text: 'Hello Alex' } },
+          { role: 'user', content: { type: 'text', text: 'Be nice' } },
+        ],
+      }
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__greet', 'Alex')
+
+    expect(calls).toEqual([{ name: 'greet', arguments: { who: 'Alex' } }])
+    expect(harness.sent).toEqual([
+      [
+        { type: 'text', text: 'Hello Alex' },
+        { type: 'text', text: 'Be nice' },
+      ],
+    ])
+  })
+
+  it('carries a prompt image block through to the user message', async () => {
+    withPrompts([{ name: 'shot' }])
+    hoisted.control.getPrompt = async () => ({
+      messages: [
+        { role: 'user', content: { type: 'text', text: 'see the screenshot' } },
+        { role: 'user', content: { type: 'image', data: 'ZZZZ', mimeType: 'image/png' } },
+      ],
+    })
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__shot', '')
+
+    expect(harness.sent).toEqual([
+      [
+        { type: 'text', text: 'see the screenshot' },
+        { type: 'image', data: 'ZZZZ', mimeType: 'image/png' },
+      ],
+    ])
+  })
+
+  it('reports instead of driving a turn when a prompt returns no content', async () => {
+    withPrompts([{ name: 'empty' }])
+    hoisted.control.getPrompt = async () => ({ messages: [] })
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__empty', '')
+
+    expect(harness.sent).toEqual([])
+    expect(harness.notifications.some((n) => n.message.includes('no content'))).toBe(true)
+  })
+
+  it('skips a second same-server prompt whose name normalizes onto one already taken', async () => {
+    withPrompts([{ name: 'deploy-prod' }, { name: 'deploy_prod' }])
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    expect(harness.commandNames().filter((n) => n === 'mcp__demo__deploy_prod')).toEqual(['mcp__demo__deploy_prod'])
+    expect(harness.warnings.some((w) => w.includes('skipping colliding prompt command mcp__demo__deploy_prod'))).toBe(true)
+  })
+
+  it('omits the arguments field when the prompt declares none', async () => {
+    const calls: unknown[] = []
+    withPrompts([{ name: 'plain' }])
+    hoisted.control.getPrompt = async (args) => {
+      calls.push(args)
+      return { messages: [{ role: 'user', content: { type: 'text', text: 'ok' } }] }
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__plain', '')
+
+    expect(calls).toEqual([{ name: 'plain' }])
+  })
+
+  it('registers prompts announced later via prompts list_changed without duplicating existing ones', async () => {
+    withPrompts([{ name: 'first' }])
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+    expect(harness.commandNames()).toEqual(['mcp', 'mcp__demo__first'])
+
+    hoisted.control.listPrompts = async () => ({ prompts: [{ name: 'first' }, { name: 'second' }] })
+    await hoisted.notify.get('notifications/prompts/list_changed')?.()
+
+    expect(harness.commandNames()).toEqual(['mcp', 'mcp__demo__first', 'mcp__demo__second'])
+  })
+
+  it('notifies at error level instead of sending when getPrompt fails', async () => {
+    withPrompts([{ name: 'boom' }])
+    hoisted.control.getPrompt = async () => {
+      throw new Error('prompt exploded')
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+
+    await harness.runSlash('mcp__demo__boom', '')
+
+    expect(harness.sent).toEqual([])
+    expect(harness.notifications.some((n) => n.level === 'error' && n.message.includes('prompt exploded'))).toBe(true)
+  })
+})
+
+describe('mcp resource tools', () => {
+  const withResourceCapability = (): void => {
+    hoisted.control.getServerCapabilities = () => ({ resources: {} })
+  }
+  const resourceTool = (harness: Harness, name: string): RegisteredTool => {
+    const tool = harness.tools.find((t) => t.name === name)
+    if (!tool) throw new Error(`${name} was not registered`)
+    return tool
+  }
+
+  it('registers no resource tools when no connected server advertises resources', async () => {
+    const harness = await setupStarted({ user: { plain: { command: 'x' } } })
+
+    expect(harness.toolNames()).not.toContain('list_mcp_resources')
+    expect(harness.toolNames()).not.toContain('read_mcp_resource')
+  })
+
+  it('registers the list and read tools exactly once across resource-capable servers', async () => {
+    withResourceCapability()
+    const harness = await setupStarted({ user: { one: { command: 'x' }, two: { command: 'y' } } })
+
+    expect(harness.toolNames().filter((n) => n === 'list_mcp_resources')).toHaveLength(1)
+    expect(harness.toolNames().filter((n) => n === 'read_mcp_resource')).toHaveLength(1)
+  })
+
+  it('lists resources and templates across servers, naming the server on each entry', async () => {
+    withResourceCapability()
+    hoisted.control.listResources = async (_args, client) => (client.transport?.options.command === 'x' ? { resources: [{ uri: 'db://a', name: 'A' }] } : { resources: [{ uri: 'db://b', name: 'B' }] })
+    hoisted.control.listResourceTemplates = async (_args, client) => (client.transport?.options.command === 'x' ? { resourceTemplates: [{ uriTemplate: 'db://{id}', name: 'ById' }] } : { resourceTemplates: [] })
+    const harness = await setupStarted({ user: { one: { command: 'x' }, two: { command: 'y' } } })
+
+    const out = await resourceTool(harness, 'list_mcp_resources').execute('c1', {})
+
+    const entries = JSON.parse(out.content[0].text ?? '') as Array<Record<string, unknown>>
+    expect(entries).toContainEqual(expect.objectContaining({ server: 'one', uri: 'db://a' }))
+    expect(entries).toContainEqual(expect.objectContaining({ server: 'two', uri: 'db://b' }))
+    expect(entries).toContainEqual(expect.objectContaining({ server: 'one', uriTemplate: 'db://{id}' }))
+  })
+
+  it('filters the listing to the requested server and rejects an unknown one', async () => {
+    withResourceCapability()
+    hoisted.control.listResources = async (_args, client) => (client.transport?.options.command === 'x' ? { resources: [{ uri: 'db://a', name: 'A' }] } : { resources: [{ uri: 'db://b', name: 'B' }] })
+    const harness = await setupStarted({ user: { one: { command: 'x' }, two: { command: 'y' } } })
+    const tool = resourceTool(harness, 'list_mcp_resources')
+
+    const out = await tool.execute('c1', { server: 'two' })
+    const entries = JSON.parse(out.content[0].text ?? '') as Array<Record<string, unknown>>
+    expect(entries).toEqual([expect.objectContaining({ server: 'two', uri: 'db://b' })])
+
+    await expect(tool.execute('c2', { server: 'ghost' })).rejects.toThrow('not connected')
+  })
+
+  it('keeps the resource listing when a server does not support templates', async () => {
+    withResourceCapability()
+    hoisted.control.listResources = async () => ({ resources: [{ uri: 'db://a', name: 'A' }] })
+    hoisted.control.listResourceTemplates = async () => {
+      throw new Error('Method not found')
+    }
+    const harness = await setupStarted({ user: { one: { command: 'x' } } })
+
+    const out = await resourceTool(harness, 'list_mcp_resources').execute('c1', {})
+
+    const entries = JSON.parse(out.content[0].text ?? '') as Array<Record<string, unknown>>
+    expect(entries).toEqual([expect.objectContaining({ server: 'one', uri: 'db://a' })])
+    expect(entries.every((entry) => !('error' in entry))).toBe(true)
+  })
+
+  it('reads a resource and routes its text through the output budget', async () => {
+    withResourceCapability()
+    hoisted.control.readResource = async (args) => ({ contents: [{ uri: args.uri, text: 'y'.repeat(60_000), mimeType: 'text/plain' }] })
+    const harness = await setupStarted({ user: { one: { command: 'x' } } })
+
+    const out = await resourceTool(harness, 'read_mcp_resource').execute('c1', { server: 'one', uri: 'db://big' })
+
+    expect(out.content[0].text).toContain('[Resource: db://big]')
+    expect(out.content[0].text).toContain('[truncated')
+  })
+
+  it('maps an image blob to an image block and other blobs to a placeholder', async () => {
+    withResourceCapability()
+    hoisted.control.readResource = async () => ({
+      contents: [
+        { uri: 'img://shot', blob: 'AAAA', mimeType: 'image/png' },
+        { uri: 'bin://blob', blob: 'BBBB', mimeType: 'application/octet-stream' },
+      ],
+    })
+    const harness = await setupStarted({ user: { one: { command: 'x' } } })
+
+    const out = await resourceTool(harness, 'read_mcp_resource').execute('c1', { server: 'one', uri: 'img://shot' })
+
+    expect(out.content[0]).toEqual({ type: 'image', data: 'AAAA', mimeType: 'image/png' })
+    expect(out.content[1].text).toContain('bin://blob')
+    expect(out.content[1].text).not.toContain('BBBB')
+  })
+
+  it('rejects a read against a server that is not connected', async () => {
+    withResourceCapability()
+    const harness = await setupStarted({ user: { one: { command: 'x' } } })
+
+    await expect(resourceTool(harness, 'read_mcp_resource').execute('c1', { server: 'ghost', uri: 'db://a' })).rejects.toThrow('not connected')
+  })
+
+  it('registers the tools from resources list_changed when the capability settled late', async () => {
+    let capabilities: Record<string, unknown> | undefined
+    hoisted.control.getServerCapabilities = () => capabilities
+    const harness = await setupStarted({ user: { one: { command: 'x' } } })
+    expect(harness.toolNames()).not.toContain('list_mcp_resources')
+
+    capabilities = { resources: {} }
+    await hoisted.notify.get('notifications/resources/list_changed')?.()
+
+    expect(harness.toolNames()).toEqual(expect.arrayContaining(['list_mcp_resources', 'read_mcp_resource']))
+  })
+
+  it('reserves the resource tool names against a shadowing server tool', async () => {
+    withTools([{ name: 'mcp-resource' }])
+    const harness = await setupStarted({ user: { read: { command: 'x' } } })
+
+    expect(harness.toolNames()).not.toContain('read_mcp_resource')
+    expect(harness.warnings.join('\n')).toContain('read_mcp_resource')
   })
 })

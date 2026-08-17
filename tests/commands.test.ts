@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import commandsExtension, { collectCommands, commandDirs } from '../extensions/commands.ts'
+import commandsExtension, { collectCommands, commandDirs, expandCommand, SHELL_DISABLED_PLACEHOLDER, shellExecutionDisabled, slashCommandBudget, slashCommandToolDescription } from '../extensions/commands.ts'
+import { parseCommandFile } from '../extensions/internal/command-file.js'
+import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', pwshBinary: undefined as string | undefined }))
 vi.mock('node:os', async (importOriginal) => {
@@ -40,6 +42,7 @@ beforeEach(() => {
 afterEach(() => {
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  setManagedSettingsPath()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -75,9 +78,18 @@ describe('collectCommands', () => {
   })
 })
 
+interface RegisteredTool {
+  name: string
+  label: string
+  description: string
+  parameters: unknown
+  execute: (id: string, params: { command: string }, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>
+}
+
 const setup = (cwd: string, trusted = true) => {
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
+  const tools = new Map<string, RegisteredTool>()
   const sent: string[] = []
   const toolSets: string[][] = []
   const notices: string[] = []
@@ -87,6 +99,7 @@ const setup = (cwd: string, trusted = true) => {
   const pi = {
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
     registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
+    registerTool: (tool: RegisteredTool) => tools.set(tool.name, tool),
     exec: async (file: string, args: string[], opts?: { timeout?: number; env?: Record<string, string> }) => {
       execCalls.push({ file, args, shell: args[1], timeout: opts?.timeout, env: opts?.env })
       return { stdout: `ran:${args[1]}`, ...execResult }
@@ -126,7 +139,7 @@ const setup = (cwd: string, trusted = true) => {
       },
     },
   }
-  return { handlers, commands, sent, toolSets, notices, execCalls, ctx, modelSets, activeTools: () => active, failExec: (result: { stderr: string; code: number }) => Object.assign(execResult, result) }
+  return { handlers, commands, tools, sent, toolSets, notices, execCalls, ctx, modelSets, activeTools: () => active, failExec: (result: { stderr: string; code: number }) => Object.assign(execResult, result) }
 }
 
 describe('commands extension', () => {
@@ -178,7 +191,7 @@ describe('commands extension', () => {
     expect(s.execCalls[0].shell).toContain('pwd')
   })
 
-  it('keeps the restriction in place for the turn, restoring only when it ends', async () => {
+  it('keeps the restriction in place for the run, restoring only when it ends', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
     const s = setup(cwd)
@@ -187,11 +200,47 @@ describe('commands extension', () => {
 
     // sendUserMessage is fire-and-forget, so restoring inside the handler would put
     // the full set back before the agent ever read it: the restriction must outlive
-    // the handler and end with the turn.
+    // the handler and end with the agent run.
     expect(s.toolSets[0]).toEqual(['read'])
     expect(s.activeTools()).toEqual(['read'])
 
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('keeps the restriction through a mid-run turn_end, since pi fires one per assistant step', async () => {
+    // Claude's contract is "the grant clears when you send your next message". pi's
+    // turn_end fires after every assistant step, so restoring there stripped a
+    // multi-step command's scoping right after step one.
+    const cwd = tempDir()
+    writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('safe')?.handler('', s.ctx)
+
     await s.handlers.get('turn_end')?.({}, s.ctx)
+    expect(s.activeTools()).toEqual(['read'])
+
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('keeps the scoping across an agent_end loop boundary and lifts it only once the run has settled', async () => {
+    // agent_end fires once per agent loop, ahead of an automatic retry, an auto-
+    // compaction-and-retry, or a Stop-hook continuation. Restoring there would lift
+    // the command's scoping while that continued run is still to come, so the restore
+    // is bound to agent_settled, which fires only after the run has fully settled.
+    const cwd = tempDir()
+    writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('safe')?.handler('', s.ctx)
+    expect(s.activeTools()).toEqual(['read'])
+
+    await s.handlers.get('agent_end')?.({}, s.ctx)
+    expect(s.activeTools()).toEqual(['read'])
+
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
@@ -239,7 +288,7 @@ describe('commands extension', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('a')?.handler('', s.ctx)
     await s.commands.get('b')?.handler('', s.ctx)
-    await s.handlers.get('turn_end')?.({}, s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
 
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
@@ -254,7 +303,7 @@ describe('commands extension', () => {
 })
 
 describe('command model frontmatter', () => {
-  it('switches to the command model for the turn and restores it on turn_end', async () => {
+  it('switches to the command model for the run and restores it on agent_settled', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'deep.md', '---\nmodel: opus\n---\nThink hard.')
     const s = setup(cwd)
@@ -262,7 +311,10 @@ describe('command model frontmatter', () => {
     await s.commands.get('deep')?.handler('', s.ctx)
     // opus fuzzy-matches claude-opus-5 among the available models.
     expect(s.modelSets).toEqual(['claude-opus-5'])
+    // A mid-run turn_end must not restore: a multi-step command keeps its model.
     await s.handlers.get('turn_end')?.({}, s.ctx)
+    expect(s.modelSets).toEqual(['claude-opus-5'])
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     // Restored to the session model.
     expect(s.modelSets).toEqual(['claude-opus-5', 'gemma4'])
   })
@@ -277,11 +329,11 @@ describe('command model frontmatter', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('f')?.handler('', s.ctx)
     expect(s.modelSets.at(-1)).toBe('claude-fable-5')
-    await s.handlers.get('turn_end')?.({}, s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     const before = s.modelSets.length
     await s.commands.get('exact')?.handler('', s.ctx)
     expect(s.modelSets.at(-1)).toBe('claude-opus-5')
-    await s.handlers.get('turn_end')?.({}, s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     const afterExact = s.modelSets.length
     await s.commands.get('inh')?.handler('', s.ctx)
     await s.commands.get('none')?.handler('', s.ctx)
@@ -378,7 +430,7 @@ describe('claude variables and skill frontmatter wiring', () => {
     expect(s.sent[1]).toBe('Deploy prod now.')
   })
 
-  it('removes disallowed-tools for the turn and restores them after', async () => {
+  it('removes disallowed-tools for the run and restores them after', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'ro.md', '---\ndisallowed-tools: Edit, Write\n---\nLook, do not touch.')
     const s = setup(cwd)
@@ -386,7 +438,7 @@ describe('claude variables and skill frontmatter wiring', () => {
     await s.commands.get('ro')?.handler('', s.ctx)
 
     expect(s.activeTools()).toEqual(['bash', 'read'])
-    await s.handlers.get('turn_end')?.({}, s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
@@ -532,14 +584,19 @@ describe('allowed-tools argument scopes', () => {
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'x' } }, s.ctx)).toBeUndefined()
   })
 
-  it('stops enforcing when the turn ends', async () => {
+  it('stops enforcing when the run ends, not on a mid-run turn_end', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'stage.md', '---\nallowed-tools: Bash(git add:*)\n---\nStage it.')
     const s = setup(cwd)
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('stage')?.handler('', s.ctx)
-    await s.handlers.get('turn_end')?.({}, s.ctx)
 
+    // A second assistant step is still inside the command's run: the scope holds.
+    await s.handlers.get('turn_end')?.({}, s.ctx)
+    const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'bash', input: { command: 'rm -rf /' } }, s.ctx)) as { block?: boolean }
+    expect(blocked?.block).toBe(true)
+
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(await s.handlers.get('tool_call')?.({ toolName: 'bash', input: { command: 'rm -rf /' } }, s.ctx)).toBeUndefined()
   })
 
@@ -595,7 +652,7 @@ describe('allowed-tools argument scopes', () => {
     const write = (await s.handlers.get('tool_call')?.({ toolName: 'write', input: { path: 'src/evil.ts' } }, s.ctx)) as { block?: boolean }
     expect(write?.block).toBe(true)
 
-    await s.handlers.get('turn_end')?.({}, s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'src/secret.ts' } }, s.ctx)).toBeUndefined()
   })
 
@@ -625,5 +682,269 @@ describe('allowed-tools with queued commands', () => {
     await s.commands.get('b')?.handler('', s.ctx)
 
     expect(s.activeTools()).toEqual(['bash'])
+  })
+})
+
+const stubRunner = () => {
+  const calls: string[] = []
+  return {
+    calls,
+    exec: async (_file: string, args: string[]) => {
+      calls.push(args[1])
+      return { stdout: `ran:${args[1]}`, stderr: '', code: 0, killed: false }
+    },
+  }
+}
+
+describe('expandCommand', () => {
+  it('produces exactly what the user path sends for the same invocation', async () => {
+    const cwd = tempDir()
+    const file = join(cwd, '.claude', 'commands', 'par.md')
+    writeCommand(cwd, 'par.md', '---\nargument-hint: [target]\n---\nBuild $0 in ${CLAUDE_PROJECT_DIR}: !`git status`')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('par')?.handler('web', s.ctx)
+
+    const parsed = parseCommandFile(readFileSync(file, 'utf-8'))
+    const out = await expandCommand(stubRunner(), parsed, 'web', s.ctx as { cwd: string }, file)
+    expect(s.sent).toHaveLength(1)
+    expect(out).toBe(s.sent[0])
+  })
+
+  it('appends ARGUMENTS when the body never reads the passed args', async () => {
+    const cwd = tempDir()
+    const out = await expandCommand(stubRunner(), parseCommandFile('Deploy now.'), 'prod', { cwd }, join(cwd, 'd.md'))
+    expect(out).toBe('Deploy now.\n\nARGUMENTS: prod')
+  })
+
+  it('throws on a span failure instead of returning a half-expanded body', async () => {
+    const cwd = tempDir()
+    const failing = { exec: async () => ({ stdout: '', stderr: 'boom', code: 2, killed: false }) }
+    await expect(expandCommand(failing, parseCommandFile('x: !`bad`'), '', { cwd }, join(cwd, 'f.md'))).rejects.toThrow(/bad[\s\S]*boom/)
+  })
+
+  it('replaces every shell span with the policy placeholder when shell is disallowed', async () => {
+    const cwd = tempDir()
+    const runner = stubRunner()
+    const parsed = parseCommandFile('status: !`git status`\n```!\nrm -rf /\n```\ndone')
+    const out = await expandCommand(runner, parsed, '', { cwd }, join(cwd, 's.md'), undefined, { allowShell: false })
+    expect(runner.calls).toEqual([])
+    expect(out).toBe(`status: ${SHELL_DISABLED_PLACEHOLDER}\n${SHELL_DISABLED_PLACEHOLDER}\ndone`)
+  })
+})
+
+describe('slashCommandBudget', () => {
+  it('prefers the env override, then ~1% of the context window, then the default', () => {
+    expect(slashCommandBudget(200_000, { SLASH_COMMAND_TOOL_CHAR_BUDGET: '4000' })).toBe(4000)
+    // 1% of the window's tokens at ~4 chars per token is window / 25.
+    expect(slashCommandBudget(200_000, {})).toBe(8000)
+    expect(slashCommandBudget(undefined, {})).toBe(15_000)
+  })
+
+  it('ignores a malformed or non-positive env value', () => {
+    expect(slashCommandBudget(undefined, { SLASH_COMMAND_TOOL_CHAR_BUDGET: 'lots' })).toBe(15_000)
+    expect(slashCommandBudget(undefined, { SLASH_COMMAND_TOOL_CHAR_BUDGET: '0' })).toBe(15_000)
+  })
+})
+
+describe('slashCommandToolDescription', () => {
+  it('lists each command as /name - description (argument-hint)', () => {
+    const text = slashCommandToolDescription(
+      [
+        { name: 'deploy', description: 'Deploy it', argumentHint: '[env]' },
+        { name: 'lint', description: 'Lint the tree' },
+      ],
+      15_000,
+    )
+    expect(text).toContain('/deploy - Deploy it ([env])')
+    expect(text).toContain('/lint - Lint the tree')
+  })
+
+  it('caps one entry at 1536 characters', () => {
+    const text = slashCommandToolDescription([{ name: 'big', description: 'x'.repeat(4000) }], 15_000)
+    const entry = text.split('\n').find((line) => line.startsWith('/big')) ?? ''
+    expect(entry).toHaveLength(1536)
+  })
+
+  it('drops entries past the overall budget and says so', () => {
+    const commands = [
+      { name: 'a', description: 'first command' },
+      { name: 'b', description: 'x'.repeat(300) },
+    ]
+    const text = slashCommandToolDescription(commands, 60)
+    expect(text).toContain('/a - first command')
+    expect(text).not.toContain('/b')
+    expect(text).toContain('omitted')
+  })
+})
+
+describe('slash_command tool', () => {
+  it('registers the tool listing only model-invocable commands', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deploy.md', '---\ndescription: Deploy it\nargument-hint: [env]\n---\nDeploy $0.')
+    writeCommand(cwd, 'secret.md', '---\ndescription: User only\ndisable-model-invocation: true\n---\nSecret steps.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    const tool = s.tools.get('slash_command')
+    expect(tool).toBeDefined()
+    expect(tool?.label).toBe('SlashCommand')
+    expect(tool?.description).toContain('/deploy - Deploy it ([env])')
+    expect(tool?.description).not.toContain('/secret')
+  })
+
+  it('does not register the tool when every command is user-only, or none exist', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'secret.md', '---\ndisable-model-invocation: true\n---\nSecret steps.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    expect(s.tools.has('slash_command')).toBe(false)
+
+    const empty = setup(tempDir())
+    await empty.handlers.get('session_start')?.({}, empty.ctx)
+    expect(empty.tools.has('slash_command')).toBe(false)
+  })
+
+  it('expands a command into the tool result without spawning a user turn', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deploy.md', '---\ndescription: Deploy it\n---\nDeploy $0 from ${CLAUDE_PROJECT_DIR}.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    const result = await s.tools.get('slash_command')?.execute('t1', { command: '/deploy staging' }, undefined, undefined, s.ctx)
+    expect(result?.content[0].text).toBe(`Contents of /deploy (expanded):\n\nDeploy staging from ${cwd}.`)
+    // The tool result is the channel; sendUserMessage would spawn a second turn.
+    expect(s.sent).toEqual([])
+  })
+
+  it('re-reads the file on invocation so a live edit takes effect', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deploy.md', 'Old body.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    writeCommand(cwd, 'deploy.md', 'New body.')
+
+    const result = await s.tools.get('slash_command')?.execute('t1', { command: '/deploy' }, undefined, undefined, s.ctx)
+    expect(result?.content[0].text).toContain('New body.')
+  })
+
+  it('refuses a disable-model-invocation command and says not to reproduce it', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'ok.md', 'Fine.')
+    writeCommand(cwd, 'secret.md', '---\ndisable-model-invocation: true\n---\nSecret steps.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    await expect(s.tools.get('slash_command')?.execute('t1', { command: '/secret' }, undefined, undefined, s.ctx)).rejects.toThrow(/user-only[\s\S]*reproduce/)
+    expect(s.sent).toEqual([])
+  })
+
+  it('honors disable-model-invocation added by a live edit after registration', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deploy.md', 'Deploy.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    writeCommand(cwd, 'deploy.md', '---\ndisable-model-invocation: true\n---\nDeploy.')
+
+    await expect(s.tools.get('slash_command')?.execute('t1', { command: '/deploy' }, undefined, undefined, s.ctx)).rejects.toThrow(/user-only/)
+  })
+
+  it('never runs a shell span for a model invocation, substituting the placeholder', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'ctx.md', 'Fine.')
+    writeCommand(cwd, 'st.md', 'status: !`git status`')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    const result = await s.tools.get('slash_command')?.execute('t1', { command: '/st' }, undefined, undefined, s.ctx)
+    expect(s.execCalls).toEqual([])
+    expect(result?.content[0].text).toContain(SHELL_DISABLED_PLACEHOLDER)
+    expect(result?.content[0].text).not.toContain('ran:')
+  })
+
+  it('rejects an unknown command name', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'ok.md', 'Fine.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    await expect(s.tools.get('slash_command')?.execute('t1', { command: '/nope now' }, undefined, undefined, s.ctx)).rejects.toThrow(/nope/)
+  })
+
+  it("drops a previous project's commands from the model path on a session switch", async () => {
+    // A resume or fork can land on a different project in-process, firing session_start
+    // again with a new cwd. The model must not be able to run a command that belonged
+    // to the project it just left, so the resolution set is rebuilt each session_start.
+    const cwdA = tempDir()
+    writeCommand(cwdA, 'deploy-a.md', 'Deploy project A.')
+    const s = setup(cwdA)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    const runA = await s.tools.get('slash_command')?.execute('t1', { command: '/deploy-a' }, undefined, undefined, s.ctx)
+    expect(runA?.content[0].text).toContain('Deploy project A.')
+
+    const cwdB = tempDir()
+    writeCommand(cwdB, 'deploy-b.md', 'Deploy project B.')
+    const ctxB = { ...s.ctx, cwd: cwdB }
+    await s.handlers.get('session_start')?.({}, ctxB)
+
+    // The project A command no longer resolves for the model after the switch.
+    await expect(s.tools.get('slash_command')?.execute('t1', { command: '/deploy-a' }, undefined, undefined, ctxB)).rejects.toThrow(/Unknown command/)
+    const runB = await s.tools.get('slash_command')?.execute('t1', { command: '/deploy-b' }, undefined, undefined, ctxB)
+    expect(runB?.content[0].text).toContain('Deploy project B.')
+  })
+
+  it('leaves the user path running spans as before', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'st.md', 'status: !`git status`')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('st')?.handler('', s.ctx)
+
+    expect(s.execCalls).toHaveLength(1)
+    expect(s.sent[0]).toContain('git status')
+  })
+})
+
+describe('disableSkillShellExecution', () => {
+  const writeSettings = (dir: string, settings: Record<string, unknown>): void => {
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify(settings))
+  }
+
+  it('reads user settings always and project settings only when trusted', () => {
+    const cwd = tempDir()
+    expect(shellExecutionDisabled(cwd, hoisted.home, true)).toBe(false)
+    writeSettings(cwd, { disableSkillShellExecution: true })
+    expect(shellExecutionDisabled(cwd, hoisted.home, true)).toBe(true)
+    expect(shellExecutionDisabled(cwd, hoisted.home, false)).toBe(false)
+    writeSettings(hoisted.home, { disableSkillShellExecution: true })
+    expect(shellExecutionDisabled(tempDir(), hoisted.home, false)).toBe(true)
+  })
+
+  it('cannot be re-enabled by a lower layer once the user disabled it', () => {
+    // Fail closed: a trusted repository's `false` must not lift the user's policy.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, { disableSkillShellExecution: true })
+    writeSettings(cwd, { disableSkillShellExecution: false })
+    expect(shellExecutionDisabled(cwd, hoisted.home, true)).toBe(true)
+  })
+
+  it('honors the managed policy file', () => {
+    const managed = join(tempDir(), 'managed-settings.json')
+    writeFileSync(managed, JSON.stringify({ disableSkillShellExecution: true }))
+    setManagedSettingsPath(managed)
+    expect(shellExecutionDisabled(tempDir(), hoisted.home, false)).toBe(true)
+  })
+
+  it('replaces spans with the placeholder on the user path when set', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, { disableSkillShellExecution: true })
+    writeCommand(cwd, 'st.md', 'status: !`git status`\n```!\npwd\n```')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('st')?.handler('', s.ctx)
+
+    expect(s.execCalls).toEqual([])
+    expect(s.sent[0]).toBe(`status: ${SHELL_DISABLED_PLACEHOLDER}\n${SHELL_DISABLED_PLACEHOLDER}`)
   })
 })

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { applyServerPolicy, formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, managedSettingsPath, mapContent, mcpAllowDeny, normalizeSchema, parseHelperHeaders, projectConfigPaths, userConfigPaths } from '../extensions/mcp.ts'
+import { applyServerPolicy, formatPromptCommandName, formatToolName, interpolateEnv, loadConfigFrom, loadUserScope, managedSettingsPath, mapContent, mapPromptArguments, mcpAllowDeny, normalizeSchema, parseHelperHeaders, projectConfigPaths, promptMessageContent, userConfigPaths } from '../extensions/mcp.ts'
 
 describe('parseHelperHeaders', () => {
   it('keeps string-valued header entries and drops the rest', () => {
@@ -203,5 +203,69 @@ describe('mcp adapter helpers', () => {
   it('caps a huge resource block, not just text blocks', () => {
     const mapped = mapContent([{ type: 'resource', resource: { uri: 'file:///big', text: 'y'.repeat(60_000) } }])
     expect((mapped[0] as { text: string }).text).toContain('[truncated')
+  })
+})
+
+describe('mcp prompt command naming', () => {
+  it('builds mcp__server__prompt with dashes and spaces normalized to underscores', () => {
+    expect(formatPromptCommandName('demo', 'greet')).toBe('mcp__demo__greet')
+    expect(formatPromptCommandName('my-server', 'code review')).toBe('mcp__my_server__code_review')
+  })
+})
+
+describe('mcp prompt argument mapping', () => {
+  it('maps space-separated tokens positionally onto the declared arguments', () => {
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one two')).toEqual({ a: 'one', b: 'two' })
+  })
+
+  it('keeps a quoted run together as one value, like slash-command args', () => {
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], '"one two" three')).toEqual({ a: 'one two', b: 'three' })
+  })
+
+  it('folds extra trailing tokens into the last declared argument so no input is dropped', () => {
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one two three four')).toEqual({ a: 'one', b: 'two three four' })
+  })
+
+  it('omits declared arguments with no token, and maps nothing when none are declared', () => {
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one')).toEqual({ a: 'one' })
+    expect(mapPromptArguments([], 'stray')).toEqual({})
+    expect(mapPromptArguments(undefined, 'stray')).toEqual({})
+  })
+})
+
+describe('mcp prompt message content', () => {
+  it('maps text and resource message content to injected text blocks', () => {
+    const blocks = promptMessageContent([{ content: { type: 'text', text: 'first line' } }, { content: { type: 'resource', resource: { uri: 'file:///ctx', text: 'body' } } }])
+    expect(blocks).toEqual([
+      { type: 'text', text: 'first line' },
+      { type: 'text', text: '[Resource: file:///ctx]\nbody' },
+    ])
+  })
+
+  it('carries an image block through instead of dropping it', () => {
+    const blocks = promptMessageContent([{ content: { type: 'text', text: 'look at this' } }, { content: { type: 'image', data: 'AAAA', mimeType: 'image/png' } }])
+    expect(blocks).toEqual([
+      { type: 'text', text: 'look at this' },
+      { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+    ])
+  })
+
+  it('keeps an image-only prompt as a real turn', () => {
+    const blocks = promptMessageContent([{ content: { type: 'image', data: 'BBBB', mimeType: 'image/jpeg' } }])
+    expect(blocks).toEqual([{ type: 'image', data: 'BBBB', mimeType: 'image/jpeg' }])
+  })
+
+  it('yields no blocks for an empty message list, so no turn is driven on a sentinel', () => {
+    expect(promptMessageContent([])).toEqual([])
+  })
+
+  it('yields no blocks when every message carries only empty text', () => {
+    expect(promptMessageContent([{ content: { type: 'text', text: '   ' } }, { content: { type: 'text', text: '' } }])).toEqual([])
+  })
+
+  it('caps a prompt whose messages exceed the output budget', () => {
+    const blocks = promptMessageContent([{ content: { type: 'text', text: 'x'.repeat(60_000) } }])
+    expect(blocks[0]).toMatchObject({ type: 'text' })
+    expect(blocks[0].type === 'text' && blocks[0].text).toContain('[truncated')
   })
 })

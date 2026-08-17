@@ -6,7 +6,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
-import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, buildHookAgent, withMemoryTools } from '../extensions/subagent/index.ts'
+import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
 
 // The agent-memory tests read settings and stores under the home directory; point
 // homedir at a throwaway dir so the developer's real ~/.claude cannot influence them.
@@ -142,12 +142,27 @@ const emittedEvents: Array<{ channel: string; data: unknown }> = []
 
 const eventHandlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
 
+interface CapturedCommand {
+  description?: string
+  handler: (args: string, ctx: unknown) => Promise<void>
+}
+
+const registeredCommands = new Map<string, CapturedCommand>()
+
+/** The captured /name command; throws so a missing registration fails a test loudly. */
+const command = (name: string): CapturedCommand => {
+  const captured = registeredCommands.get(name)
+  if (!captured) throw new Error(`command /${name} was not registered`)
+  return captured
+}
+
 const getExecute = (): Execute => {
   let execute: Execute | undefined
   subagentExtension({
     registerTool: (t: { name: string; execute: Execute }) => {
       if (t.name === 'subagent') execute = t.execute
     },
+    registerCommand: (name: string, options: CapturedCommand) => registeredCommands.set(name, options),
     sendMessage: sendMessageMock,
     events: { emit: (channel: string, data: unknown) => emittedEvents.push({ channel, data }), on: () => () => {} },
     on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => eventHandlers.set(name, fn),
@@ -166,6 +181,11 @@ const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source:
 })
 
 const trustedCtx = { cwd: '/repo', hasUI: false, isProjectTrusted: () => true, ui: { confirm: vi.fn(async () => true) } }
+
+const notifyMock = vi.fn()
+
+/** The context a slash-command handler runs with: trustedCtx plus the notify sink. */
+const commandCtx = (over: Record<string, unknown> = {}) => ({ ...trustedCtx, ui: { ...trustedCtx.ui, notify: notifyMock }, ...over })
 
 const text = (result: ToolResult): string => {
   const first = result.content[0]
@@ -206,9 +226,12 @@ beforeEach(() => {
   cancelBackgroundRunMock.mockReset()
   resumeBackgroundRunMock.mockReset()
   activeBackgroundRunsMock.mockReturnValue(0)
+  backgroundRunMock.mockReset()
   sendMessageMock.mockClear()
+  notifyMock.mockClear()
   emittedEvents.length = 0
   eventHandlers.clear()
+  registeredCommands.clear()
   trustedCtx.ui.confirm.mockClear()
   discoverAgentsMock.mockReturnValue({ agents: [agentConfig()], projectAgentsDir: null })
   execute = getExecute()
@@ -865,6 +888,145 @@ describe('backgroundCompletionText diagnostics', () => {
 
     const done = backgroundCompletionText({ id: 'bg-2', agent: 'scout', state: 'done', turns: 3, output: 'all good', stderr: 'noise' })
     expect(done).not.toContain('stderr tail:')
+  })
+})
+
+describe('tasksStatusText', () => {
+  it('notes when there are no background runs', () => {
+    expect(tasksStatusText([])).toBe('No background subagent runs in this session.')
+  })
+
+  it('lists each run with id, agent, state, turns and a short output tail', () => {
+    const out = tasksStatusText([
+      { id: 'bg-1', agent: 'scout', task: 'audit the API surface', state: 'running', turns: 0 },
+      { id: 'bg-2', agent: 'reviewer', task: 'review the diff', state: 'done', turns: 3, output: 'Looked at 4 files.\nAll clear.' },
+      { id: 'bg-3', agent: 'scout', task: 'boot check', state: 'failed', turns: 0, stderr: 'unknown model id x' },
+    ])
+
+    expect(out).toContain('bg-1 scout: running - audit the API surface')
+    expect(out).toContain('bg-2 reviewer: done (3 turns) - review the diff')
+    // The tail is the last line of the run output, not the whole transcript.
+    expect(out).toContain('All clear.')
+    expect(out).not.toContain('Looked at 4 files.')
+    expect(out).toContain('bg-3 scout: failed (0 turns) - boot check')
+    // A child that dies at boot leaves only stderr; the tail says so.
+    expect(out).toContain('stderr: unknown model id x')
+  })
+
+  it('uses singular wording for a one-turn run', () => {
+    expect(tasksStatusText([{ id: 'bg-1', agent: 'scout', task: 't', state: 'done', turns: 1 }])).toContain('done (1 turn) - t')
+  })
+
+  it('truncates long task previews and long output tails', () => {
+    const out = tasksStatusText([{ id: 'bg-1', agent: 'scout', task: 'x'.repeat(100), state: 'done', turns: 2, output: 'y'.repeat(400) }])
+
+    expect(out).toContain('x'.repeat(60))
+    expect(out).not.toContain('x'.repeat(61))
+    expect(out).toContain(`${'y'.repeat(200)}...`)
+    expect(out).not.toContain('y'.repeat(201))
+  })
+
+  it('does not split a surrogate pair when the truncation boundary lands mid-character', () => {
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+    const tail = tasksStatusText([{ id: 'bg-1', agent: 'scout', task: 't', state: 'done', turns: 1, output: `${'y'.repeat(199)}😀😀` }])
+    expect(loneSurrogate.test(tail)).toBe(false)
+    const task = tasksStatusText([{ id: 'bg-2', agent: 'scout', task: `${'z'.repeat(59)}😀😀`, state: 'done', turns: 1 }])
+    expect(loneSurrogate.test(task)).toBe(false)
+  })
+})
+
+describe('agentsListText', () => {
+  it('points at the agent directories when nothing was discovered', () => {
+    const out = agentsListText([])
+
+    expect(out).toContain('No agents discovered')
+    expect(out).toContain('~/.claude/agents')
+    expect(out).toContain('.claude/agents')
+  })
+
+  it('groups agents by source, lists file paths, and appends the add-more hint', () => {
+    const out = agentsListText([
+      { name: 'repo-reviewer', source: 'project', filePath: '/repo/.claude/agents/repo-reviewer.md' },
+      { name: 'scout', source: 'user', filePath: '/home/u/.claude/agents/scout.md' },
+      { name: 'Explore', source: 'builtin', filePath: '/ext/agents/explore.md' },
+      { name: 'linter', source: 'plugin', filePath: '/plugins/lint/agents/linter.md' },
+    ])
+
+    // Grouped lowest to highest precedence, matching discovery's override order.
+    const positions = ['builtin:', 'plugin:', 'user:', 'project:'].map((header) => out.indexOf(header))
+    expect(positions.every((p) => p >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+
+    expect(out).toContain('  Explore - /ext/agents/explore.md')
+    expect(out).toContain('  linter - /plugins/lint/agents/linter.md')
+    expect(out).toContain('  scout - /home/u/.claude/agents/scout.md')
+    expect(out).toContain('  repo-reviewer - /repo/.claude/agents/repo-reviewer.md')
+    expect(out).toContain('~/.claude/agents')
+  })
+
+  it('omits the header of a source with no agents', () => {
+    const out = agentsListText([{ name: 'scout', source: 'user', filePath: '/home/u/.claude/agents/scout.md' }])
+
+    expect(out).toContain('user:')
+    expect(out).not.toContain('builtin:')
+    expect(out).not.toContain('project:')
+  })
+})
+
+describe('viewer commands', () => {
+  it('registers /tasks and /agents with descriptions', () => {
+    expect(command('tasks').description).toBeTruthy()
+    expect(command('agents').description).toBeTruthy()
+  })
+
+  it('/tasks notes the empty registry without running anything', async () => {
+    await command('tasks').handler('', commandCtx())
+
+    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs in this session.', 'info')
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('/tasks lists runs started in this session, resolved against the live registry', async () => {
+    startBackgroundRunMock.mockReturnValue('bg-11111111')
+    await execute('c1', { background: true, agent: 'scout', task: 'audit the API surface' }, undefined, undefined, trustedCtx)
+    backgroundRunMock.mockImplementation((id: string) => (id === 'bg-11111111' ? { id, agent: 'scout', task: 'audit the API surface', state: 'done', turns: 3, output: 'All clear.' } : undefined))
+
+    await command('tasks').handler('', commandCtx())
+
+    const out = notifyMock.mock.calls[0][0] as string
+    expect(out).toContain('bg-11111111 scout: done (3 turns) - audit the API surface')
+    expect(out).toContain('All clear.')
+  })
+
+  it('/tasks drops runs the registry has evicted', async () => {
+    await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    backgroundRunMock.mockReturnValue(undefined)
+
+    await command('tasks').handler('', commandCtx())
+
+    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs in this session.', 'info')
+  })
+
+  it('/agents lists the discovered agents for an approved project', async () => {
+    discoverAgentsMock.mockClear()
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig(), agentConfig({ name: 'repo', source: 'project', filePath: '/repo/.pi/agents/repo.md' })], projectAgentsDir: '/repo/.pi/agents' })
+
+    await command('agents').handler('', commandCtx())
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'both')
+    const out = notifyMock.mock.calls[0][0] as string
+    expect(out).toContain('user:')
+    expect(out).toContain('  scout - /agents/scout.md')
+    expect(out).toContain('project:')
+    expect(out).toContain('  repo - /repo/.pi/agents/repo.md')
+  })
+
+  it('/agents narrows discovery to user scope when the project is not approved', async () => {
+    discoverAgentsMock.mockClear()
+
+    await command('agents').handler('', commandCtx({ isProjectTrusted: () => false }))
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'user')
   })
 })
 

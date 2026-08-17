@@ -46,6 +46,7 @@ const getTool = (): ToolShape => {
     registerTool: (t: ToolShape) => {
       if (t.name === 'subagent') tool = t
     },
+    registerCommand: () => {},
     on: () => {},
   } as never)
   if (!tool) throw new Error('subagent tool was not registered')
