@@ -4,7 +4,21 @@ import { dirname } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, formatStatus, parseFinalOutputFromJsonl, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
+import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, createJsonlOutputParser, formatStatus, parseFinalOutputFromJsonl, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
+
+describe('createJsonlOutputParser onTurn', () => {
+  const asst = (text: string) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })
+
+  it('calls onTurn with the cumulative turn count on each assistant message_end', () => {
+    const counts: number[] = []
+    const parser = createJsonlOutputParser((turns) => counts.push(turns))
+    parser.push(`${asst('a')}\n`)
+    // A user message is not a turn.
+    parser.push(`${JSON.stringify({ type: 'message_end', message: { role: 'user', content: [] } })}\n`)
+    parser.push(`${asst('b')}\n`)
+    expect(counts).toEqual([1, 2])
+  })
+})
 
 describe('background subagent helpers', () => {
   it('parses the final assistant text and turn count from jsonl', () => {
@@ -88,6 +102,25 @@ describe('background run lifecycle', () => {
     expect(done?.state).toBe('failed')
     expect(done?.stderr).toContain('model id not resolvable')
     expect((done?.stderr ?? '').length).toBeLessThanOrEqual(2048)
+  })
+
+  it('reports a maxTurns-capped run as done, not failed', () => {
+    // The cap kills the child with SIGTERM, whose close carries a null code; that is a
+    // clean boundary end, so it must read as done (the foreground path treats it so too).
+    let done: BackgroundRun | undefined
+    startBackgroundRun('scout', 'audit', spec({ maxTurns: 2 }), (run) => {
+      done = run
+    })
+    const child = children.at(-1)!
+    const asst = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
+    child.stdout.emit('data', asst('turn one'))
+    child.stdout.emit('data', asst('turn two'))
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    child.emit('close', null)
+
+    expect(done?.state).toBe('done')
+    expect(done?.exitCode).toBe(0)
+    expect(done?.turns).toBe(2)
   })
 
   it('holds the cap slot for a cancelled child until it dies, then escalates to SIGKILL', () => {

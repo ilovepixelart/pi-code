@@ -40,6 +40,8 @@ export interface BackgroundSpawn {
    * completing run deleted. Without it the resumed child is handed a path that no
    * longer exists, and pi falls back to using that path as the prompt text. */
   promptBody?: string
+  /** Claude's maxTurns: kill the child once it has produced this many turns. */
+  maxTurns?: number
 }
 
 const runs = new Map<string, BackgroundRun>()
@@ -68,7 +70,7 @@ function evictFinishedRuns(): void {
 
 /** Line-by-line parser keeping only the last assistant text and a turn count, so a
  * long run's JSONL stdout never accumulates whole in the parent's memory. */
-export function createJsonlOutputParser(): { push: (chunk: string) => void; flush: () => { text: string; turns: number } } {
+export function createJsonlOutputParser(onTurn?: (turns: number) => void): { push: (chunk: string) => void; flush: () => { text: string; turns: number } } {
   let buffer = ''
   let text = ''
   let turns = 0
@@ -82,6 +84,7 @@ export function createJsonlOutputParser(): { push: (chunk: string) => void; flus
     }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant') return
     turns++
+    onTurn?.(turns)
     // The complete text of the last assistant message, matching getFinalOutput on the
     // foreground path so a multi-part message reads the same in both.
     const parts = (event.message.content ?? []).filter((p) => p.type === 'text' && p.text).map((p) => p.text as string)
@@ -230,8 +233,23 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     proc.once('close', () => clearTimeout(escalate))
   }
   // Parsed as it streams: buffering the whole JSONL replays every tool result echoed
-  // by the child through the parent's memory for the life of the run.
-  const parser = createJsonlOutputParser()
+  // by the child through the parent's memory for the life of the run. A maxTurns cap
+  // kills the child at the turn boundary after its Nth turn, so the output so far is
+  // preserved and no turn is cut mid-flight.
+  const maxTurns = invocation.maxTurns
+  // A maxTurns cap kills the child with SIGTERM, so its close arrives with a null code.
+  // That is a clean boundary end (the foreground path treats the same cap as success),
+  // so remember it and do not misreport the run as failed.
+  let cappedByMaxTurns = false
+  const parser = createJsonlOutputParser(
+    maxTurns
+      ? (turns) => {
+          if (turns < maxTurns) return
+          cappedByMaxTurns = true
+          run.kill?.()
+        }
+      : undefined,
+  )
   let stderrTail = ''
   // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
   let completed = false
@@ -264,9 +282,10 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     const { text, turns } = parser.flush()
     run.kill = undefined
     run.live = false
-    // A cancelled run keeps that state: its non-zero exit is the cancellation.
-    if (run.state !== 'cancelled') run.state = code === 0 ? 'done' : 'failed'
-    run.exitCode = code ?? 0
+    // A cancelled run keeps that state: its non-zero exit is the cancellation. A
+    // maxTurns cap ends cleanly with output preserved, so it counts as done, not failed.
+    if (run.state !== 'cancelled') run.state = code === 0 || cappedByMaxTurns ? 'done' : 'failed'
+    run.exitCode = cappedByMaxTurns ? 0 : (code ?? 0)
     run.output = text
     run.turns = turns
     run.stderr = stderrTail.trim() || undefined

@@ -92,7 +92,7 @@ const setup = (cwd: string) => {
     model: { id: 'gpt-oss:20b', name: 'GPT-OSS 20B' },
     getContextUsage: () => ({ tokens: 1000, contextWindow: 131072, percent: 0.8 }),
     ui: { theme: { fg: (_c: string, t: string) => t }, setStatus: (_k: string, text: string | undefined) => status.push(text), notify: () => {}, confirm: async () => true },
-    sessionManager: { getBranch: () => [], getSessionId: () => 'sess-9', getSessionFile: () => '/tmp/sess-9.jsonl' },
+    sessionManager: { getBranch: () => [], getSessionId: () => 'sess-9', getSessionFile: () => '/tmp/sess-9.jsonl', getSessionName: () => 'my-session' },
   }
   return { handlers, busHandlers, status, ctx }
 }
@@ -118,6 +118,69 @@ describe('statusLine command contract', () => {
     expect((payload.model as { display_name: string }).display_name).toBe('GPT-OSS 20B')
     expect((payload.context_window as { used_percentage: number }).used_percentage).toBe(0.8)
     expect(status.at(-1)).toBe(' CTX 42% | $0.10 ')
+  })
+
+  it('carries the documented payload fields: version, event name, durations and counters', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('tool_result')?.({ toolName: 'write', isError: false, input: { path: 'a.ts', content: 'one\ntwo\nthree' } }, ctx)
+    await handlers.get('tool_result')?.({ toolName: 'edit', isError: false, input: { path: 'a.ts', edits: [{ oldText: 'one\ntwo', newText: 'uno' }] } }, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.hook_event_name).toBe('Status')
+    expect(typeof payload.version).toBe('string')
+    expect((payload.version as string).length).toBeGreaterThan(0)
+    expect(payload.session_name).toBe('my-session')
+    const cost = payload.cost as Record<string, number>
+    expect(cost.total_duration_ms).toBeGreaterThanOrEqual(0)
+    expect(cost.total_lines_added).toBe(4)
+    expect(cost.total_lines_removed).toBe(2)
+    expect((payload.context_window as { remaining_percentage: number }).remaining_percentage).toBe(99.2)
+    expect(payload.exceeds_200k_tokens).toBe(false)
+    expect((payload.thinking as { enabled: boolean }).enabled).toBe(true)
+  })
+
+  it('measures API duration and the token breakdown from provider and message events', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    // One provider round-trip of 50ms, then a message with a usage breakdown.
+    await handlers.get('before_provider_request')?.({ type: 'before_provider_request', payload: {} }, ctx)
+    await vi.advanceTimersByTimeAsync(50)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: {} }, ctx)
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 3, totalTokens: 128 } } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.cost as Record<string, number>).total_api_duration_ms).toBeGreaterThanOrEqual(50)
+    const cw = payload.context_window as Record<string, unknown>
+    expect(cw.current_usage).toEqual({ input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 3 })
+    expect(cw.total_output_tokens).toBe(20)
+  })
+
+  it('flags exceeds_200k_tokens from the combined usage total', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 150000, output: 30000, cacheRead: 40000, cacheWrite: 0, totalTokens: 220000 } } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.exceeds_200k_tokens).toBe(true)
   })
 
   it('keeps the built-in segment when the command prints nothing', async () => {

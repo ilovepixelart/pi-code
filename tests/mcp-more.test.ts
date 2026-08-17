@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  */
 
 interface TransportRecord {
-  kind: 'stdio' | 'http' | 'sse'
+  kind: 'stdio' | 'http' | 'sse' | 'ws'
   options: Record<string, unknown>
   url?: URL
 }
@@ -114,6 +114,16 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
   },
 }))
 
+vi.mock('@modelcontextprotocol/sdk/client/websocket.js', () => ({
+  WebSocketClientTransport: class implements TransportRecord {
+    kind = 'ws' as const
+    options: Record<string, unknown> = {}
+    constructor(public url: URL) {
+      hoisted.transports.push(this)
+    }
+  },
+}))
+
 vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   SSEClientTransport: class implements TransportRecord {
     kind = 'sse' as const
@@ -127,7 +137,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 }))
 
 const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { splitByPolicy, expandCwd, resolveBearerToken, mapContent } = await import('../extensions/mcp.ts')
+const { splitByPolicy, expandCwd, resolveBearerToken, mapContent, setManagedSettingsPath } = await import('../extensions/mcp.ts')
 
 interface RegisteredTool {
   name: string
@@ -380,6 +390,48 @@ describe('mcp startup config scoping', () => {
 })
 
 describe('mcp transport selection', () => {
+  it('connects a type: ws server over the WebSocket transport', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { rt: { type: 'ws', url: 'wss://example.com/mcp' } } })
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['ws'])
+    expect(String(hoisted.transports[0].url)).toBe('wss://example.com/mcp')
+    expect(harness.toolNames()).toEqual(['rt_go'])
+  })
+
+  it('warns and connects url-only when a ws server declares auth the transport cannot carry', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { rt: { type: 'ws', url: 'wss://example.com/mcp', bearerToken: 'secret', headersHelper: 'echo {}' } } })
+    // The ws branch returns before the headersHelper runs; the socket still opens.
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['ws'])
+    expect(harness.toolNames()).toEqual(['rt_go'])
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/WebSocket.*url-only|ignored/i)
+    warn.mockRestore()
+  })
+
+  // The managed allow/deny lists are an enterprise policy file, not user/project
+  // settings, so point the extension at a throwaway managed-settings.json.
+  const withManaged = (settings: unknown): void => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-managed-')), 'managed-settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    setManagedSettingsPath(file)
+  }
+  afterEach(() => setManagedSettingsPath(undefined))
+
+  it('does not connect a server on the managed deny list', async () => {
+    withTools([{ name: 'go' }])
+    withManaged({ deniedMcpServers: [{ serverName: 'blocked' }] })
+    const harness = await setupStarted({ user: { blocked: { command: 'x' }, ok: { command: 'y' } } })
+    expect(harness.toolNames()).toEqual(['ok_go'])
+  })
+
+  it('connects only managed-allow-listed servers when an allow list is set', async () => {
+    withTools([{ name: 'go' }])
+    withManaged({ allowedMcpServers: [{ serverName: 'keep' }] })
+    const harness = await setupStarted({ user: { keep: { command: 'x' }, drop: { command: 'y' } } })
+    expect(harness.toolNames()).toEqual(['keep_go'])
+  })
+
   it('interpolates env vars in the command and args', async () => {
     setEnv('MCP_BIN', '/opt/bin/server')
     withTools([{ name: 'go' }])
@@ -563,14 +615,23 @@ describe('mcp transport selection', () => {
     expect(harness.toolNames()).toEqual(['remote_go'])
   })
 
-  it('does not retry over SSE when the streamable transport reports Unauthorized', async () => {
+  it('does not retry over SSE when the streamable transport reports a 401', async () => {
     hoisted.control.connect = async (transport) => {
-      if (transport.kind === 'http') throw new Error('Unauthorized')
+      if (transport.kind === 'http') {
+        // What the SDK throws for a 401 with no authProvider: a transport error
+        // carrying the status code, not the literal word Unauthorized.
+        throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint'), { code: 401 })
+      }
     }
-    const harness = await setupStarted({ user: { remote: { url: 'https://example.com/mcp' } } })
+    // Declining the OAuth login keeps the failure an auth failure: a typeless url
+    // must not read it as a transport mismatch and retry the whole flow over SSE.
+    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp' } } })
+    await harness.sessionStart(undefined, false)
 
+    // No SSE retry AND the flow reached the decline path: both only happen if the
+    // bare 401 (no 'Unauthorized' text) was recognized as an auth failure.
     expect(hoisted.transports.map((t) => t.kind)).toEqual(['http'])
-    expect(await statusLinesOf(harness)).toEqual(['remote: failed: Unauthorized (0 tools)'])
+    expect(await statusLinesOf(harness)).toEqual(['remote: failed: login declined for remote (0 tools)'])
   })
 
   it('reports a malformed url as a failure without constructing any transport', async () => {
@@ -580,6 +641,27 @@ describe('mcp transport selection', () => {
     const [line] = await statusLinesOf(harness)
     expect(line.startsWith('remote: failed: ')).toBe(true)
     expect(line.endsWith(' (0 tools)')).toBe(true)
+  })
+})
+
+describe('plugin mcp servers', () => {
+  it('connects an enabled plugin server with plugin vars substituted and the plugin tool alias', async () => {
+    const harness = await setup()
+    const root = join(harness.home, '.claude', 'plugins', 'cache', 'market', 'toolbox', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'toolbox' }))
+    writeFileSync(join(root, '.mcp.json'), JSON.stringify({ mcpServers: { db: { command: '${CLAUDE_PLUGIN_ROOT}/bin/server' } } }))
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolbox: true } }))
+    withTools([{ name: 'query' }])
+
+    await harness.sessionStart()
+
+    expect(harness.toolNames()).toEqual(['db_query'])
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['stdio'])
+    expect((hoisted.transports[0].options as { command: string }).command).toBe(`${root}/bin/server`)
+    const aliasEvent = harness.emitted.find((entry) => entry.channel === 'pi-code:mcp-tools')
+    expect(aliasEvent?.data).toEqual([{ pi: 'db_query', claude: 'mcp__plugin_toolbox_db__query' }])
   })
 })
 

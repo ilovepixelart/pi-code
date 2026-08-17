@@ -6,7 +6,10 @@ import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import contextImports from '../extensions/context-imports.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit } from '../extensions/hooks.ts'
+import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
 /**
  * Hook commands must never reach a real shell from this suite, so `spawn` is
@@ -141,6 +144,7 @@ afterEach(() => {
   for (const child of hoisted.live.splice(0)) child.emit('close', 0)
   vi.useRealTimers()
   vi.restoreAllMocks()
+  setCompleteBackend(null)
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -176,18 +180,19 @@ const setupExtension = () => {
     notes,
     sent,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, { ...defaultCtx, ...ctx }),
-    toolCall: (toolName: string, input: unknown, toolCallId = 't1') => handler('tool_call')({ toolName, input, toolCallId }, defaultCtx),
+    toolCall: (toolName: string, input: unknown, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_call')({ toolName, input, toolCallId }, { ...defaultCtx, ...ctxOverride }),
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
-    agentEnd: () => handler('agent_end')({ messages: [] }, defaultCtx),
+    agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
     compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
-    beforeAgentStart: () => handler('before_agent_start')({ systemPrompt: '' }),
+    beforeAgentStart: (event: Record<string, unknown> = { systemPrompt: '' }) => handler('before_agent_start')(event),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
     emitPlanMode: (state: unknown) => busHandlers.get('pi-code:plan-mode')?.(state),
     emitSubagent: (event: unknown) => busHandlers.get('pi-code:subagent')?.(event),
+    emitInstruction: (event: unknown) => busHandlers.get('pi-code:instructions')?.(event),
   }
 }
 
@@ -311,20 +316,26 @@ describe('hook timeout configuration', () => {
 })
 
 describe('non-command hook types', () => {
-  it('runs only command hooks and skips prompt/agent typed entries', async () => {
-    // Claude settings may carry prompt or agent hooks with no command field; running
-    // one through sh -c undefined would throw out of the tool_call handler.
+  it('runs command, prompt, and agent hooks but skips entries missing their required fields', async () => {
+    // prompt and agent hooks run with their prompt mirrored into `command`; an agent
+    // hook with no prompt, or an mcp_tool hook missing its tool, is dropped.
     const seen: string[] = []
     const runner: HookRunner = async (command) => {
-      seen.push(command)
+      seen.push(command.command)
       return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     const config = {
-      PreToolUse: [{ hooks: [{ type: 'prompt', prompt: 'judge this' } as never, { command: 'real-hook' }, { type: 'command', command: 'typed-hook' }] }],
+      PreToolUse: [
+        {
+          hooks: [{ type: 'prompt', prompt: 'judge this' } as never, { command: 'real-hook' }, { type: 'agent', prompt: 'verify this' } as never, { type: 'agent' } as never, { type: 'mcp_tool', server: 'x' } as never, { type: 'command', command: 'typed-hook' }],
+        },
+      ],
     }
     const decision = await runPreToolUse(config, 'bash', {}, runner)
     expect(decision).toEqual({ block: false })
-    expect(seen).toEqual(['real-hook', 'typed-hook'])
+    // 'verify this' is the agent hook's mirrored identity; the promptless agent and
+    // the fieldless mcp_tool hooks are absent.
+    expect(seen).toEqual(['judge this', 'real-hook', 'verify this', 'typed-hook'])
   })
 })
 
@@ -377,8 +388,8 @@ describe('runPreToolUse hook sequencing', () => {
   it('returns the first blocking verdict; every hook still runs (parallel launch)', async () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
-      run.push(command)
-      return command === 'second' ? { code: 2, stdout: '', stderr: 'denied by second', timedOut: false } : { code: 0, stdout: '', stderr: '', timedOut: false }
+      run.push(command.command)
+      return command.command === 'second' ? { code: 2, stdout: '', stderr: 'denied by second', timedOut: false } : { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     const config = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }, { command: 'third' }] }] }
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, reason: 'denied by second' })
@@ -388,7 +399,7 @@ describe('runPreToolUse hook sequencing', () => {
   it('allows the tool when every matching hook passes', async () => {
     const run: string[] = []
     const runner: HookRunner = async (command) => {
-      run.push(command)
+      run.push(command.command)
       return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     const config = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
@@ -713,6 +724,24 @@ describe('hooks extension tool_call', () => {
     expect(await ext.toolCall('bash', { command: 'git push -f' })).toEqual({ block: true, reason: 'force push is not allowed' })
   })
 
+  it('runs a PreToolUse prompt hook through the model and blocks on its deny decision', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'Should this run? $ARGUMENTS' }] }] })
+    setCompleteBackend(async () => ({ role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"looks risky"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }) as never)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const decision = await ext.toolCall('bash', { command: 'rm -rf /' }, 't1', { model: {} })
+    expect(decision).toEqual({ block: true, reason: 'looks risky' })
+  })
+
+  it('lets the tool through when a prompt hook allows and there is no command hook to run', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'ok? $ARGUMENTS' }] }] })
+    setCompleteBackend(async () => ({ role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"allow"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }) as never)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(await ext.toolCall('bash', { command: 'ls' }, 't1', { model: {} })).toBeUndefined()
+    expect(commandsRun()).toEqual([]) // the prompt hook did not shell out
+  })
+
   it('blocks the tool with the deny reason from hookSpecificOutput', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'secrets file' } })], code: 0 })
     expect(await ext.toolCall('bash', { command: 'cat .env' })).toEqual({ block: true, reason: 'secrets file' })
@@ -721,6 +750,23 @@ describe('hooks extension tool_call', () => {
   it('returns undefined so the tool proceeds when the hook allows it', async () => {
     const ext = await withPreHook({ code: 0 })
     expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
+  })
+
+  it('prompts the user on permissionDecision ask, letting the call through when approved', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
+    const ui = { notify: () => {}, confirm: async () => true }
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui })).toBeUndefined()
+  })
+
+  it('blocks on permissionDecision ask when the user declines the prompt', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
+    const ui = { notify: () => {}, confirm: async () => false }
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui })).toEqual({ block: true, reason: 'confirm this' })
+  })
+
+  it('blocks on permissionDecision ask with no UI to prompt (headless fallback)', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
+    expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this' })
   })
 
   it('forwards the tool name and input to the hook payload', async () => {
@@ -796,6 +842,25 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     expect(commandsRun()).toEqual([])
   })
 
+  it('appends a PostToolUseFailure hook additionalContext to the failed result for the model', async () => {
+    // Claude shows the failure hook's output to the model even though the tool failed.
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'diag' }] }] })
+    script('diag', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'the network was down' } })], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const patched = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })) as { content: Array<{ text: string }> } | undefined
+    expect(patched?.content.map((c) => c.text)).toEqual(['boom', 'the network was down'])
+  })
+
+  it('appends a PostToolUseFailure hook stderr (exit 2) to the failed result', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'diag' }] }] })
+    script('diag', { stderr: ['check your credentials'], code: 2 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const patched = (await ext.toolResult('bash', { content: [{ type: 'text', text: 'boom' }], isError: true })) as { content: Array<{ text: string }> } | undefined
+    expect(patched?.content.at(-1)?.text).toBe('PostToolUseFailure hook: check your credentials')
+  })
+
   it('skips PostToolUse hooks whose matcher misses the tool', async () => {
     const ext = await withPostHooks([{ command: 'post' }])
     await ext.toolResult('edit')
@@ -863,12 +928,53 @@ describe('hooks extension notify-style events', () => {
     return ext
   }
 
+  it('runs an enabled plugin hook with its plugin root substituted', async () => {
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { fmt: true } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
+  })
+
+  it('bridges Notification hooks for idle_prompt on agent end, matcher-filtered', async () => {
+    // The one notification pi can honestly source today: the agent finished and
+    // is waiting for input. Observational only, like Claude documents.
+    const ext = await withHooks({
+      Notification: [
+        { matcher: 'idle_prompt', hooks: [{ command: 'notify-idle' }] },
+        { matcher: 'permission_prompt', hooks: [{ command: 'notify-perm' }] },
+      ],
+    })
+    await ext.agentEnd()
+
+    expect(commandsRun()).toEqual(['notify-idle'])
+    const stdin = JSON.parse(recordFor('notify-idle').stdin)
+    expect(stdin.hook_event_name).toBe('Notification')
+    expect(stdin.notification_type).toBe('idle_prompt')
+    expect(typeof stdin.message).toBe('string')
+  })
+
   it('runs Stop hooks on agent end with stop_hook_active false', async () => {
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
     await ext.agentEnd()
     expect(commandsRun()).toEqual(['stopped'])
     expect(JSON.parse(recordFor('stopped').stdin)).toEqual({ ...COMMON, hook_event_name: 'Stop', stop_hook_active: false })
     expect(ext.sent).toEqual([])
+  })
+
+  it('includes the final assistant text as last_assistant_message on Stop', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopped' }] }] })
+    await ext.agentEnd([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'text', text: 'all done' }] },
+    ])
+    expect(JSON.parse(recordFor('stopped').stdin).last_assistant_message).toBe('all done')
   })
 
   it('continues the conversation when a Stop hook blocks, with the reason', async () => {
@@ -1010,6 +1116,139 @@ describe('hooks subagent lifecycle', () => {
   })
 })
 
+describe('hooks InstructionsLoaded', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    const proj = tempDir('hooks-proj-')
+    await ext.sessionStart('startup', { cwd: proj })
+    return { ext, proj }
+  }
+
+  const startEvent = (proj: string, files: Array<{ path: string; content: string }>) => ({ systemPrompt: '', systemPromptOptions: { cwd: proj, contextFiles: files } })
+
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('bridges a session_start event from the bus with the common payload fields', async () => {
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ matcher: 'session_start', hooks: [{ command: 'il' }] }] })
+    const projectFile = join(proj, 'CLAUDE.md')
+
+    await ext.emitInstruction({ file_path: projectFile, memory_type: 'Project', load_reason: 'session_start' })
+
+    expect(commandsRun()).toEqual(['il'])
+    expect(JSON.parse(recordFor('il').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'InstructionsLoaded', file_path: projectFile, memory_type: 'Project', load_reason: 'session_start' })
+  })
+
+  it('does not announce raw contextFiles itself: exclusion-aware session_start events ride the bus', async () => {
+    // claudeMdExcludes lives in context-imports; announcing contextFiles here
+    // used to fire for files the exclusion had removed from the prompt.
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ matcher: 'session_start', hooks: [{ command: 'il' }] }] })
+
+    await ext.beforeAgentStart(startEvent(proj, [{ path: join(proj, 'CLAUDE.md'), content: 'x' }]))
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('is not told an excluded context file loaded (context-imports integration over the bus)', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(
+      join(hoisted.home, '.claude', 'settings.json'),
+      JSON.stringify({
+        claudeMdExcludes: ['**/vendor/CLAUDE.md'],
+        hooks: { InstructionsLoaded: [{ matcher: 'session_start', hooks: [{ command: 'il' }] }] },
+      }),
+    )
+    setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
+    try {
+      const ext = setupExtension()
+      const proj = tempDir('hooks-proj-')
+      mkdirSync(join(proj, 'vendor'))
+      await ext.sessionStart('startup', { cwd: proj })
+
+      // context-imports on the same bus: its synchronous emits reach the
+      // listener hooks registered, regardless of extension order.
+      const ciHandlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+      contextImports({
+        on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => ciHandlers.set(name, fn),
+        events: {
+          emit: (channel: string, data: unknown) => {
+            if (channel === 'pi-code:instructions') ext.emitInstruction(data)
+          },
+          on: () => () => {},
+        },
+      } as never)
+      const contextFiles = [
+        { path: join(proj, 'CLAUDE.md'), content: 'KEEP' },
+        { path: join(proj, 'vendor', 'CLAUDE.md'), content: 'EXCLUDED' },
+      ]
+      await ciHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd: proj, contextFiles } }, {})
+      await flush()
+
+      expect(commandsRun()).toEqual(['il'])
+      expect(JSON.parse(recordFor('il').stdin).file_path).toBe(join(proj, 'CLAUDE.md'))
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  })
+
+  it('runs no hook when the matcher misses the load reason', async () => {
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ matcher: 'path_glob_match', hooks: [{ command: 'lazy' }] }] })
+
+    await ext.emitInstruction({ file_path: join(proj, 'CLAUDE.md'), memory_type: 'Project', load_reason: 'session_start' })
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('bridges a lazy path_glob_match event from the bus with its globs and trigger', async () => {
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ matcher: 'path_glob_match', hooks: [{ command: 'lazy' }] }] })
+    const rule = join(proj, '.claude', 'rules', 'sql.md')
+
+    await ext.emitInstruction({ file_path: rule, memory_type: 'Project', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(proj, 'db', 'schema.sql') })
+
+    expect(commandsRun()).toEqual(['lazy'])
+    expect(JSON.parse(recordFor('lazy').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'InstructionsLoaded', file_path: rule, memory_type: 'Project', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(proj, 'db', 'schema.sql') })
+  })
+
+  it('bridges an include event and honors a pipe-list matcher across reasons', async () => {
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ matcher: 'path_glob_match|include', hooks: [{ command: 'lazy' }] }] })
+
+    await ext.emitInstruction({ file_path: join(proj, 'style.md'), memory_type: 'Project', load_reason: 'include', parent_file_path: join(proj, 'CLAUDE.md') })
+    expect(commandsRun()).toEqual(['lazy'])
+    expect(JSON.parse(recordFor('lazy').stdin).parent_file_path).toBe(join(proj, 'CLAUDE.md'))
+
+    await ext.emitInstruction({ file_path: join(proj, 'CLAUDE.md'), memory_type: 'Project', load_reason: 'session_start' })
+    expect(commandsRun()).toEqual(['lazy'])
+  })
+
+  it('is observational: exit codes, block decisions and systemMessage output are all ignored', async () => {
+    const { ext, proj } = await withHooks({ InstructionsLoaded: [{ hooks: [{ command: 'il' }] }] })
+    script('il', { stdout: [JSON.stringify({ systemMessage: 'warn', decision: 'block', continue: false })], stderr: ['angry'], code: 2 })
+
+    await ext.emitInstruction({ file_path: join(proj, 'CLAUDE.md'), memory_type: 'Project', load_reason: 'session_start' })
+    await flush()
+
+    expect(commandsRun()).toEqual(['il'])
+    expect(ext.notes).toEqual([])
+    expect(ext.sent).toEqual([])
+  })
+
+  it('ignores malformed bus payloads and events arriving before session_start', async () => {
+    const valid = { file_path: '/x/CLAUDE.md', memory_type: 'Project', load_reason: 'path_glob_match' }
+    writeSettings(hoisted.home, 'settings.json', { InstructionsLoaded: [{ hooks: [{ command: 'lazy' }] }] })
+    const fresh = setupExtension()
+    await fresh.emitInstruction(valid)
+    expect(commandsRun()).toEqual([])
+
+    await fresh.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await fresh.emitInstruction({ file_path: '/x/CLAUDE.md', load_reason: 'path_glob_match' })
+    await fresh.emitInstruction('junk')
+    expect(commandsRun()).toEqual([])
+
+    await fresh.emitInstruction(valid)
+    expect(commandsRun()).toEqual(['lazy'])
+  })
+})
+
 describe('hooks MCP tool aliases', () => {
   const withHooks = async (config: Record<string, unknown>) => {
     writeSettings(hoisted.home, 'settings.json', config)
@@ -1077,7 +1316,7 @@ describe('hook execution parallelism', () => {
       release = resolve
     })
     const runner: HookRunner = async (command) => {
-      launched.push(command)
+      launched.push(command.command)
       await gate
       return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
@@ -1092,7 +1331,7 @@ describe('hook execution parallelism', () => {
     const seen: unknown[] = []
     const runner: HookRunner = async (command, payload) => {
       seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
-      const stdout = command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
+      const stdout = command.command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
       return { code: 0, stdout, stderr: '', timedOut: false }
     }
     const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
@@ -1109,7 +1348,7 @@ describe('hook execution parallelism', () => {
       release = resolve
     })
     const runner: HookRunner = async (command) => {
-      launched.push(command)
+      launched.push(command.command)
       await gate
       return { code: 0, stdout: 'ctx', stderr: '', timedOut: false }
     }

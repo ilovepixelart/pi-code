@@ -14,8 +14,16 @@
  *                      with stop_hook_active as the loop guard)
  * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
  * - PostCompact     -> pi `session_compact` (fire-and-forget)
- * - PostToolUseFailure -> pi `tool_result` error branch (fire-and-forget)
+ * - PostToolUseFailure -> pi `tool_result` error branch (stderr/additionalContext
+ *                      appended to the failed result; it cannot block, the tool failed)
  * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
+ * - InstructionsLoaded -> bridged from the shared instruction-events bus:
+ *                      context-imports publishes session_start for the context
+ *                      files that survived claudeMdExcludes (it owns exclusion,
+ *                      so a file it removed from the prompt never announces)
+ *                      and include for resolved @imports; claude-rules publishes
+ *                      path_glob_match. Strictly observational: exit codes and
+ *                      JSON output, systemMessage included, are ignored.
  *
  * Every payload carries session_id, transcript_path (pi's session file), cwd,
  * permission_mode (plan-mode state off the shared bus) and effort; tool events add
@@ -48,19 +56,43 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import type { Api, Model } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
+import { runAgent } from './internal/agent-run.js'
+import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from './internal/instruction-events.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
+import { callMcpTool } from './internal/mcp-call.js'
+import { completeText } from './internal/model-complete.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
+import { type InstalledPlugin, installedPlugins, substitutePluginVars } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
+import { findNearestFile, repoRoot } from './internal/project-root.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.js'
 
+// Claude defaults to 600s and lets a timed-out hook proceed; here a timed-out
+// PreToolUse or UserPromptSubmit hook fails closed (pi has no permission prompt
+// to fall back on), so ten minutes of default budget would wedge the turn for
+// ten minutes on a hung hook. Hooks that legitimately run long can raise their
+// own per-hook `timeout`.
 const DEFAULT_TIMEOUT_S = 60
 
 interface HookCommand {
   type?: string
   command: string
   timeout?: number
+  /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
+  url?: string
+  headers?: Record<string, string>
+  allowedEnvVars?: string[]
+  /** prompt entries: the prompt sent to the model (`$ARGUMENTS` = the event JSON). */
+  prompt?: string
+  /** mcp_tool entries: the connected server and tool to call, with optional input. */
+  server?: string
+  tool?: string
+  input?: Record<string, unknown>
+  /** prompt/agent entries: an optional model override; agent adds a system prompt. */
+  model?: string
+  systemPrompt?: string
 }
 interface HookMatcher {
   matcher?: string
@@ -71,6 +103,9 @@ export type HooksConfig = Record<string, HookMatcher[]>
 export interface HookDecision {
   block: boolean
   reason?: string
+  /** Claude's `permissionDecision: "ask"`: the caller should prompt the user and
+   * block only on decline. `block` stays true as the no-UI fallback. */
+  ask?: boolean
 }
 export interface HookRunResult {
   code: number
@@ -81,35 +116,75 @@ export interface HookRunResult {
   /** The process errored before delivering a verdict (spawn failure, EIO). */
   spawnFailed?: boolean
 }
-export type HookRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string) => Promise<HookRunResult>
+/** Runs one configured hook entry, whatever its type; boundRunner dispatches. */
+export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
+/** The shell path specifically; the statusline reuses it for its own command. */
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string) => Promise<HookRunResult>
 
-/** Settings files to read, newest-winning. Project files load only when trusted. */
+/** Settings files to read, newest-winning. Project files load only when trusted, each
+ * the nearest of its name at or above cwd (bounded at the repository root, matching
+ * the approval walk), so a subdirectory session reads the settings that gated it. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
   const files = [path.join(home, '.claude', 'settings.json')]
-  if (trusted) files.push(path.join(cwd, '.claude', 'settings.json'), path.join(cwd, '.claude', 'settings.local.json'))
+  if (!trusted) return files
+  for (const name of ['settings.json', 'settings.local.json']) {
+    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
+  }
   return files
 }
 
 export function loadHooks(files: string[]): HooksConfig {
   const config: HooksConfig = {}
   for (const file of files) {
-    let parsed: { hooks?: HooksConfig }
+    let raw: string
     try {
-      parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      raw = fs.readFileSync(file, 'utf-8')
     } catch {
       continue
     }
-    for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {
-      if (!Array.isArray(matchers)) continue
-      // Entries are validated here rather than where they run: a hand-edited settings
-      // file that writes `hooks` as an object instead of a list used to throw out of
-      // the tool_call handler, and pi turns that into an error result, so every tool
-      // call for the rest of the session failed with an opaque type error.
-      const usable = matchers.filter((entry) => isUsableMatcher(entry, file, event))
-      if (usable.length > 0) config[event] = [...(config[event] ?? []), ...usable]
-    }
+    mergeHooksJson(config, raw, file)
   }
   return config
+}
+
+function mergeHooksJson(config: HooksConfig, raw: string, source: string): void {
+  let parsed: { hooks?: HooksConfig }
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return
+  }
+  for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {
+    if (!Array.isArray(matchers)) continue
+    // Entries are validated here rather than where they run: a hand-edited settings
+    // file that writes `hooks` as an object instead of a list used to throw out of
+    // the tool_call handler, and pi turns that into an error result, so every tool
+    // call for the rest of the session failed with an opaque type error.
+    const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
+    if (usable.length > 0) config[event] = [...(config[event] ?? []), ...usable]
+  }
+}
+
+/** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
+ * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
+ * hook can name its bundled scripts by real path. */
+export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[]): void {
+  for (const plugin of plugins) {
+    const declared = plugin.manifest.hooks
+    // An inline hooks object; an array is not a valid hooks map (it would parse to
+    // numeric event keys), so it falls through to the default path rather than
+    // silently registering nothing.
+    if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
+      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`)
+      continue
+    }
+    const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
+    try {
+      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file)
+    } catch {
+      // a plugin without hooks contributes nothing
+    }
+  }
 }
 
 /** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
@@ -163,9 +238,14 @@ function matcherApplies(matcher: string | undefined, names: readonly string[]): 
   }
 }
 
-/** Claude settings may carry prompt/agent hook types with no command; running one
- * through `sh -c undefined` would throw out of the tool_call handler. */
+/** A hook entry pi-code can run: a shell command, an http POST, an in-process
+ * prompt, an mcp_tool call, or an agent subagent. An agent hook with no runner
+ * registered is still matched here and resolves non-blocking at run time, the same
+ * way a prompt hook with no model does. */
 function isRunnableHook(hook: HookCommand): boolean {
+  if (hook.type === 'http') return typeof hook.url === 'string' && /^https?:\/\//.test(hook.url)
+  if (hook.type === 'prompt' || hook.type === 'agent') return typeof hook.prompt === 'string' && hook.prompt.length > 0
+  if (hook.type === 'mcp_tool') return typeof hook.server === 'string' && typeof hook.tool === 'string'
   return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
 }
 
@@ -177,7 +257,12 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
   const seen = new Set<string>()
   for (const entry of matchers ?? []) {
     if (!matcherApplies(entry.matcher, candidates)) continue
-    for (const hook of (entry.hooks ?? []).filter(isRunnableHook)) {
+    for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
+      // An http/prompt/agent/mcp_tool entry has no `command`; its identity is the
+      // url / prompt / server:tool. Mirroring it into `command` keeps dedup, timeout
+      // messages and display working.
+      const identity = raw.type === 'http' ? raw.url : raw.type === 'prompt' || raw.type === 'agent' ? raw.prompt : raw.type === 'mcp_tool' ? `${raw.server}:${raw.tool}` : undefined
+      const hook = identity !== undefined && typeof raw.command !== 'string' ? { ...raw, command: identity } : raw
       // Claude runs a handler defined in more than one settings file once.
       if (seen.has(hook.command)) continue
       seen.add(hook.command)
@@ -200,9 +285,11 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   if (code === 2) return { block: true, reason: stderr.trim() || 'Blocked by hook' }
   const parsed = tryParseJson(stdout)
   const specific = parsed?.hookSpecificOutput
-  // pi's tool_call return is allow-or-block, so "ask" (confirm) maps to block-with-reason
-  // rather than a silent allow, which is the least-safe reading on a trust-gated path.
-  if (specific?.permissionDecision === 'deny' || specific?.permissionDecision === 'ask') return { block: true, reason: specific.permissionDecisionReason ?? 'Blocked by hook' }
+  // Claude's "ask" prompts the user; the tool_call handler turns this into a
+  // ctx.ui.confirm and blocks only on decline. block:true is the fallback for a
+  // headless run with no dialog to show, which is the safe reading on a gated path.
+  if (specific?.permissionDecision === 'ask') return { block: true, ask: true, reason: specific.permissionDecisionReason ?? 'A hook asks you to confirm this tool call.' }
+  if (specific?.permissionDecision === 'deny') return { block: true, reason: specific.permissionDecisionReason ?? 'Blocked by hook' }
   if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Blocked by hook' }
   if (parsed?.continue === false) return { block: true, reason: parsed.stopReason ?? 'Blocked by hook' }
   return { block: false }
@@ -231,7 +318,7 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
-export const runHookCommand: HookRunner = (command, payload, timeoutMs, projectDir) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
     // `detached` makes the shell its own process group leader so the timeout can kill
@@ -276,6 +363,159 @@ export const runHookCommand: HookRunner = (command, payload, timeoutMs, projectD
     child.stdin?.end(JSON.stringify(payload))
   })
 
+/** `$VAR` / `${VAR}` in header values, from allowlisted env vars only; a reference
+ * to an unlisted variable becomes an empty string, as Claude documents. */
+function interpolateHeaders(headers: Record<string, string> | undefined, allowed: string[] | undefined): Record<string, string> {
+  const allowedSet = new Set(allowed ?? [])
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    out[key] = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_token, braced?: string, bare?: string) => {
+      const name = braced ?? bare ?? ''
+      return allowedSet.has(name) ? (process.env[name] ?? '') : ''
+    })
+  }
+  return out
+}
+
+/**
+ * Claude's `type: "http"` hook: the payload POSTs as JSON and only a 2xx response
+ * with a valid JSON body renders a decision, read exactly like command stdout.
+ * Everything else, including non-2xx statuses, connection failures and timeouts,
+ * is a non-blocking error by contract, so none of these outcomes ever reports
+ * `timedOut`, which PreToolUse fails closed on. The user wrote the URL into their
+ * own settings, so it carries the same trust as a command hook's shell string and
+ * gets no SSRF screening.
+ */
+export async function runHttpHook(hook: { type?: string; command: string; url?: string; headers?: Record<string, string>; allowedEnvVars?: string[] }, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
+  const url = hook.url ?? hook.command
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...interpolateHeaders(hook.headers, hook.allowedEnvVars) },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const body = (await response.text()).slice(0, MAX_HOOK_OUTPUT)
+    if (!response.ok) return { code: 1, stdout: '', stderr: `HTTP ${response.status} from ${url}`, timedOut: false }
+    if (body.trim().length === 0) return { code: 0, stdout: '', stderr: '', timedOut: false }
+    try {
+      JSON.parse(body)
+    } catch {
+      return { code: 1, stdout: '', stderr: `non-JSON response from ${url}`, timedOut: false }
+    }
+    return { code: 0, stdout: body, stderr: '', timedOut: false }
+  } catch (error) {
+    return { code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: false }
+  }
+}
+
+/** System prompt turning a prompt hook into a structured decision, so its reply
+ * flows through interpretHookResult exactly like a command hook's stdout. */
+const PROMPT_HOOK_SYSTEM = [
+  'You are a Claude Code hook evaluating whether an action should proceed.',
+  'Respond with ONLY a JSON object and nothing else:',
+  '{"hookSpecificOutput":{"permissionDecision":"allow"|"deny"|"ask","permissionDecisionReason":"<short reason>"}}',
+  'Use "allow" to let the action proceed, "deny" to block it, "ask" to require the user to confirm.',
+].join('\n')
+
+/**
+ * Claude's `type: "prompt"` hook: the prompt (with `$ARGUMENTS` replaced by the
+ * event JSON) is evaluated by the model, which returns a JSON decision. pi runs it
+ * in-process via completeText and returns the reply as stdout so the existing
+ * decision parser handles it. No model (headless) or a provider error is
+ * non-blocking; only an abort at the timeout fails closed, like the other hooks.
+ */
+/** Replace `$ARGUMENTS` with the event JSON via a replacer function, so `$`-sequences
+ * in the payload (`$$`, `$&`, `` $` ``, `$'`) are inserted literally, not read as
+ * `String.replace` patterns. Prompt and agent hooks feed the result to the model. */
+function substituteArguments(prompt: string | undefined, payload: unknown): string {
+  const json = JSON.stringify(payload)
+  return (prompt ?? '').replaceAll('$ARGUMENTS', () => json)
+}
+
+/** Classify a model/agent failure: the deadline is authoritative via the signal (the
+ * subagent runner rejects with a plain Error on abort, so an error-name check alone
+ * fails open), so a fired signal is a timeout (PreToolUse fails closed); anything else
+ * produced no verdict and is non-blocking. */
+function abortAwareFailure(signal: AbortSignal, error: unknown): HookRunResult {
+  const aborted = signal.aborted || (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+  return { code: aborted ? TIMEOUT_EXIT_CODE : 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: aborted }
+}
+
+export async function runPromptHook(hook: HookCommand, payload: unknown, model: Model<Api> | undefined, timeoutMs: number): Promise<HookRunResult> {
+  if (!model) return { code: 1, stdout: '', stderr: 'no model available for prompt hook', timedOut: false }
+  // A replacer function, so `$$`/`$&`/`` $` ``/`$'` inside the payload JSON are inserted
+  // verbatim rather than read as replacement patterns (a Bash `echo $$` is a common trigger).
+  const prompt = substituteArguments(hook.prompt, payload)
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    const answer = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal })
+    return { code: 0, stdout: answer, stderr: '', timedOut: false }
+  } catch (error) {
+    return abortAwareFailure(signal, error)
+  }
+}
+
+/**
+ * Claude's `type: "mcp_tool"` hook: call a tool on an already-connected MCP server
+ * and treat its text output like command stdout. pi reaches the server through the
+ * mcp-call seam the mcp extension registers. Like http, it never fails closed: a
+ * missing server, a tool error, or the deadline is non-blocking.
+ */
+export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
+  if (!hook.server || !hook.tool) return { code: 1, stdout: '', stderr: 'mcp_tool hook needs server and tool', timedOut: false }
+  const input = hook.input && typeof hook.input === 'object' ? hook.input : (payload as Record<string, unknown>)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<HookRunResult>((resolve) => {
+    timer = setTimeout(() => resolve({ code: 1, stdout: '', stderr: `mcp_tool hook timed out after ${timeoutMs}ms`, timedOut: false }), timeoutMs)
+  })
+  const call = callMcpTool(hook.server, hook.tool, input)
+    .then((result): HookRunResult => ({ code: result.isError ? 1 : 0, stdout: result.text, stderr: '', timedOut: false }))
+    .catch((error): HookRunResult => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: false }))
+  try {
+    return await Promise.race([call, deadline])
+  } finally {
+    // Left running, the deadline timer pins the event loop for the full timeout
+    // after the call resolves, delaying exit in a one-shot headless run.
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Claude's experimental `type: "agent"` hook: spawn a subagent (Read/Grep/Glob) to
+ * verify a condition, then return its final text as a JSON decision, parsed by the
+ * same interpreter as a command hook. pi reaches the subagent through the agent-run
+ * seam the subagent extension registers. Like the prompt hook, only an abort at the
+ * deadline fails closed; a missing runner or a crashed agent is non-blocking.
+ */
+export async function runAgentHook(hook: HookCommand, payload: unknown, timeoutMs: number, sessionModelId: string | undefined): Promise<HookRunResult> {
+  const prompt = substituteArguments(hook.prompt, payload)
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    const answer = await runAgent({ prompt, model: hook.model ?? sessionModelId, systemPrompt: hook.systemPrompt, signal })
+    return { code: 0, stdout: answer, stderr: '', timedOut: false }
+  } catch (error) {
+    return abortAwareFailure(signal, error)
+  }
+}
+
+/** The text of the last assistant message in a turn, for Claude's Stop-hook
+ * `last_assistant_message`. Thinking and tool calls are dropped; a plain-string
+ * content is returned as-is. */
+export function lastAssistantText(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'assistant') continue
+    if (typeof message.content === 'string') return message.content
+    if (!Array.isArray(message.content)) return ''
+    return message.content
+      .filter((part): part is { type: 'text'; text: string } => typeof part === 'object' && part !== null && (part as { type?: unknown }).type === 'text')
+      .map((part) => part.text)
+      .join('')
+  }
+  return ''
+}
+
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
 
@@ -319,7 +559,7 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   const commands = matchingCommands(config.PreToolUse, names)
   const results = await Promise.all(
     commands.map((command) =>
-      runner(command.command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command)).then((result) => {
+      runner(command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command)).then((result) => {
         const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
         if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
         return result
@@ -333,15 +573,19 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
   }
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
+  // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
+  // scan for any deny first, and only fall back to the first ask.
+  let ask: HookDecision | undefined
   for (const result of results) {
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
-    if (decision.block) return decision
+    if (decision.block && !decision.ask) return decision
+    if (decision.ask && ask === undefined) ask = decision
   }
-  return { block: false }
+  return ask ?? { block: false }
 }
 
 async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner: HookRunner): Promise<HookRunResult[]> {
-  return await Promise.all(commands.map((command) => runner(command.command, payload, timeoutMs(command))))
+  return await Promise.all(commands.map((command) => runner(command, payload, timeoutMs(command))))
 }
 
 type SystemMessageSink = (message: string) => void
@@ -373,7 +617,7 @@ function promptContext(stdout: string): string {
  * in config order for injection ahead of the prompt. */
 export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner, onSystemMessage?: SystemMessageSink): Promise<PromptDecision> {
   const commands = matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')
-  const results = await Promise.all(commands.map((command) => runner(command.command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))))
+  const results = await Promise.all(commands.map((command) => runner(command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))))
   surfaceHookFailures(commands, results, onSystemMessage)
   for (const [i, result] of results.entries()) {
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}`, context: '' }
@@ -416,11 +660,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
     return common
   }
-  /** A runner bound to the firing context, filling the common fields into each stdin. */
+  /** A runner bound to the firing context, filling the common fields into each
+   * payload and dispatching on the entry's type. */
   const boundRunner =
     (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
-    (command, payload, ms) =>
-      runHookCommand(command, { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }, ms, projectDir)
+    (hook, payload, ms) => {
+      const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
+      if (hook.type === 'http') return runHttpHook(hook, merged, ms)
+      if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
+      if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
+      if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
+      return runHookCommand(hook.command, merged, ms, projectDir)
+    }
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
   const mcpAliases = new Map<string, string>()
@@ -435,6 +686,30 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.events.on(PLAN_MODE_CHANNEL, (data) => {
     if (isPlanModeState(data)) permissionMode = data.active ? 'plan' : 'default'
   })
+  // Claude's InstructionsLoaded hook has NO decision control: exit codes are
+  // ignored and every JSON output field (systemMessage included) is discarded, so
+  // dispatch is fire-and-forget on all paths. Two documented load reasons can
+  // never fire honestly and are deliberate gaps, not approximations:
+  // `nested_traversal` (pi does not lazily load a nested CLAUDE.md on subdirectory
+  // entry) and `compact` (pi does not re-load instruction files after compaction).
+  const fireInstructionsLoaded = (payload: Record<string, unknown>): void => {
+    if (!sessionCtx) return
+    const commands = matchingCommands(config.InstructionsLoaded, String(payload.load_reason))
+    if (commands.length === 0) return
+    void runNotifyHooks(commands, { hook_event_name: 'InstructionsLoaded', ...payload }, boundRunner(sessionCtx)).catch(() => {})
+  }
+  // Every load rides the shared bus: context-imports publishes session_start for
+  // the context files that survived claudeMdExcludes and include for resolved
+  // @imports (deduped there, once per file per session); claude-rules publishes
+  // path_glob_match when a scoped rule attaches. Consuming the bus rather than
+  // iterating raw contextFiles keeps this extension from announcing a file the
+  // exclusion removed from the prompt; bus emit is synchronous, so the events
+  // arrive regardless of extension load order.
+  pi.events.on(INSTRUCTIONS_CHANNEL, (data) => {
+    if (!isInstructionLoadEvent(data)) return
+    fireInstructionsLoaded({ ...data })
+  })
+
   // Subagent lifecycle arrives over the bus without a pi context; the session context
   // captured at session_start supplies the common payload fields.
   pi.events.on(SUBAGENT_CHANNEL, async (data) => {
@@ -449,8 +724,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (event, ctx) => {
     sessionCtx = ctx
     const trusted = await isProjectApproved(ctx)
-    projectDir = ctx.cwd
+    // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
+    // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
+    // subdirectory session too.
+    projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
     config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
+    // Plugins are user-installed and enabled by user settings (see installedPlugins),
+    // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
+    loadPluginHooks(config, installedPlugins(os.homedir()))
     // "reload" re-fires in-process with the same conversation and would double-run hooks;
     // a fork is a genuine session begin, which Claude reports as source "fork".
     if (event.reason === 'reload') return
@@ -458,14 +739,16 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const commands = matchingCommands(config.SessionStart, source.names)
     const payload = { hook_event_name: 'SessionStart', source: source.value }
     const run = boundRunner(ctx)
-    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
+    const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     pendingSessionContext = results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
 
   // Claude adds a SessionStart hook's additionalContext (or plain stdout) to the
   // conversation before the first prompt; pi's seam for that is a message injected
-  // on the next agent start.
+  // on the next agent start. The session_start InstructionsLoaded events arrive
+  // over the bus from context-imports, which owns claudeMdExcludes; announcing
+  // the raw contextFiles here would fire for a file the exclusion removed.
   pi.on('before_agent_start', async () => {
     if (pendingSessionContext.length === 0) return
     const content = pendingSessionContext.join('\n')
@@ -476,44 +759,38 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.on('tool_call', async (event, ctx) => {
     const decision = await runPreToolUse(config, event.toolName, event.input, boundRunner(ctx, { tool_use_id: event.toolCallId }), mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
     if (!decision.block) return undefined
+    // Claude's "ask": prompt the user and let the call through if they approve.
+    // With no UI (headless) the block stands, which is the safe default.
+    if (decision.ask && ctx.hasUI) {
+      const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.')
+      return approved ? undefined : { block: true, reason: decision.reason }
+    }
     return { block: true, reason: decision.reason }
   })
 
-  // Claude's PostToolUse runs after a successful call and feeds back into the result:
-  // a decision:block reason (or exit-2 stderr) and additionalContext are appended next
-  // to the tool result, which is where Claude documents they land. Failed executions
-  // are skipped (Claude routes those to PostToolUseFailure, not bridged yet).
+  // Claude's PostToolUse (success) and PostToolUseFailure (error) both feed their
+  // hook's output back next to the tool result: a decision:block reason (or exit-2
+  // stderr) and additionalContext are appended, which is where Claude documents they
+  // land. The failure branch shows the hook's stderr to the model too ("Shows stderr
+  // to Claude; the tool already failed"), it just cannot block a call that failed.
   pi.on('tool_result', async (event, ctx) => {
     const alias = mcpAliases.get(event.toolName)
     const names = alias ? [event.toolName, alias] : [event.toolName]
     const response = { content: event.content, details: event.details, isError: event.isError }
-    // A failed execution fires Claude's PostToolUseFailure instead: notify-style, no
-    // result patch, since the error content is already what the model sees.
-    if (event.isError) {
-      const failCommands = matchingCommands(config.PostToolUseFailure, names)
-      if (failCommands.length === 0) return
-      const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
-      const failPayload = { hook_event_name: 'PostToolUseFailure', tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
-      const failResults = await Promise.all(failCommands.map((command) => run(command.command, failPayload, timeoutMs(command))))
-      surfaceSystemMessages(failResults, (message) => ctx.ui.notify(message, 'warning'))
-      return
-    }
-    const commands = matchingCommands(config.PostToolUse, names)
+    const eventName = event.isError ? 'PostToolUseFailure' : 'PostToolUse'
+    const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names)
     if (commands.length === 0) return
-    const payload = {
-      hook_event_name: 'PostToolUse',
-      tool_name: alias ?? event.toolName,
-      tool_input: event.input,
-      tool_response: response,
-    }
+    const payload = { hook_event_name: eventName, tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
-    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
+    const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const feedback: string[] = []
     for (const result of results) {
       const parsed = tryParseJson(result.stdout)
-      if (!result.timedOut && result.code === 2) feedback.push(`PostToolUse hook: ${result.stderr.trim() || 'Blocked by hook'}`)
-      else if (parsed?.decision === 'block') feedback.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
+      // A failed tool cannot be blocked, but the hook's stderr is still shown; on
+      // success, exit-2 / decision:block feed back as a block notice.
+      if (!result.timedOut && result.code === 2) feedback.push(`${eventName} hook: ${result.stderr.trim() || (event.isError ? 'hook reported an error' : 'Blocked by hook')}`)
+      else if (!event.isError && parsed?.decision === 'block') feedback.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
       const context = parsed?.hookSpecificOutput?.additionalContext
       if (context) feedback.push(context)
     }
@@ -541,15 +818,26 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // turn, and stop_hook_active in the payload tells the next firing it is already
   // continuing from a stop hook, which is the hook script's documented loop guard.
   // Only exit 2 and decision:"block" continue; continue:false means "stay stopped".
-  pi.on('agent_end', async (_event, ctx) => {
+  pi.on('agent_end', async (event, ctx) => {
+    // Claude's Notification event, for the one type pi can honestly source: the
+    // agent finished and is waiting for input (idle_prompt). Observational only;
+    // exit codes and JSON output are ignored, as Claude documents for this event.
+    const notifyCommands = matchingCommands(config.Notification, ['idle_prompt'])
+    if (notifyCommands.length > 0) {
+      void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, boundRunner(ctx)).catch(() => {})
+    }
+
     const commands = matchingCommands(config.Stop, 'Stop')
     if (commands.length === 0) {
       stopHookActive = false
       return
     }
-    const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive }
+    // Claude's Stop payload carries the turn's final assistant text so a hook need
+    // not re-read the transcript; included only when there is one.
+    const lastText = lastAssistantText((event as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [])
+    const payload = { hook_event_name: 'Stop', stop_hook_active: stopHookActive, ...(lastText ? { last_assistant_message: lastText } : {}) }
     const run = boundRunner(ctx)
-    const results = await Promise.all(commands.map((command) => run(command.command, payload, timeoutMs(command))))
+    const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const block = results
       .filter((result) => !result.timedOut)

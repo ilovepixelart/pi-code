@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, pluginStyleDirs, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
 
 // The extension reads user-scope styles and settings from the home directory; point it
 // at a throwaway dir so the developer's real ~/.claude cannot influence assertions.
@@ -77,6 +77,44 @@ describe('styleDirs', () => {
     mkdirSync(join(cwd, '.claude', 'output-styles'), { recursive: true })
     expect(styleDirs(cwd, home, true)).toEqual([join(cwd, '.claude', 'output-styles')])
     expect(styleDirs(cwd, home, false)).toEqual([])
+  })
+
+  it('finds project styles at the repository root from a subdirectory session', () => {
+    const repo = tempDir()
+    const home = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(repo, '.claude', 'output-styles'), { recursive: true })
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+    expect(styleDirs(sub, home, true)).toEqual([join(repo, '.claude', 'output-styles')])
+  })
+})
+
+describe('pluginStyleDirs', () => {
+  // Lay down one enabled cached plugin with an optional manifest, as installedPlugins reads it.
+  const installPlugin = (home: string, name: string, manifest: Record<string, unknown> = {}): string => {
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', name, '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name, ...manifest }))
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { [name]: true } }))
+    return root
+  }
+
+  it('defaults to the plugin output-styles/ directory', () => {
+    const home = tempDir()
+    const root = installPlugin(home, 'styler')
+    expect(pluginStyleDirs(home)).toEqual([join(root, 'output-styles')])
+  })
+
+  it('honors a manifest outputStyles override, replacing the default scan', () => {
+    const home = tempDir()
+    const root = installPlugin(home, 'styler', { outputStyles: ['./styles/', './extras/'] })
+    expect(pluginStyleDirs(home)).toEqual([join(root, 'styles'), join(root, 'extras')])
+  })
+
+  it('returns nothing when no plugins are enabled', () => {
+    expect(pluginStyleDirs(tempDir())).toEqual([])
   })
 })
 
@@ -237,6 +275,21 @@ describe('extension wiring', () => {
     await handlers.get('session_start')?.({}, ctx)
     return handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})
   }
+
+  it('loads and applies an output style shipped by an enabled plugin', async () => {
+    // Enabled plugin ships a style; the user selects it. hoisted.home is the mocked ~.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'styler', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'styler' }))
+    mkdirSync(join(root, 'output-styles'), { recursive: true })
+    writeFileSync(join(root, 'output-styles', 'zen.md'), '---\nname: Zen\n---\nBe calm and terse.')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { styler: true }, outputStyle: 'Zen' }))
+
+    const result = (await wireSession({ cwd: tempDir(), hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {} } })) as { systemPrompt: string }
+    expect(result.systemPrompt).toContain('## Output Style: Zen')
+    expect(result.systemPrompt).toContain('Be calm and terse.')
+  })
 
   it('does not load a project style when the project is untrusted', async () => {
     const cwd = projectWithStyle('Evil', 'Injected instructions.')

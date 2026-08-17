@@ -2,7 +2,9 @@
  * Output Styles Extension
  *
  * Bridges Claude Code's output styles into pi. It discovers `.claude/output-styles/*.md`
- * (user then project), honors the active style recorded as `outputStyle` in
+ * (user then project) plus styles shipped by enabled plugins (manifest `outputStyles`,
+ * default `output-styles/`, ranked below the user's and project's own), honors the
+ * active style recorded as `outputStyle` in
  * `.claude/settings.json` (user, project, then settings.local.json, last wins),
  * and appends that style's body to the system prompt so the agent adopts its
  * tone and role. `/output-style` lists the styles and persists a choice to the
@@ -22,7 +24,9 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
+import { findNearestDir, findNearestFile } from './internal/project-root.js'
 
 export interface OutputStyle {
   name: string
@@ -79,8 +83,22 @@ function isDirectory(target: string): boolean {
  */
 export function styleDirs(cwd: string, home: string, trusted: boolean): string[] {
   const dirs = [path.join(home, '.claude', 'output-styles')]
-  if (trusted) dirs.push(path.join(cwd, '.claude', 'output-styles'))
+  if (trusted) dirs.push(findNearestDir(cwd, path.join('.claude', 'output-styles')) ?? path.join(cwd, '.claude', 'output-styles'))
   return dirs.filter((dir) => isDirectory(dir))
+}
+
+/**
+ * Output-style directories of every enabled plugin: `output-styles/` unless the
+ * manifest's `outputStyles` points elsewhere, in which case it replaces the
+ * default scan (Claude Code semantics). Plugins are user-installed, so user scope
+ * alone decides; they rank below the user's and project's own styles.
+ */
+export function pluginStyleDirs(home: string): string[] {
+  return installedPlugins(home).flatMap((plugin) => {
+    const declared = plugin.manifest.outputStyles
+    const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'output-styles']
+    return dirs.map((dir) => path.resolve(plugin.root, String(dir)))
+  })
 }
 
 /** All output styles, project entries overriding user entries of the same name. */
@@ -108,10 +126,14 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
   return [...byName.values()]
 }
 
-/** Settings files that carry `outputStyle`. Project settings apply only when trusted. */
+/** Settings files that carry `outputStyle`. Project settings apply only when trusted,
+ * each the nearest of its name at or above cwd, as the hooks settings chain reads. */
 export function settingsFiles(cwd: string, home: string, trusted: boolean): string[] {
   const files = [path.join(home, '.claude', 'settings.json')]
-  if (trusted) files.push(path.join(cwd, '.claude', 'settings.json'), path.join(cwd, '.claude', 'settings.local.json'))
+  if (!trusted) return files
+  for (const name of ['settings.json', 'settings.local.json']) {
+    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
+  }
   return files
 }
 
@@ -156,8 +178,14 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     // project styles / selection once the project is approved. isProjectTrusted alone
     // is true for a repo pi never asked about; see project-approval.
     const trusted = await isProjectApproved(ctx)
-    styles = loadStyles([BUILTIN_STYLES_DIR, ...styleDirs(ctx.cwd, home, trusted)])
-    localSettingsPath = path.join(ctx.cwd, '.claude', 'settings.local.json')
+    // Precedence low to high: builtin, plugin, then the user's and project's own
+    // dirs, so a same-named user or project style overrides a plugin's.
+    styles = loadStyles([BUILTIN_STYLES_DIR, ...pluginStyleDirs(home), ...styleDirs(ctx.cwd, home, trusted)])
+    // Persist the choice where the read chain will find it again: the nearest local
+    // settings file, else inside the nearest .claude directory, else at cwd.
+    const nearestLocal = findNearestFile(ctx.cwd, path.join('.claude', 'settings.local.json'))
+    const claudeDir = findNearestDir(ctx.cwd, '.claude') ?? path.join(ctx.cwd, '.claude')
+    localSettingsPath = nearestLocal ?? path.join(claudeDir, 'settings.local.json')
     activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
     const active = styleForName(styles, activeName)
     if (active) ctx.ui.notify(`Output style: ${active.name}`, 'info')

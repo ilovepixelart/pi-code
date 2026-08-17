@@ -48,6 +48,27 @@ describe('skillDirs', () => {
     writeFileSync(join(cwd, '.claude', 'skills'), 'not a dir')
     expect(skillDirs(cwd, home, true)).toEqual([])
   })
+
+  it('includes an enabled plugin skills directory', () => {
+    const cwd = tempDir('cs-proj-')
+    const home = tempDir('cs-home-')
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills'), { recursive: true })
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+
+    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'skills')])
+  })
+
+  it('finds project skills at the repository root from a subdirectory session', () => {
+    const repo = tempDir('cs-repo-')
+    const home = tempDir('cs-home-')
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(repo, '.claude', 'skills'), { recursive: true })
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+    expect(skillDirs(sub, home, true)).toEqual([join(repo, '.claude', 'skills')])
+  })
 })
 
 describe('extension wiring', () => {

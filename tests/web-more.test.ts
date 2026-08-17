@@ -1,6 +1,7 @@
 import { lookup } from 'node:dns/promises'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 import { httpFetch } from '../extensions/internal/web-transport.ts'
 import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
 
@@ -8,10 +9,14 @@ vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
 vi.mock('../extensions/internal/web-transport.js', () => ({ httpFetch: vi.fn() }))
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown> }
-type Execute = (id: string, params: Record<string, unknown>) => Promise<ToolResult>
+type Execute = (id: string, params: Record<string, unknown>, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
 
 /** Register the extension against a stub API and expose both tools by name. */
-const setup = (): { search: (params: Record<string, unknown>) => Promise<ToolResult>; fetchUrl: (url: string) => Promise<ToolResult> } => {
+const setup = (): {
+  search: (params: Record<string, unknown>) => Promise<ToolResult>
+  fetchUrl: (url: string) => Promise<ToolResult>
+  fetchWith: (params: Record<string, unknown>, ctx?: unknown) => Promise<ToolResult>
+} => {
   const tools = new Map<string, Execute>()
   webExtension({
     on: () => {},
@@ -21,7 +26,11 @@ const setup = (): { search: (params: Record<string, unknown>) => Promise<ToolRes
   const search = tools.get('web_search')
   const fetchUrl = tools.get('web_fetch')
   if (!search || !fetchUrl) throw new Error('web tools were not registered')
-  return { search: (params) => search('call-1', params), fetchUrl: (url) => fetchUrl('call-1', { url }) }
+  return {
+    search: (params) => search('call-1', params),
+    fetchUrl: (url) => fetchUrl('call-1', { url }),
+    fetchWith: (params, ctx) => fetchUrl('call-1', params, undefined, undefined, ctx),
+  }
 }
 
 const lookupMock = vi.mocked(lookup)
@@ -46,6 +55,71 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  setCompleteBackend(null)
+})
+
+describe('web_fetch prompt (in-process summarization)', () => {
+  it('runs the prompt over the page and returns the model answer, not the markdown', async () => {
+    fetchMock.mockResolvedValue(respond('<h1>Pricing</h1><p>The plan costs $9/mo.</p>'))
+    let seenPrompt = ''
+    setCompleteBackend(async (_m, context) => {
+      seenPrompt = String(context.messages[0]?.content ?? '')
+      return { role: 'assistant', content: [{ type: 'text', text: '$9 per month' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 } as never
+    })
+    const r = await setup().fetchWith({ url: 'https://example.com/pricing', prompt: 'What does the plan cost?' }, { model: {} })
+    expect(r.content[0].text).toBe('$9 per month')
+    // The page markdown is handed to the model, not returned raw.
+    expect(seenPrompt).toContain('The plan costs $9/mo.')
+    expect(seenPrompt).toContain('What does the plan cost?')
+  })
+
+  it('falls back to the markdown when the completion fails', async () => {
+    fetchMock.mockResolvedValue(respond('<h1>Docs</h1><p>Body text.</p>'))
+    setCompleteBackend(async () => {
+      throw new Error('no credentials')
+    })
+    const r = await setup().fetchWith({ url: 'https://example.com/d', prompt: 'summarize' }, { model: {} })
+    expect(r.content[0].text).toContain('# Docs')
+  })
+
+  it('returns raw markdown when no model is available (headless)', async () => {
+    fetchMock.mockResolvedValue(respond('<p>plain</p>'))
+    const r = await setup().fetchWith({ url: 'https://example.com/p', prompt: 'summarize' }, { model: undefined })
+    expect(r.content[0].text).toBe('plain')
+  })
+})
+
+describe('web_fetch cache', () => {
+  it('serves a repeat fetch of the same URL from the 15-minute cache', async () => {
+    fetchMock.mockImplementation(async () => respond('<h1>Cached</h1>'))
+    const tools = setup()
+    const first = await tools.fetchUrl('https://example.com/page')
+    const second = await tools.fetchUrl('https://example.com/page')
+
+    expect(first.content[0].text).toContain('# Cached')
+    expect(second.content[0].text).toBe(first.content[0].text)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps different URLs in separate cache entries', async () => {
+    fetchMock.mockImplementation(async () => respond('<p>x</p>'))
+    const tools = setup()
+    await tools.fetchUrl('https://example.com/a')
+    await tools.fetchUrl('https://example.com/b')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not cache a failed fetch', async () => {
+    fetchMock.mockImplementationOnce(async () => respond('nope', { status: 500 }))
+    fetchMock.mockImplementationOnce(async () => respond('<p>fine</p>'))
+    const tools = setup()
+    await expect(tools.fetchUrl('https://example.com/flaky')).rejects.toThrow()
+    const ok = await tools.fetchUrl('https://example.com/flaky')
+
+    expect(ok.content[0].text).toBe('fine')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('web_fetch scheme validation', () => {
@@ -65,17 +139,17 @@ describe('web_fetch scheme validation', () => {
 })
 
 describe('web_fetch responses', () => {
-  it('converts an html body to readable text and drops scripts', async () => {
+  it('converts an html body to markdown and drops scripts', async () => {
     fetchMock.mockResolvedValue(respond('<html><script>evil()</script><body><h1>Hi</h1><p>One &amp; two</p></body></html>'))
     const result = await setup().fetchUrl('https://example.com/page')
-    expect(result.content[0].text).toBe('Hi\nOne & two')
+    expect(result.content[0].text).toBe('# Hi\n\nOne & two')
     expect(result.details).toEqual({})
   })
 
-  it('returns non-html bodies verbatim, capped at 30000 chars with no truncation marker', async () => {
+  it('returns non-html bodies verbatim, capped at 30000 chars with the drop named', async () => {
     fetchMock.mockResolvedValue(respond('x'.repeat(40_000), { contentType: 'application/json' }))
     const result = await setup().fetchUrl('https://example.com/data.json')
-    expect(result.content[0].text).toBe('x'.repeat(30_000))
+    expect(result.content[0].text).toBe(`${'x'.repeat(30_000)}\n[truncated 10000 chars]`)
   })
 
   it('caps the raw download at 200000 chars before the 30000 char output cap', async () => {

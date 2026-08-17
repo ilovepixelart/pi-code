@@ -2,14 +2,16 @@
  * Claude Rules Extension
  *
  * Replicates Claude Code's rules loading:
- * - Unscoped global rules (~/.claude/rules/*.md) are inlined in full into the system prompt.
- * - Path-scoped global rules and all project rules (.claude/rules/*.md) are listed as
- *   pointers the agent reads on demand.
- *
- * Path-scoped rules: a rule file may declare `paths:` frontmatter (a glob or
- * list of globs). Pointers surface that scope so the agent knows to read the
- * rule when working on matching files. Frontmatter is stripped from inlined
- * global rules.
+ * - Unscoped rules are inlined in full into the system prompt, global
+ *   (~/.claude/rules/*.md) and approved-project (.claude/rules/*.md) alike:
+ *   Claude loads rules without `paths:` frontmatter at launch with the same
+ *   priority as .claude/CLAUDE.md.
+ * - Path-scoped rules auto-attach: a rule file may declare `paths:` frontmatter
+ *   (a glob or list of globs). Its scope is surfaced upfront as a pointer, and
+ *   when a read/edit/write touches a file the globs cover, the rule body is
+ *   appended to that tool's result, once per rule per session. This mirrors
+ *   Claude Code, which attaches a scoped rule when a matching file is touched
+ *   rather than inlining it everywhere. Frontmatter is stripped from rule text.
  *
  * Adapted from the pi v0.74.2 claude-rules example.
  */
@@ -19,7 +21,11 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { publishInstructionLoad } from './internal/instruction-events.js'
+import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved } from './internal/project-approval.js'
+import { findNearestDir } from './internal/project-root.js'
+import { stripBlockComments } from './internal/strip-comments.js'
 
 export interface Frontmatter {
   paths: string[]
@@ -62,6 +68,32 @@ export function parseFrontmatter(content: string): Frontmatter {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content)
   if (!match) return { paths: [], body: content }
   return { paths: parsePaths(match[1]), body: content.slice(match[0].length) }
+}
+
+/**
+ * Whether a file path matches at least one of a rule's `paths:` globs. `*` stays in
+ * a segment, `**` crosses directories, a slashless pattern (`*.ts`) matches the
+ * basename at any depth (gitignore-style), and a trailing slash (`docs/`) scopes to
+ * that directory's contents. `./` and a leading `/` are stripped so a project-root
+ * anchored glob resolves the same as a bare one. A bare directory name without a
+ * trailing slash or `**` matches a file of that name, not the directory's contents;
+ * write `dir/**` to scope to a directory. `relPath` is the touched file relative to
+ * the rule set's root.
+ */
+export function pathMatchesGlobs(relPath: string, globs: string[]): boolean {
+  const posix = relPath.split(path.sep).join('/')
+  const base = posix.split('/').pop() ?? posix
+  return globs.some((raw) => {
+    let glob = raw.trim()
+    if (!glob) return false
+    if (glob.startsWith('./')) glob = glob.slice(2)
+    else if (glob.startsWith('/')) glob = glob.slice(1)
+    // A trailing slash means the directory's contents, like gitignore; `docs/` alone
+    // would compile to `^docs/$` and match nothing.
+    if (glob.endsWith('/')) glob += '**'
+    const target = glob.includes('/') ? posix : base
+    return new RegExp(`^${globToRegExpSource(glob)}$`).test(target)
+  })
 }
 
 /** A rule pointer line, annotated with its path scope when present. */
@@ -112,83 +144,155 @@ function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>
   return results
 }
 
-interface ProjectRule {
+interface ScopedRule {
   rel: string
   paths: string[]
+  /** The rule text, attached when a matching file is touched. */
+  body: string
 }
 
-interface GlobalRules {
-  inline: string
-  scoped: ProjectRule[]
+interface RuleSet {
+  inline: string[]
+  scoped: ScopedRule[]
 }
 
-/** Unscoped global rules are inlined; path-scoped ones keep their scope as pointers,
+const EMPTY_RULES: RuleSet = { inline: [], scoped: [] }
+
+/** Unscoped rules are inlined; path-scoped ones keep their scope as pointers,
  * mirroring Claude Code, where scoped rules attach only to matching files. */
-function readGlobalRules(globalRulesDir: string): GlobalRules {
+function readRules(rulesDir: string): RuleSet {
   const inline: string[] = []
-  const scoped: ProjectRule[] = []
-  for (const file of findMarkdownFiles(globalRulesDir)) {
+  const scoped: ScopedRule[] = []
+  for (const file of findMarkdownFiles(rulesDir)) {
     let parsed: Frontmatter
     try {
-      parsed = parseFrontmatter(fs.readFileSync(path.join(globalRulesDir, file), 'utf-8'))
+      parsed = parseFrontmatter(fs.readFileSync(path.join(rulesDir, file), 'utf-8'))
     } catch {
       continue // one unreadable rule must not take down session start
     }
-    if (parsed.paths.length > 0) scoped.push({ rel: file, paths: parsed.paths })
-    else if (parsed.body.trim().length > 0) inline.push(parsed.body.trim())
+    // Rule bodies get the same block-level comment strip as CLAUDE.md files
+    // before they reach the prompt or attach to a tool result.
+    const body = stripBlockComments(parsed.body).trim()
+    // A body that strips to nothing has nothing to inline or attach; attaching
+    // an empty text block to a tool result is rejected by the API when the
+    // result's content is a block array (image-bearing results).
+    if (body.length === 0) continue
+    if (parsed.paths.length > 0) scoped.push({ rel: file, paths: parsed.paths, body })
+    else inline.push(body)
   }
-  return { inline: inline.join('\n\n'), scoped }
+  return { inline, scoped }
 }
 
-function readProjectRules(projectRulesDir: string): ProjectRule[] {
-  return findMarkdownFiles(projectRulesDir).map((rel) => {
-    try {
-      return { rel, paths: parseFrontmatter(fs.readFileSync(path.join(projectRulesDir, rel), 'utf-8')).paths }
-    } catch {
-      return { rel, paths: [] }
-    }
-  })
+/** The system-prompt section for one rule set: inlined bodies, then scoped pointers. */
+function rulesSection(title: string, rules: RuleSet, base: string): string {
+  if (rules.inline.length === 0 && rules.scoped.length === 0) return ''
+  let section = `\n\n## ${title}`
+  if (rules.inline.length > 0) {
+    section += `\n\nThese rules always apply:\n\n${rules.inline.join('\n\n')}`
+  }
+  if (rules.scoped.length > 0) {
+    const scopedList = rules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, base)).join('\n')
+    section += `\n\nPath-scoped rules, available in ${base}/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
+  }
+  return section
+}
+
+/** A scoped rule resolved to the root its globs match against, ready to attach. */
+interface AttachTarget {
+  key: string
+  globs: string[]
+  body: string
+  /** The absolute directory `paths:` globs are matched relative to. */
+  root: string
+  /** The rule file's absolute path, reported on the instruction-events bus. */
+  file: string
+  /** Claude's memory_type for the rule's origin: global rules are User config. */
+  memoryType: 'User' | 'Project'
 }
 
 export default function claudeRulesExtension(pi: ExtensionAPI) {
   const globalRulesDir = path.join(os.homedir(), '.claude', 'rules')
-  let globalRules: GlobalRules = { inline: '', scoped: [] }
-  let projectRules: ProjectRule[] = []
+  let globalRules: RuleSet = EMPTY_RULES
+  let projectRules: RuleSet = EMPTY_RULES
+  // The base a scoped-rule pointer is written against, so the model's read resolves.
+  // The project rules dir may sit at an ancestor of cwd, where a cwd-relative
+  // '.claude/rules' would point the read at a path that does not exist.
+  let projectRulesBase = '.claude/rules'
+  // Scoped rules ready to attach when a matching file is touched, and the set of
+  // rules already attached this session so each attaches at most once.
+  let attachTargets: AttachTarget[] = []
+  const attached = new Set<string>()
 
   pi.on('session_start', async (_event, ctx) => {
-    globalRules = readGlobalRules(globalRulesDir)
-    // Project rule filenames and their paths: frontmatter are surfaced in the system prompt.
-    // isProjectTrusted alone is true for a repo pi never asked about; see project-approval.
+    globalRules = readRules(globalRulesDir)
+    // Project rules are repository text landing in the system prompt, so they load
+    // only once the project is approved. isProjectTrusted alone is true for a repo
+    // pi never asked about; see project-approval.
     const approved = await isProjectApproved(ctx)
-    projectRules = approved ? readProjectRules(path.join(ctx.cwd, '.claude', 'rules')) : []
+    // Nearest at-or-above cwd, so a subdirectory session still reads the rules the
+    // approval walk gated on.
+    const projectRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
+    projectRules = projectRulesDir ? readRules(projectRulesDir) : EMPTY_RULES
+
+    // Global globs are relative to cwd; project globs to the project root (the dir
+    // holding .claude), so `db/**` in a repo rule matches repo-relative paths even
+    // from a subdirectory session. Reset per session so a re-run re-attaches.
+    attached.clear()
+    const projectRoot = projectRulesDir ? path.dirname(path.dirname(projectRulesDir)) : ctx.cwd
+    attachTargets = [
+      ...globalRules.scoped.map((rule) => ({ key: `global:${rule.rel}`, globs: rule.paths, body: rule.body, root: ctx.cwd, file: path.join(globalRulesDir, rule.rel), memoryType: 'User' as const })),
+      ...projectRules.scoped.map((rule) => ({ key: `project:${rule.rel}`, globs: rule.paths, body: rule.body, root: projectRoot, file: path.join(projectRulesDir ?? path.join(ctx.cwd, '.claude', 'rules'), rule.rel), memoryType: 'Project' as const })),
+    ]
+    // Relative to cwd, which the read tool resolves: an ancestor dir yields a
+    // `../…/.claude/rules` the model can follow, where a bare '.claude/rules'
+    // would point at a nonexistent path under the subdirectory.
+    projectRulesBase = projectRulesDir === null ? '.claude/rules' : path.relative(ctx.cwd, projectRulesDir) || '.claude/rules'
 
     const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
-    if (hasGlobal || projectRules.length > 0) {
-      ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectRules.length}`, 'info')
+    const projectCount = projectRules.inline.length + projectRules.scoped.length
+    if (hasGlobal || projectCount > 0) {
+      ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectCount}`, 'info')
     }
   })
 
   pi.on('before_agent_start', async (event) => {
-    let addition = ''
-
-    if (globalRules.inline.length > 0 || globalRules.scoped.length > 0) {
-      addition += `\n\n## Global Rules`
-      if (globalRules.inline.length > 0) {
-        addition += `\n\nThese rules always apply:\n\n${globalRules.inline}`
-      }
-      if (globalRules.scoped.length > 0) {
-        const scopedList = globalRules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, '~/.claude/rules')).join('\n')
-        addition += `\n\nPath-scoped global rules, available in ~/.claude/rules/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
-      }
-    }
-
-    if (projectRules.length > 0) {
-      const rulesList = projectRules.map((rule) => formatRulePointer(rule.rel, rule.paths)).join('\n')
-      addition += `\n\n## Project Rules\n\nThe following project rules are available in .claude/rules/:\n\n${rulesList}\n\nRead the relevant rule file with the read tool before working on the files it covers; rules with an "applies when" scope are path-scoped.`
-    }
-
+    // Global first: Claude loads user-level rules before project rules, so project
+    // rules read later and take priority.
+    const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
     if (addition.length === 0) return
 
     return { systemPrompt: event.systemPrompt + addition }
+  })
+
+  // Lazy attach: when a file tool touches a path a scoped rule covers, append the
+  // rule body to that tool's result so it enters context, once per rule per session.
+  // This mirrors Claude Code, which attaches a scoped rule when a matching file is
+  // read or edited rather than inlining it upfront.
+  pi.on('tool_result', async (event, ctx) => {
+    if (attachTargets.length === 0) return
+    if (event.isError) return
+    if (event.toolName !== 'read' && event.toolName !== 'edit' && event.toolName !== 'write') return
+    const rel = (event.input as { path?: unknown } | undefined)?.path
+    if (typeof rel !== 'string' || rel.length === 0) return
+    const abs = path.resolve(ctx.cwd, rel)
+
+    const bodies: string[] = []
+    for (const target of attachTargets) {
+      if (attached.has(target.key)) continue
+      const relativeToRoot = path.relative(target.root, abs)
+      // A file outside the rule root cannot match its project-relative globs. Test for
+      // a real parent-traversal segment, not a leading '..' (a file named `..config` is
+      // inside the root).
+      if (relativeToRoot === '..' || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) continue
+      if (!pathMatchesGlobs(relativeToRoot, target.globs)) continue
+      attached.add(target.key)
+      bodies.push(target.body)
+      // The lazy attach is Claude's path_glob_match instruction load; the hooks
+      // extension bridges the bus event to the InstructionsLoaded hook. The
+      // once-per-session attach set above also bounds the events to one per rule.
+      publishInstructionLoad(pi.events, { file_path: target.file, memory_type: target.memoryType, load_reason: 'path_glob_match', globs: target.globs, trigger_file_path: abs })
+    }
+    if (bodies.length === 0) return
+    return { content: [...event.content, ...bodies.map((text) => ({ type: 'text' as const, text }))] }
   })
 }

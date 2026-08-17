@@ -23,11 +23,14 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, type Theme, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
+import { type AgentRunRequest, setAgentRunner } from '../internal/agent-run.js'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
+import { repoRoot } from '../internal/project-root.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
+import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
-import { type AgentConfig, type AgentScope, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
+import { type AgentConfig, type AgentMemoryScope, type AgentScope, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
@@ -140,7 +143,7 @@ interface UsageStats {
 
 interface SingleResult {
   agent: string
-  agentSource: 'user' | 'project' | 'builtin' | 'unknown'
+  agentSource: 'user' | 'project' | 'builtin' | 'plugin' | 'unknown'
   task: string
   exitCode: number
   messages: Message[]
@@ -264,6 +267,8 @@ interface RunAgentOptions {
   skillRoots?: string[]
   /** Models this user can actually run, for resolving a tier alias. */
   availableModels?: ReadonlyArray<{ id: string }>
+  /** Whether repo-controlled config (a project/local agent memory store) may be read. */
+  projectApproved?: boolean
 }
 
 /** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
@@ -299,7 +304,16 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     }
   }
 
-  const args = agentInvocationArgs(agent, resolveModelAlias(agent.modelAlias, options.availableModels ?? []))
+  const runCwd = cwd ?? defaultCwd
+  // Project/local memory is anchored at the SESSION project (defaultCwd), not the
+  // model-supplied runCwd: projectApproved gates the session's repo, so anchoring the
+  // store on a different (possibly unapproved) cwd would inject that repo's memory as
+  // trusted. User-scope memory ignores cwd, so this is safe for it too.
+  const memorySection = agentMemoryPromptSection(agent, defaultCwd, options.projectApproved ?? false)
+  // A memory-enabled child must be able to manage its store files even when the
+  // agent pins a tools allowlist.
+  const invocationAgent = memorySection ? { ...agent, tools: withMemoryTools(agent.tools) } : agent
+  const args = agentInvocationArgs(invocationAgent, resolveModelAlias(agent.modelAlias, options.availableModels ?? []))
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
@@ -326,9 +340,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   }
 
   try {
-    const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, options.skillRoots ?? [])
-    if (promptWithSkills.trim()) {
-      const tmp = await writePromptToTempFile(agent.name, promptWithSkills)
+    const promptBody = childPromptBody(agent, options.skillRoots ?? [], memorySection)
+    if (promptBody.trim()) {
+      const tmp = await writePromptToTempFile(agent.name, promptBody)
       tmpPromptDir = tmp.dir
       tmpPromptPath = tmp.filePath
       args.push('--append-system-prompt', tmpPromptPath)
@@ -340,7 +354,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     const exitCode = await new Promise<number>((resolve) => {
       const invocation = getPiInvocation(args)
       const proc = spawn(invocation.command, invocation.args, {
-        cwd: cwd ?? defaultCwd,
+        cwd: runCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         // Its own group, so an abort reaches grandchildren too: killing only the
@@ -350,6 +364,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         env: { ...process.env, PI_CODE_SUBAGENT: '1' },
       })
       let buffer = ''
+      let assistantTurns = 0
 
       const processLine = (line: string) => {
         if (!line.trim()) return
@@ -365,7 +380,13 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         if (event.type === 'message_end') {
           const msg = event.message as Message
           currentResult.messages.push(msg)
-          if (msg.role === 'assistant') accumulateAssistantMessage(currentResult, msg)
+          if (msg.role === 'assistant') {
+            accumulateAssistantMessage(currentResult, msg)
+            assistantTurns++
+            // Claude's maxTurns cap: end the child at the turn boundary once it has
+            // produced its Nth turn, so the collected output is kept and no turn is cut.
+            if (agent.maxTurns && assistantTurns >= agent.maxTurns) killGroup('SIGTERM')
+          }
           emitUpdate()
         } else if (event.type === 'tool_result_end') {
           currentResult.messages.push(event.message as Message)
@@ -546,6 +567,7 @@ interface ModeContext {
   onPhase?: SubagentPhaseSink
   skillRoots: string[]
   availableModels: ReadonlyArray<{ id: string }>
+  projectApproved: boolean
 }
 
 async function checkProjectAgentGate(params: SubagentParamsStatic, agents: AgentConfig[], ctx: ExtensionContext, projectAgentsDir: string | null, gateMode: SubagentMode, makeDetails: MakeDetails): Promise<ToolResult | null> {
@@ -576,6 +598,100 @@ async function checkProjectAgentGate(params: SubagentParamsStatic, agents: Agent
     if (!ok) return { content: [{ type: 'text', text: 'Canceled: project-local agents not approved.' }], details: makeDetails(gateMode)([]) }
   }
   return null
+}
+
+/** The system prompt for Claude's experimental `type: "agent"` hooks: the subagent
+ * inspects with read-only tools and returns the same JSON decision a command hook's
+ * stdout carries. A hook-supplied `systemPrompt` is appended after it. */
+export const AGENT_HOOK_SYSTEM = [
+  'You are a Claude Code agent hook verifying whether an action should proceed.',
+  'Use the Read, Grep, and Glob tools to inspect files as needed before deciding.',
+  'When done, respond with ONLY a JSON object and nothing else:',
+  '{"hookSpecificOutput":{"permissionDecision":"allow"|"deny"|"ask","permissionDecisionReason":"<short reason>"}}',
+  'Use "allow" to let the action proceed, "deny" to block it, "ask" to require the user to confirm.',
+].join('\n')
+
+/** A throwaway agent config for one agent-hook run: read-only inspection tools, the
+ * hook's model (a fast default when unset), and the decision-returning system prompt. */
+export function buildHookAgent(request: Pick<AgentRunRequest, 'model' | 'systemPrompt'>): AgentConfig {
+  return {
+    name: 'agent-hook',
+    description: 'Verifies a hook condition using read-only inspection tools.',
+    tools: ['read', 'grep', 'find'],
+    model: request.model,
+    systemPrompt: request.systemPrompt ? `${AGENT_HOOK_SYSTEM}\n\n${request.systemPrompt}` : AGENT_HOOK_SYSTEM,
+    source: 'builtin',
+    filePath: '',
+  }
+}
+
+/** The file-management tools a memory-enabled child needs for its store. */
+const MEMORY_TOOLS = ['read', 'write', 'edit']
+
+/** Where an agent's own persistent memory lives, per its `memory:` scope (Claude:
+ * user -> ~/.claude/agent-memory/<name>, project -> <root>/.claude/agent-memory/<name>,
+ * local -> <root>/.claude/agent-memory-local/<name>). The name comes from frontmatter
+ * a repository can control, so it is sanitized before becoming a path segment. */
+export function agentMemoryDir(scope: AgentMemoryScope, name: string, cwd: string, home: string): string {
+  const sanitized = name.replace(/[^\w.-]+/g, '_')
+  // A name of only dots ('.', '..') survives the character filter but still traverses.
+  const segment = /^\.+$/.test(sanitized) ? '_' : sanitized
+  if (scope === 'user') return path.join(home, '.claude', 'agent-memory', segment)
+  const root = repoRoot(cwd) ?? cwd
+  return path.join(root, '.claude', scope === 'project' ? 'agent-memory' : 'agent-memory-local', segment)
+}
+
+/** The prompt section giving a memory-enabled child its own persistent store: the
+ * directory, read/write/curation instructions, and its MEMORY.md capped like the
+ * parent's index load (first 200 lines or 25KB, whichever comes first). */
+export function agentMemorySection(dir: string, memoryMd: string): string {
+  const indexPath = path.join(dir, 'MEMORY.md')
+  const capped = capIndexForPrompt(memoryMd)
+  const current = capped.trim() ? `Current ${indexPath}:\n\n${capped}` : `${indexPath} does not exist yet; create it once you have something worth keeping.`
+  return [
+    '## Agent memory',
+    '',
+    `You have a persistent memory directory at ${dir} that survives across sessions.`,
+    'Use the read, write, and edit tools to record durable insights, project patterns, and lessons learned there, and consult them when relevant.',
+    `Only the first ${INDEX_MAX_LINES} lines or ${INDEX_MAX_BYTES} bytes of ${indexPath} are loaded at startup, so keep it a concise, curated index and move details into separate files in the directory.`,
+    '',
+    current,
+  ].join('\n')
+}
+
+/** The memory section for one run, or undefined when the agent declares no memory,
+ * auto memory is off, or a repo-scoped store is not approved. Subagent memory is part
+ * of auto memory, so the same settings chain and env kill switch gate it. */
+export function agentMemoryPromptSection(agent: Pick<AgentConfig, 'memory' | 'name'>, cwd: string, projectApproved: boolean): string | undefined {
+  if (!agent.memory) return undefined
+  // project and local stores live under the repository's .claude, a repo-controlled
+  // path; like rules, they are only read once the project is approved.
+  if (agent.memory !== 'user' && !projectApproved) return undefined
+  const settings = readMemorySettings(memorySettingsFiles(cwd, os.homedir(), projectApproved))
+  if (!autoMemoryEnabled(settings.autoMemoryEnabled, process.env)) return undefined
+  const dir = agentMemoryDir(agent.memory, agent.name, cwd, os.homedir())
+  let memoryMd = ''
+  try {
+    memoryMd = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf-8')
+  } catch {
+    // no store yet: the section still tells the child where to create one
+  }
+  return agentMemorySection(dir, memoryMd)
+}
+
+/** Widen a restricted agent's allowlist so it can manage its memory files. An
+ * unrestricted agent (no allowlist) already has every tool. */
+export function withMemoryTools(tools: string[] | undefined): string[] | undefined {
+  if (!tools || tools.length === 0) return tools
+  return [...tools, ...MEMORY_TOOLS.filter((tool) => !tools.includes(tool))]
+}
+
+/** The child's --append-system-prompt body: the skills-preloaded prompt plus the
+ * agent memory section, without a stray separator when either part is empty. */
+function childPromptBody(agent: AgentConfig, skillRoots: string[], memorySection: string | undefined): string {
+  const prompt = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots)
+  if (!memorySection) return prompt
+  return [prompt, memorySection].filter((part) => part.trim()).join('\n\n')
 }
 
 /** CLI args shared by foreground and background children, from the agent's config. */
@@ -613,7 +729,7 @@ function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefine
   }
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>): Promise<ToolResult> {
+async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConfig[], defaultCwd: string, pi: ExtensionAPI, makeDetails: MakeDetails, skillRoots: string[], availableModels: ReadonlyArray<{ id: string }>, projectApproved: boolean): Promise<ToolResult> {
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -633,16 +749,20 @@ async function runBackgroundMode(params: SubagentParamsStatic, agents: AgentConf
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
     return backgroundCapResult(makeDetails)
   }
-  const args = agentInvocationArgs(agent, resolveModelAlias(agent.modelAlias, availableModels))
+  const runCwd = params.cwd ?? defaultCwd
+  // Anchor project/local memory at the session project (defaultCwd), which is the one
+  // projectApproved gated; see the foreground path for why runCwd must not be used.
+  const memorySection = agentMemoryPromptSection(agent, defaultCwd, projectApproved)
+  const args = agentInvocationArgs(memorySection ? { ...agent, tools: withMemoryTools(agent.tools) } : agent, resolveModelAlias(agent.modelAlias, availableModels))
   let tmpPrompt: { dir: string; filePath: string } | undefined
-  const promptWithSkills = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots)
-  if (promptWithSkills.trim()) {
-    tmpPrompt = await writePromptToTempFile(agent.name, promptWithSkills)
+  const promptBody = childPromptBody(agent, skillRoots, memorySection)
+  if (promptBody.trim()) {
+    tmpPrompt = await writePromptToTempFile(agent.name, promptBody)
     args.push('--append-system-prompt', tmpPrompt.filePath)
   }
   args.push(`Task: ${task}`)
   const invocation = getPiInvocation(args)
-  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: params.cwd ?? defaultCwd, promptBody: tmpPrompt ? promptWithSkills : undefined }, (run) => {
+  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: runCwd, promptBody: tmpPrompt ? promptBody : undefined, maxTurns: agent.maxTurns }, (run) => {
     removeTmpPrompt(tmpPrompt)
     // Both calls throw once the session that started the run is disposed; driveRun
     // catches for the whole callback, so neither can escape into the child's close
@@ -700,6 +820,7 @@ async function runChainMode(chain: ChainStepParam[], mode: ModeContext): Promise
       onPhase: mode.onPhase,
       skillRoots: mode.skillRoots,
       availableModels: mode.availableModels,
+      projectApproved: mode.projectApproved,
     })
     results.push(result)
 
@@ -772,6 +893,7 @@ async function runParallelMode(tasks: TaskItemParam[], mode: ModeContext): Promi
       // preload and its model tier alias silently do nothing in parallel mode only.
       skillRoots: mode.skillRoots,
       availableModels: mode.availableModels,
+      projectApproved: mode.projectApproved,
       // Per-task update callback
       onUpdate: (partial) => {
         const live = partial.details?.results[0]
@@ -821,6 +943,7 @@ async function runSingleMode(agentName: string, task: string, cwd: string | unde
     onPhase: mode.onPhase,
     skillRoots: mode.skillRoots,
     availableModels: mode.availableModels,
+    projectApproved: mode.projectApproved,
   })
   const isError = result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
   if (isError) {
@@ -841,8 +964,8 @@ interface CallItem {
   task: string
 }
 
-function renderChainCall(chain: CallItem[], scope: AgentScope, theme: Theme): Text {
-  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', `chain (${chain.length} steps)`) + theme.fg('muted', ` [${scope}]`)
+function renderChainCall(chain: CallItem[], scope: AgentScope | undefined, theme: Theme): Text {
+  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', `chain (${chain.length} steps)`) + scopeTag(scope, theme)
   for (let i = 0; i < Math.min(chain.length, 3); i++) {
     const step = chain[i]
     // Clean up {previous} placeholder for display
@@ -859,8 +982,8 @@ function renderChainCall(chain: CallItem[], scope: AgentScope, theme: Theme): Te
   return new Text(text, 0, 0)
 }
 
-function renderParallelCall(tasks: CallItem[], scope: AgentScope, theme: Theme): Text {
-  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', `parallel (${tasks.length} tasks)`) + theme.fg('muted', ` [${scope}]`)
+function renderParallelCall(tasks: CallItem[], scope: AgentScope | undefined, theme: Theme): Text {
+  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', `parallel (${tasks.length} tasks)`) + scopeTag(scope, theme)
   for (const t of tasks.slice(0, 3)) {
     const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task
     const taskLabel = theme.fg('accent', t.agent) + theme.fg('dim', ` ${preview}`)
@@ -873,11 +996,13 @@ function renderParallelCall(tasks: CallItem[], scope: AgentScope, theme: Theme):
   return new Text(text, 0, 0)
 }
 
-function renderSingleCall(agent: string | undefined, task: string | undefined, scope: AgentScope, theme: Theme): Text {
+const scopeTag = (scope: AgentScope | undefined, theme: Theme): string => (scope ? theme.fg('muted', ` [${scope}]`) : '')
+
+function renderSingleCall(agent: string | undefined, task: string | undefined, scope: AgentScope | undefined, theme: Theme): Text {
   const agentName = agent || '...'
   let preview = '...'
   if (task) preview = task.length > 60 ? `${task.slice(0, 60)}...` : task
-  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', agentName) + theme.fg('muted', ` [${scope}]`)
+  let text = theme.fg('toolTitle', theme.bold('subagent ')) + theme.fg('accent', agentName) + scopeTag(scope, theme)
   text += `\n  ${theme.fg('dim', preview)}`
   return new Text(text, 0, 0)
 }
@@ -1131,6 +1256,37 @@ export default function subagentExtension(pi: ExtensionAPI) {
     pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   }
 
+  // Claude's experimental `type: "agent"` hooks spawn a read-only subagent to verify a
+  // condition. The hooks extension reaches it through the agent-run seam; register a
+  // runner that reuses the same single-run machinery as the subagent tool. cwd and the
+  // available model list are captured per session so a hook run lands in the right repo.
+  let hookCwd = process.cwd()
+  let hookModels: ReadonlyArray<{ id: string }> = []
+  pi.on('session_start', async (_event, ctx) => {
+    hookCwd = ctx.cwd
+    try {
+      hookModels = ctx.modelRegistry?.getAvailable?.() ?? []
+    } catch {
+      hookModels = []
+    }
+    setAgentRunner(async (request) => {
+      // A subagent session must not spawn further agents; agent hooks inside one are
+      // skipped (the seam rejection is non-blocking in runAgentHook).
+      if (process.env.PI_CODE_SUBAGENT) throw new Error('agent hooks do not run inside a subagent')
+      const agent = buildHookAgent(request)
+      const result = await runSingleAgent({
+        defaultCwd: hookCwd,
+        agents: [agent],
+        agentName: agent.name,
+        task: request.prompt,
+        signal: request.signal,
+        makeDetails: (results): SubagentDetails => ({ mode: 'single', agentScope: 'user', projectAgentsDir: null, results }),
+        availableModels: hookModels,
+      })
+      return getFinalOutput(result.messages)
+    })
+  })
+
   // Claude surfaces each agent's description so the model can pick one autonomously.
   // Rebuilt per turn (agents are rediscovered per invocation too); project agents are
   // included only when the project is already approved, read without prompting, since
@@ -1151,13 +1307,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
       'Single mode also supports background: true for long tasks; a notification arrives on completion and {status: true} lists runs.',
-      'Default agent scope is "user" (from ~/.claude/agents and ~/.pi/agent/agents).',
-      'To enable project-local agents in .claude/agents or .pi/agents, set agentScope: "both" (or "project").',
+      'Agents come from ~/.claude/agents and ~/.pi/agent/agents, plus project .claude/agents and .pi/agents once the project is trusted.',
+      'agentScope: "user" or "project" narrows to one source.',
     ].join(' '),
     parameters: SubagentParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const agentScope: AgentScope = params.agentScope ?? 'user'
+      // Claude merges project agents into the default roster (project wins on a name
+      // clash), and the roster above advertises them under the same approval check,
+      // so a default call can reach every agent it lists. An explicit agentScope
+      // still narrows or widens; the invocation gate below applies either way.
+      const agentScope: AgentScope = params.agentScope ?? (isProjectApprovedSilently(ctx) ? 'both' : 'user')
       // Children carry PI_CODE_SUBAGENT; without this check they could spawn
       // grandchildren without limit.
       if (process.env.PI_CODE_SUBAGENT) {
@@ -1215,16 +1375,19 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const gateResult = await checkProjectAgentGate(params, agents, ctx, discovery.projectAgentsDir, gateMode, makeDetails)
       if (gateResult) return gateResult
 
-      // Project skills only preload once the project is approved, matching the
-      // gate the skills extension applies to discovery itself.
-      const skillRoots = skillDirs(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+      // Project skills only preload and project/local agent memory stores only load
+      // once the project is approved, matching the gate the skills extension applies
+      // to discovery itself. Read after the project-agent gate above so an approval
+      // the user just granted there counts.
+      const projectApproved = isProjectApprovedSilently(ctx)
+      const skillRoots = skillDirs(ctx.cwd, os.homedir(), projectApproved)
       // Tier aliases resolve against what this user is authenticated for; an
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels)
+      if (params.background) return runBackgroundMode(params, agents, ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved)
 
-      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
+      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, projectApproved, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
 
       if (params.chain?.length) return runChainMode(params.chain, mode)
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)
@@ -1238,7 +1401,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, _context) {
-      const scope: AgentScope = args.agentScope ?? 'user'
+      // No tag when the call left the scope to the contextual default: the label
+      // cannot know here whether that resolved to user or both.
+      const scope = args.agentScope
       if (args.chain && args.chain.length > 0) return renderChainCall(args.chain, scope, theme)
       if (args.tasks && args.tasks.length > 0) return renderParallelCall(args.tasks, scope, theme)
       return renderSingleCall(args.agent, args.task, scope, theme)

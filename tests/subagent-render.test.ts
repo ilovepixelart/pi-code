@@ -296,23 +296,23 @@ describe('renderCall', () => {
         { agent: 'fixer', task: 'fix it' },
       ],
     }
-    expect(str(renderCall(args, theme))).toBe(['subagent chain (2 steps) [user]', '  1. scout find the bug', '  2. fixer fix it'].join('\n'))
+    expect(str(renderCall(args, theme))).toBe(['subagent chain (2 steps)', '  1. scout find the bug', '  2. fixer fix it'].join('\n'))
   })
 
   it('strips the {previous} placeholder from the chain preview', () => {
     const args = { chain: [{ agent: 'fixer', task: '{previous} then summarize' }] }
-    expect(str(renderCall(args, theme))).toBe(['subagent chain (1 steps) [user]', '  1. fixer then summarize'].join('\n'))
+    expect(str(renderCall(args, theme))).toBe(['subagent chain (1 steps)', '  1. fixer then summarize'].join('\n'))
   })
 
   it('truncates chain step previews past 40 characters', () => {
     const task = 'a'.repeat(45)
     const args = { chain: [{ agent: 'scout', task }] }
-    expect(str(renderCall(args, theme))).toBe(['subagent chain (1 steps) [user]', `  1. scout ${'a'.repeat(40)}...`].join('\n'))
+    expect(str(renderCall(args, theme))).toBe(['subagent chain (1 steps)', `  1. scout ${'a'.repeat(40)}...`].join('\n'))
   })
 
   it('shows only the first three chain steps and counts the rest', () => {
     const chain = ['a', 'b', 'c', 'd', 'e'].map((agent) => ({ agent, task: 't' }))
-    expect(str(renderCall({ chain }, theme))).toBe(['subagent chain (5 steps) [user]', '  1. a t', '  2. b t', '  3. c t', '  ... +2 more'].join('\n'))
+    expect(str(renderCall({ chain }, theme))).toBe(['subagent chain (5 steps)', '  1. a t', '  2. b t', '  3. c t', '  ... +2 more'].join('\n'))
   })
 
   it('renders parallel mode with an unnumbered task list and the requested scope', () => {
@@ -328,25 +328,25 @@ describe('renderCall', () => {
 
   it('shows only the first three parallel tasks and counts the rest', () => {
     const tasks = ['a', 'b', 'c', 'd'].map((agent) => ({ agent, task: 't' }))
-    expect(str(renderCall({ tasks }, theme))).toBe(['subagent parallel (4 tasks) [user]', '  a t', '  b t', '  c t', '  ... +1 more'].join('\n'))
+    expect(str(renderCall({ tasks }, theme))).toBe(['subagent parallel (4 tasks)', '  a t', '  b t', '  c t', '  ... +1 more'].join('\n'))
   })
 
   it('truncates parallel task previews past 40 characters', () => {
     const task = 'b'.repeat(41)
-    expect(str(renderCall({ tasks: [{ agent: 'scout', task }] }, theme))).toBe(['subagent parallel (1 tasks) [user]', `  scout ${'b'.repeat(40)}...`].join('\n'))
+    expect(str(renderCall({ tasks: [{ agent: 'scout', task }] }, theme))).toBe(['subagent parallel (1 tasks)', `  scout ${'b'.repeat(40)}...`].join('\n'))
   })
 
   it('renders single mode with the agent name and task on the second line', () => {
-    expect(str(renderCall({ agent: 'scout', task: 'find it' }, theme))).toBe(['subagent scout [user]', '  find it'].join('\n'))
+    expect(str(renderCall({ agent: 'scout', task: 'find it' }, theme))).toBe(['subagent scout', '  find it'].join('\n'))
   })
 
   it('truncates a single-mode task past 60 characters', () => {
     const task = 'c'.repeat(61)
-    expect(str(renderCall({ agent: 'scout', task }, theme))).toBe(['subagent scout [user]', `  ${'c'.repeat(60)}...`].join('\n'))
+    expect(str(renderCall({ agent: 'scout', task }, theme))).toBe(['subagent scout', `  ${'c'.repeat(60)}...`].join('\n'))
   })
 
   it('falls back to ellipses when the agent or task is missing', () => {
-    expect(str(renderCall({}, theme))).toBe(['subagent ... [user]', '  ...'].join('\n'))
+    expect(str(renderCall({}, theme))).toBe(['subagent ...', '  ...'].join('\n'))
   })
 })
 
