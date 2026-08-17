@@ -16,6 +16,17 @@
  * Values support ${VAR} / ${VAR:-default} interpolation, connect and per-call timeouts
  * honor MCP_TIMEOUT / MCP_TOOL_TIMEOUT, and a stdio server receives only the SDK's default
  * environment plus its own `env` block, not the whole process environment.
+ *
+ * Servers advertising the `prompts` capability get their prompts registered as Claude's
+ * /mcp__<server>__<prompt> slash commands (names normalized dashes/spaces to underscores,
+ * args space-separated and mapped positionally); the prompt result drives a turn via
+ * sendUserMessage, exactly how custom slash commands do. Servers advertising `resources`
+ * make the global list_mcp_resources / read_mcp_resource tools available, mirroring
+ * Claude's automatic resource tools. Resource and prompt output rides the same
+ * mapContent/capForContext budget as tool output. That budget is byte/line based
+ * (pi's DEFAULT_MAX_BYTES in the shared output guard); Claude's MAX_MCP_OUTPUT_TOKENS
+ * is a token budget and cannot be folded into it without making the guard token-aware,
+ * so the byte cap stands in for it.
  */
 
 import { execFile } from 'node:child_process'
@@ -32,8 +43,9 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
+import { PromptListChangedNotificationSchema, ResourceListChangedNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
+import { splitArgs } from './internal/command-file.js'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from './internal/mcp-alias.js'
 import { setMcpToolCaller } from './internal/mcp-call.js'
 import { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } from './internal/mcp-oauth.js'
@@ -61,7 +73,9 @@ const callTimeoutMs = (): number => envTimeout('MCP_TOOL_TIMEOUT', DEFAULT_CALL_
 // pi's own built-ins (read, bash, edit, ...) cannot be produced and are not listed.
 // These are pi-code's own tools, and mcp.ts registers before the extensions owning
 // them, so without this guard a server named `web` would replace the SSRF-checked fetch.
-const RESERVED_NAMES = new Set(['web_fetch', 'web_search', 'plan_mode_complete'])
+// The resource tools are this extension's own globals; a server named `list` or `read`
+// must not take their names either.
+const RESERVED_NAMES = new Set(['web_fetch', 'web_search', 'plan_mode_complete', 'list_mcp_resources', 'read_mcp_resource'])
 
 export interface StdioServerConfig {
   type?: 'stdio'
@@ -317,6 +331,52 @@ export function warnOnTypelessUrl(name: string, config: ServerConfig): void {
 
 export function formatToolName(server: string, tool: string): string {
   return `${server}_${tool}`.replaceAll('-', '_')
+}
+
+/** Claude exposes server prompts as /mcp__<server>__<prompt> slash commands. Both
+ * names normalize like formatToolName, extended to spaces: dashes and spaces each
+ * become an underscore. */
+export function formatPromptCommandName(server: string, prompt: string): string {
+  const normalize = (name: string): string => name.replace(/[\s-]/g, '_')
+  return `mcp__${normalize(server)}__${normalize(prompt)}`
+}
+
+export interface McpPromptArgumentInfo {
+  name: string
+  description?: string
+  required?: boolean
+}
+
+export interface McpPromptInfo {
+  name: string
+  description?: string
+  arguments?: McpPromptArgumentInfo[]
+}
+
+/** Claude passes prompt arguments space-separated after the command. Tokens map
+ * positionally onto the declared arguments, split the way slash-command args are
+ * (quoted runs stay together); the last declared argument absorbs any trailing
+ * tokens so free text at the end is not silently dropped. Declared arguments with
+ * no token are omitted, and the server enforces its own `required`. */
+export function mapPromptArguments(declared: ReadonlyArray<{ name: string }> | undefined, args: string): Record<string, string> {
+  const tokens = splitArgs(args)
+  const names = (declared ?? []).map((argument) => argument.name)
+  const mapped: Record<string, string> = {}
+  for (let index = 0; index < names.length && index < tokens.length; index++) {
+    mapped[names[index]] = index === names.length - 1 ? tokens.slice(index).join(' ') : tokens[index]
+  }
+  return mapped
+}
+
+/** The content blocks a getPrompt result injects. Each message carries one content
+ * block; the blocks ride the same mapContent budget as tool output, and image blocks
+ * are carried through rather than dropped, since sendUserMessage accepts them and a
+ * vision prompt is worthless flattened to text. An empty message list yields no
+ * blocks, and messages that carry only empty text yield none either, so the caller
+ * can skip the turn rather than drive it on an empty or sentinel message. */
+export function promptMessageContent(messages: ReadonlyArray<{ content: unknown }>): ToolContent[] {
+  if (messages.length === 0) return []
+  return mapContent(messages.map((message) => message.content as McpContentBlock)).filter((block) => block.type !== 'text' || block.text.trim() !== '')
 }
 
 export function normalizeSchema(schema: unknown): object {
@@ -603,6 +663,17 @@ async function listAllTools(client: Client): Promise<McpToolInfo[]> {
   return tools
 }
 
+async function listAllPrompts(client: Client): Promise<McpPromptInfo[]> {
+  const prompts: McpPromptInfo[] = []
+  let cursor: string | undefined
+  do {
+    const page = await client.listPrompts({ cursor })
+    prompts.push(...page.prompts)
+    cursor = page.nextCursor
+  } while (cursor)
+  return prompts
+}
+
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
@@ -662,6 +733,169 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     return count
   }
 
+  // Prompt command name -> the server and prompt that own it, so a refresh re-listing
+  // the same prompt is told apart both from a cross-server collision and from a second
+  // prompt on the same server whose name normalizes to the one already taken (e.g.
+  // `deploy-prod` and `deploy_prod`), mirroring `registered` for tools.
+  const registeredPrompts = new Map<string, { server: string; prompt: string }>()
+
+  /** Register a slash command for every not-yet-registered prompt of a server. pi has
+   * no command unregister, so, like tools, a withdrawn prompt keeps its registration
+   * and surfaces the server's own error when invoked; an edit to a prompt's declared
+   * arguments only lands on new names, since an existing command keeps its binding. */
+  function registerPrompts(name: string, client: Client, prompts: McpPromptInfo[]): void {
+    for (const prompt of prompts) {
+      const commandName = formatPromptCommandName(name, prompt.name)
+      const owner = registeredPrompts.get(commandName)
+      if (owner) {
+        if (owner.server === name && owner.prompt === prompt.name) continue // a refresh re-listing the same prompt
+        console.warn(`pi-code-mcp: skipping colliding prompt command ${commandName}`)
+        continue
+      }
+      registeredPrompts.set(commandName, { server: name, prompt: prompt.name })
+      const hint = (prompt.arguments ?? []).map((argument) => (argument.required ? `<${argument.name}>` : `[${argument.name}]`)).join(' ')
+      const base = prompt.description ?? `MCP prompt ${prompt.name} from ${name}`
+      pi.registerCommand(commandName, {
+        description: hint ? `${base} ${hint}` : base,
+        handler: async (args, ctx) => {
+          try {
+            const promptArgs = mapPromptArguments(prompt.arguments, args)
+            const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
+            if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
+            const budget = callTimeoutMs()
+            const result = await withTimeout(client.getPrompt(params, { timeout: budget }), budget, commandName)
+            // The prompt drives a turn exactly the way a custom slash command does
+            // (see commands.ts), carrying its image blocks through. A prompt that
+            // yields no content is reported rather than sent as an empty turn.
+            const content = promptMessageContent(result.messages)
+            if (content.length === 0) {
+              ctx.ui.notify(`${commandName}: prompt returned no content`, 'info')
+              return
+            }
+            pi.sendUserMessage(content)
+          } catch (error) {
+            ctx.ui.notify(`${commandName}: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          }
+        },
+      })
+    }
+  }
+
+  /** Claude exposes prompts as slash commands only for servers advertising the
+   * prompts capability; a listing failure loses the prompts, not the server. */
+  async function connectPrompts(name: string, client: Client): Promise<void> {
+    if (!client.getServerCapabilities()?.prompts) return
+    try {
+      registerPrompts(name, client, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
+    } catch (error) {
+      console.warn(`pi-code-mcp: prompt listing failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Mirror of subscribeToToolChanges for the prompt list: a newly announced prompt
+   * registers without a restart, a withdrawn one keeps its registration. */
+  function subscribeToPromptChanges(name: string, client: Client): void {
+    try {
+      client.setNotificationHandler(PromptListChangedNotificationSchema, async () => {
+        try {
+          registerPrompts(name, client, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
+        } catch (error) {
+          console.warn(`pi-code-mcp: prompt refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
+    } catch {
+      // a transport or client without notification support simply never refreshes
+    }
+  }
+
+  /** Servers currently connected that advertise the resources capability. */
+  const resourceServers = (): Array<[string, Client]> => [...clients.entries()].filter(([, client]) => Boolean(client.getServerCapabilities()?.resources))
+
+  let resourceToolsRegistered = false
+
+  /** Claude auto-provides tools to list and read MCP resources when servers support
+   * them. Registered once, globally, the first time a connected server advertises the
+   * resources capability: the tools span servers, taking the server name as an
+   * argument, so per-server registration would only produce duplicates. Listings are
+   * fetched live on every call, so a resources list_changed needs no cache
+   * invalidation; its handler only re-checks this gate (see subscribeToResourceChanges). */
+  function ensureResourceTools(): void {
+    if (resourceToolsRegistered || resourceServers().length === 0) return
+    resourceToolsRegistered = true
+    pi.registerTool({
+      name: 'list_mcp_resources',
+      label: 'List MCP resources',
+      description: 'List available resources and resource templates from connected MCP servers. Optionally filter to a single server by name.',
+      parameters: Type.Object({ server: Type.Optional(Type.String({ description: 'Only list resources from this server' })) }),
+      async execute(_id, params) {
+        const filter = typeof (params as { server?: unknown }).server === 'string' && (params as { server: string }).server.length > 0 ? (params as { server: string }).server : undefined
+        if (filter && !clients.has(filter)) throw new Error(`MCP server "${filter}" is not connected`)
+        const entries: Array<Record<string, unknown>> = []
+        for (const [name, client] of resourceServers()) {
+          if (filter && name !== filter) continue
+          const budget = callTimeoutMs()
+          try {
+            let cursor: string | undefined
+            do {
+              const page = await withTimeout(client.listResources({ cursor }, { timeout: budget }), budget, `list resources ${name}`)
+              for (const resource of page.resources) entries.push({ server: name, uri: resource.uri, name: resource.name, ...(resource.description ? { description: resource.description } : {}), ...(resource.mimeType ? { mimeType: resource.mimeType } : {}) })
+              cursor = page.nextCursor
+            } while (cursor)
+          } catch (error) {
+            // One server failing must not empty the whole listing; surface it inline.
+            entries.push({ server: name, error: error instanceof Error ? error.message : String(error) })
+          }
+          try {
+            let cursor: string | undefined
+            do {
+              const page = await withTimeout(client.listResourceTemplates({ cursor }, { timeout: budget }), budget, `list resource templates ${name}`)
+              for (const template of page.resourceTemplates) entries.push({ server: name, uriTemplate: template.uriTemplate, name: template.name, ...(template.description ? { description: template.description } : {}), ...(template.mimeType ? { mimeType: template.mimeType } : {}) })
+              cursor = page.nextCursor
+            } while (cursor)
+          } catch {
+            // Templates are optional: a server with the resources capability but no
+            // templates answers method-not-found, which is not worth reporting.
+          }
+        }
+        return { content: mapContent([{ type: 'text', text: JSON.stringify(entries, null, 2) }]), details: {} }
+      },
+    })
+    pi.registerTool({
+      name: 'read_mcp_resource',
+      label: 'Read MCP resource',
+      description: 'Read a resource from a connected MCP server by URI.',
+      parameters: Type.Object({ server: Type.String({ description: 'The MCP server name' }), uri: Type.String({ description: 'The resource URI to read' }) }),
+      async execute(_id, params) {
+        const { server, uri } = params as { server: string; uri: string }
+        const client = clients.get(server)
+        if (!client) throw new Error(`MCP server "${server}" is not connected`)
+        const budget = callTimeoutMs()
+        const result = await withTimeout(client.readResource({ uri }, { timeout: budget }), budget, `read ${uri}`)
+        const blocks = (result.contents as Array<{ uri: string; text?: string; blob?: string; mimeType?: string }>).map((entry): McpContentBlock => {
+          if (typeof entry.text === 'string') return { type: 'resource', resource: { uri: entry.uri, text: entry.text } }
+          if (entry.blob && entry.mimeType?.startsWith('image/')) return { type: 'image', data: entry.blob, mimeType: entry.mimeType }
+          // Non-image binary has no useful text form; a placeholder beats megabytes
+          // of base64 reaching the model as JSON.
+          return { type: 'text', text: `[Binary resource ${entry.uri} (${entry.mimeType ?? 'unknown type'})]` }
+        })
+        return { content: mapContent(blocks), details: {} }
+      },
+    })
+  }
+
+  /** Resource listings are fetched live per call, so the notification has no cache to
+   * invalidate; re-checking the registration gate covers a server whose capabilities
+   * settled after the connect-time check. */
+  function subscribeToResourceChanges(client: Client): void {
+    try {
+      client.setNotificationHandler(ResourceListChangedNotificationSchema, async () => {
+        ensureResourceTools()
+      })
+    } catch {
+      // a transport or client without notification support simply never refreshes
+    }
+  }
+
   /** Claude refreshes tools on a server's list_changed notification. pi has no
    * unregister, so a withdrawn tool keeps its registration and surfaces the server's
    * own error when called; a newly announced one is registered without a restart. */
@@ -708,6 +942,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
           const count = registerTools(name, config, client, tools)
           subscribeToToolChanges(name, config, client)
+          // Prompts and resources are additive surfaces: their failures warn (inside
+          // connectPrompts) rather than flipping a tool-serving server to failed.
+          await connectPrompts(name, client)
+          subscribeToPromptChanges(name, client)
+          ensureResourceTools()
+          subscribeToResourceChanges(client)
           status.set(name, { state: 'connected', tools: count })
           // A server that dies mid-session would otherwise stay "connected" in /mcp
           // while every call fails with the SDK's bare "Not connected"; flip the

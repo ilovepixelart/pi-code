@@ -7,12 +7,29 @@
  * subdirectories (`frontend/build.md` is `/frontend:build`), `$ARGUMENTS` and
  * positional substitution, `` !`cmd` `` bash output, `@file` inlining, and the
  * `allowed-tools`, `argument-hint` and `model` frontmatter (`model` switches the
- * session model for the command's turn via `pi.setModel`, restored on turn_end).
+ * session model for the command's run via `pi.setModel`, restored on agent_end).
  * `shell: powershell` runs a command's injected spans through PowerShell when a
  * pwsh binary is installed, falling back to /bin/sh so the command still works
- * without one. `disable-model-invocation` is parsed but not applied yet.
+ * without one.
  *
- * A project command body is repository-controlled text that can now run shell
+ * Commands are also exposed to the model through a `slash_command` tool
+ * (Claude's SlashCommand tool), listing every discovered command whose file
+ * does not set `disable-model-invocation: true`. Only the command files this
+ * extension discovers are listed: pi built-ins and pi-code's own UI commands
+ * are user surfaces, not model surfaces. The model path is expansion only: the
+ * expanded body comes back as the tool result (sendUserMessage would spawn a
+ * second turn), `allowed-tools`/`disallowed-tools`/`model:` are not applied
+ * (applying them from inside a tool call would narrow the running batch and
+ * scope unrelated parallel tool calls, and the agent_end restore would lift
+ * the grant before the next model step could rely on it), and `!` spans are
+ * never executed on the model's demand: pi has no permission engine to gate
+ * repo-authored shell, so each span is replaced with Claude's
+ * "[shell command execution disabled by policy]" placeholder. The same
+ * placeholder is applied on every path when the `disableSkillShellExecution`
+ * settings key is set (user settings always, project settings when trusted,
+ * managed-settings.json as policy).
+ *
+ * A project command body is repository-controlled text that can run shell
  * commands and read files, so project commands load only once the project is
  * approved. That closes the "skills / commands are not trust-gated" limitation
  * for commands; skills remain pi-loader territory.
@@ -24,13 +41,15 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
+import { Type } from 'typebox'
 
 import { matchesBashRules } from './internal/bash-rules.js'
-import { type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { findNearestDir, repoRoot } from './internal/project-root.js'
+import { findNearestDir, findNearestFile, repoRoot } from './internal/project-root.js'
 
 type PathRuleTool = 'read' | 'edit' | 'write'
 
@@ -38,6 +57,7 @@ type PathRuleTool = 'read' | 'edit' | 'write'
 interface ModelLike {
   id: string
   name?: string
+  contextWindow?: number
 }
 
 /** Resolve a command's `model:` frontmatter to an available model. Claude accepts a
@@ -118,18 +138,169 @@ export function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] 
   return found
 }
 
+/** Claude's replacement text for a `!` span it refuses to execute. */
+export const SHELL_DISABLED_PLACEHOLDER = '[shell command execution disabled by policy]'
+
+type CommandPlugin = NonNullable<DiscoveredCommand['plugin']>
+
+/**
+ * Whether `disableSkillShellExecution` is set: the Claude settings key that
+ * replaces every `` !`cmd` `` and ```` ```! ```` span in skills and custom
+ * commands with SHELL_DISABLED_PLACEHOLDER instead of executing it. Read from
+ * user settings always, the project's settings.json/settings.local.json only
+ * when the project is trusted, and managed-settings.json as policy. Any layer
+ * setting it true wins: a repository's `false` must not lift the user's or the
+ * organization's policy, so this fails closed rather than last-file-wins.
+ */
+export function shellExecutionDisabled(cwd: string, home: string, trusted: boolean): boolean {
+  if (readManagedSettings().disableSkillShellExecution === true) return true
+  const files = [path.join(home, '.claude', 'settings.json')]
+  if (trusted) {
+    for (const name of ['settings.json', 'settings.local.json']) {
+      files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
+    }
+  }
+  return files.some((file) => {
+    try {
+      return (JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>).disableSkillShellExecution === true
+    } catch {
+      return false // missing or invalid file: not a policy statement
+    }
+  })
+}
+
+/** The ${CLAUDE_*} substitution sources for one command invocation. */
+function commandVars(ctx: { cwd: string }, filePath: string, plugin?: CommandPlugin): Record<string, string | undefined> {
+  const varCtx = ctx as unknown as VarContext
+  return {
+    CLAUDE_SESSION_ID: varCtx.sessionManager?.getSessionId?.(),
+    CLAUDE_EFFORT: varCtx.thinkingLevel,
+    CLAUDE_SKILL_DIR: path.dirname(filePath),
+    CLAUDE_PROJECT_DIR: repoRoot(ctx.cwd) ?? ctx.cwd,
+    CLAUDE_PLUGIN_ROOT: plugin?.root,
+    CLAUDE_PLUGIN_DATA: plugin?.dataDir,
+  }
+}
+
+/** The exec seam expandCommand runs spans through; pi itself satisfies it. */
+interface SpanRunner {
+  exec(command: string, args: string[], options?: { cwd?: string; timeout?: number }): Promise<{ stdout: string; stderr: string; code: number }>
+}
+
+/**
+ * A command body expanded to the text a turn (or a tool result) carries:
+ * argument and named substitution, ${CLAUDE_*} and plugin variables, `!` spans
+ * and `@file` inlining, plus Claude's `ARGUMENTS:` append when the body never
+ * read what was passed. Throws when an injected span fails, so a caller never
+ * sees a half-expanded body. With `allowShell: false` no span executes at all;
+ * each is replaced by SHELL_DISABLED_PLACEHOLDER, which is how both the model
+ * path and the disableSkillShellExecution setting keep repo-authored shell
+ * from running.
+ */
+export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, args: string, ctx: { cwd: string }, filePath: string, plugin?: CommandPlugin, options?: { allowShell?: boolean }): Promise<string> {
+  const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
+  const vars = commandVars(ctx, filePath, plugin)
+  const { text: withArgs, consumed } = substituteArgsDetailed(parsed.body, args, parsed.argumentNames ?? [])
+  // `${user_config.KEY}` is a plugin-command variable only; leave it literal in an
+  // ordinary command so a body that happens to contain the syntax is not stripped.
+  const substituted = substituteVars(withArgs, vars)
+  const withVars = plugin ? substituted.replace(/\$\{user_config\.([A-Za-z0-9_]+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '') : substituted
+
+  const exec: CommandExec =
+    (options?.allowShell ?? true)
+      ? async (script) => {
+          // Hooks get CLAUDE_PROJECT_DIR, and a command's shell span is the same kind of
+          // project-scoped script. pi.exec takes no env, so it is set in the script.
+          // stderr merges into stdout, as the Bash tool runs these for Claude. The
+          // resolver is passed by its imported binding so tests can stub the lookup.
+          const run = spanExec(parsed.shell, projectRoot, script, resolvePowershellBinary)
+          const result = await runner.exec(run.command, run.args, { cwd: ctx.cwd, timeout: BASH_TIMEOUT_MS })
+          // pwsh cannot merge a native command's stderr in-script (spanExec sets
+          // mergeStreams), so it is appended here; the sh script merges via 2>&1.
+          const stdout = run.mergeStreams ? result.stdout + result.stderr : result.stdout
+          return { stdout, stderr: result.stderr, code: result.code }
+        }
+      : async () => ({ stdout: SHELL_DISABLED_PLACEHOLDER, stderr: '', code: 0 })
+  let expanded = await expandDynamicContent(withVars, ctx.cwd, exec)
+
+  // Claude appends the raw arguments when the command never read them, so what
+  // the user typed still reaches the model.
+  if (args.trim().length > 0 && !consumed) expanded += `\n\nARGUMENTS: ${args.trim()}`
+  return expanded
+}
+
+export interface SlashCommandEntry {
+  name: string
+  description: string
+  argumentHint?: string
+}
+
+/** One listed command's cap inside the tool description, as Claude cuts an
+ * oversized description rather than dropping the command. */
+const ENTRY_CHAR_CAP = 1536
+
+/** Claude's default character budget for the SlashCommand tool description. */
+const DEFAULT_TOOL_CHAR_BUDGET = 15_000
+
+/** The description budget: SLASH_COMMAND_TOOL_CHAR_BUDGET when set, else about
+ * 1% of the model's context window (1% of the tokens at ~4 characters per token
+ * is window / 25), else Claude's documented default. */
+export function slashCommandBudget(contextWindow: number | undefined, env: Record<string, string | undefined> = process.env): number {
+  const override = Number.parseInt(env.SLASH_COMMAND_TOOL_CHAR_BUDGET ?? '', 10)
+  if (Number.isInteger(override) && override > 0) return override
+  if (contextWindow && contextWindow > 0) return Math.floor(contextWindow / 25)
+  return DEFAULT_TOOL_CHAR_BUDGET
+}
+
+/** The slash_command tool description: usage framing plus the budgeted command
+ * list, each entry `/name - description (argument-hint)`. */
+export function slashCommandToolDescription(commands: SlashCommandEntry[], budget: number): string {
+  const lines: string[] = []
+  let used = 0
+  let omitted = 0
+  for (const command of commands) {
+    const entry = `/${command.name} - ${command.description}${command.argumentHint ? ` (${command.argumentHint})` : ''}`.slice(0, ENTRY_CHAR_CAP)
+    if (used + entry.length + 1 > budget) {
+      omitted++
+      continue // a shorter later entry may still fit the remaining budget
+    }
+    used += entry.length + 1
+    lines.push(entry)
+  }
+  if (omitted > 0) lines.push(`(${omitted} more ${omitted === 1 ? 'command was' : 'commands were'} omitted: raise SLASH_COMMAND_TOOL_CHAR_BUDGET to list them)`)
+  return ["Execute a custom slash command on the user's behalf. The command expands to instructions for you to follow in this conversation.", '', 'Available commands:', ...lines].join('\n')
+}
+
 export default function commandsExtension(pi: ExtensionAPI) {
   const registered = new Set<string>()
-  /** Tool set to put back once the turn a restricted command drove has ended. */
+  /** Every command file discovered for the current session, by name, for the
+   * slash_command tool to resolve against. Rebuilt on each session_start (a resume,
+   * fork, or new session can land on a different project) so the model never resolves
+   * a command left over from a previous project's session. Kept fresh even for names
+   * already registered. */
+  const discovered = new Map<string, DiscoveredCommand>()
+  /** pi has no unregister, so the slash_command tool registers once per process. */
+  let toolRegistered = false
+  /** The session_start approval decision, reused for per-invocation settings reads. */
+  let projectApproved = false
+  /** Tool set to put back once the run a restricted command drove has ended. */
   let pendingRestore: string[] | undefined
-  /** `Bash(...)` scopes enforced while that turn runs; lifted with the restriction. */
+  /** `Bash(...)` scopes enforced while that run lasts; lifted with the restriction. */
   let pendingBashRules: string[] | undefined
   /** Read/Edit path scopes enforced the same way, per pi file tool. */
   let pendingPathRules: Partial<Record<PathRuleTool, string[]>> | undefined
-  /** The session model to restore after a command's `model:` override drove its turn. */
+  /** The session model to restore after a command's `model:` override drove its run. */
   let pendingModelRestore: ModelLike | undefined
 
-  pi.on('turn_end', async () => {
+  // Claude's contract is "the grant clears when you send your next message", and
+  // pi's turn_end fires after every assistant step: restoring there stripped a
+  // multi-step command's tool and model scoping as soon as its first tool batch
+  // came back. agent_end is not the end either: it fires once per agent loop, ahead
+  // of an automatic retry, an auto-compaction-and-retry, or a Stop-hook continuation,
+  // so restoring there lifts the scoping before that continued run executes.
+  // agent_settled fires exactly once, after the run has fully settled and no such
+  // continuation remains, which is the grant's true clearing point.
+  pi.on('agent_settled', async () => {
     pendingBashRules = undefined
     pendingPathRules = undefined
     if (pendingModelRestore) {
@@ -165,37 +336,13 @@ export default function commandsExtension(pi: ExtensionAPI) {
     }
   })
 
-  async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext, filePath: string, plugin?: { root: string; dataDir: string; userConfig?: Record<string, string> }): Promise<void> {
+  async function runCommand(parsed: ParsedCommand, args: string, ctx: ExtensionCommandContext, filePath: string, plugin?: CommandPlugin): Promise<void> {
     const varCtx = ctx as unknown as VarContext
-    const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
-    const vars: Record<string, string | undefined> = {
-      CLAUDE_SESSION_ID: varCtx.sessionManager?.getSessionId?.(),
-      CLAUDE_EFFORT: varCtx.thinkingLevel,
-      CLAUDE_SKILL_DIR: path.dirname(filePath),
-      CLAUDE_PROJECT_DIR: projectRoot,
-      CLAUDE_PLUGIN_ROOT: plugin?.root,
-      CLAUDE_PLUGIN_DATA: plugin?.dataDir,
-    }
-    const { text: withArgs, consumed } = substituteArgsDetailed(parsed.body, args, parsed.argumentNames ?? [])
-    // `${user_config.KEY}` is a plugin-command variable only; leave it literal in an
-    // ordinary command so a body that happens to contain the syntax is not stripped.
-    const substituted = substituteVars(withArgs, vars)
-    const withVars = plugin ? substituted.replace(/\$\{user_config\.([A-Za-z0-9_]+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '') : substituted
+    const vars = commandVars(ctx, filePath, plugin)
 
     let expanded: string
     try {
-      expanded = await expandDynamicContent(withVars, ctx.cwd, async (script) => {
-        // Hooks get CLAUDE_PROJECT_DIR, and a command's shell span is the same kind of
-        // project-scoped script. pi.exec takes no env, so it is set in the script.
-        // stderr merges into stdout, as the Bash tool runs these for Claude. The
-        // resolver is passed by its imported binding so tests can stub the lookup.
-        const run = spanExec(parsed.shell, projectRoot, script, resolvePowershellBinary)
-        const result = await pi.exec(run.command, run.args, { cwd: ctx.cwd, timeout: BASH_TIMEOUT_MS })
-        // pwsh cannot merge a native command's stderr in-script (spanExec sets
-        // mergeStreams), so it is appended here; the sh script merges via 2>&1.
-        const stdout = run.mergeStreams ? result.stdout + result.stderr : result.stdout
-        return { stdout, stderr: result.stderr, code: result.code }
-      })
+      expanded = await expandCommand(pi, parsed, args, ctx, filePath, plugin, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), projectApproved) })
     } catch (error) {
       // A failed injected command aborts the invocation; the model never sees a
       // half-expanded body. The notify carries Claude's failure message format.
@@ -203,12 +350,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
       return
     }
 
-    // Claude appends the raw arguments when the command never read them, so what
-    // the user typed still reaches the model.
-    if (args.trim().length > 0 && !consumed) expanded += `\n\nARGUMENTS: ${args.trim()}`
-
-    // allowed-tools restricts the turn the command drives, and the previous set is
-    // restored when that turn ends. Restoring inline does not work: sendUserMessage is
+    // allowed-tools restricts the run the command drives, and the previous set is
+    // restored when that run ends. Restoring inline does not work: sendUserMessage is
     // fire-and-forget, so the restore would land before the agent ever read the tool
     // list, leaving the command running with everything enabled.
     if (parsed.allowedTools) {
@@ -243,9 +386,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
       const disallowed = parsed.disallowedTools
       pi.setActiveTools(pi.getActiveTools().filter((tool) => !disallowed.includes(tool)))
     }
-    // Claude's `model:` frontmatter overrides the model for this turn only, then the
-    // session model resumes; restore happens on turn_end like the tool-set restore.
-    // Applied before sendUserMessage so the turn it drives runs on the new model.
+    // Claude's `model:` frontmatter overrides the model for this run only, then the
+    // session model resumes; restore happens on agent_settled like the tool-set restore.
+    // Applied before sendUserMessage so the run it drives happens on the new model.
     const target = resolveCommandModel(parsed.model, varCtx.modelRegistry?.getAvailable() ?? [])
     if (target && varCtx.model && target.id !== varCtx.model.id) {
       pendingModelRestore = pendingModelRestore ?? varCtx.model
@@ -256,20 +399,33 @@ export default function commandsExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     const trusted = await isProjectApproved(ctx)
+    projectApproved = trusted
+    // A resume/fork/new session can switch projects in-process. pi cannot unregister a
+    // command or re-describe the slash_command tool, so a name registered in an earlier
+    // project keeps its user-path binding and the tool description stays frozen at the
+    // first session's list; that is a pi limitation. What must not persist is the map
+    // the model resolves against, so it is rebuilt from scratch here: a stale command
+    // from a previous project resolves to "unknown" rather than being expanded.
+    discovered.clear()
     // Plugins are user-installed and enabled by user settings; a checked-out repo
     // must not silently flip which code-bearing plugins run, so enablement is
     // user-scoped and never reads the project settings chain (see installedPlugins).
     const plugins = pluginCommands(installedPlugins(os.homedir()))
+    const invocable: SlashCommandEntry[] = []
     for (const command of [...collectCommands(commandDirs(ctx.cwd, os.homedir(), trusted)), ...plugins]) {
-      // pi has no unregister, so a command already registered this process keeps its
-      // original file binding; re-registering would only add a numbered duplicate.
-      if (registered.has(command.name)) continue
       let parsed: ParsedCommand
       try {
         parsed = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
       } catch {
         continue // an unreadable command file must not take down session start
       }
+      discovered.set(command.name, command)
+      // A user-only command stays off the tool description; it is still in the
+      // map so a model attempt gets the explicit refusal, not "unknown command".
+      if (!parsed.disableModelInvocation) invocable.push({ name: command.name, description: parsed.description, argumentHint: parsed.argumentHint })
+      // pi has no unregister, so a command already registered this process keeps its
+      // original file binding; re-registering would only add a numbered duplicate.
+      if (registered.has(command.name)) continue
       registered.add(command.name)
       pi.registerCommand(command.name, {
         description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
@@ -285,5 +441,42 @@ export default function commandsExtension(pi: ExtensionAPI) {
         },
       })
     }
+
+    // Claude's SlashCommand tool, registered only when there is something for the
+    // model to call: an empty tool would spend context saying "nothing available".
+    if (toolRegistered || invocable.length === 0) return
+    toolRegistered = true
+    pi.registerTool({
+      name: 'slash_command',
+      label: 'SlashCommand',
+      description: slashCommandToolDescription(invocable, slashCommandBudget((ctx as unknown as VarContext).model?.contextWindow)),
+      parameters: Type.Object({ command: Type.String({ description: 'The command to run with args, e.g. "/deploy staging"' }) }),
+      async execute(_toolCallId, params, _signal, _onUpdate, execCtx) {
+        const line = params.command.trim().replace(/^\//, '')
+        const space = line.search(/\s/)
+        const name = space === -1 ? line : line.slice(0, space)
+        const args = space === -1 ? '' : line.slice(space + 1).trim()
+        // pi marks a tool result as an error only when execute() throws, so the
+        // failure paths below throw rather than return.
+        const command = discovered.get(name)
+        if (!name || !command) throw new Error(`Unknown command: /${name || params.command}. Only the custom commands listed in the slash_command tool description can be run.`)
+        // Live-edit parity with the user path: re-read on every invocation, so a
+        // just-added disable-model-invocation takes effect immediately too.
+        let current: ParsedCommand
+        try {
+          current = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
+        } catch {
+          throw new Error(`/${name}: the command file could not be read (${command.filePath}).`)
+        }
+        if (current.disableModelInvocation) {
+          throw new Error(`/${name} is user-only (disable-model-invocation: true) and was not run. Do not reproduce this command's steps or try to achieve its effect another way; only the user can invoke it.`)
+        }
+        // Expansion only, never sendUserMessage (that would spawn a second turn):
+        // the tool result is the channel, and frontmatter scoping stays user-path
+        // territory (see the header).
+        const expanded = await expandCommand(pi, current, args, execCtx, command.filePath, command.plugin, { allowShell: false })
+        return { content: [{ type: 'text' as const, text: `Contents of /${name} (expanded):\n\n${expanded}` }], details: {} }
+      },
+    })
   })
 }

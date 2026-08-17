@@ -43,7 +43,10 @@
  *
  * Config is merged from ~/.claude/settings.json (always) plus the project's
  * .claude/settings.json and settings.local.json (only when the project is
- * trusted, since hooks execute arbitrary shell). Matchers follow Claude's rule:
+ * trusted, since hooks execute arbitrary shell). Claude's `disableAllHooks`
+ * setting (managed settings or any honored file in that chain) short-circuits
+ * the load entirely, so no event fires any hook; /hooks prints the resolved
+ * chain per event with each entry's source settings file. Matchers follow Claude's rule:
  * `*`/empty match all, plain names are exact (with `|`/`,` list separators), and
  * anything with other regex characters is an unanchored regex. Claude matchers
  * are PascalCase (`Bash`); pi tool names are lowercase (`bash`), so comparison
@@ -60,6 +63,7 @@ import type { Api, Model } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { runAgent } from './internal/agent-run.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from './internal/instruction-events.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from './internal/mcp-alias.js'
 import { callMcpTool } from './internal/mcp-call.js'
 import { completeText } from './internal/model-complete.js'
@@ -94,7 +98,7 @@ interface HookCommand {
   model?: string
   systemPrompt?: string
 }
-interface HookMatcher {
+export interface HookMatcher {
   matcher?: string
   hooks: HookCommand[]
 }
@@ -133,7 +137,26 @@ export function hookFiles(cwd: string, home: string, trusted: boolean): string[]
   return files
 }
 
-export function loadHooks(files: string[]): HooksConfig {
+/** Claude's `disableAllHooks` setting: the escape hatch a user reaches for when a
+ * hook misbehaves, so it is honored before any hook runs. Disabled when managed
+ * settings or ANY file in the settings chain sets it to `true`; deliberately not
+ * last-file-wins, since a repository file re-enabling the hooks the user just
+ * disabled in their own settings would defeat the escape hatch. The chain itself
+ * already gates project files on trust (see hookFiles). */
+export function readDisableAllHooks(files: string[], managed: Record<string, unknown> = readManagedSettings()): boolean {
+  if (managed.disableAllHooks === true) return true
+  for (const file of files) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (isRecord(parsed) && parsed.disableAllHooks === true) return true
+    } catch {
+      // missing or invalid file: skip
+    }
+  }
+  return false
+}
+
+export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): HooksConfig {
   const config: HooksConfig = {}
   for (const file of files) {
     let raw: string
@@ -142,12 +165,12 @@ export function loadHooks(files: string[]): HooksConfig {
     } catch {
       continue
     }
-    mergeHooksJson(config, raw, file)
+    mergeHooksJson(config, raw, file, sources)
   }
   return config
 }
 
-function mergeHooksJson(config: HooksConfig, raw: string, source: string): void {
+function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>): void {
   let parsed: { hooks?: HooksConfig }
   try {
     parsed = JSON.parse(raw)
@@ -161,26 +184,30 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string): void 
     // the tool_call handler, and pi turns that into an error result, so every tool
     // call for the rest of the session failed with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
-    if (usable.length > 0) config[event] = [...(config[event] ?? []), ...usable]
+    if (usable.length === 0) continue
+    config[event] = [...(config[event] ?? []), ...usable]
+    // Each parse produces fresh entry objects, so object identity keys the /hooks
+    // viewer's source attribution without touching the entries themselves.
+    for (const entry of usable) sources?.set(entry, source)
   }
 }
 
 /** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
  * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
  * hook can name its bundled scripts by real path. */
-export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[]): void {
+export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks
     // An inline hooks object; an array is not a valid hooks map (it would parse to
     // numeric event keys), so it falls through to the default path rather than
     // silently registering nothing.
     if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`)
+      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`, sources)
       continue
     }
     const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
     try {
-      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file)
+      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file, sources)
     } catch {
       // a plugin without hooks contributes nothing
     }
@@ -270,6 +297,42 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
     }
   }
   return result
+}
+
+/** A hook entry's display identity for the /hooks viewer: the command for shell
+ * hooks, otherwise the type-qualified url / prompt / server:tool. A missing field
+ * is named rather than hidden, since a misconfigured entry is exactly what the
+ * viewer exists to surface. */
+function hookIdentity(hook: HookCommand | null | undefined): string {
+  // A hand-edited settings file can leave a null (or otherwise empty) entry in a
+  // hooks array; name it rather than let it crash the viewer that exists to surface
+  // exactly this kind of misconfiguration.
+  const record: Partial<HookCommand> = hook ?? {}
+  const type = record.type ?? 'command'
+  if (type === 'http') return `http: ${record.url ?? record.command ?? '(missing url)'}`
+  if (type === 'prompt' || type === 'agent') return `${type}: ${record.prompt ?? record.command ?? '(missing prompt)'}`
+  if (type === 'mcp_tool') return `mcp_tool: ${record.server ?? '(missing server)'}:${record.tool ?? '(missing tool)'}`
+  return `command: ${record.command ?? '(missing command)'}`
+}
+
+/** Render the resolved hooks config as a readable per-event summary for /hooks:
+ * one line per configured hook with its matcher, identity and, when known, the
+ * settings file it came from. Pure formatting of already-resolved data. */
+export function formatHooksSummary(config: HooksConfig, sources?: Map<HookMatcher, string>): string {
+  const lines: string[] = []
+  for (const [event, matchers] of Object.entries(config)) {
+    const entryLines: string[] = []
+    for (const entry of matchers) {
+      const matcher = entry.matcher || '*'
+      const source = sources?.get(entry)
+      for (const hook of entry.hooks ?? []) {
+        entryLines.push(`  [${matcher}] ${hookIdentity(hook)}${source ? ` (${source})` : ''}`)
+      }
+    }
+    if (entryLines.length > 0) lines.push(`${event}:`, ...entryLines)
+  }
+  if (lines.length === 0) return 'No hooks configured. Add a "hooks" section to ~/.claude/settings.json or .claude/settings.json.'
+  return lines.join('\n')
 }
 
 function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string; systemMessage?: string } | undefined {
@@ -652,6 +715,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let pendingSessionContext: string[] = []
   let stopHookActive = false
   let sessionCtx: ExtensionContext | undefined
+  /** Claude's disableAllHooks escape hatch was set somewhere in the honored chain. */
+  let hooksDisabled = false
+  /** Which settings file each resolved entry came from, for the /hooks viewer. */
+  const hookSources = new Map<HookMatcher, string>()
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
@@ -728,10 +795,20 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
     // subdirectory session too.
     projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
-    config = loadHooks(hookFiles(ctx.cwd, os.homedir(), trusted))
+    const files = hookFiles(ctx.cwd, os.homedir(), trusted)
+    hookSources.clear()
+    // The disableAllHooks escape hatch, checked before any config loads: with no
+    // config resolved, no event, plugin hooks included, can fire a hook.
+    hooksDisabled = readDisableAllHooks(files)
+    if (hooksDisabled) {
+      config = {}
+      pendingSessionContext = []
+      return
+    }
+    config = loadHooks(files, hookSources)
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
-    loadPluginHooks(config, installedPlugins(os.homedir()))
+    loadPluginHooks(config, installedPlugins(os.homedir()), hookSources)
     // "reload" re-fires in-process with the same conversation and would double-run hooks;
     // a fork is a genuine session begin, which Claude reports as source "fork".
     if (event.reason === 'reload') return
@@ -868,5 +945,19 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
     const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+  })
+
+  // Claude's /hooks manages hook configuration; pi-code's is a viewer: hook failures
+  // are otherwise opaque, so showing the resolved chain per event, with the settings
+  // file each entry came from, is the debugging surface.
+  pi.registerCommand('hooks', {
+    description: 'Show the hook configuration resolved from settings',
+    handler: async (_args, ctx) => {
+      if (hooksDisabled) {
+        ctx.ui.notify('All hooks are disabled by the disableAllHooks setting.', 'info')
+        return
+      }
+      ctx.ui.notify(formatHooksSummary(config, hookSources), 'info')
+    },
   })
 }

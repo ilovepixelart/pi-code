@@ -134,11 +134,15 @@ beforeEach(() => {
   hoisted.live.length = 0
   hoisted.behaviors.clear()
   hoisted.home = tempDir('hooks-home-')
+  // Hermetic managed settings: session_start reads disableAllHooks from the managed
+  // path, which must never resolve to this machine's real policy file.
+  setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
 })
 
 afterEach(() => {
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  setManagedSettingsPath(undefined)
 
   // Release any child scripted to hang so its pending promise never leaks into the next test.
   for (const child of hoisted.live.splice(0)) child.emit('close', 0)
@@ -158,10 +162,12 @@ const setupExtension = () => {
   const handlers = new Map<string, Handler>()
   const busHandlers = new Map<string, (data: unknown) => void>()
   const sent: Array<{ message: unknown; options: unknown }> = []
+  const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
   hooksExtension({
     on: (name: string, fn: Handler) => handlers.set(name, fn),
     events: { on: (channel: string, fn: (data: unknown) => void) => busHandlers.set(channel, fn), emit: () => {} },
     sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
+    registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
   } as never)
   const handler = (name: string): Handler => {
     const found = handlers.get(name)
@@ -177,6 +183,12 @@ const setupExtension = () => {
   }
   return {
     registered: [...handlers.keys()],
+    commands: [...commands.keys()],
+    runCommand: (name: string, args = '') => {
+      const spec = commands.get(name)
+      if (!spec) throw new Error(`hooks extension did not register /${name}`)
+      return spec.handler(args, defaultCtx)
+    },
     notes,
     sent,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, { ...defaultCtx, ...ctx }),
@@ -1357,6 +1369,118 @@ describe('hook execution parallelism', () => {
     expect(launched).toEqual(['one', 'two'])
     release()
     expect((await pending).context).toBe('ctx\nctx')
+  })
+})
+
+describe('disableAllHooks', () => {
+  const trustedCtx = { isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } }
+
+  it('runs no SessionStart hook and injects no context when user settings set it', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true, hooks: { SessionStart: [{ hooks: [{ command: 'home-session' }] }] } }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(commandsRun()).toEqual([])
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
+  })
+
+  it('does not fire a configured PreToolUse hook on a tool call', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] } }))
+    script('guard', { stderr: ['denied'], code: 2 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('honors the key from trusted project settings, disabling user hooks too', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'home-pre' }] }] })
+    const project = tempDir('hooks-proj-')
+    mkdirSync(join(project, '.claude'), { recursive: true })
+    writeFileSync(join(project, '.claude', 'settings.local.json'), JSON.stringify({ disableAllHooks: true }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project, ...trustedCtx })
+    await ext.toolCall('bash', {})
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('ignores the key in an untrusted project settings file', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'home-pre' }] }] })
+    const project = tempDir('hooks-proj-')
+    mkdirSync(join(project, '.claude'), { recursive: true })
+    writeFileSync(join(project, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project })
+    await ext.toolCall('bash', {})
+    expect(commandsRun()).toEqual(['home-pre'])
+  })
+
+  it('honors the key from managed settings', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'home-pre' }] }] })
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ disableAllHooks: true }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('loads no plugin hooks either', async () => {
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true, enabledPlugins: { fmt: true } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+    expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('/hooks command', () => {
+  it('registers the hooks viewer command', () => {
+    expect(setupExtension().commands).toContain('hooks')
+  })
+
+  it('prints the resolved chain grouped by event with matcher, identity and source file', async () => {
+    writeSettings(hoisted.home, 'settings.json', {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard.sh' }] }],
+      Stop: [{ hooks: [{ type: 'prompt', prompt: 'done?' }] }],
+    })
+    const project = tempDir('hooks-proj-')
+    writeSettings(project, 'settings.json', { PostToolUse: [{ matcher: 'Edit|Write', hooks: [{ command: 'fmt.sh' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } })
+
+    await ext.runCommand('hooks')
+
+    expect(ext.notes).toHaveLength(1)
+    const { msg, level } = ext.notes[0]
+    expect(level).toBe('info')
+    expect(msg).toContain('PreToolUse:')
+    expect(msg).toContain(`  [Bash] command: guard.sh (${join(hoisted.home, '.claude', 'settings.json')})`)
+    expect(msg).toContain('PostToolUse:')
+    expect(msg).toContain(`  [Edit|Write] command: fmt.sh (${join(project, '.claude', 'settings.json')})`)
+    expect(msg).toContain('Stop:')
+    expect(msg).toContain('  [*] prompt: done?')
+  })
+
+  it('notes when no hooks are configured', async () => {
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.runCommand('hooks')
+    expect(ext.notes[0].msg).toContain('No hooks configured')
+  })
+
+  it('reports the disabled state when disableAllHooks is set', async () => {
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true, hooks: { PreToolUse: [{ hooks: [{ command: 'guard' }] }] } }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.runCommand('hooks')
+    expect(ext.notes[0].msg).toContain('disableAllHooks')
   })
 })
 

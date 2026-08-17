@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined }))
@@ -47,9 +48,13 @@ beforeEach(() => {
   hoisted.runs.length = 0
   hoisted.result = { code: 0, stdout: '', stderr: '', timedOut: false }
   hoisted.gate = undefined
+  // Hermetic managed settings: the disableAllHooks read must never resolve to this
+  // machine's real policy file.
+  setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
 })
 
 afterEach(() => {
+  setManagedSettingsPath(undefined)
   vi.useRealTimers()
   vi.restoreAllMocks()
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
@@ -279,6 +284,46 @@ describe('statusLine concurrency and compaction', () => {
     const afterShutdown = hoisted.runs.length
     await vi.advanceTimersByTimeAsync(5000)
     expect(hoisted.runs.length).toBe(afterShutdown)
+  })
+})
+
+describe('statusLine disableAllHooks', () => {
+  it('does not run the configured command and keeps the built-in segment', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { disableAllHooks: true, statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs).toHaveLength(0)
+    expect(status.some((s) => s?.includes('ready'))).toBe(true)
+  })
+
+  it('ignores a disableAllHooks in an unapproved project settings file', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    writeSettings(cwd, 'settings.json', { disableAllHooks: true })
+    hoisted.result = { code: 0, stdout: 'seg', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    const untrusted = { ...ctx, isProjectTrusted: () => false }
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, untrusted)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs).toHaveLength(1)
+  })
+
+  it('honors a managed-settings disableAllHooks', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ disableAllHooks: true }))
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs).toHaveLength(0)
   })
 })
 

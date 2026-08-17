@@ -9,6 +9,8 @@
  * analogue, off the shared bus), and on the optional `refreshInterval` timer
  * (minimum 1s). A project-defined command is arbitrary shell, so project settings
  * count only once the project is already approved, read without prompting.
+ * Claude's `disableAllHooks` setting turns the configured command off too, and
+ * the built-in segment stands in.
  *
  * Without a configured statusLine, the built-in segment shows turn state plus
  * running session cost, summed from per-message usage on the current branch so it
@@ -24,7 +26,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
-import { hookFiles, runHookCommand } from './hooks.js'
+import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
@@ -271,7 +273,10 @@ export default function statusLine(pi: ExtensionAPI) {
     // the keys meant for it. An undecided project simply skips project settings.
     const trusted = isProjectApprovedSilently(ctx)
     projectApproved = trusted
-    config = readStatusLineConfig(hookFiles(ctx.cwd, os.homedir(), trusted))
+    const files = hookFiles(ctx.cwd, os.homedir(), trusted)
+    // Claude's disableAllHooks also turns off the custom statusLine command; the
+    // built-in segment still renders as the fallback.
+    config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
     if (config?.refreshInterval) {
       refreshTimer = setInterval(() => scheduleRefresh(), config.refreshInterval * 1000)
     }

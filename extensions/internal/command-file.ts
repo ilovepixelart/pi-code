@@ -66,6 +66,10 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
   task: 'subagent',
   askuserquestion: 'question',
   exitplanmode: 'plan_mode_complete',
+  // Claude's name for the tool this package registers so the model can run user slash
+  // commands; without it `allowed-tools: SlashCommand` matched nothing and the grant
+  // could neither keep nor drop the tool.
+  slashcommand: 'slash_command',
 }
 
 /**
@@ -193,6 +197,14 @@ const text = (value: unknown): string => {
   return typeof value === 'number' || typeof value === 'boolean' ? String(value) : ''
 }
 
+/** YAML's affirmative boolean spellings. Claude documents `disable-model-invocation:
+ * true`, but a command file is hand-written YAML where `yes`, `on`, and `1` are all
+ * ordinary spellings of true, and pi's parser hands those back as the raw string or
+ * number rather than a boolean. A flag that gates a command off from the model has to
+ * honor them, or a command the user marked off-limits is silently offered to it. */
+const YAML_TRUE = new Set(['true', 'yes', 'on', 'y', '1'])
+const isFlagEnabled = (value: unknown): boolean => value === true || YAML_TRUE.has(text(value).toLowerCase())
+
 /** Claude writes `argument-hint: [pr]`, which YAML reads as a list; render it back. */
 const hint = (value: unknown): string => (Array.isArray(value) ? `[${value.join(', ')}]` : text(value))
 
@@ -233,7 +245,7 @@ export function parseCommandFile(content: string): ParsedCommand {
     disallowedTools: parseToolGrants(frontmatter['disallowed-tools'])?.tools,
     shell: SHELLS.has(shell) ? shell : undefined,
     model: text(frontmatter.model) || undefined,
-    disableModelInvocation: disable === true || text(disable) === 'true',
+    disableModelInvocation: isFlagEnabled(disable),
     body,
   }
 }
