@@ -91,6 +91,7 @@ const setup = (cwd: string, trusted = true) => {
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
   const tools = new Map<string, RegisteredTool>()
   const sent: string[] = []
+  const sentOptions: unknown[] = []
   const toolSets: string[][] = []
   const notices: string[] = []
   const execCalls: Array<{ file: string; args: string[]; shell: string; timeout?: number; env?: Record<string, string> }> = []
@@ -104,8 +105,9 @@ const setup = (cwd: string, trusted = true) => {
       execCalls.push({ file, args, shell: args[1], timeout: opts?.timeout, env: opts?.env })
       return { stdout: `ran:${args[1]}`, ...execResult }
     },
-    sendUserMessage: (text: string) => {
+    sendUserMessage: (text: string, options?: unknown) => {
       sent.push(text)
+      sentOptions.push(options)
     },
     getActiveTools: () => active,
     setActiveTools: (next: string[]) => {
@@ -124,10 +126,12 @@ const setup = (cwd: string, trusted = true) => {
     { id: 'claude-fable-5', name: 'Fable' },
   ]
   commandsExtension(pi as never)
+  let idle = true
   const ctx = {
     cwd,
     hasUI: true,
     isProjectTrusted: () => trusted,
+    isIdle: () => idle,
     sessionManager: { getSessionId: () => 'sess-1' },
     thinkingLevel: 'high',
     model: available[0],
@@ -139,7 +143,23 @@ const setup = (cwd: string, trusted = true) => {
       },
     },
   }
-  return { handlers, commands, tools, sent, toolSets, notices, execCalls, ctx, modelSets, activeTools: () => active, failExec: (result: { stderr: string; code: number }) => Object.assign(execResult, result) }
+  return {
+    handlers,
+    commands,
+    tools,
+    sent,
+    sentOptions,
+    toolSets,
+    notices,
+    execCalls,
+    ctx,
+    modelSets,
+    activeTools: () => active,
+    setIdle: (value: boolean) => {
+      idle = value
+    },
+    failExec: (result: { stderr: string; code: number }) => Object.assign(execResult, result),
+  }
 }
 
 describe('commands extension', () => {
@@ -206,6 +226,34 @@ describe('commands extension', () => {
 
     await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('queues a command invoked mid-stream as a follow-up without touching the in-flight run', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    // The agent is streaming: the command must not narrow the in-flight run's tools or
+    // switch its model, and a bare sendUserMessage would throw. It is queued as a
+    // follow-up through pi's own queue instead, with no scoping applied.
+    s.setIdle(false)
+    await s.commands.get('safe')?.handler('', s.ctx)
+    expect(s.sent).toEqual(['Look only.'])
+    expect(s.sentOptions).toEqual([{ deliverAs: 'followUp' }])
+    expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
+  })
+
+  it('applies scoping and sends bare when the command is invoked while idle', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'safe.md', '---\nallowed-tools: Read\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    await s.commands.get('safe')?.handler('', s.ctx)
+    expect(s.sent).toEqual(['Look only.'])
+    expect(s.sentOptions).toEqual([undefined])
+    expect(s.activeTools()).toEqual(['read'])
   })
 
   it('keeps the restriction through a mid-run turn_end, since pi fires one per assistant step', async () => {
@@ -869,6 +917,16 @@ describe('slash_command tool', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
 
     await expect(s.tools.get('slash_command')?.execute('t1', { command: '/nope now' }, undefined, undefined, s.ctx)).rejects.toThrow(/nope/)
+  })
+
+  it('caps the tool result so a huge command expansion cannot overflow the context', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'big.md', 'x'.repeat(60_000))
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    const result = await s.tools.get('slash_command')?.execute('t1', { command: '/big' }, undefined, undefined, s.ctx)
+    expect(result?.content[0].text).toContain('[truncated')
   })
 
   it("drops a previous project's commands from the model path on a session switch", async () => {

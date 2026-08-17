@@ -8,7 +8,7 @@ import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
 vi.mock('../extensions/internal/web-transport.js', () => ({ httpFetch: vi.fn() }))
 
-type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown> }
+type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown>; usage?: unknown }
 type Execute = (id: string, params: Record<string, unknown>, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
 
 /** Register the extension against a stub API and expose both tools by name. */
@@ -71,6 +71,16 @@ describe('web_fetch prompt (in-process summarization)', () => {
     // The page markdown is handed to the model, not returned raw.
     expect(seenPrompt).toContain('The plan costs $9/mo.')
     expect(seenPrompt).toContain('What does the plan cost?')
+  })
+
+  it('carries the nested completion usage on the tool result for session accounting', async () => {
+    fetchMock.mockResolvedValue(respond('<p>page body</p>'))
+    const usage = { input: 200, output: 12, cacheRead: 0, cacheWrite: 0, totalTokens: 212, cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 } }
+    setCompleteBackend(async () => ({ role: 'assistant', content: [{ type: 'text', text: 'the answer' }], api: 'x', provider: 'x', model: 'm', usage, stopReason: 'stop', timestamp: 0 }) as never)
+    const r = await setup().fetchWith({ url: 'https://example.com/answered', prompt: 'what is it?' }, { model: {} })
+    expect(r.content[0].text).toBe('the answer')
+    // The nested call's tokens must reach pi's session totals via the tool result.
+    expect(r.usage).toEqual(usage)
   })
 
   it('falls back to the markdown when the completion fails', async () => {

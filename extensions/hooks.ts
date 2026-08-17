@@ -565,7 +565,7 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
   const prompt = substituteArguments(hook.prompt, payload)
   const signal = AbortSignal.timeout(timeoutMs)
   try {
-    const answer = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal })
+    const { text: answer } = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal })
     return { code: 0, stdout: answer, stderr: '', timedOut: false }
   } catch (error) {
     return abortAwareFailure(signal, error)
@@ -971,6 +971,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // turn, and stop_hook_active in the payload tells the next firing it is already
   // continuing from a stop hook, which is the hook script's documented loop guard.
   // Only exit 2 and decision:"block" continue; continue:false means "stay stopped".
+  //
+  // On agent_end rather than agent_settled: agent_settled is only emitted after every
+  // agent_end handler returns, and a peer extension (plan mode) blocks its agent_end
+  // handler on a UI dialog, which would starve the Stop hook and idle notification
+  // until the user answers it. agent_end can fire slightly early before a rare
+  // automatic retry or compaction; that is the better tradeoff.
   pi.on('agent_end', async (event, ctx) => {
     // Claude's Notification event, for the one type pi can honestly source: the
     // agent finished and is waiting for input (idle_prompt). Observational only;

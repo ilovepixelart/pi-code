@@ -9,6 +9,7 @@
 import type { LookupAddress } from 'node:dns'
 import { lookup } from 'node:dns/promises'
 import type { LookupFunction } from 'node:net'
+import type { Usage } from '@earendil-works/pi-ai'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
@@ -252,16 +253,16 @@ function rememberFetch(cache: FetchCache, url: string, body: string, now: number
 }
 
 /** Claude's WebFetch runs the prompt over the page with a fast model and returns
- * that answer, not the raw page. Best-effort: any failure (no model, provider error)
+ * that answer, not the raw page, along with the nested call's usage so the tool
+ * result can account for it. Best-effort: any failure (no model, provider error)
  * yields null so the caller falls back to the markdown. */
-async function answerFromPage(model: Parameters<typeof completeText>[0], prompt: string, url: string, body: string, signal?: AbortSignal): Promise<string | null> {
+async function answerFromPage(model: Parameters<typeof completeText>[0], prompt: string, url: string, body: string, signal?: AbortSignal): Promise<{ text: string; usage: Usage } | null> {
   try {
-    const answer = await completeText(model, `${prompt}\n\nAnswer using only the page content below, fetched from ${url}:\n\n${body}`, {
+    return await completeText(model, `${prompt}\n\nAnswer using only the page content below, fetched from ${url}:\n\n${body}`, {
       system: 'You extract and answer questions from a web page. Answer only from the provided content, concisely. If the content does not contain the answer, say so.',
       maxTokens: 1024,
       signal,
     })
-    return answer || null
   } catch {
     return null
   }
@@ -318,14 +319,18 @@ export default function webExtension(pi: ExtensionAPI) {
       }
 
       // Best-effort prompt-over-page: a failure returns null, so web_fetch always
-      // falls back to the raw markdown and returns something.
+      // falls back to the raw markdown and returns something. The nested call's
+      // usage rides on the result either way, so pi counts it in session totals.
+      let usage: Usage | undefined
       if (params.prompt && ctx?.model) {
         const answer = await answerFromPage(ctx.model, params.prompt, params.url, body, signal)
-        if (answer) return { content: [{ type: 'text' as const, text: answer }], details: {} }
+        if (answer?.text) return { content: [{ type: 'text' as const, text: answer.text }], details: {}, usage: answer.usage }
+        // An empty answer still cost the completion; the fallback carries its usage.
+        usage = answer?.usage
       }
       // The char cap alone admits thousands of short lines; pi's tool-output budget
       // bounds lines too, which the shared guard enforces.
-      return { content: [{ type: 'text' as const, text: capForContext(body) || '(empty response)' }], details: {} }
+      return { content: [{ type: 'text' as const, text: capForContext(body) || '(empty response)' }], details: {}, usage }
     },
   })
 }

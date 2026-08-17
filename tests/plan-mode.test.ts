@@ -34,6 +34,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const shortcuts: Array<(ctx: unknown) => Promise<void>> = []
   const sent: SentMessage[] = []
   const userMessages: string[] = []
+  const userMessageOptions: unknown[] = []
   const appended: Array<{ type: string; data: unknown }> = []
   const emitted: Array<{ channel: string; data: unknown }> = []
   let activeTools = options.activeTools ?? [...ALL_TOOLS]
@@ -53,7 +54,10 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     registerShortcut: (_key: unknown, spec: { handler: (ctx: unknown) => Promise<void> }) => shortcuts.push(spec.handler),
     on: (name: string, fn: Handler) => handlers.set(name, fn),
     sendMessage: (message: SentMessage) => sent.push(message),
-    sendUserMessage: (text: string) => userMessages.push(text),
+    sendUserMessage: (text: string, options?: unknown) => {
+      userMessages.push(text)
+      userMessageOptions.push(options)
+    },
     appendEntry: (type: string, data: unknown) => appended.push({ type, data }),
     events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
   }
@@ -65,6 +69,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const notices: string[] = []
   const ctx = {
     hasUI: true,
+    isIdle: () => true,
     ui: {
       theme,
       setStatus: (_key: string, text?: string) => status.push(text),
@@ -86,6 +91,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     notices,
     sent,
     userMessages,
+    userMessageOptions,
     appended,
     emitted,
     shortcuts,
@@ -357,6 +363,19 @@ describe('plan review prompt', () => {
     await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader')] })
 
     expect(s.userMessages).toEqual(['focus on the parser'])
+  })
+
+  it('sends the refinement bare while idle but queues it as a followUp while streaming', async () => {
+    const s = setup()
+    s.ctx.ui.select = async (_q: string, choices: string[]) => choices[2]
+    s.ctx.ui.editor = async () => 'focus on the parser'
+    await s.runCommand('plan')
+    await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader')] })
+
+    s.ctx.isIdle = () => false
+    await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader')] })
+
+    expect(s.userMessageOptions).toEqual([{}, { deliverAs: 'followUp' }])
   })
 
   it('re-extracts the plan from prose after a tool-submitted plan is refined', async () => {

@@ -238,7 +238,39 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
   // The free-text option does not compose with checkbox selection, so it is single-select only.
   const allOptions: DisplayOption[] = multiSelect ? [...params.options] : [...params.options, { label: 'Type something.', isOther: true }]
 
-  const result = await ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui: Parameters<Parameters<ExtensionContext['ui']['custom']>[0]>[0], theme: Theme, _kb: unknown, done: (value: { answer: string; wasCustom: boolean; index?: number } | null) => void) => {
+  // ui.custom() is terminal-only: with a UI but no terminal (RPC mode) it resolves
+  // undefined immediately, which would read as a cancel without ever asking. Ask
+  // through the dialog primitives there instead.
+  const result = ctx.mode === 'tui' ? await askViaOverlay(params, ctx, allOptions, multiSelect) : await askViaDialogs(params, ctx, allOptions, multiSelect)
+
+  // Build simple options list for details; header/multiSelect appear only when set,
+  // so single-select details are unchanged.
+  const simpleOptions = params.options.map((o) => o.label)
+  const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: shortHeader(params.header) } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
+
+  if (!result) {
+    return {
+      content: [{ type: 'text', text: 'User cancelled the selection' }],
+      details: { ...base, answer: null } as QuestionDetails,
+    }
+  }
+
+  if (result.wasCustom) {
+    return {
+      content: [{ type: 'text', text: `User wrote: ${result.answer}` }],
+      details: { ...base, answer: result.answer, wasCustom: true } as QuestionDetails,
+    }
+  }
+  const selectionText = multiSelect ? `User selected: ${result.answer || '(none)'}` : `User selected: ${result.index}. ${result.answer}`
+  return {
+    content: [{ type: 'text', text: selectionText }],
+    details: { ...base, answer: result.answer, wasCustom: false } as QuestionDetails,
+  }
+}
+
+/** Terminal path: the full custom overlay (options list, checkboxes, inline editor). */
+function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean): Promise<{ answer: string; wasCustom: boolean; index?: number } | null> {
+  return ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui: Parameters<Parameters<ExtensionContext['ui']['custom']>[0]>[0], theme: Theme, _kb: unknown, done: (value: { answer: string; wasCustom: boolean; index?: number } | null) => void) => {
     let optionIndex = 0
     let editMode = false
     const checked: boolean[] = allOptions.map(() => false)
@@ -339,28 +371,29 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
       handleInput,
     }
   })
+}
 
-  // Build simple options list for details; header/multiSelect appear only when set,
-  // so single-select details are unchanged.
-  const simpleOptions = params.options.map((o) => o.label)
-  const base = { question: params.question, options: simpleOptions, ...(params.header ? { header: shortHeader(params.header) } : {}), ...(multiSelect ? { multiSelect: true } : {}) }
-
-  if (!result) {
-    return {
-      content: [{ type: 'text', text: 'User cancelled the selection' }],
-      details: { ...base, answer: null } as QuestionDetails,
-    }
+/** Dialog-primitive fallback for UI without a terminal (RPC mode supports
+ * select/input/notify but not custom components). Mirrors the overlay's result
+ * shape; a dismissed dialog reads as a cancel, same as Escape in the overlay. */
+async function askViaDialogs(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean): Promise<{ answer: string; wasCustom: boolean; index?: number } | null> {
+  const header = shortHeader(params.header)
+  const title = header ? `[${header}] ${params.question}` : params.question
+  // Number the labels: ctx.ui.select returns the chosen label string, so duplicate
+  // labels (or a model-supplied option named like the free-text entry) would be
+  // ambiguous by text alone; the number is the unambiguous way back to the option.
+  const labels = allOptions.map((option, i) => `${i + 1}. ${option.label}`)
+  const choice = await ctx.ui.select(title, labels)
+  if (choice === undefined) return null
+  const index = labels.indexOf(choice)
+  const chosen = allOptions[index]
+  if (!multiSelect && chosen?.isOther === true) {
+    const typed = await ctx.ui.input(params.question, 'Your answer')
+    // A dismissed dialog cancels; a submitted empty answer is an (empty) answer, not a
+    // cancel, so one accidental blank Enter does not abort the rest of a question batch.
+    if (typed === undefined) return null
+    return { answer: typed.trim(), wasCustom: true }
   }
-
-  if (result.wasCustom) {
-    return {
-      content: [{ type: 'text', text: `User wrote: ${result.answer}` }],
-      details: { ...base, answer: result.answer, wasCustom: true } as QuestionDetails,
-    }
-  }
-  const selectionText = multiSelect ? `User selected: ${result.answer || '(none)'}` : `User selected: ${result.index}. ${result.answer}`
-  return {
-    content: [{ type: 'text', text: selectionText }],
-    details: { ...base, answer: result.answer, wasCustom: false } as QuestionDetails,
-  }
+  const answer = chosen?.label ?? choice
+  return multiSelect ? { answer, wasCustom: false } : { answer, wasCustom: false, index: index + 1 }
 }

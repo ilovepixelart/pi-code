@@ -75,7 +75,9 @@ export default function initExtension(pi: ExtensionAPI) {
       const existing = findExistingContextFile(root)
       const cursorRules = statOf(path.join(root, '.cursor', 'rules'))?.isDirectory() === true || statOf(path.join(root, '.cursorrules'))?.isFile() === true
       const copilotRules = statOf(path.join(root, '.github', 'copilot-instructions.md'))?.isFile() === true
-      pi.sendUserMessage(buildInitPrompt({ ...(existing !== undefined ? { existingContextFile: existing } : {}), cursorRules, copilotRules }))
+      // A bare send throws (and is silently swallowed) while the agent is
+      // streaming, so mid-stream invocations queue as a follow-up turn.
+      pi.sendUserMessage(buildInitPrompt({ ...(existing !== undefined ? { existingContextFile: existing } : {}), cursorRules, copilotRules }), ctx.isIdle() ? {} : { deliverAs: 'followUp' })
     },
   })
 }
