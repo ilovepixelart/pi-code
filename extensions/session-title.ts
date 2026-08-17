@@ -51,6 +51,30 @@ export function firstUserText(ctx: ExtensionContext): string {
   return ''
 }
 
+/** Wrapping quotes (straight, smart, and backtick) and trailing sentence punctuation that
+ * cleanTitle peels, held as plain strings so the trims below can test membership by index
+ * rather than with an anchored regex. */
+const WRAPPING_QUOTES = '"\'`“”‘’'
+const TRAILING_PUNCTUATION = '.,;:!?'
+
+/** Strip runs of `chars` from both ends of `value` in linear time. The equivalent
+ * /^[chars]+|[chars]+$/g backtracks super-linearly on a long run (S8786). */
+function trimBothEnds(value: string, chars: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && chars.includes(value[start])) start++
+  while (end > start && chars.includes(value[end - 1])) end--
+  return value.slice(start, end)
+}
+
+/** Strip a trailing run of `chars` from `value` in linear time. The equivalent
+ * /[chars]+$/g backtracks super-linearly on a long trailing run (S8786). */
+function trimTrailing(value: string, chars: string): string {
+  let end = value.length
+  while (end > 0 && chars.includes(value[end - 1])) end--
+  return value.slice(0, end)
+}
+
 /** Trim the model's reply to a bare title: collapse whitespace, then peel wrapping quotes
  * and trailing punctuation until stable, so `"Fix The Parser."` and `Fix The Parser.` both
  * land on the plain phrase. */
@@ -59,10 +83,7 @@ export function cleanTitle(raw: string): string {
   let prev: string
   do {
     prev = title
-    title = title
-      .replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, '')
-      .replace(/[.,;:!?]+$/g, '')
-      .trim()
+    title = trimTrailing(trimBothEnds(title, WRAPPING_QUOTES), TRAILING_PUNCTUATION).trim()
   } while (title !== prev)
   return title
 }
