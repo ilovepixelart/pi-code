@@ -541,6 +541,64 @@ function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: 
   return `\n\n## Imported context (@)\n\n${section}${notice}`
 }
 
+/** Prepend the managed and user memory blocks Claude loads ahead of pi's native project
+ * context, top to bottom: managed file, managed key, then the user CLAUDE.md. withTopBlock
+ * prepends, so they are inserted bottom-up (user, then managed key, then managed file just
+ * below) to land in that order. keptUser was already exclude-checked and comment-stripped by
+ * the caller like every other file; the managed claudeMd is never excludable and comes from
+ * two managed-only surfaces, the settings key (ignored in user/project settings) and the file
+ * IT deploys beside managed-settings.json, re-read every turn so a policy change applies
+ * immediately (only its announce is deduped per session). Returns the grown prompt, whether
+ * anything was added, and the managed file body (reused for the import memo key). */
+function prependMemoryBlocks(prompt: string, changed: boolean, keptUser: { path: string; content: string } | undefined, managed: Record<string, unknown>, announce: (event: InstructionLoadEvent) => void): { prompt: string; changed: boolean; managedFile: string } {
+  if (keptUser !== undefined && keptUser.content.trim().length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(keptUser.path, keptUser.content.trim()))
+    changed = true
+    announce({ file_path: keptUser.path, memory_type: 'User', load_reason: 'session_start' })
+  }
+  const managedKey = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
+  if (managedKey.length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(MANAGED_CLAUDE_MD_PATH, managedKey))
+    changed = true
+  }
+  const managedFile = stripBlockComments(readManagedClaudeMdFile()).trim()
+  if (managedFile.length > 0) {
+    prompt = withTopBlock(prompt, instructionsBlock(managedClaudeMdPath(), managedFile))
+    changed = true
+    announce({ file_path: managedClaudeMdPath(), memory_type: 'Managed', load_reason: 'session_start' })
+  }
+  return { prompt, changed, managedFile }
+}
+
+/** Everything the import expansion depends on, hashed to a memo key: a turn whose inputs
+ * match a prior key and whose recorded mtimes are unchanged reuses the previous expansion
+ * outright. The native/local paths, the user/project-.claude additions, and the managed file
+ * body seed the "seen" set, so a change in which of them exist (even an excluded one that
+ * never reaches contextFiles) changes the key; the managed file is re-read every turn, so a
+ * change in its content re-expands and keeps the seed self-consistent. */
+function buildImportMemoKey(input: {
+  cwd: string
+  home: string
+  projectApproved: boolean
+  addDirsRaw: string
+  excludeGlobs: string[]
+  native: Array<{ path: string; content: string }>
+  localContexts: Array<{ path: string; content: string }>
+  userContext: { path: string; content: string } | undefined
+  projectDotClaude: { path: string; content: string } | undefined
+  managedFile: string
+  contextFiles: Array<{ path: string; content: string }>
+}): string {
+  const keyHash = createHash('sha256')
+  keyHash.update(`${input.cwd}\0${input.home}\0${input.projectApproved}\0${input.addDirsRaw}\0${input.excludeGlobs.join(',')}\0`)
+  for (const file of [...input.native, ...input.localContexts]) keyHash.update(`${file.path}\0`)
+  if (input.userContext !== undefined) keyHash.update(`${input.userContext.path}\0`)
+  if (input.projectDotClaude !== undefined) keyHash.update(`${input.projectDotClaude.path}\0`)
+  keyHash.update(`${input.managedFile}\0`)
+  for (const file of input.contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
+  return keyHash.digest('hex')
+}
+
 export default function contextImportsExtension(pi: ExtensionAPI) {
   let localContexts: Array<{ path: string; content: string }> = []
   // ~/.claude/CLAUDE.md, Claude's user-scope memory (all projects). The user's own
@@ -728,38 +786,19 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       announce({ file_path: file.path, memory_type: memoryTypeForPath(file.path, home, projectRoot), load_reason: 'session_start' })
     }
 
-    // The blocks Claude loads ahead of pi's native project context, top to bottom:
-    // managed file, managed key, the user CLAUDE.md, then native. withTopBlock
-    // prepends, so they are inserted bottom-up (user, then managed key, then managed
-    // file just below) to land in that order.
-    //
     // The user CLAUDE.md is the user's own file (no approval gate) but respects
-    // claudeMdExcludes and comment-stripping like every other file.
+    // claudeMdExcludes and comment-stripping like every other file. It is kept here so it
+    // both gets its own block (via prependMemoryBlocks) and joins the import-expansion set
+    // below, so its @imports resolve.
     const keptUser = userContext !== undefined && !excluded(userContext.path) ? { path: userContext.path, content: stripBlockComments(userContext.content) } : undefined
-    if (keptUser !== undefined && keptUser.content.trim().length > 0) {
-      prompt = withTopBlock(prompt, instructionsBlock(keptUser.path, keptUser.content.trim()))
-      changed = true
-      announce({ file_path: keptUser.path, memory_type: 'User', load_reason: 'session_start' })
-    }
 
-    // Managed claudeMd loads before user and project context and is never excludable.
-    // It comes from two managed-only surfaces in this order, file first: the managed
-    // CLAUDE.md file IT deploys next to managed-settings.json, then the claudeMd
-    // settings key (ignored in user/project settings). withTopBlock prepends, so the
-    // key is inserted before the file to leave the file block highest of all. The file
-    // is re-read every turn, so a policy change applies immediately (fresher than the
-    // session-start user/project reads); only its announce is deduped per session.
-    const managedKey = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
-    if (managedKey.length > 0) {
-      prompt = withTopBlock(prompt, instructionsBlock(MANAGED_CLAUDE_MD_PATH, managedKey))
-      changed = true
-    }
-    const managedFile = stripBlockComments(readManagedClaudeMdFile()).trim()
-    if (managedFile.length > 0) {
-      prompt = withTopBlock(prompt, instructionsBlock(managedClaudeMdPath(), managedFile))
-      changed = true
-      announce({ file_path: managedClaudeMdPath(), memory_type: 'Managed', load_reason: 'session_start' })
-    }
+    // Prepend the managed and user memory blocks (managed file, managed key, user), the
+    // blocks Claude loads ahead of pi's native project context. managedFile comes back
+    // because it also seeds the import memo key below.
+    const top = prependMemoryBlocks(prompt, changed, keptUser, managed, announce)
+    prompt = top.prompt
+    changed = top.changed
+    const managedFile = top.managedFile
 
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
 
@@ -778,19 +817,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
-    const keyHash = createHash('sha256')
-    keyHash.update(`${cwd}\0${home}\0${projectApproved}\0${addDirsRaw}\0${excludeGlobs.join(',')}\0`)
-    // Paths that seed the seen set (native, locals, and the user/project-.claude
-    // additions), so a change in which of them exist changes the key even for an
-    // excluded one that never reaches contextFiles.
-    for (const file of [...native, ...localContexts]) keyHash.update(`${file.path}\0`)
-    if (userContext !== undefined) keyHash.update(`${userContext.path}\0`)
-    if (projectDotClaude !== undefined) keyHash.update(`${projectDotClaude.path}\0`)
-    // The managed file seeds the seen set, so a change in its content (it is re-read
-    // every turn) changes the key and re-expands, keeping the seed self-consistent.
-    keyHash.update(`${managedFile}\0`)
-    for (const file of contextFiles) keyHash.update(`${file.path}\0${file.content}\0`)
-    const memoKey = keyHash.digest('hex')
+    const memoKey = buildImportMemoKey({ cwd, home, projectApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
 
     const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, home, cwd, excluded)
 

@@ -1232,6 +1232,62 @@ export default async function mcpExtension(pi: ExtensionAPI) {
 
   let projectConnected = false
 
+  /** managed-mcp.json exclusive mode: a policy deployed mid-process must not leave
+   * already-connected user/project servers running alongside the managed set. Evict every
+   * connected client not in the managed set (delete it from the map first so the onclose
+   * handler's guard sees it gone and does not overwrite the status, then close it
+   * best-effort and mark it disabled), then connect only the managed servers. */
+  async function connectManagedExclusive(managed: Record<string, ServerConfig>, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
+    const managedServers = applyServerPolicy(managed, allowed, denied)
+    const managedNames = new Set(Object.keys(managedServers))
+    for (const [name, client] of Array.from(clients.entries())) {
+      if (managedNames.has(name)) continue
+      clients.delete(name)
+      await client.close().catch(() => {})
+      status.set(name, { state: 'disabled by managed policy', tools: 0 })
+    }
+    await connectServers(managedServers, authUi)
+  }
+
+  /** The normal user + plugin + project scopes, when no managed-mcp.json is present.
+   * Connecting spawns processes and opens sockets, so it belongs here rather than in the
+   * factory: pi runs the factory for invocations that never start a session. Names still
+   * connected are filtered out, so a later session start only retries servers that failed
+   * or whose transport dropped, without duplicate-name warnings. */
+  async function connectNormalScopes(ctx: ExtensionContext, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
+    // Plugin servers merge under the user scope (plugins are user-installed);
+    // the user's own entry wins a name clash with a plugin's.
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
+    const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
+    // Claude's precedence is project over user for a duplicate name. A project .mcp.json
+    // server only outranks the user's own when it will actually connect (the user already
+    // consented to it, or an approved project's), so a merely-present untrusted project
+    // entry cannot shadow a trusted user server by reusing its name. A gated project
+    // server still awaiting the approval prompt does not preempt the user server: that is
+    // a deliberate narrowing of Claude's rule to keep the safe default.
+    // The stored project decision, read without prompting: consent recorded inside
+    // the project only counts once the project itself has been approved.
+    const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy)
+    const projectWinners = new Set(Object.keys(consented))
+    const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
+    // The consented project servers carry no ordering dependency on the user scope:
+    // projectWinners already excludes their names from userServers, so the two batches
+    // are disjoint and connect concurrently, and startup pays the slower scope rather
+    // than the sum of both. Reconnect attempts after a refused confirm are safe:
+    // connectServers skips names that already connected.
+    const connects: Promise<void>[] = []
+    if (Object.keys(userServers).length > 0) connects.push(connectServers(userServers, authUi))
+    if (!projectConnected && Object.keys(consented).length > 0) connects.push(connectServers(consented, authUi))
+    await Promise.all(connects)
+    // A project .mcp.json can run arbitrary commands on connect, so only honor it once
+    // the project is trusted. Per-server settings refine that: disabled servers never
+    // connect, servers the user consented to individually connected above without the
+    // whole-project confirm, and the rest stay behind it, sequentially after both
+    // scopes so the confirm dialog never races a connect.
+    if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
+  }
+
   pi.on('session_start', async (_event, ctx) => {
     const authUi = authUiFor(ctx)
     // The managed allow/deny lists filter every scope, including a managed-mcp.json set.
@@ -1243,55 +1299,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // empty set (see loadManagedMcpServers).
     const managed = loadManagedMcpServers()
     if (managed !== null) {
-      const managedServers = applyServerPolicy(managed, allowed, denied)
-      const managedNames = new Set(Object.keys(managedServers))
-      // A policy deployed mid-process must not leave already-connected user/project servers
-      // running alongside the managed set. Evict every connected client not in the managed
-      // set: delete it from the map first so the onclose handler's guard sees it gone and
-      // does not overwrite the status, then close it best-effort and mark it disabled.
-      for (const [name, client] of [...clients.entries()]) {
-        if (managedNames.has(name)) continue
-        clients.delete(name)
-        await client.close().catch(() => {})
-        status.set(name, { state: 'disabled by managed policy', tools: 0 })
-      }
-      await connectServers(managedServers, authUi)
+      await connectManagedExclusive(managed, allowed, denied, authUi)
     } else {
-      // Connecting spawns processes and opens sockets, so it belongs here rather than in
-      // the factory: pi runs the factory for invocations that never start a session.
-      // Names still connected are filtered out, so a later session start only retries
-      // servers that failed or whose transport dropped, without duplicate-name warnings.
-      // Plugin servers merge under the user scope (plugins are user-installed);
-      // the user's own entry wins a name clash with a plugin's.
-      const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
-      const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
-      // Claude's precedence is project over user for a duplicate name. A project .mcp.json
-      // server only outranks the user's own when it will actually connect (the user already
-      // consented to it, or an approved project's), so a merely-present untrusted project
-      // entry cannot shadow a trusted user server by reusing its name. A gated project
-      // server still awaiting the approval prompt does not preempt the user server: that is
-      // a deliberate narrowing of Claude's rule to keep the safe default.
-      // The stored project decision, read without prompting: consent recorded inside
-      // the project only counts once the project itself has been approved.
-      const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-      const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy)
-      const projectWinners = new Set(Object.keys(consented))
-      const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
-      // The consented project servers carry no ordering dependency on the user scope:
-      // projectWinners already excludes their names from userServers, so the two batches
-      // are disjoint and connect concurrently, and startup pays the slower scope rather
-      // than the sum of both. Reconnect attempts after a refused confirm are safe:
-      // connectServers skips names that already connected.
-      const connects: Promise<void>[] = []
-      if (Object.keys(userServers).length > 0) connects.push(connectServers(userServers, authUi))
-      if (!projectConnected && Object.keys(consented).length > 0) connects.push(connectServers(consented, authUi))
-      await Promise.all(connects)
-      // A project .mcp.json can run arbitrary commands on connect, so only honor it once
-      // the project is trusted. Per-server settings refine that: disabled servers never
-      // connect, servers the user consented to individually connected above without the
-      // whole-project confirm, and the rest stay behind it, sequentially after both
-      // scopes so the confirm dialog never races a connect.
-      if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
+      await connectNormalScopes(ctx, allowed, denied, authUi)
     }
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])

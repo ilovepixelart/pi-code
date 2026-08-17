@@ -19,7 +19,7 @@ const THINKING_ORDER: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medi
 
 export function thinkingRank(level: ThinkingLevel): number {
   const i = THINKING_ORDER.indexOf(level)
-  return i < 0 ? 0 : i
+  return Math.max(i, 0)
 }
 
 /** The reasoning level a prompt requests through Claude's think keywords, or undefined

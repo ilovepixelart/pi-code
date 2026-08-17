@@ -27,10 +27,10 @@ export function formatContextUsage(usage: ContextUsage | undefined, modelWindow?
   }
   const tokens = usage.tokens
   const percent = usage.percent ?? (window > 0 ? (tokens / window) * 100 : null)
-  const lines = ['Context usage', `  Used:   ${fmt(tokens)} tokens${percent === null ? '' : ` (${percent.toFixed(1)}%)`}`]
+  const percentSuffix = percent === null ? '' : ` (${percent.toFixed(1)}%)`
+  const lines = ['Context usage', `  Used:   ${fmt(tokens)} tokens${percentSuffix}`]
   if (window > 0) {
-    lines.push(`  Window: ${fmt(window)} tokens`)
-    lines.push(`  Free:   ${fmt(Math.max(window - tokens, 0))} tokens`)
+    lines.push(`  Window: ${fmt(window)} tokens`, `  Free:   ${fmt(Math.max(window - tokens, 0))} tokens`)
   }
   return lines.join('\n')
 }

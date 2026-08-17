@@ -73,7 +73,7 @@ export function mergeEnvScopes(managed: Record<string, string>, user: Record<str
 export function applyEnvSettings(merged: Record<string, string>, env: NodeJS.ProcessEnv, owned: Set<string>, managedKeys: ReadonlySet<string> = new Set()): void {
   // Unset any key an earlier apply set that the current merge dropped. Iterate a copy
   // since `owned` is mutated. A shell export this module never owned is left in place.
-  for (const key of [...owned]) {
+  for (const key of Array.from(owned)) {
     if (!(key in merged)) {
       delete env[key]
       owned.delete(key)
