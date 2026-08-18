@@ -33,6 +33,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const tools = new Map<string, (id: string, params: Record<string, unknown>) => Promise<ToolResult>>()
   const shortcuts: Array<(ctx: unknown) => Promise<void>> = []
   const sent: SentMessage[] = []
+  const sentOptions: unknown[] = []
   const userMessages: string[] = []
   const userMessageOptions: unknown[] = []
   const appended: Array<{ type: string; data: unknown }> = []
@@ -53,7 +54,10 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     registerTool: (tool: { name: string; execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult> }) => tools.set(tool.name, tool.execute),
     registerShortcut: (_key: unknown, spec: { handler: (ctx: unknown) => Promise<void> }) => shortcuts.push(spec.handler),
     on: (name: string, fn: Handler) => handlers.set(name, fn),
-    sendMessage: (message: SentMessage) => sent.push(message),
+    sendMessage: (message: SentMessage, options?: unknown) => {
+      sent.push(message)
+      sentOptions.push(options)
+    },
     sendUserMessage: (text: string, options?: unknown) => {
       userMessages.push(text)
       userMessageOptions.push(options)
@@ -98,6 +102,13 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     getActiveTools: () => activeTools,
     runCommand: (name: string, args = '', context: unknown = ctx) => commands.get(name)?.(args, context),
     callTool: (name: string, params: Record<string, unknown>) => tools.get(name)?.('call-1', params) as Promise<ToolResult>,
+    /** The { triggerTurn } options the last sendMessage of this customType carried. */
+    optionsFor: (customType: string) => {
+      for (let i = sent.length - 1; i >= 0; i--) {
+        if (sent[i].customType === customType) return sentOptions[i]
+      }
+      return undefined
+    },
   }
 }
 
@@ -633,5 +644,42 @@ describe('execution mode stall exit', () => {
     await s.emit('agent_end', { messages: [] })
 
     expect(await s.emit('before_agent_start')).toBeDefined()
+  })
+})
+
+describe('record-only sends (0.84.2 triggerTurn:false semantics)', () => {
+  // pi 0.84.2 (#8022) made sendMessage(..., { triggerTurn: false }) purely record-only:
+  // it no longer steers an active run, only appends a display message. plan mode has two
+  // such sites (the plan-todo-list review message and the plan-complete/stall summary);
+  // both intend record-only, and no surrounding logic depends on the old steer side effect.
+  it('records the plan-todo-list review message without triggering a turn', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader\n2. Add the new field')] })
+
+    expect(s.sent.find((m) => m.customType === 'plan-todo-list')).toBeDefined()
+    expect(s.optionsFor('plan-todo-list')).toEqual({ triggerTurn: false })
+  })
+
+  it('records the plan-complete summary without triggering a turn', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.callTool('plan_mode_complete', { plan: '1. First step\n2. Second step' })
+    await s.emit('agent_end', { messages: [] }) // default choice executes the plan
+    await s.emit('turn_end', { message: assistant('[DONE:1] [DONE:2]') })
+    await s.emit('agent_end', { messages: [] }) // every step done -> endExecution sends plan-complete
+
+    expect(s.sent.find((m) => m.customType === 'plan-complete')).toBeDefined()
+    expect(s.optionsFor('plan-complete')).toEqual({ triggerTurn: false })
+  })
+
+  it('still drives a turn for the execute message (triggerTurn:true), unlike the record-only sends', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.emit('agent_end', { messages: [assistant('Plan:\n1. Read the config loader')] })
+
+    // The one send that must still steer a run is plan-mode-execute; the record-only sites
+    // are deliberately triggerTurn:false alongside it.
+    expect(s.optionsFor('plan-mode-execute')).toEqual({ triggerTurn: true })
   })
 })

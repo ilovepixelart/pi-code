@@ -13,45 +13,37 @@ const assistantEntry = (content: any, id = 'a1') => ({ type: 'message', id, pare
 
 afterEach(() => setCompleteBackend(null))
 
-/** Fresh extension instance over a stub API. `initialName` seeds a pre-named session. */
-function setup(initialName?: string) {
+/** Fresh extension instance over a stub API. `initialName` seeds a pre-named session;
+ * `throwOnSetName` models a session disposed while the title call was in flight. */
+function setup(initialName?: string, opts: { throwOnSetName?: boolean } = {}) {
   const handlers = new Map<string, Handler>()
   let name: string | undefined = initialName
   const namesSet: string[] = []
-  const setTitles: string[] = []
 
   sessionTitle({
     on: (event: string, fn: Handler) => handlers.set(event, fn),
     setSessionName: (n: string) => {
+      // pi.setSessionName refreshes the terminal/tab title natively, so it is the only title
+      // sink; a session disposed mid-call throws from it post-await, which the guard swallows.
+      if (opts.throwOnSetName) throw new Error('session disposed')
       name = n
       namesSet.push(n)
     },
     getSessionName: () => name,
   } as any)
 
-  const makeCtx = (branch: any[], opts: { model?: unknown; setTitle?: boolean; throwUi?: boolean } = {}) => {
-    const base = {
-      model: 'model' in opts ? opts.model : {},
-      hasUI: true,
-      mode: 'tui' as const,
-      sessionManager: { getBranch: () => branch },
-    }
-    // A ctx whose ui getter throws models a session disposed while a title call was in flight.
-    if (opts.throwUi) {
-      return Object.defineProperty(base, 'ui', {
-        get: () => {
-          throw new Error('session disposed')
-        },
-      })
-    }
-    return { ...base, ui: opts.setTitle === false ? {} : { setTitle: (t: string) => setTitles.push(t) } }
-  }
+  const makeCtx = (branch: any[], ctxOpts: { model?: unknown } = {}) => ({
+    model: 'model' in ctxOpts ? ctxOpts.model : {},
+    hasUI: true,
+    mode: 'tui' as const,
+    sessionManager: { getBranch: () => branch },
+    ui: {},
+  })
 
   return {
-    settle: (branch: any[], opts?: { model?: unknown; setTitle?: boolean; throwUi?: boolean }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, opts)),
+    settle: (branch: any[], ctxOpts?: { model?: unknown }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, ctxOpts)),
     start: (reason = 'new') => handlers.get('session_start')?.({ type: 'session_start', reason }, makeCtx([])),
     namesSet,
-    setTitles,
     getName: () => name,
   }
 }
@@ -62,7 +54,6 @@ describe('session auto-titling', () => {
     setCompleteBackend(async () => assistantMsg('Refactor Config Loader'))
     await t.settle([userEntry('refactor the config loader so it validates the schema up front')])
     expect(t.namesSet).toEqual(['Refactor Config Loader'])
-    expect(t.setTitles).toEqual(['Refactor Config Loader'])
     expect(t.getName()).toBe('Refactor Config Loader')
   })
 
@@ -73,7 +64,6 @@ describe('session auto-titling', () => {
     setCompleteBackend(async () => assistantMsg('Second Title'))
     await t.settle([userEntry('do the first thing'), userEntry('do a second thing', 'u2')])
     expect(t.namesSet).toEqual(['First Title'])
-    expect(t.setTitles).toEqual(['First Title'])
   })
 
   it('leaves a session that already has a name untouched, without calling the model', async () => {
@@ -85,7 +75,6 @@ describe('session auto-titling', () => {
     })
     await t.settle([userEntry('some message')])
     expect(t.namesSet).toEqual([])
-    expect(t.setTitles).toEqual([])
     expect(called).toBe(false)
     expect(t.getName()).toBe('User Chosen Name')
   })
@@ -97,7 +86,6 @@ describe('session auto-titling', () => {
     })
     await expect(t.settle([userEntry('a message')])).resolves.toBeUndefined()
     expect(t.namesSet).toEqual([])
-    expect(t.setTitles).toEqual([])
     expect(t.getName()).toBeUndefined()
   })
 
@@ -130,14 +118,6 @@ describe('session auto-titling', () => {
     await t.settle([userEntry('hello')], { model: undefined })
     expect(t.namesSet).toEqual([])
     expect(called).toBe(false)
-  })
-
-  it('still names the session when the ui cannot set a window title', async () => {
-    const t = setup()
-    setCompleteBackend(async () => assistantMsg('Some Title'))
-    await t.settle([userEntry('do a thing')], { setTitle: false })
-    expect(t.namesSet).toEqual(['Some Title'])
-    expect(t.setTitles).toEqual([])
   })
 
   it('does not retry a failed attempt until a new session resets the guard', async () => {
@@ -174,15 +154,16 @@ describe('session auto-titling', () => {
     await settling
     // The late title belonged to the prior session; it must not rename the new one.
     expect(t.namesSet).toEqual([])
-    expect(t.setTitles).toEqual([])
   })
 
-  it('does not reject when the ctx is disposed after the model call resolves', async () => {
-    const t = setup()
+  it('does not reject when setSessionName throws on a disposed session after the model call', async () => {
+    const t = setup(undefined, { throwOnSetName: true })
     setCompleteBackend(async () => assistantMsg('Some Title'))
-    // A ctx whose ui getter throws post-await models a session disposed while the call
-    // was in flight; an escaping rejection from this un-awaited settle can exit pi.
-    await expect(t.settle([userEntry('do a thing')], { throwUi: true })).resolves.toBeUndefined()
+    // setSessionName is the only post-await title sink; a session disposed while the call
+    // was in flight throws from it, and an escaping rejection from this un-awaited settle
+    // can exit pi, so the guard must swallow it.
+    await expect(t.settle([userEntry('do a thing')])).resolves.toBeUndefined()
+    expect(t.namesSet).toEqual([])
   })
 })
 

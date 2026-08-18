@@ -3,15 +3,15 @@
  *
  * Claude auto-names a new conversation from its first message; this does the same for
  * pi. After the first run of an unnamed session settles, it asks the current model for
- * a short title based on the first user message and applies it two ways: setSessionName
- * (the name shown in the session selector) and the terminal window/tab title.
+ * a short title based on the first user message and applies it with setSessionName, which
+ * names the session in the selector and refreshes the terminal window/tab title natively
+ * (pi changelog); a separate ctx.ui.setTitle call would only duplicate that, so there is none.
  *
  * It runs in every mode, not just the TUI: naming a session is cheap and harmless, and a
- * headless run that persists its session still benefits from a readable name later. The
- * window-title update is the only terminal-specific part, so it is optional-called rather
- * than gated on hasUI. Titling is best-effort throughout: a session that already has a
- * name, a run with no user text (a slash-command-only turn), a headless run with no model,
- * or any provider error leaves the session untitled and never throws.
+ * headless run that persists its session still benefits from a readable name later. Titling
+ * is best-effort throughout: a session that already has a name, a run with no user text (a
+ * slash-command-only turn), a headless run with no model, or any provider error leaves the
+ * session untitled and never throws.
  *
  * Cost: one model call per session at most. The guard is claimed before the completion so
  * repeated settles cannot each fire a call, and a failed attempt is not retried until a
@@ -132,8 +132,11 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
     // Post-await ctx getters throw once the session is disposed, and an escaping rejection
     // from this un-awaited settle can exit pi; apply the title best-effort.
     try {
+      // pi.setSessionName refreshes the terminal/tab title natively (pi changelog), so a
+      // separate ctx.ui.setTitle call would only duplicate that. The guard stays: a
+      // disposed session throws from setSessionName post-await, and an escaping rejection
+      // from this un-awaited settle can exit pi.
       pi.setSessionName(title)
-      ctx.ui.setTitle?.(title)
     } catch {
       // disposed session or a setter failure: leave the session untitled.
     }

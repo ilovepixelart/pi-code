@@ -253,6 +253,13 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance after turn_start took the pre-run snapshot but before turn_end saved
+    // it; that pending ref belongs to the previous session and must not attach to the next
+    // session's first turn_end. Re-arm runNeedsSnapshot too, so the next run snapshots its
+    // own tree even though the prior run left it false.
+    pending = undefined
+    runNeedsSnapshot = true
     await ensureShadow(ctx)
     checkpoints.clear()
     for (const entry of ctx.sessionManager.getEntries()) {

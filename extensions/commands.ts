@@ -466,6 +466,16 @@ export default function commandsExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while a command's per-run scoping is still pending (its agent_settled
+    // never came). Carrying that into the next session would restore an unrelated tool set,
+    // bash/path scope, model, or effort onto it, so drop the pending state here. Drop only:
+    // no setActiveTools/setModel/setThinkingLevel, since the new session owns its own state.
+    pendingRestore = undefined
+    pendingBashRules = undefined
+    pendingPathRules = undefined
+    pendingModelRestore = undefined
+    pendingEffortRestore = undefined
     const trusted = await isProjectApproved(ctx)
     projectApproved = trusted
     // A resume/fork/new session can switch projects in-process. pi cannot unregister a

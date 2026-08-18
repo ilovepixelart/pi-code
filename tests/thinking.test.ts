@@ -19,6 +19,7 @@ function wire(initial = 'off') {
   return {
     input: (text: string, ctx: any = {}, source = 'interactive') => handlers.get('input')?.({ text, source }, ctx),
     settle: () => handlers.get('agent_settled')?.({}, {}),
+    start: () => handlers.get('session_start')?.({}, {}),
     setThinkingLevel,
     getThinkingLevel,
     level: () => level,
@@ -147,6 +148,21 @@ describe('thinking extension', () => {
     t.setThinkingLevel.mockClear()
     t.settle()
     expect(t.setThinkingLevel).not.toHaveBeenCalled()
+  })
+
+  it('drops a pending escalation on session_start so it never restores into the next session', () => {
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while an escalation is still pending; that stale restore must be
+    // dropped, not fired into the next session (whose level the new session owns), and
+    // session_start itself must not call setThinkingLevel.
+    const t = wire('low')
+    t.input('please ultrathink') // low -> max
+    expect(t.level()).toBe('max')
+    t.setThinkingLevel.mockClear()
+    t.start()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled() // the reset does not fire a restore
+    t.settle()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled() // the pending escalation was dropped
   })
 
   it('reads the prior level from ctx.thinkingLevel when getThinkingLevel is absent', () => {

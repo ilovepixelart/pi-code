@@ -32,7 +32,7 @@ import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
-import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -1385,6 +1385,23 @@ export default function subagentExtension(pi: ExtensionAPI) {
       })
       return getFinalOutput(result.messages)
     })
+  })
+
+  pi.on('session_shutdown', (event, ctx) => {
+    // On quit pi is exiting, so a detached background child would keep running (and
+    // spending tokens) with its completion swallowed: SIGTERM every live run, killing the
+    // process group the way a cancel does. On a same-process session switch
+    // (new/resume/fork) the children keep running under the new session, so leave them be
+    // and warn once that they are still spending; /tasks inspects them. reload re-imports
+    // this module (losing the registry), so it neither kills nor warns.
+    if (event.reason === 'quit') {
+      cancelAllBackgroundRuns()
+      return
+    }
+    if (event.reason === 'new' || event.reason === 'resume' || event.reason === 'fork') {
+      const active = activeBackgroundRuns()
+      if (active > 0) ctx.ui?.notify(`${active} background run${active === 1 ? '' : 's'} still active; /tasks to inspect`, 'warning')
+    }
   })
 
   // Claude surfaces each agent's description so the model can pick one autonomously.

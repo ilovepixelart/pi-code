@@ -17,6 +17,10 @@ What a repository ships is treated as untrusted until you approve it: project MC
 
 ![pi-code demo](demos/hero.gif)
 
+## Requirements
+
+pi `>=0.79.1` (0.84.x recommended) and Node `>=22.19` for current pi.
+
 ## Install
 
 ```bash

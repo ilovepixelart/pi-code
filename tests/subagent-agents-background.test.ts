@@ -504,6 +504,58 @@ describe('cancelBackgroundRun', () => {
   })
 })
 
+describe('cancelAllBackgroundRuns', () => {
+  const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
+
+  it('signals every live child, marks them cancelled, and reports the count', async () => {
+    const { startBackgroundRun, cancelAllBackgroundRuns, activeBackgroundRuns, backgroundStatusText } = await loadBackground()
+    const completed: Array<{ state: string }> = []
+    startBackgroundRun('scout', 'one', invocation, (run) => completed.push(run))
+    startBackgroundRun('scout', 'two', invocation, (run) => completed.push(run))
+    expect(activeBackgroundRuns()).toBe(2)
+
+    expect(cancelAllBackgroundRuns()).toBe(2)
+    for (const child of spawned.children) expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(backgroundStatusText()).not.toContain('running')
+
+    // A cancelled child still holds its slot until it actually dies (SIGTERM may be ignored).
+    expect(activeBackgroundRuns()).toBe(2)
+    for (const child of spawned.children) child.emit('close', 143)
+    expect(activeBackgroundRuns()).toBe(0)
+    expect(completed.map((run) => run.state)).toEqual(['cancelled', 'cancelled'])
+  })
+
+  it('skips already-finished runs and counts only the ones it signalled', async () => {
+    const { startBackgroundRun, cancelAllBackgroundRuns } = await loadBackground()
+    startBackgroundRun('scout', 'done-run', invocation, () => {})
+    spawned.children[0].emit('close', 0) // finished before the shutdown
+    startBackgroundRun('scout', 'live-run', invocation, () => {})
+
+    expect(cancelAllBackgroundRuns()).toBe(1)
+    expect(spawned.children[1].kill).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it('signals the process group, not just the direct child', async () => {
+    // A cancel kills -pid so any grandchild the agent spawned dies too; the fake child's
+    // pid stands in for the group. Spying process.kill lets the group signal succeed and
+    // be observed rather than throwing ESRCH and falling back to the direct child.
+    const { startBackgroundRun, cancelAllBackgroundRuns } = await loadBackground()
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      startBackgroundRun('scout', 'grp', invocation, () => {})
+      cancelAllBackgroundRuns()
+      expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGTERM')
+    } finally {
+      killSpy.mockRestore()
+    }
+  })
+
+  it('returns zero when there are no runs to cancel', async () => {
+    const { cancelAllBackgroundRuns } = await loadBackground()
+    expect(cancelAllBackgroundRuns()).toBe(0)
+  })
+})
+
 describe('startBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
 

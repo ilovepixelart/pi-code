@@ -792,7 +792,7 @@ describe('hooks extension tool_call', () => {
 
   it('blocks the tool with the hook stderr as the reason when the hook exits 2', async () => {
     const ext = await withPreHook({ stderr: ['force push is not allowed'], code: 2 })
-    expect(await ext.toolCall('bash', { command: 'git push -f' })).toEqual({ block: true, reason: 'force push is not allowed' })
+    expect(await ext.toolCall('bash', { command: 'git push -f' })).toEqual({ block: true, reason: 'force push is not allowed', terminate: true })
   })
 
   it('runs a PreToolUse prompt hook through the model and blocks on its deny decision', async () => {
@@ -801,7 +801,7 @@ describe('hooks extension tool_call', () => {
     const ext = setupExtension()
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     const decision = await ext.toolCall('bash', { command: 'rm -rf /' }, 't1', { model: {} })
-    expect(decision).toEqual({ block: true, reason: 'looks risky' })
+    expect(decision).toEqual({ block: true, reason: 'looks risky', terminate: true })
   })
 
   it('lets the tool through when a prompt hook allows and there is no command hook to run', async () => {
@@ -815,7 +815,7 @@ describe('hooks extension tool_call', () => {
 
   it('blocks the tool with the deny reason from hookSpecificOutput', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'secrets file' } })], code: 0 })
-    expect(await ext.toolCall('bash', { command: 'cat .env' })).toEqual({ block: true, reason: 'secrets file' })
+    expect(await ext.toolCall('bash', { command: 'cat .env' })).toEqual({ block: true, reason: 'secrets file', terminate: true })
   })
 
   it('returns undefined so the tool proceeds when the hook allows it', async () => {
@@ -832,12 +832,12 @@ describe('hooks extension tool_call', () => {
   it('blocks on permissionDecision ask when the user declines the prompt', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
     const ui = { notify: () => {}, confirm: async () => false }
-    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui })).toEqual({ block: true, reason: 'confirm this' })
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui })).toEqual({ block: true, reason: 'confirm this', terminate: true })
   })
 
   it('blocks on permissionDecision ask with no UI to prompt (headless fallback)', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
-    expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this' })
+    expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this', terminate: true })
   })
 
   it('forwards the tool name and input to the hook payload', async () => {
@@ -1200,6 +1200,26 @@ describe('hooks extension notify-style events', () => {
       await ext.agentEnd()
       expect(ext.sent).toHaveLength(7)
       expect(ext.notes.some((n) => n.level === 'warning' && /cap/i.test(n.msg))).toBe(true)
+    })
+
+    it('resets the Stop-hook streak on session_start so a mid-turn /new starts fresh', async () => {
+      // One extension instance serves every session. A Stop-hook continuation streak
+      // (stop_hook_active plus the consecutive-block count) from the previous session must
+      // not carry into the next: a mid-turn /new fires session_start on the same instance,
+      // which resets both so the next Stop reports stop_hook_active false.
+      const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+      script('keep-going', { stderr: ['not done'], code: 2 })
+      await ext.agentEnd() // first block: continues and arms stop_hook_active for the next firing
+      expect(ext.sent).toHaveLength(1)
+
+      await ext.sessionStart('new', { cwd: tempDir('hooks-proj-') })
+
+      script('keep-going', { stderr: ['still red'], code: 2 })
+      await ext.agentEnd()
+      const calls = hoisted.calls.filter((call) => call.command === 'keep-going')
+      // The post-reset firing reports stop_hook_active false, not the true carried from before.
+      expect(JSON.parse(calls[calls.length - 1].stdin).stop_hook_active).toBe(false)
+      expect(ext.sent).toHaveLength(2) // the count reset too, so this block still continues
     })
   })
 
@@ -1674,7 +1694,7 @@ describe('allowedHttpHookUrls wiring', () => {
       allowedHttpHookUrls: ['https://hooks.example.com/*'],
       hooks: { PreToolUse: [{ hooks: [{ type: 'http', url: 'https://hooks.example.com/pre' }] }] },
     })
-    expect(await ext.toolCall('bash', { command: 'ls' })).toEqual({ block: true, reason: 'nope' })
+    expect(await ext.toolCall('bash', { command: 'ls' })).toEqual({ block: true, reason: 'nope', terminate: true })
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 })

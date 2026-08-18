@@ -361,6 +361,33 @@ describe('commands extension', () => {
     expect(s.activeTools()).toEqual(['bash', 'read', 'edit', 'write'])
   })
 
+  it('drops pending command scoping on session_start so it never restores across a session switch', async () => {
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while a command's tool, model, and effort scoping is still pending;
+    // restoring that stale state into the next session would corrupt it, so session_start
+    // drops the pending state (without itself restoring anything).
+    const cwd = tempDir()
+    writeCommand(cwd, 'deep.md', '---\nallowed-tools: Read\nmodel: opus\neffort: max\n---\nLook only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('deep')?.handler('', s.ctx)
+    expect(s.activeTools()).toEqual(['read'])
+    expect(s.modelSets).toEqual(['claude-opus-5'])
+    expect(s.thinkingSets).toEqual(['max'])
+
+    // A mid-turn /new reuses the instance: the pending restores must be dropped.
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    const toolSetsBefore = s.toolSets.length
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+
+    // agent_settled fired no stale restore: tools, model, and effort are left where the
+    // command left them rather than reverted into the next session.
+    expect(s.toolSets.length).toBe(toolSetsBefore)
+    expect(s.activeTools()).toEqual(['read'])
+    expect(s.modelSets).toEqual(['claude-opus-5'])
+    expect(s.thinkingSets).toEqual(['max'])
+  })
+
   it('does not register project commands for an unapproved project', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'evil.md', 'do bad things')

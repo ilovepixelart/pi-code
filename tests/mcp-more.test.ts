@@ -1357,6 +1357,55 @@ describe('mcp session_shutdown', () => {
   })
 })
 
+describe('mcp second in-process session', () => {
+  it('reconnects the same server and reports its real tool count, not zero', async () => {
+    // session_start -> session_shutdown -> session_start with the same server. The
+    // shutdown must drop the closed client from the map (not rely on a deferred onclose),
+    // so the second session reconnects; the banner and /mcp must count the tools from the
+    // registered map (pi cannot unregister them) rather than registerTools' return, which
+    // is 0 on a reconnect because they are already registered.
+    withTools([{ name: 'go' }, { name: 'stop' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+    const first = hoisted.clients.at(-1)
+    expect(harness.notifications).toEqual([{ message: 'MCP: 2 tools from 1 servers', level: 'info' }])
+
+    await harness.shutdown()
+    await harness.sessionStart()
+    const second = hoisted.clients.at(-1)
+    // The closed client was replaced, not skipped as a lingering duplicate.
+    expect(second).not.toBe(first)
+
+    // The second banner counts the real tools, not zero.
+    expect(harness.notifications.at(-1)).toEqual({ message: 'MCP: 2 tools from 1 servers', level: 'info' })
+    // /mcp shows the server connected with its true tool count.
+    expect(await statusLinesOf(harness)).toEqual(['srv: connected (2 tools)'])
+
+    // The still-registered tool executes against the SECOND client instance.
+    const calledOn: unknown[] = []
+    hoisted.control.callTool = async (_args, client) => {
+      calledOn.push(client)
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+    await harness.tools[0].execute('call-1', {})
+    expect(calledOn).toEqual([second])
+  })
+
+  it('drops a server removed from the config from /mcp on the next session', async () => {
+    // A server present in the first session but not the second must not linger in /mcp:
+    // the status map is reset per session so it reflects only the current config.
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { keep: { command: 'k' }, drop: { command: 'd' } } })
+    await harness.sessionStart()
+    expect((await statusLinesOf(harness)).sort()).toEqual(['drop: connected (1 tools)', 'keep: connected (1 tools)'])
+
+    await harness.shutdown()
+    writeServers(join(harness.home, '.claude.json'), { keep: { command: 'k' } })
+    await harness.sessionStart()
+
+    expect(await statusLinesOf(harness)).toEqual(['keep: connected (1 tools)'])
+  })
+})
+
 describe('MCP tool alias publication', () => {
   it('publishes pi-to-Claude tool name aliases on the shared bus with original names', async () => {
     withTools([{ name: 'web-search' }])
