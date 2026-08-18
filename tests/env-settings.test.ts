@@ -240,4 +240,15 @@ describe('env-settings extension', () => {
     expect(process.env.ENVTEST_MANAGED_OVR).toBe('from-managed') // managed outranks the shell
     expect(process.env.ENVTEST_USER_OVR).toBe('from-shell') // user does not
   })
+
+  it('does not throw and applies nothing when the user settings.json is invalid JSON', () => {
+    track('ENVTEST_BROKEN')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), '{ not json')
+
+    // readSettingsFile swallows the parse error, so the factory apply is a no-op rather
+    // than throwing during extension load, and nothing from the unreadable scope lands.
+    expect(() => setup()).not.toThrow()
+    expect('ENVTEST_BROKEN' in process.env).toBe(false)
+  })
 })

@@ -218,6 +218,16 @@ describe('runtime version guard for a missing isProjectTrusted callback', () => 
     const { isProjectApprovedSilently } = await freshApproval()
     expect(() => isProjectApprovedSilently({ cwd: '/repo' }, deps())).not.toThrow()
   })
+
+  it('does not warn when a modern runtime reports the project untrusted', async () => {
+    const { isProjectApprovedSilently } = await freshApproval()
+    const notify = vi.fn()
+    // The guard keys on the capability being absent, not on the trust answer: a runtime
+    // that supplies isProjectTrusted and returns false is simply untrusted, not too old,
+    // so it fails closed without the RUNTIME_TOO_OLD notice.
+    expect(isProjectApprovedSilently(ctx({ isProjectTrusted: () => false, ui: { confirm: async () => true, notify } }), deps())).toBe(false)
+    expect(notify).not.toHaveBeenCalled()
+  })
 })
 
 describe('hasClaudeShapedConfig walks to the repository root', () => {
