@@ -148,7 +148,7 @@ export function cancelBackgroundRun(id: string): 'cancelled' | 'not-running' | '
  * signalled; each cancelled child still holds its slot until it actually dies. */
 export function cancelAllBackgroundRuns(): number {
   let count = 0
-  for (const id of [...runs.keys()]) {
+  for (const id of Array.from(runs.keys())) {
     if (cancelBackgroundRun(id) === 'cancelled') count++
   }
   return count
