@@ -142,16 +142,36 @@ except Exception:
 settings["packages"] = [repo]
 settings["defaultThinkingLevel"] = "low"
 settings["extensions"] = [probe]
-for key in ("skills", "prompts"):
+# lastChangelogVersion rides in from the developer's real global settings; a stale value
+# (e.g. an install several releases back) makes pi paint the full "What's New" changelog
+# wall over the boot screen, burying the banners these checks grep for. Dropping it lets
+# pi treat the throwaway home as a fresh install: it records the current version silently
+# and shows no changelog.
+for key in ("skills", "prompts", "lastChangelogVersion"):
     settings.pop(key, None)
 json.dump(settings, open(dst, "w"))
 PY
 
 # This harness only means anything if pi is loading THIS checkout. A developer with a
 # published pi-code installed would otherwise get a green run for the wrong code.
-if ! HOME="$FAKEHOME" pi list 2>/dev/null | grep -qF "$REPO"; then
+if ! HOME="$FAKEHOME" PI_SKIP_VERSION_CHECK=1 pi list 2>/dev/null | grep -qF "$REPO"; then
   say "%F{red}pi under the isolated home is not loading this checkout ($REPO)%f"
   exit 2
+fi
+
+# Project trust is the gate for every project-scoped .claude surface. pi-code's
+# project-approval extension reads it through ctx.isProjectTrusted(), which pi only exposes
+# from 0.79.1 on. On an older runtime that callback is undefined, so isProjectApproved()
+# short-circuits to "unapproved": the "Trust this project?" prompt never appears and none of
+# the project rules, hooks, MCP servers, output styles, project agents, context imports,
+# skills or commands load. pi 0.75.0+ needs Node >= 22.19.0, so a stuck-on-Node-22.18 box is
+# pinned to 0.74.x and will fail every trust-gated beat below. Warn loudly rather than let the
+# cascade read like a harness bug.
+# pi prints --version to stderr, so capture both streams before parsing.
+PI_VERSION=$(pi --version 2>&1 | tr -d '[:space:]')
+autoload -Uz is-at-least
+if [ -z "$PI_VERSION" ] || ! is-at-least 0.79.1 "$PI_VERSION"; then
+  warn "pi ${PI_VERSION:-unknown} predates ctx.isProjectTrusted() (pi 0.79.1); every project-trust-gated beat will FAIL until pi >= 0.79.1 (needs Node >= 22.19.0)"
 fi
 
 say "fixture: $FX"
@@ -162,7 +182,7 @@ cleanup() {
 trap cleanup EXIT
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
 
 # --- Deterministic checks -------------------------------------------------------------
 if wait_for 'Trust this project\?' 30; then
@@ -350,7 +370,7 @@ json.dump(settings, open(path, "w"))
 PY
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
 if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
 # The statusLine command runs on the first status refresh after boot; its output replaces
 # the built-in segment, so STATUS_E2E in the pane proves the configured command drove it.
