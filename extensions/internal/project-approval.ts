@@ -61,7 +61,7 @@ export interface ApprovalContext {
   cwd: string
   hasUI: boolean
   isProjectTrusted?: () => boolean
-  ui: { confirm: (title: string, body: string) => Promise<boolean> }
+  ui: { confirm: (title: string, body: string) => Promise<boolean>; notify?: (message: string, type?: 'info' | 'warning' | 'error') => void }
 }
 
 export interface ApprovalDeps {
@@ -81,6 +81,37 @@ const defaultDeps: ApprovalDeps = {
 const APPROVAL_BODY = 'It ships Claude Code configuration that pi-code loads. MCP servers, hooks and agents can run commands from this repository.'
 
 /**
+ * Shown once when the pi runtime predates project-trust support. pi >= 0.79.1 hands
+ * extensions a `ctx.isProjectTrusted` callback; older runtimes omit it, and the trust
+ * guard below then reads every project as untrusted, so trust prompts, project hooks, MCP,
+ * commands, skills and rules all fail closed with nothing said. A live run on such a pi
+ * produced no error anywhere; this turns that silence into one line.
+ */
+const RUNTIME_TOO_OLD = 'pi-code requires pi >= 0.79.1 for project configuration; project-scoped .claude config stays disabled on this pi version'
+
+/**
+ * Whether the runtime lacks the `isProjectTrusted` capability, warning once when it does.
+ *
+ * The notice fires at most once per process and the guard is never reset: a pi binary
+ * cannot change version mid-run, so a single notice carries all the information a session
+ * can, and repeating it on every gated surface would be noise. Both the prompting and the
+ * silent callers report it. A missing runtime capability is not an approval question, so
+ * surfacing it from the silent variant is correct rather than a stray dialog. `ctx.ui` may
+ * be absent on a headless run, so the notify is fully optional-chained. Callers still fail
+ * closed on a true return, exactly as before.
+ */
+let warnedRuntimeTooOld = false
+
+function runtimeLacksProjectTrust(ctx: { isProjectTrusted?: () => boolean; ui?: { notify?: (message: string, type?: 'info' | 'warning' | 'error') => void } }): boolean {
+  if (typeof ctx.isProjectTrusted === 'function') return false
+  if (!warnedRuntimeTooOld) {
+    warnedRuntimeTooOld = true
+    ctx.ui?.notify?.(RUNTIME_TOO_OLD, 'warning')
+  }
+  return true
+}
+
+/**
  * Whether project-controlled config may be acted on.
  *
  * Refuses without a UI rather than deferring: pi reached this point without consulting
@@ -90,7 +121,8 @@ const APPROVAL_BODY = 'It ships Claude Code configuration that pi-code loads. MC
 /** The same decision as isProjectApproved, but never prompts: an undecided project
  * reads as unapproved. For surfaces that only display project config, like the
  * subagent roster, where a mid-turn dialog would be wrong. */
-export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'isProjectTrusted'>, deps: ApprovalDeps = defaultDeps): boolean {
+export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'isProjectTrusted'> & { ui?: ApprovalContext['ui'] }, deps: ApprovalDeps = defaultDeps): boolean {
+  if (runtimeLacksProjectTrust(ctx)) return false // pi predates project-trust support
   if (ctx.isProjectTrusted?.() !== true) return false
   if (!deps.hasClaudeShaped(ctx.cwd)) return true
   if (deps.piWouldAsk(ctx.cwd)) return true
@@ -98,7 +130,8 @@ export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'is
 }
 
 export async function isProjectApproved(ctx: ApprovalContext, deps: ApprovalDeps = defaultDeps): Promise<boolean> {
-  if (ctx.isProjectTrusted?.() !== true) return false // pi already declined, or never trusted
+  if (runtimeLacksProjectTrust(ctx)) return false // pi predates project-trust support
+  if (ctx.isProjectTrusted?.() !== true) return false // pi declined trust for this project
   if (!deps.hasClaudeShaped(ctx.cwd)) return true // nothing here pi's own check would miss
   if (deps.piWouldAsk(ctx.cwd)) return true // pi genuinely prompted for this project
 
