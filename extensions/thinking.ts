@@ -10,6 +10,7 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { createTurnOverride } from './internal/turn-override.js'
 
 // The pi ThinkingLevel union, taken from the setter's parameter so it tracks the SDK.
 type ThinkingLevel = Parameters<ExtensionAPI['setThinkingLevel']>[0]
@@ -34,25 +35,26 @@ export function requestedThinkingLevel(text: string): ThinkingLevel | undefined 
 }
 
 export default function thinkingExtension(pi: ExtensionAPI) {
-  // The level to restore once the escalated turn settles, captured the first time a
-  // turn escalates so back-to-back keywords in one turn still restore the original.
-  // Cleared on agent_settled, the run's true end past any retry/compaction/Stop
-  // continuation, the same clearing point commands.ts uses for its model override.
-  let pendingRestore: ThinkingLevel | undefined
-  // The level this extension last escalated to. The restore is conditional on the level
-  // still being this target at settle: commands.ts also restores an `effort:` override
-  // on agent_settled, so both fire on the same event. Keying the restore on the target
-  // makes the outcome order-independent: if a command's restore (or a manual change)
-  // already moved the level, thinking stands down instead of clobbering it.
-  let pendingTarget: ThinkingLevel | undefined
+  // A per-turn escalation: the level to restore, captured the first time a turn escalates
+  // so back-to-back keywords still restore the original, and the target this extension
+  // moved to. The restore is conditional on the level still being that target at settle:
+  // commands.ts also restores an `effort:` override on agent_settled, so both fire on the
+  // same event. Keying the restore on the target makes the outcome order-independent: if a
+  // command's restore (or a manual change) already moved the level, thinking stands down
+  // instead of clobbering it. The capture clears on agent_settled, the run's true end past
+  // any retry/compaction/Stop continuation, the same clearing point commands.ts uses.
+  const override = createTurnOverride<ThinkingLevel>({
+    set: (level) => pi.setThinkingLevel?.(level),
+    get: () => pi.getThinkingLevel?.(),
+    conditional: true,
+  })
 
   pi.on('session_start', () => {
     // One extension instance serves every session. A mid-turn /new fires session_start on
     // the same instance while an escalation is still pending (its agent_settled never came),
     // and that stale restore must be dropped rather than fired into the next session, whose
     // level the new session owns. Drop only: do NOT setThinkingLevel here.
-    pendingRestore = undefined
-    pendingTarget = undefined
+    override.reset()
   })
 
   pi.on('input', (event, ctx) => {
@@ -65,35 +67,27 @@ export default function thinkingExtension(pi: ExtensionAPI) {
     // signal that the prior prompt is gone: if this extension still owns the level (it is
     // exactly our escalation target), restore before handling this input. In the normal
     // path a settle already cleared pending, so this fires only for the blocked case.
-    if (pendingRestore !== undefined && (pi.getThinkingLevel?.() ?? ctx.thinkingLevel) === pendingTarget) {
-      pi.setThinkingLevel?.(pendingRestore)
-      pendingRestore = undefined
-      pendingTarget = undefined
+    const armedPrior = override.prior
+    if (armedPrior !== undefined && (pi.getThinkingLevel?.() ?? ctx.thinkingLevel) === override.target) {
+      pi.setThinkingLevel?.(armedPrior)
+      override.reset()
     }
     const target = requestedThinkingLevel(event.text)
     if (!target) return
     const current = pi.getThinkingLevel?.() ?? ctx.thinkingLevel ?? 'off'
     // A keyword only raises reasoning: leave a level already at or above the target.
     if (thinkingRank(current) >= thinkingRank(target)) return
-    pendingRestore = pendingRestore ?? current
-    pendingTarget = target
+    override.arm(current, target)
     pi.setThinkingLevel?.(target)
     // Return nothing so the input is neither consumed nor transformed: Claude keeps
     // the keyword in the prompt.
   })
 
   pi.on('agent_settled', () => {
-    if (pendingRestore === undefined) return
-    const restore = pendingRestore
-    const target = pendingTarget
-    pendingRestore = undefined
-    pendingTarget = undefined
-    // Restore only if nothing else moved the level since this extension set it. If a
-    // command's effort restore or the user's manual change already took over (current
-    // no longer equals our target), leave that value in place and stand down. When the
-    // level cannot be read, restore unconditionally, the prior best-effort behavior.
-    const current = pi.getThinkingLevel?.()
-    if (current !== undefined && current !== target) return
-    pi.setThinkingLevel?.(restore)
+    // Restore the pre-escalation level, but only if nothing else moved it since (a
+    // command's effort restore, a manual change): the conditional override stands down in
+    // that case and restores unconditionally when the level cannot be read, the prior
+    // best-effort behavior.
+    override.settle()
   })
 }

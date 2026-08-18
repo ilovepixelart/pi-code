@@ -201,7 +201,7 @@ export function extractTodoItems(message: string): TodoItem[] {
   return items
 }
 
-export function extractDoneSteps(message: string): number[] {
+function extractDoneSteps(message: string): number[] {
   const steps: number[] = []
   for (const match of message.matchAll(/\[DONE:(\d+)\]/gi)) {
     const step = Number(match[1])

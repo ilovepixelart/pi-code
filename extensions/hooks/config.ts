@@ -6,10 +6,9 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { claudeConfigDir } from '../internal/config-dir.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { type InstalledPlugin, substitutePluginVars } from '../internal/plugins.js'
-import { findNearestFile } from '../internal/project-root.js'
+import { claudeSettingsChain } from '../internal/settings-chain.js'
 
 export interface HookCommand {
   type?: string
@@ -46,12 +45,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
  * the nearest of its name at or above cwd (bounded at the repository root, matching
  * the approval walk), so a subdirectory session reads the settings that gated it. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
-  const files = [path.join(claudeConfigDir(home), 'settings.json')]
-  if (!trusted) return files
-  for (const name of ['settings.json', 'settings.local.json']) {
-    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-  }
-  return files
+  return claudeSettingsChain(cwd, home, trusted)
 }
 
 /** Claude's `disableAllHooks` setting: the escape hatch a user reaches for when a

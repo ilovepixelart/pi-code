@@ -75,6 +75,8 @@ import { managedSettingsPath, readManagedSettings } from './internal/managed-set
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
+import { statToken } from './internal/stat-token.js'
 import { fenceMarker, stripBlockComments } from './internal/strip-comments.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
@@ -93,7 +95,7 @@ function isUnder(target: string, roots: string[]): boolean {
 }
 
 /** Realpath the roots that exist; used both to seed and to bound the import search. */
-export function realRoots(candidates: string[]): string[] {
+function realRoots(candidates: string[]): string[] {
   const roots: string[] = []
   for (const candidate of candidates) {
     try {
@@ -249,7 +251,7 @@ export function rootsForImporter(importer: string, home: string, cwd: string): s
 }
 
 /** Claude's env gate for loading memory files from --add-dir directories. */
-export const ADDITIONAL_DIRS_ENV = 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'
+const ADDITIONAL_DIRS_ENV = 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD'
 
 /** Whether the env gate is on. Claude documents `=1`; any value that is not
  * empty/0/false/no counts, so `=true` behaves as a user would expect. */
@@ -319,7 +321,7 @@ export function managedClaudeMdPath(): string {
 }
 
 /** The managed CLAUDE.md file body, or '' when absent or unreadable. */
-export function readManagedClaudeMdFile(): string {
+function readManagedClaudeMdFile(): string {
   try {
     return fs.readFileSync(managedClaudeMdPath(), 'utf-8')
   } catch {
@@ -375,12 +377,7 @@ function withTopBlock(prompt: string, block: string): string {
  * settings.local.json (nearest at or above cwd) only when the project is
  * approved. Managed settings are read separately by the caller. */
 export function claudeMdExcludeFiles(cwd: string, home: string, approved: boolean): string[] {
-  const files = [path.join(claudeConfigDir(home), 'settings.json')]
-  if (!approved) return files
-  for (const name of ['settings.json', 'settings.local.json']) {
-    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-  }
-  return files
+  return claudeSettingsChain(cwd, home, approved)
 }
 
 /** Merged `claudeMdExcludes` globs across the settings chain plus managed
@@ -641,11 +638,6 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
         tokens: Array<[string, string]>
       }
     | undefined
-  // mtime plus size, so a same-mtime rewrite of a different length still invalidates.
-  const statToken = (file: string): string => {
-    const stat = fs.statSync(file)
-    return `${stat.mtimeMs}:${stat.size}`
-  }
   const memoIsFresh = (memo: NonNullable<typeof importMemo>): boolean => {
     try {
       return memo.tokens.every(([file, token]) => statToken(file) === token)

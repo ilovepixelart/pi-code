@@ -51,7 +51,9 @@ import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { findNearestDir, findNearestFile, repoRoot } from './internal/project-root.js'
+import { findNearestDir, repoRoot } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
+import { createTurnOverride } from './internal/turn-override.js'
 
 type PathRuleTool = 'read' | 'edit' | 'write'
 
@@ -136,7 +138,7 @@ export function collectCommands(dirs: string[]): DiscoveredCommand[] {
 
 /** A plugin's command files, namespaced `plugin:name` as Claude registers them.
  * The manifest may point `commands` somewhere else; the default is `commands/`. */
-export function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] {
+function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] {
   const found: DiscoveredCommand[] = []
   for (const plugin of plugins) {
     const declared = plugin.manifest.commands
@@ -166,12 +168,7 @@ type CommandPlugin = NonNullable<DiscoveredCommand['plugin']>
  */
 export function shellExecutionDisabled(cwd: string, home: string, trusted: boolean): boolean {
   if (readManagedSettings().disableSkillShellExecution === true) return true
-  const files = [path.join(claudeConfigDir(home), 'settings.json')]
-  if (trusted) {
-    for (const name of ['settings.json', 'settings.local.json']) {
-      files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-    }
-  }
+  const files = claudeSettingsChain(cwd, home, trusted)
   return files.some((file) => {
     try {
       return (JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>).disableSkillShellExecution === true
@@ -307,10 +304,21 @@ export default function commandsExtension(pi: ExtensionAPI) {
   let pendingBashRules: string[] | undefined
   /** Read/Edit path scopes enforced the same way, per pi file tool. */
   let pendingPathRules: Partial<Record<PathRuleTool, string[]>> | undefined
-  /** The session model to restore after a command's `model:` override drove its run. */
-  let pendingModelRestore: ModelLike | undefined
-  /** The thinking level to restore after a command's `effort:` override drove its run. */
-  let pendingEffortRestore: string | undefined
+  /** The session model to restore after a command's `model:` override drove its run,
+   * captured once per turn so a second command restores the original session model. */
+  const modelOverride = createTurnOverride<ModelLike>({
+    // setModel can reject (e.g. auth resolution fails), and a floated rejection would
+    // escape as unhandled; surface it as a no-op instead of leaving the session silently
+    // on the command's override model.
+    set: (model) => {
+      void pi.setModel(model as Parameters<typeof pi.setModel>[0]).catch(() => {})
+    },
+  })
+  /** The thinking level to restore after a command's `effort:` override drove its run,
+   * captured once per turn the same way. */
+  const effortOverride = createTurnOverride<string>({
+    set: (level) => pi.setThinkingLevel(level as Parameters<typeof pi.setThinkingLevel>[0]),
+  })
 
   // Claude's contract is "the grant clears when you send your next message", and
   // pi's turn_end fires after every assistant step: restoring there stripped a
@@ -323,19 +331,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
   pi.on('agent_settled', async () => {
     pendingBashRules = undefined
     pendingPathRules = undefined
-    if (pendingModelRestore) {
-      const restore = pendingModelRestore as Parameters<typeof pi.setModel>[0]
-      pendingModelRestore = undefined
-      // setModel can reject (e.g. auth resolution fails), and a floated rejection would
-      // escape as unhandled; surface it instead of leaving the session silently on the
-      // command's override model.
-      void pi.setModel(restore).catch(() => {})
-    }
-    if (pendingEffortRestore) {
-      const level = pendingEffortRestore as Parameters<typeof pi.setThinkingLevel>[0]
-      pendingEffortRestore = undefined
-      pi.setThinkingLevel(level)
-    }
+    modelOverride.settle()
+    effortOverride.settle()
     if (pendingRestore) {
       pi.setActiveTools(pendingRestore)
       pendingRestore = undefined
@@ -412,7 +409,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
   async function applyModelOverride(parsed: ParsedCommand, varCtx: VarContext): Promise<void> {
     const target = resolveCommandModel(parsed.model, varCtx.modelRegistry?.getAvailable() ?? [])
     if (target && varCtx.model && target.id !== varCtx.model.id) {
-      pendingModelRestore = pendingModelRestore ?? varCtx.model
+      modelOverride.arm(varCtx.model)
       await pi.setModel(target as Parameters<typeof pi.setModel>[0])
     }
   }
@@ -421,11 +418,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
    * the session level resumes; restore happens on agent_settled like the model restore.
    * Applied before sendUserMessage so the run it drives happens at the new level. Only the
    * first override in a turn records the restore target, so a second command restores to
-   * the original session level rather than the first command's override (as pendingModelRestore). */
+   * the original session level rather than the first command's override (as the model override). */
   function applyEffortOverride(parsed: ParsedCommand, varCtx: VarContext): void {
     const target = parsed.effort
     if (target && varCtx.thinkingLevel && target !== varCtx.thinkingLevel) {
-      pendingEffortRestore = pendingEffortRestore ?? varCtx.thinkingLevel
+      effortOverride.arm(varCtx.thinkingLevel)
       pi.setThinkingLevel(target as Parameters<typeof pi.setThinkingLevel>[0])
     }
   }
@@ -474,8 +471,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
     pendingRestore = undefined
     pendingBashRules = undefined
     pendingPathRules = undefined
-    pendingModelRestore = undefined
-    pendingEffortRestore = undefined
+    modelOverride.reset()
+    effortOverride.reset()
     const trusted = await isProjectApproved(ctx)
     projectApproved = trusted
     // A resume/fork/new session can switch projects in-process. pi cannot unregister a

@@ -19,7 +19,7 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from '
  * Shorter input comes back whole and a negative budget yields nothing, so callers
  * need no length check of their own.
  */
-export function sliceBytes(text: string, maxBytes: number): string {
+function sliceBytes(text: string, maxBytes: number): string {
   return Buffer.from(text, 'utf-8').subarray(0, Math.max(0, maxBytes)).toString('utf-8')
 }
 

@@ -107,7 +107,7 @@ export function normalizeToolName(name: string): string {
  * Scanned rather than matched with a regex: the pattern form is quadratic on an input
  * of unclosed parens, and a command file comes from the repository.
  */
-export function toolEntries(raw: string): string[] {
+function toolEntries(raw: string): string[] {
   const entries: string[] = []
   let current = ''
   let depth = 0
