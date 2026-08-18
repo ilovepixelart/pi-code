@@ -2035,4 +2035,27 @@ describe('managed-mcp.json exclusive control', () => {
     expect(lines.some((l) => l.startsWith('managed: connected'))).toBe(true)
     expect(hoisted.transports.map((t) => t.options.command)).toEqual(['u', 'm'])
   })
+
+  it('gives up on a hung eviction close after the timeout instead of stalling session start', async () => {
+    // The evicted user client's close() hangs. Without a per-close deadline the eviction
+    // loop would await it forever and the managed servers would never connect, so the new
+    // session start must proceed once the close budget elapses, exactly like shutdown.
+    hoisted.control.close = async (client) => {
+      if (client.transport?.options.command === 'u') return new Promise<void>(() => {})
+    }
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { fromUser: { command: 'u' } } })
+
+    withoutManagedMcp()
+    await harness.sessionStart(true)
+
+    withManagedMcp({ mcpServers: { managed: { command: 'm' } } })
+    vi.useFakeTimers()
+    const starting = harness.sessionStart(true)
+    await vi.advanceTimersByTimeAsync(3000)
+
+    await expect(starting).resolves.toBeUndefined()
+    // The managed server still connected despite the hung eviction close.
+    expect(hoisted.transports.map((t) => t.options.command)).toEqual(['u', 'm'])
+  })
 })

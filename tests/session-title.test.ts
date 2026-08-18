@@ -29,16 +29,26 @@ function setup(initialName?: string) {
     getSessionName: () => name,
   } as any)
 
-  const makeCtx = (branch: any[], opts: { model?: unknown; setTitle?: boolean } = {}) => ({
-    model: 'model' in opts ? opts.model : {},
-    hasUI: true,
-    mode: 'tui' as const,
-    sessionManager: { getBranch: () => branch },
-    ui: opts.setTitle === false ? {} : { setTitle: (t: string) => setTitles.push(t) },
-  })
+  const makeCtx = (branch: any[], opts: { model?: unknown; setTitle?: boolean; throwUi?: boolean } = {}) => {
+    const base = {
+      model: 'model' in opts ? opts.model : {},
+      hasUI: true,
+      mode: 'tui' as const,
+      sessionManager: { getBranch: () => branch },
+    }
+    // A ctx whose ui getter throws models a session disposed while a title call was in flight.
+    if (opts.throwUi) {
+      return Object.defineProperty(base, 'ui', {
+        get: () => {
+          throw new Error('session disposed')
+        },
+      })
+    }
+    return { ...base, ui: opts.setTitle === false ? {} : { setTitle: (t: string) => setTitles.push(t) } }
+  }
 
   return {
-    settle: (branch: any[], opts?: { model?: unknown; setTitle?: boolean }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, opts)),
+    settle: (branch: any[], opts?: { model?: unknown; setTitle?: boolean; throwUi?: boolean }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, opts)),
     start: (reason = 'new') => handlers.get('session_start')?.({ type: 'session_start', reason }, makeCtx([])),
     namesSet,
     setTitles,
@@ -144,6 +154,35 @@ describe('session auto-titling', () => {
     await t.start('new')
     await t.settle([userEntry('brand new session message')])
     expect(t.namesSet).toEqual(['Recovered Title'])
+  })
+
+  it('drops a stale title when a new session starts during the model call', async () => {
+    const t = setup()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    setCompleteBackend(async () => {
+      await gate
+      return assistantMsg('Stale Title')
+    })
+    // Start titling the first session, then a /new mid-call resets state to a fresh,
+    // different session (a new generation) before the completion resolves.
+    const settling = t.settle([userEntry('do the first thing')])
+    await t.start('new')
+    release()
+    await settling
+    // The late title belonged to the prior session; it must not rename the new one.
+    expect(t.namesSet).toEqual([])
+    expect(t.setTitles).toEqual([])
+  })
+
+  it('does not reject when the ctx is disposed after the model call resolves', async () => {
+    const t = setup()
+    setCompleteBackend(async () => assistantMsg('Some Title'))
+    // A ctx whose ui getter throws post-await models a session disposed while the call
+    // was in flight; an escaping rejection from this un-awaited settle can exit pi.
+    await expect(t.settle([userEntry('do a thing')], { throwUi: true })).resolves.toBeUndefined()
   })
 })
 

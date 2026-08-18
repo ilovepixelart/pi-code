@@ -133,6 +133,22 @@ describe('thinking extension', () => {
     expect(t.level()).toBe('low')
   })
 
+  it('restores a blocked escalation on the next input, without waiting for a settle', () => {
+    // A hook can block the prompt that escalated: no turn runs, so no agent_settled ever
+    // fires to restore the level. The next input is the signal the prior prompt is gone;
+    // if this extension still owns the level, it must restore before handling that input.
+    const t = wire('low')
+    t.input('please ultrathink') // low -> max
+    expect(t.level()).toBe('max')
+    // No settle (the prompt was blocked). A second input with no keyword arrives.
+    t.input('never mind, just do it')
+    expect(t.level()).toBe('low') // restored before evaluating the new input
+    // A late settle must not re-apply anything: the restore already cleared the pending.
+    t.setThinkingLevel.mockClear()
+    t.settle()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+  })
+
   it('reads the prior level from ctx.thinkingLevel when getThinkingLevel is absent', () => {
     const handlers = new Map<string, Handler>()
     const setThinkingLevel = vi.fn()

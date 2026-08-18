@@ -11,19 +11,24 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => hoisted.home || actual.homedir() }
 })
 
-// Records every readFileSync path, so the index-cache test can count index reads.
-// The builtin namespace is not spyable either, so the module is wrapped like os.
-const fsHoisted = vi.hoisted(() => ({ reads: [] as string[] }))
+// Records every readFileSync path (so the index-cache test can count index reads) and
+// every renameSync (so the atomic-write tests can assert a temp file was renamed onto
+// the target). The builtin namespace is not spyable either, so the module is wrapped like os.
+const fsHoisted = vi.hoisted(() => ({ reads: [] as string[], renames: [] as Array<[string, string]> }))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
     fsHoisted.reads.push(String(args[0]))
     return actual.readFileSync(...args)
   }) as typeof actual.readFileSync
-  return { ...actual, readFileSync }
+  const renameSync = ((...args: Parameters<typeof actual.renameSync>) => {
+    fsHoisted.renames.push([String(args[0]), String(args[1])])
+    return actual.renameSync(...args)
+  }) as typeof actual.renameSync
+  return { ...actual, readFileSync, renameSync }
 })
 
-import memoryExtension, { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, indexWouldOverflow, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, resolveMemoryDir, slugifyName, stampModified, stripNonLoaded, upsertIndexLine } from '../extensions/memory.ts'
+import memoryExtension, { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, indexWouldOverflow, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, resolveMemoryDir, setAutoMemoryEnabledSetting, slugifyName, stampModified, stripNonLoaded, upsertIndexLine } from '../extensions/memory.ts'
 
 describe('memory helpers', () => {
   it('slugs project paths into directory names', () => {
@@ -199,6 +204,36 @@ describe('indexWouldOverflow', () => {
     // A huge comment blows the raw byte budget but is stripped before the index loads.
     const commented = `# Memory index\n<!-- ${'y'.repeat(INDEX_MAX_BYTES)} -->\n- [a](a.md): first\n`
     expect(indexWouldOverflow(commented, 'b', 'second')).toBe(false)
+  })
+})
+
+describe('setAutoMemoryEnabledSetting', () => {
+  it('writes the user settings atomically via a temp file, preserving other keys', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mem-atomic-'))
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR
+    delete process.env.CLAUDE_CONFIG_DIR
+    try {
+      const file = join(home, '.claude', 'settings.json')
+      mkdirSync(join(home, '.claude'), { recursive: true })
+      writeFileSync(file, JSON.stringify({ theme: 'dark' }))
+      fsHoisted.renames.length = 0
+
+      const result = setAutoMemoryEnabledSetting(home, false)
+      expect(result).toEqual({ ok: true })
+
+      // The final content is correct and unrelated keys survive.
+      const parsed = JSON.parse(readFileSync(file, 'utf-8'))
+      expect(parsed.autoMemoryEnabled).toBe(false)
+      expect(parsed.theme).toBe('dark')
+
+      // Like writeIndex, the write lands through a temp file renamed onto the target, so a
+      // crash mid-write cannot truncate the user's hooks/env/permissions config.
+      expect(fsHoisted.renames.some(([from, to]) => to === file && from.includes('.tmp'))).toBe(true)
+    } finally {
+      if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = savedConfigDir
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 

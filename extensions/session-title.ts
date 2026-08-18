@@ -92,9 +92,14 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
   // One title per session, reset when a new session takes over so a resumed or forked
   // session can still earn its own name.
   let titled = false
+  // Bumped on every session_start. Captured before the model call so a title that resolves
+  // after a /new (which resets state to a different session) is recognized as stale and
+  // dropped, rather than renaming whoever holds the session slot now.
+  let generation = 0
 
   pi.on('session_start', () => {
     titled = false
+    generation++
   })
 
   pi.on('agent_settled', async (_event, ctx) => {
@@ -109,6 +114,7 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
     // Claim the single attempt before the await, so overlapping or repeated settles cannot
     // each fire a model call; a failed attempt below is not retried within this session.
     titled = true
+    const startedGeneration = generation
     let title: string
     try {
       const { text } = await completeText(model, `First user message of a new coding session:\n\n${prompt.slice(0, MAX_PROMPT_CHARS)}`, {
@@ -120,7 +126,16 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
       return // no model, provider error: leave the session untitled (best-effort)
     }
     if (!title) return
-    pi.setSessionName(title)
-    ctx.ui.setTitle?.(title)
+    // A /new during the await moved us to a different session, or a name has since been set;
+    // applying this title now would rename the wrong session, so drop it.
+    if (generation !== startedGeneration || pi.getSessionName?.()) return
+    // Post-await ctx getters throw once the session is disposed, and an escaping rejection
+    // from this un-awaited settle can exit pi; apply the title best-effort.
+    try {
+      pi.setSessionName(title)
+      ctx.ui.setTitle?.(title)
+    } catch {
+      // disposed session or a setter failure: leave the session untitled.
+    }
   })
 }
