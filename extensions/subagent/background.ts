@@ -1,8 +1,9 @@
 /**
  * Background subagent runs: fire-and-forget children whose completion wakes
  * the parent agent via a notification message. State lives in an in-memory
- * registry queried via {status: true}; it is lost on restart, and a child
- * still running when pi exits finishes on its own rather than being killed.
+ * registry queried via {status: true}; it is lost on restart. A child still
+ * running when pi quits is SIGTERMed (cancelAllBackgroundRuns); one still running
+ * across a same-process session switch keeps going under the new session.
  */
 
 import { spawn } from 'node:child_process'
@@ -139,6 +140,18 @@ export function cancelBackgroundRun(id: string): 'cancelled' | 'not-running' | '
   run.kill()
   run.kill = undefined
   return 'cancelled'
+}
+
+/** SIGTERM every live background child, killing each process group the way a single
+ * cancel does. Called on quit: a detached child would otherwise keep running (and
+ * spending tokens) after pi exits, its completion swallowed. Returns how many were
+ * signalled; each cancelled child still holds its slot until it actually dies. */
+export function cancelAllBackgroundRuns(): number {
+  let count = 0
+  for (const id of [...runs.keys()]) {
+    if (cancelBackgroundRun(id) === 'cancelled') count++
+  }
+  return count
 }
 
 export function backgroundStatusText(): string {

@@ -943,6 +943,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // Original server/tool names per registered pi name, for Claude-style hook matchers.
   const aliases: McpToolAlias[] = []
 
+  /** How many tools a server actually has registered. Counted from `registered` (the
+   * durable owner map) rather than registerTools' return, so a reconnect on a second
+   * session, where every tool is already registered and registerTools adds 0, still
+   * reports the true count in /mcp and the startup banner instead of zero. */
+  const serverToolCount = (name: string): number => [...registered.values()].filter((owner) => owner === name).length
+
   /** Register every not-yet-registered tool of a server; returns how many were added. */
   function registerTools(name: string, config: ServerConfig, tools: McpToolInfo[]): number {
     let count = 0
@@ -1154,7 +1160,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           const added = registerTools(name, config, refreshed)
           if (added === 0) return
           const current = status.get(name)
-          status.set(name, { state: current?.state ?? 'connected', tools: (current?.tools ?? 0) + added })
+          status.set(name, { state: current?.state ?? 'connected', tools: serverToolCount(name) })
           pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
         } catch (error) {
           console.warn(`pi-code-mcp: tool refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
@@ -1187,7 +1193,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           const client = await connect(name, config, authUi)
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
-          const count = registerTools(name, config, tools)
+          registerTools(name, config, tools)
           subscribeToToolChanges(name, config, client)
           // Prompts and resources are additive surfaces: their failures warn (inside
           // connectPrompts) rather than flipping a tool-serving server to failed.
@@ -1195,7 +1201,10 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           subscribeToPromptChanges(name, client)
           ensureResourceTools()
           subscribeToResourceChanges(client)
-          status.set(name, { state: 'connected', tools: count })
+          // Count from `registered`, not registerTools' return: a reconnect re-lists tools
+          // that are already registered (return 0) but still serves them, so the banner
+          // must reflect the true count.
+          status.set(name, { state: 'connected', tools: serverToolCount(name) })
           // A server that dies mid-session would otherwise stay "connected" in /mcp
           // while every call fails with the SDK's bare "Not connected"; flip the
           // status and free the name so a later session start can reconnect it.
@@ -1291,6 +1300,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    // Reset the status map so /mcp and the banner reflect only this session's config: a
+    // server present last session but not this one must not linger as "connected". The
+    // registered tools, aliases, and prompt commands stay: pi has no unregister (a
+    // withdrawn tool keeps its registration and surfaces the server's own error), which
+    // is why serverToolCount reads from `registered` to recover the true count here.
+    status.clear()
     const authUi = authUiFor(ctx)
     // The managed allow/deny lists filter every scope, including a managed-mcp.json set.
     const { allowed, denied } = mcpAllowDeny()
@@ -1320,6 +1335,13 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     // Close in parallel with a per-client timeout so one hung server can't stall pi's exit.
     await Promise.all([...clients.values()].map((client) => withTimeout(client.close(), 3000, 'close').catch(() => {})))
+    // Drop the closed clients and their status now rather than waiting on each client's
+    // onclose, which the SDK fires late: a same-process session switch (/new, /resume,
+    // /fork) runs the next session_start right after this, and a lingering dead client
+    // there would make connectServers skip reconnecting the name, stranding every tool
+    // closure on a closed client. session_start resets status too, so a switch rebuilds it.
+    clients.clear()
+    status.clear()
   })
 
   pi.registerCommand('mcp', {

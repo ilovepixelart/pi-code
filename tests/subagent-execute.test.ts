@@ -21,6 +21,7 @@ const discoverAgentsMock = vi.hoisted(() => vi.fn())
 const startBackgroundRunMock = vi.hoisted(() => vi.fn((_agent: string, _task: string, _invocation: { command: string; args: string[]; cwd: string }, _onComplete: (run: unknown) => void): string | null => 'bg-deadbeef'))
 const backgroundStatusTextMock = vi.hoisted(() => vi.fn(() => 'No background runs in this session.'))
 const cancelBackgroundRunMock = vi.hoisted(() => vi.fn())
+const cancelAllBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 const resumeBackgroundRunMock = vi.hoisted(() => vi.fn())
 const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 const backgroundRunMock = vi.hoisted(() => vi.fn())
@@ -33,6 +34,7 @@ vi.mock('../extensions/subagent/agents.js', async (importOriginal) => ({
 vi.mock('../extensions/subagent/background.js', () => ({
   backgroundStatusText: backgroundStatusTextMock,
   cancelBackgroundRun: cancelBackgroundRunMock,
+  cancelAllBackgroundRuns: cancelAllBackgroundRunsMock,
   resumeBackgroundRun: resumeBackgroundRunMock,
   startBackgroundRun: startBackgroundRunMock,
   activeBackgroundRuns: activeBackgroundRunsMock,
@@ -224,6 +226,8 @@ beforeEach(() => {
   startBackgroundRunMock.mockReturnValue('bg-deadbeef')
   backgroundStatusTextMock.mockClear()
   cancelBackgroundRunMock.mockReset()
+  cancelAllBackgroundRunsMock.mockClear()
+  cancelAllBackgroundRunsMock.mockReturnValue(0)
   resumeBackgroundRunMock.mockReset()
   activeBackgroundRunsMock.mockReturnValue(0)
   backgroundRunMock.mockReset()
@@ -970,6 +974,45 @@ describe('agentsListText', () => {
     expect(out).toContain('user:')
     expect(out).not.toContain('builtin:')
     expect(out).not.toContain('project:')
+  })
+})
+
+describe('session_shutdown background runs', () => {
+  const shutdown = (reason: string, ctx: unknown) => eventHandlers.get('session_shutdown')?.({ reason }, ctx)
+
+  it('SIGTERMs every live background run on quit without warning', async () => {
+    activeBackgroundRunsMock.mockReturnValue(2)
+
+    await shutdown('quit', commandCtx())
+
+    expect(cancelAllBackgroundRunsMock).toHaveBeenCalledTimes(1)
+    expect(notifyMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['new', 'resume', 'fork'])('warns about still-active runs on a %s switch without killing them', async (reason) => {
+    activeBackgroundRunsMock.mockReturnValue(3)
+
+    await shutdown(reason, commandCtx())
+
+    expect(cancelAllBackgroundRunsMock).not.toHaveBeenCalled()
+    expect(notifyMock).toHaveBeenCalledWith('3 background runs still active; /tasks to inspect', 'warning')
+  })
+
+  it('warns in the singular for a single active run', async () => {
+    activeBackgroundRunsMock.mockReturnValue(1)
+
+    await shutdown('resume', commandCtx())
+
+    expect(notifyMock).toHaveBeenCalledWith('1 background run still active; /tasks to inspect', 'warning')
+  })
+
+  it('stays silent on a switch when no runs are active', async () => {
+    activeBackgroundRunsMock.mockReturnValue(0)
+
+    await shutdown('new', commandCtx())
+
+    expect(cancelAllBackgroundRunsMock).not.toHaveBeenCalled()
+    expect(notifyMock).not.toHaveBeenCalled()
   })
 })
 
