@@ -241,7 +241,10 @@ if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusl
 # (which proved unreliable in both directions as the prompt and thinking level varied).
 if wait_file "$WIRE" 20 && grep -q 'ZANZIBAR' "$WIRE"; then ok "context-imports: @import content on the wire"; else bad "context-imports: import missing from payload"; fi
 if grep -q 'PERSONAL LOCAL NOTE MARKER' "$WIRE" 2>/dev/null; then ok "context-imports: CLAUDE.local.md on the wire"; else bad "context-imports: local marker missing from payload"; fi
-if grep -q 'testing.md' "$WIRE" 2>/dev/null; then ok "rules: project rule pointer on the wire"; else bad "rules: pointer missing from payload"; fi
+# The fixture rule (.claude/rules/testing.md) carries no `paths:` frontmatter, so claude-rules
+# inlines its body into the system prompt rather than surfacing a scoped pointer. Assert the
+# injected body on the wire, like the two import checks above; the filename never rides along.
+if grep -q 'Tests must be deterministic' "$WIRE" 2>/dev/null; then ok "rules: project rule on the wire"; else bad "rules: project rule missing from payload"; fi
 
 type_prompt "Call the e2e_ping tool now and repeat its output verbatim."
 if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "mcp: no E2EPONG"; fi
