@@ -67,7 +67,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from '@earendil-works/pi-coding-agent'
 import { runAgent } from './internal/agent-run.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from './internal/instruction-events.js'
@@ -859,12 +859,10 @@ function postToolFeedback(result: HookRunResult, eventName: string, isError: boo
   return lines
 }
 
-/** A blocked tool_call verdict carrying pi 0.84.1's `terminate` flag (#7715): with it set on
+/** A blocked tool_call verdict carrying pi's `terminate` flag (#7715): with it set on
  * an all-terminating tool batch, pi skips the automatic follow-up model call that a plain
- * block would otherwise pay for. `terminate` is not on the installed 0.84.0
- * ToolCallEventResult type, so it is attached through this superset shape (rather than a cast
- * that would drop it at runtime); the wave's dep bump to ^0.84.2 lands the real declaration. */
-function blockedToolCall(reason: string | undefined): { block: true; reason?: string; terminate: true } {
+ * block would otherwise pay for. */
+function blockedToolCall(reason: string | undefined): ToolCallEventResult {
   return { block: true, reason, terminate: true }
 }
 
