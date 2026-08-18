@@ -17,7 +17,9 @@ import { Type } from 'typebox'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
-import { findNearestFile, repoRoot } from './internal/project-root.js'
+import { repoRoot } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
+import { statToken } from './internal/stat-token.js'
 
 export const INDEX_FILE = 'MEMORY.md'
 
@@ -148,7 +150,7 @@ type MemoryToolResult = { content: Array<{ type: 'text'; text: string }>; detail
  * also on the memory file: a second nested queue self-deadlocks when a memory name
  * canonicalizes to the same key as the index (e.g. `memory.md` and `MEMORY.md` under a
  * case-insensitive filesystem, since the queue keys on realpath). */
-export async function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): Promise<MemoryToolResult> {
+async function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): Promise<MemoryToolResult> {
   if (!name || !description || !content) {
     return { content: [{ type: 'text', text: 'save requires name, description, and content.' }], details: {} }
   }
@@ -289,12 +291,7 @@ function writeIndex(indexPath: string, content: string): void {
  * approved, since a project's `autoMemoryDirectory` is honored under the same trust
  * rule as hooks in settings files. Later files win. */
 export function memorySettingsFiles(cwd: string, home: string, approved: boolean): string[] {
-  const files = [path.join(claudeConfigDir(home), 'settings.json')]
-  if (!approved) return files
-  for (const name of ['settings.json', 'settings.local.json']) {
-    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-  }
-  return files
+  return claudeSettingsChain(cwd, home, approved)
 }
 
 /** Merge the two memory settings across the chain, later files winning per key. */
@@ -361,8 +358,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   const indexStatToken = (): string => {
     try {
-      const stat = fs.statSync(path.join(dir, INDEX_FILE))
-      return `${stat.mtimeMs}:${stat.size}`
+      return statToken(path.join(dir, INDEX_FILE))
     } catch {
       return 'missing'
     }

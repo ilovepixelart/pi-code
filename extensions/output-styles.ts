@@ -28,6 +28,7 @@ import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { findNearestDir, findNearestFile } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
 
 export interface OutputStyle {
   name: string
@@ -130,12 +131,7 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
 /** Settings files that carry `outputStyle`. Project settings apply only when trusted,
  * each the nearest of its name at or above cwd, as the hooks settings chain reads. */
 export function settingsFiles(cwd: string, home: string, trusted: boolean): string[] {
-  const files = [path.join(claudeConfigDir(home), 'settings.json')]
-  if (!trusted) return files
-  for (const name of ['settings.json', 'settings.local.json']) {
-    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-  }
-  return files
+  return claudeSettingsChain(cwd, home, trusted)
 }
 
 /** The `outputStyle` recorded in settings, last file winning. */

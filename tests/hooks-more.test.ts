@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import contextImports from '../extensions/context-imports.ts'
-import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit } from '../extensions/hooks.ts'
+import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 

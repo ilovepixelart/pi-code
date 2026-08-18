@@ -4,9 +4,9 @@ import { join } from 'node:path'
 
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
-import { hookFiles } from '../extensions/hooks.ts'
+import { hookFiles } from '../extensions/hooks/index.ts'
 import { hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
-import { projectConfigPaths } from '../extensions/mcp.ts'
+import { projectConfigPaths } from '../extensions/mcp/index.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'pa-'))
 

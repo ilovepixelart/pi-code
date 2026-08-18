@@ -58,7 +58,7 @@ export interface QuestionSpec {
 }
 
 /** Normalize either accepted shape into the list of questions to ask. */
-export function questionList(params: Partial<QuestionSpec> & { questions?: QuestionSpec[] }): QuestionSpec[] {
+function questionList(params: Partial<QuestionSpec> & { questions?: QuestionSpec[] }): QuestionSpec[] {
   if (params.questions && params.questions.length > 0) return params.questions
   if (typeof params.question === 'string') return [{ question: params.question, header: shortHeader(params.header), options: params.options ?? [], multiSelect: params.multiSelect }]
   return []
@@ -67,7 +67,7 @@ export function questionList(params: Partial<QuestionSpec> & { questions?: Quest
 /** Claude keeps a header short for the label slot. Truncating is the forgiving read:
  * rejecting the call costs a turn while the model recovers from a validation error,
  * which is a poor trade for a display detail. */
-export const HEADER_MAX = 12
+const HEADER_MAX = 12
 export const shortHeader = (header: string | undefined): string | undefined => (header === undefined ? undefined : header.slice(0, HEADER_MAX))
 
 function checkbox(checked: boolean | undefined): string {

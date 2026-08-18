@@ -278,7 +278,7 @@ function buildAgentMap(userAgents: AgentConfig[], projectAgents: AgentConfig[], 
 export type AgentSource = 'user' | 'project' | 'builtin' | 'plugin'
 
 /** Bundled default agents (Explore, Plan, general-purpose), lowest precedence. */
-export const BUILTIN_AGENTS_DIR = path.join(import.meta.dirname, 'agents')
+const BUILTIN_AGENTS_DIR = path.join(import.meta.dirname, 'agents')
 
 /** Agent directories of every enabled plugin: `agents/` unless the manifest
  * points elsewhere. Plugins are user-installed, so user scope only decides. */

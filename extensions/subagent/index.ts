@@ -33,104 +33,15 @@ import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES,
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
+import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
+
+// Re-exported so the render formatters stay importable from the subagent entry point,
+// where the tests and the tool itself have always reached for them.
+export { formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
 const COLLAPSED_ITEM_COUNT = 10
-
-export function formatTokens(count: number): string {
-  if (count < 1000) return count.toString()
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`
-  if (count < 1000000) return `${Math.round(count / 1000)}k`
-  return `${(count / 1000000).toFixed(1)}M`
-}
-
-export function formatUsageStats(
-  usage: {
-    input: number
-    output: number
-    cacheRead: number
-    cacheWrite: number
-    cost: number
-    contextTokens?: number
-    turns?: number
-  },
-  model?: string,
-): string {
-  const parts: string[] = []
-  if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? 's' : ''}`)
-  if (usage.input) parts.push(`↑${formatTokens(usage.input)}`)
-  if (usage.output) parts.push(`↓${formatTokens(usage.output)}`)
-  if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`)
-  if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`)
-  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`)
-  if (usage.contextTokens && usage.contextTokens > 0) {
-    parts.push(`ctx:${formatTokens(usage.contextTokens)}`)
-  }
-  if (model) parts.push(model)
-  return parts.join(' ')
-}
-
-export function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: Theme['fg']): string {
-  const shortenPath = (p: string) => {
-    const home = os.homedir()
-    return p.startsWith(home) ? `~${p.slice(home.length)}` : p
-  }
-
-  switch (toolName) {
-    case 'bash': {
-      const command = (args.command as string) || '...'
-      const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command
-      return themeFg('muted', '$ ') + themeFg('toolOutput', preview)
-    }
-    case 'read': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      const filePath = shortenPath(rawPath)
-      const offset = args.offset as number | undefined
-      const limit = args.limit as number | undefined
-      let text = themeFg('accent', filePath)
-      if (offset !== undefined || limit !== undefined) {
-        const startLine = offset ?? 1
-        const endLine = limit !== undefined ? startLine + limit - 1 : ''
-        const rangeSuffix = endLine ? `-${endLine}` : ''
-        text += themeFg('warning', `:${startLine}${rangeSuffix}`)
-      }
-      return themeFg('muted', 'read ') + text
-    }
-    case 'write': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      const filePath = shortenPath(rawPath)
-      const content = (args.content || '') as string
-      const lines = content.split('\n').length
-      let text = themeFg('muted', 'write ') + themeFg('accent', filePath)
-      if (lines > 1) text += themeFg('dim', ` (${lines} lines)`)
-      return text
-    }
-    case 'edit': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      return themeFg('muted', 'edit ') + themeFg('accent', shortenPath(rawPath))
-    }
-    case 'ls': {
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'ls ') + themeFg('accent', shortenPath(rawPath))
-    }
-    case 'find': {
-      const pattern = (args.pattern || '*') as string
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'find ') + themeFg('accent', pattern) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
-    }
-    case 'grep': {
-      const pattern = (args.pattern || '') as string
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'grep ') + themeFg('accent', `/${pattern}/`) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
-    }
-    default: {
-      const argsStr = JSON.stringify(args)
-      const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr
-      return themeFg('accent', toolName) + themeFg('dim', ` ${preview}`)
-    }
-  }
-}
 
 interface UsageStats {
   input: number
@@ -161,34 +72,6 @@ interface SubagentDetails {
   agentScope: AgentScope
   projectAgentsDir: string | null
   results: SingleResult[]
-}
-
-export function getFinalOutput(messages: Message[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role === 'assistant') {
-      // The complete text of the last assistant message: a message can carry more than one
-      // text part, and taking only the first diverged from the background parser.
-      const parts = msg.content.filter((part) => part.type === 'text').map((part) => part.text)
-      if (parts.length > 0) return parts.join('\n')
-    }
-  }
-  return ''
-}
-
-type DisplayItem = { type: 'text'; text: string } | { type: 'toolCall'; name: string; args: Record<string, unknown> }
-
-export function getDisplayItems(messages: Message[]): DisplayItem[] {
-  const items: DisplayItem[] = []
-  for (const msg of messages) {
-    if (msg.role === 'assistant') {
-      for (const part of msg.content) {
-        if (part.type === 'text') items.push({ type: 'text', text: part.text })
-        else if (part.type === 'toolCall') items.push({ type: 'toolCall', name: part.name, args: part.arguments })
-      }
-    }
-  }
-  return items
 }
 
 export async function mapWithConcurrencyLimit<TIn, TOut>(items: TIn[], concurrency: number, fn: (item: TIn, index: number) => Promise<TOut>): Promise<TOut[]> {
@@ -724,7 +607,7 @@ export function agentMemorySection(dir: string, memoryMd: string): string {
 /** The memory section for one run, or undefined when the agent declares no memory,
  * auto memory is off, or a repo-scoped store is not approved. Subagent memory is part
  * of auto memory, so the same settings chain and env kill switch gate it. */
-export function agentMemoryPromptSection(agent: Pick<AgentConfig, 'memory' | 'name'>, cwd: string, projectApproved: boolean): string | undefined {
+function agentMemoryPromptSection(agent: Pick<AgentConfig, 'memory' | 'name'>, cwd: string, projectApproved: boolean): string | undefined {
   if (!agent.memory) return undefined
   // project and local stores live under the repository's .claude, a repo-controlled
   // path; like rules, they are only read once the project is approved.
