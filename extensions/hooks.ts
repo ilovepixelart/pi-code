@@ -859,6 +859,15 @@ function postToolFeedback(result: HookRunResult, eventName: string, isError: boo
   return lines
 }
 
+/** A blocked tool_call verdict carrying pi 0.84.1's `terminate` flag (#7715): with it set on
+ * an all-terminating tool batch, pi skips the automatic follow-up model call that a plain
+ * block would otherwise pay for. `terminate` is not on the installed 0.84.0
+ * ToolCallEventResult type, so it is attached through this superset shape (rather than a cast
+ * that would drop it at runtime); the wave's dep bump to ^0.84.2 lands the real declaration. */
+function blockedToolCall(reason: string | undefined): { block: true; reason?: string; terminate: true } {
+  return { block: true, reason, terminate: true }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -951,6 +960,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (event, ctx) => {
     sessionCtx = ctx
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while a Stop-hook continuation streak is in flight; it must not
+    // carry into the next session, so reset before any early return (disableAllHooks below).
+    stopHookActive = false
+    stopHookBlockCount = 0
     const trusted = await isProjectApproved(ctx)
     // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
     // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
@@ -1002,9 +1016,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // With no UI (headless) the block stands, which is the safe default.
     if (decision.ask && ctx.hasUI) {
       const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.')
-      return approved ? undefined : { block: true, reason: decision.reason }
+      return approved ? undefined : blockedToolCall(decision.reason)
     }
-    return { block: true, reason: decision.reason }
+    return blockedToolCall(decision.reason)
   })
 
   // Claude's PostToolUse (success) and PostToolUseFailure (error) both feed their

@@ -46,6 +46,15 @@ export default function thinkingExtension(pi: ExtensionAPI) {
   // already moved the level, thinking stands down instead of clobbering it.
   let pendingTarget: ThinkingLevel | undefined
 
+  pi.on('session_start', () => {
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while an escalation is still pending (its agent_settled never came),
+    // and that stale restore must be dropped rather than fired into the next session, whose
+    // level the new session owns. Drop only: do NOT setThinkingLevel here.
+    pendingRestore = undefined
+    pendingTarget = undefined
+  })
+
   pi.on('input', (event, ctx) => {
     // Only genuine user input escalates. sendUserMessage emits an input event with
     // source 'extension' (a subagent prompt, a command body replayed through it); a

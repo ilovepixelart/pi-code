@@ -232,6 +232,42 @@ describe('shadow-repo checkpoint lifecycle', () => {
 
     expect(t.notifications.some((n) => n.startsWith('[warning] Code restore failed'))).toBe(true)
   })
+
+  it('drops a pending snapshot on session_start so a mid-turn /new does not persist it into the next session', async () => {
+    // One extension instance serves every session. A mid-turn /new fires session_start
+    // after turn_start took the pre-run snapshot but before turn_end saved it; that
+    // pending ref belongs to the previous session and must not attach to the next
+    // session's first turn_end.
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
+
+    await t.handlers.get('session_start')?.({ reason: 'new' }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
+
+    expect(t.appended).toEqual([])
+  })
+
+  it('re-arms the pre-run snapshot on session_start so the next session still checkpoints', async () => {
+    // The prior run left runNeedsSnapshot false after its turn_start. session_start must
+    // re-arm it so the next session's first turn_start snapshots its own tree, even without
+    // an intervening agent_start.
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
+    expect(t.appended).toHaveLength(1)
+
+    await t.handlers.get('session_start')?.({ reason: 'new' }, t.makeCtx([], [], []))
+    const secondPrompt = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'a brand new task' } }
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [secondPrompt], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [secondPrompt], []))
+
+    expect(t.appended).toHaveLength(2)
+    expect(t.appended[1].data.entryId).toBe('user0002')
+  })
 })
 
 describe('pruneCheckpointRepos', () => {
