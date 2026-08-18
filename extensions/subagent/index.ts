@@ -33,11 +33,11 @@ import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES,
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
-import { type DisplayItem, formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
+import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
 
 // Re-exported so the render formatters stay importable from the subagent entry point,
 // where the tests and the tool itself have always reached for them.
-export { formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput }
+export { formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
