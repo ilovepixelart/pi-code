@@ -26,6 +26,11 @@ export function setManagedSettingsPath(file?: string): void {
   managedSettingsFileOverride = file
 }
 
+/** The managed-settings.json path in effect, honoring the test-seam override. */
+export function managedSettingsFile(): string {
+  return managedSettingsFileOverride ?? managedSettingsPath()
+}
+
 /** The parsed managed settings object, or {} when absent or malformed. */
 export function readManagedSettings(file: string = managedSettingsFileOverride ?? managedSettingsPath()): Record<string, unknown> {
   try {

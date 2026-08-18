@@ -21,7 +21,7 @@ import {
   projectServerPolicy,
   promptMessageContent,
   userConfigPaths,
-} from '../extensions/mcp.ts'
+} from '../extensions/mcp/index.ts'
 
 describe('parseHelperHeaders', () => {
   it('keeps string-valued header entries and drops the rest', () => {

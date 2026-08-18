@@ -182,8 +182,8 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   },
 }))
 
-const mcpExtension = (await import('../extensions/mcp.ts')).default
-const { splitByPolicy, expandCwd, resolveBearerToken, mapContent, setManagedSettingsPath } = await import('../extensions/mcp.ts')
+const mcpExtension = (await import('../extensions/mcp/index.ts')).default
+const { splitByPolicy, expandCwd, resolveBearerToken, mapContent, setManagedSettingsPath } = await import('../extensions/mcp/index.ts')
 
 interface RegisteredTool {
   name: string
