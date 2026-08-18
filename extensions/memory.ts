@@ -271,11 +271,17 @@ function readIndexQuietly(dir: string): string {
   }
 }
 
+/** Write through a temp file and rename onto the target, so a crash mid-write cannot
+ * truncate it. The tmp name carries the pid so concurrent processes do not collide. */
+function atomicWriteFile(filePath: string, content: string): void {
+  const tmp = `${filePath}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, content)
+  fs.renameSync(tmp, filePath)
+}
+
 /** Replace the index through a rename so a crash mid-write cannot truncate it. */
 function writeIndex(indexPath: string, content: string): void {
-  const tmp = `${indexPath}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, content)
-  fs.renameSync(tmp, indexPath)
+  atomicWriteFile(indexPath, content)
 }
 
 /** The settings chain that decides `autoMemoryEnabled` and `autoMemoryDirectory`:
@@ -337,7 +343,9 @@ export function setAutoMemoryEnabledSetting(home: string, value: boolean): { ok:
   }
   current.autoMemoryEnabled = value
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(file, `${JSON.stringify(current, null, 2)}\n`)
+  // Atomic like writeIndex: a crash mid-write must not truncate the user's settings, which
+  // also hold their hooks, env and permissions config.
+  atomicWriteFile(file, `${JSON.stringify(current, null, 2)}\n`)
   return { ok: true }
 }
 

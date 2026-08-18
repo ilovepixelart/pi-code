@@ -1186,6 +1186,21 @@ describe('hooks extension notify-style events', () => {
       await ext.agentEnd()
       expect(ext.sent).toHaveLength(8)
     })
+
+    it('does not reset the Stop streak on an extension-sourced input', async () => {
+      const ext = await withHooks({ Stop: [{ hooks: [{ command: 'keep-going' }] }] })
+      script('keep-going', { stderr: ['red'], code: 2 })
+      for (let i = 0; i < 7; i += 1) await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      // An extension-injected message (plan mode, subagent) is not user progress, so the
+      // input handler returns before touching the streak. Without that source guard the
+      // count would reset and the cap could never fire in production: the 8th block still
+      // trips the cap, so nothing more is sent and the warning stands.
+      await ext.input('injected', 'extension')
+      await ext.agentEnd()
+      expect(ext.sent).toHaveLength(7)
+      expect(ext.notes.some((n) => n.level === 'warning' && /cap/i.test(n.msg))).toBe(true)
+    })
   })
 
   it('surfaces a systemMessage from any hook as a user warning', async () => {

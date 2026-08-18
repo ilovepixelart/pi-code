@@ -399,6 +399,45 @@ describe('statusLine rate limits', () => {
     expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 75 } })
   })
 
+  it('clamps an out-of-range utilization down to 100', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '150' } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 100 } })
+  })
+
+  it('clamps a computed utilization up to 0 when remaining exceeds the limit', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 200,
+        headers: { 'anthropic-ratelimit-unified-5h-limit': '1000', 'anthropic-ratelimit-unified-5h-remaining': '1500' },
+      },
+      ctx,
+    )
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 0 } })
+  })
+
   it('omits rate_limits when the response carries no rate-limit headers', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })

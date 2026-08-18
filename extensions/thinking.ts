@@ -51,6 +51,16 @@ export default function thinkingExtension(pi: ExtensionAPI) {
     // source 'extension' (a subagent prompt, a command body replayed through it); a
     // think keyword the user did not type must not escalate, mirroring hooks.ts's guard.
     if (event.source === 'extension') return
+    // A prompt that escalated but was then BLOCKED by a hook runs no turn, so no
+    // agent_settled ever fires to restore the level. The arrival of a new input is the
+    // signal that the prior prompt is gone: if this extension still owns the level (it is
+    // exactly our escalation target), restore before handling this input. In the normal
+    // path a settle already cleared pending, so this fires only for the blocked case.
+    if (pendingRestore !== undefined && (pi.getThinkingLevel?.() ?? ctx.thinkingLevel) === pendingTarget) {
+      pi.setThinkingLevel?.(pendingRestore)
+      pendingRestore = undefined
+      pendingTarget = undefined
+    }
     const target = requestedThinkingLevel(event.text)
     if (!target) return
     const current = pi.getThinkingLevel?.() ?? ctx.thinkingLevel ?? 'off'

@@ -40,6 +40,14 @@ describe('formatContextUsage', () => {
     expect(text).toMatch(/recalculat/i)
     expect(text).toContain('200,000')
   })
+
+  it('clamps Free to zero when usage exceeds the window', () => {
+    const text = formatContextUsage({ tokens: 250000, contextWindow: 200000, percent: null })
+    // window - used would be negative here; Math.max floors Free at zero rather than
+    // rendering a negative remainder.
+    expect(text).toMatch(/Free:\s+0 tokens/)
+    expect(text).not.toMatch(/-\d/)
+  })
 })
 
 describe('context command', () => {
@@ -68,5 +76,21 @@ describe('context command', () => {
     const ctx = { getContextUsage: () => undefined, model: undefined, ui: { notify } }
     await commands.get('context')?.handler('', ctx)
     expect(notify.mock.calls[0][0]).toMatch(/not available yet/i)
+  })
+
+  it('derives the window from the model when usage omits it', async () => {
+    const commands = wire()
+    const notify = vi.fn()
+    const ctx = {
+      getContextUsage: () => ({ tokens: 50000, contextWindow: 0, percent: null }),
+      model: { contextWindow: 200000 },
+      ui: { notify },
+    }
+    await commands.get('context')?.handler('', ctx)
+    const text = notify.mock.calls[0][0]
+    // The handler passes ctx.model.contextWindow as the fallback window, so the breakdown
+    // names that window and the free space derived from it (200,000 - 50,000).
+    expect(text).toContain('200,000')
+    expect(text).toContain('150,000')
   })
 })

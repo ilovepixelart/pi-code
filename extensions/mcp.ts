@@ -1243,7 +1243,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     for (const [name, client] of Array.from(clients.entries())) {
       if (managedNames.has(name)) continue
       clients.delete(name)
-      await client.close().catch(() => {})
+      // Bound the close like session_shutdown does: a hung server must not stall the new
+      // session start, which awaits this eviction before connecting the managed set.
+      await withTimeout(client.close(), 3000, 'close').catch(() => {})
       status.set(name, { state: 'disabled by managed policy', tools: 0 })
     }
     await connectServers(managedServers, authUi)

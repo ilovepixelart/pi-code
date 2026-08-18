@@ -105,7 +105,9 @@ function readRateLimitWindow(headers: Record<string, string>, prefix: string): R
     }
   }
   if (usedPercentage === undefined) return undefined
-  const window: RateLimitWindow = { used_percentage: usedPercentage }
+  // A provider can report a utilization above 100 (or a remaining above the limit, making
+  // the computed value negative); clamp so the payload never carries a nonsense percentage.
+  const window: RateLimitWindow = { used_percentage: Math.max(0, Math.min(100, usedPercentage)) }
   const resetsAt = headers[`${base}-reset`] ?? headers[`${base}-resets-at`]
   if (resetsAt) window.resets_at = resetsAt
   return window
