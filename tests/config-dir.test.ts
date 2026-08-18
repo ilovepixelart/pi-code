@@ -2,7 +2,7 @@ import * as path from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { hookFiles } from '../extensions/hooks.ts'
+import { hookFiles } from '../extensions/hooks/index.ts'
 import { claudeConfigDir } from '../extensions/internal/config-dir.ts'
 
 const HOME = '/home/testuser'

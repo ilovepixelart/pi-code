@@ -25,7 +25,7 @@ import {
   runPreToolUse,
   runPromptHook,
   stopHookBlockCap,
-} from '../extensions/hooks.ts'
+} from '../extensions/hooks/index.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'

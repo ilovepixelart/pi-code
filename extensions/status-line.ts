@@ -28,7 +28,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
-import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks.js'
+import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'

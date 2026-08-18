@@ -25,8 +25,8 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync: readFileSync as typeof actual.readFileSync }
 })
 
-vi.mock('../extensions/hooks.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../extensions/hooks.js')>()
+vi.mock('../extensions/hooks/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../extensions/hooks/index.js')>()
   return {
     ...actual,
     runHookCommand: async (command: string, payload: unknown) => {
