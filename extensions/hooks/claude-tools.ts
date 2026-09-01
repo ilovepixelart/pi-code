@@ -39,34 +39,53 @@ function absolutePath(value: unknown, cwd: string): unknown {
 
 const record = (value: unknown): Record<string, unknown> | undefined => (value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined)
 
+/** Only the entries whose value passes the filter, so optional fields stay absent
+ * rather than arriving as explicit undefined. */
+function pick(entries: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined))
+}
+
+type InputMapper = (raw: Record<string, unknown>, cwd: string) => Record<string, unknown>
+
+const TO_CLAUDE_INPUT: Record<string, InputMapper> = {
+  // pi timeout is seconds, Claude's is milliseconds.
+  bash: (raw) => pick({ command: raw.command, timeout: typeof raw.timeout === 'number' ? raw.timeout * 1000 : undefined }),
+  write: (raw, cwd) => ({ file_path: absolutePath(raw.path, cwd), content: raw.content }),
+  read: (raw, cwd) => pick({ file_path: absolutePath(raw.path, cwd), offset: raw.offset, limit: raw.limit }),
+  // Claude's Edit is a single replacement; pi's edit call carries one or more. The
+  // documented fields expose the first entry, and the full array rides along as
+  // `edits` so a hook auditing the whole call loses nothing.
+  edit: (raw, cwd) => {
+    const edits = Array.isArray(raw.edits) ? raw.edits : []
+    const first = record(edits[0]) ?? {}
+    return { file_path: absolutePath(raw.path, cwd), old_string: first.oldText ?? '', new_string: first.newText ?? '', replace_all: false, ...(edits.length > 1 ? { edits } : {}) }
+  },
+  grep: (raw, cwd) => pick({ pattern: raw.pattern, path: raw.path === undefined ? undefined : absolutePath(raw.path, cwd), glob: raw.glob, '-i': raw.ignoreCase === true ? true : undefined }),
+  find: (raw, cwd) => pick({ pattern: raw.pattern, path: raw.path === undefined ? undefined : absolutePath(raw.path, cwd) }),
+}
+
 /** pi input -> Claude `tool_input` for the translated built-ins; undefined keeps the
  * pi shape (MCP and unknown tools). */
 export function claudeToolInput(piName: string, input: unknown, cwd: string): Record<string, unknown> | undefined {
   const raw = record(input)
   if (!raw) return undefined
-  switch (piName) {
-    case 'bash':
-      // pi timeout is seconds, Claude's is milliseconds.
-      return { command: raw.command, ...(typeof raw.timeout === 'number' ? { timeout: raw.timeout * 1000 } : {}) }
-    case 'write':
-      return { file_path: absolutePath(raw.path, cwd), content: raw.content }
-    case 'read':
-      return { file_path: absolutePath(raw.path, cwd), ...(raw.offset !== undefined ? { offset: raw.offset } : {}), ...(raw.limit !== undefined ? { limit: raw.limit } : {}) }
-    case 'edit': {
-      // Claude's Edit is a single replacement; pi's edit call carries one or more.
-      // The documented fields expose the first entry, and the full array rides along
-      // as `edits` so a hook auditing the whole call loses nothing.
-      const edits = Array.isArray(raw.edits) ? raw.edits : []
-      const first = record(edits[0]) ?? {}
-      return { file_path: absolutePath(raw.path, cwd), old_string: first.oldText ?? '', new_string: first.newText ?? '', replace_all: false, ...(edits.length > 1 ? { edits } : {}) }
-    }
-    case 'grep':
-      return { pattern: raw.pattern, ...(raw.path !== undefined ? { path: absolutePath(raw.path, cwd) } : {}), ...(raw.glob !== undefined ? { glob: raw.glob } : {}), ...(raw.ignoreCase === true ? { '-i': true } : {}) }
-    case 'find':
-      return { pattern: raw.pattern, ...(raw.path !== undefined ? { path: absolutePath(raw.path, cwd) } : {}) }
-    default:
-      return undefined
-  }
+  return TO_CLAUDE_INPUT[piName]?.(raw, cwd)
+}
+
+type RewriteMapper = (updated: Record<string, unknown>) => Record<string, unknown> | undefined
+
+const FROM_CLAUDE_INPUT: Record<string, RewriteMapper> = {
+  bash: (updated) => (typeof updated.command === 'string' ? pick({ command: updated.command, timeout: typeof updated.timeout === 'number' ? updated.timeout / 1000 : undefined }) : undefined),
+  write: (updated) => (typeof updated.file_path === 'string' && typeof updated.content === 'string' ? { path: updated.file_path, content: updated.content } : undefined),
+  read: (updated) => (typeof updated.file_path === 'string' ? pick({ path: updated.file_path, offset: updated.offset, limit: updated.limit }) : undefined),
+  edit: (updated) => {
+    if (typeof updated.file_path !== 'string') return undefined
+    if (Array.isArray(updated.edits)) return { path: updated.file_path, edits: updated.edits }
+    if (typeof updated.old_string !== 'string' || typeof updated.new_string !== 'string') return undefined
+    return { path: updated.file_path, edits: [{ oldText: updated.old_string, newText: updated.new_string }] }
+  },
+  grep: (updated) => (typeof updated.pattern === 'string' ? pick({ pattern: updated.pattern, path: updated.path, glob: updated.glob, ignoreCase: updated['-i'] === true ? true : undefined }) : undefined),
+  find: (updated) => (typeof updated.pattern === 'string' ? pick({ pattern: updated.pattern, path: updated.path }) : undefined),
 }
 
 /** Claude-shaped `updatedInput` back into pi's input shape for a translated tool.
@@ -75,31 +94,7 @@ export function claudeToolInput(piName: string, input: unknown, cwd: string): Re
  * untranslated tool the caller applies the rewrite verbatim. Claude's Edit
  * `replace_all` has no pi counterpart (pi requires a unique oldText) and is dropped. */
 export function piToolInput(piName: string, updated: Record<string, unknown>): Record<string, unknown> | undefined {
-  switch (piName) {
-    case 'bash':
-      if (typeof updated.command !== 'string') return undefined
-      return { command: updated.command, ...(typeof updated.timeout === 'number' ? { timeout: updated.timeout / 1000 } : {}) }
-    case 'write':
-      if (typeof updated.file_path !== 'string' || typeof updated.content !== 'string') return undefined
-      return { path: updated.file_path, content: updated.content }
-    case 'read':
-      if (typeof updated.file_path !== 'string') return undefined
-      return { path: updated.file_path, ...(updated.offset !== undefined ? { offset: updated.offset } : {}), ...(updated.limit !== undefined ? { limit: updated.limit } : {}) }
-    case 'edit': {
-      if (typeof updated.file_path !== 'string') return undefined
-      if (Array.isArray(updated.edits)) return { path: updated.file_path, edits: updated.edits }
-      if (typeof updated.old_string !== 'string' || typeof updated.new_string !== 'string') return undefined
-      return { path: updated.file_path, edits: [{ oldText: updated.old_string, newText: updated.new_string }] }
-    }
-    case 'grep':
-      if (typeof updated.pattern !== 'string') return undefined
-      return { pattern: updated.pattern, ...(updated.path !== undefined ? { path: updated.path } : {}), ...(updated.glob !== undefined ? { glob: updated.glob } : {}), ...(updated['-i'] === true ? { ignoreCase: true } : {}) }
-    case 'find':
-      if (typeof updated.pattern !== 'string') return undefined
-      return { pattern: updated.pattern, ...(updated.path !== undefined ? { path: updated.path } : {}) }
-    default:
-      return undefined
-  }
+  return FROM_CLAUDE_INPUT[piName]?.(updated)
 }
 
 /** pi result -> Claude `tool_response` where the docs pin a shape: Bash's structured

@@ -158,8 +158,8 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
   const parsed = /^([A-Za-z_|]+?)(?:\((.*)\))?$/.exec(hook.if.trim())
   if (!parsed) return false
   const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
-  const ruleTools = parsed[1].split('|').map(fold)
-  const toolMatches = ruleTools.includes(fold(target.piName)) || (target.claudeName !== undefined && ruleTools.includes(fold(target.claudeName)))
+  const ruleTools = new Set(parsed[1].split('|').map(fold))
+  const toolMatches = ruleTools.has(fold(target.piName)) || (target.claudeName !== undefined && ruleTools.has(fold(target.claudeName)))
   if (!toolMatches) return false
   const pattern = parsed[2]
   if (pattern === undefined) return true
@@ -168,6 +168,8 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
     const command = typeof input?.command === 'string' ? input.command : ''
     return command.length > 0 && matchesBashRules(command, [pattern])
   }
-  const filePath = typeof input?.path === 'string' ? input.path : typeof input?.file_path === 'string' ? input.file_path : ''
+  let filePath = ''
+  if (typeof input?.path === 'string') filePath = input.path
+  else if (typeof input?.file_path === 'string') filePath = input.file_path
   return filePath.length > 0 && matchesPathRules(filePath, [pattern], target.anchors)
 }

@@ -112,6 +112,42 @@ export interface PreToolUseOutcome extends HookDecision {
  * keeps the original input rather than corrupting it), so with several rewrites
  * the last to finish takes effect (the docs leave multi-rewrite ordering
  * unspecified). */
+/** Apply a hook's updatedInput rewrite in place, translating a built-in rewrite
+ * back to the pi shape; an incomplete built-in rewrite keeps the original input
+ * rather than corrupting it. */
+function applyUpdatedInput(toolName: string, toolInput: unknown, translated: boolean, stdout: string): void {
+  const updated = tryParseJson(stdout)?.hookSpecificOutput?.updatedInput
+  if (!isRecord(updated) || !isRecord(toolInput)) return
+  const replacement = translated ? piToolInput(toolName, updated) : updated
+  if (replacement) replaceRecord(toolInput, replacement)
+}
+
+/** The fail-closed scan for the gated events: a timed-out or never-spawned hook
+ * reached no verdict, and its silence must not read as an allow. */
+function failClosedVerdict(commands: HookCommand[], results: HookRunResult[]): HookDecision | undefined {
+  for (const [i, result] of results.entries()) {
+    // A killed hook never reached its verdict, and SIGKILL leaves a null exit code
+    // that would otherwise read as a clean allow.
+    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
+    // A hook that never spawned (EMFILE, missing /bin/sh) reached no verdict either;
+    // its code 0 must fail closed like a timeout, not read as an allow exactly when
+    // the machine is degraded.
+    if (result.spawnFailed) return { block: true, reason: `Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}` }
+  }
+  return undefined
+}
+
+/** additionalContext strings the PreToolUse hooks contributed; delivered alongside
+ * the tool result, so a deferring hook's context is discarded, as Claude documents. */
+function preToolContexts(results: HookRunResult[]): string[] {
+  return results.flatMap((result) => {
+    const parsed = tryParseJson(result.stdout)
+    if (parsed?.hookSpecificOutput?.permissionDecision === 'defer') return []
+    const text = parsed?.hookSpecificOutput?.additionalContext
+    return typeof text === 'string' && text.length > 0 ? [text] : []
+  })
+}
+
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink, anchors?: PathAnchors): Promise<PreToolUseOutcome> {
   const cwd = anchors?.cwd ?? process.cwd()
   const translatedName = claudeName ?? claudeToolName(toolName)
@@ -121,37 +157,20 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   const names = translatedName ? [toolName, translatedName] : [toolName]
   const target = anchors ? { piName: toolName, claudeName: translatedName, input: toolInput, anchors } : undefined
   const commands = matchingCommands(config.PreToolUse, names).filter((command) => passesIfFilter(command, target))
+  const payload = { hook_event_name: 'PreToolUse', tool_name: translatedName ?? toolName, tool_input: translatedInput ?? toolInput }
   const results = await Promise.all(
     commands.map((command) =>
-      runner(command, { hook_event_name: 'PreToolUse', tool_name: translatedName ?? toolName, tool_input: translatedInput ?? toolInput }, timeoutMs(command)).then((result) => {
-        const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
-        if (isRecord(updated) && isRecord(toolInput)) {
-          const replacement = translatedInput !== undefined ? piToolInput(toolName, updated) : updated
-          if (replacement) replaceRecord(toolInput, replacement)
-        }
+      runner(command, payload, timeoutMs(command)).then((result) => {
+        applyUpdatedInput(toolName, toolInput, translatedInput !== undefined, result.stdout)
         return result
       }),
     ),
   )
   surfaceHookFailures(commands, results, onSystemMessage)
-  for (const [i, result] of results.entries()) {
-    // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
-    // would otherwise read as a clean allow. Fail closed instead.
-    if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
-    // A hook that never spawned (EMFILE, missing /bin/sh) reached no verdict either;
-    // its code 0 must fail closed like a timeout, not read as an allow exactly when
-    // the machine is degraded.
-    if (result.spawnFailed) return { block: true, reason: `Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}` }
-  }
+  const failClosed = failClosedVerdict(commands, results)
+  if (failClosed) return failClosed
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
-  // additionalContext is delivered alongside the tool result, so it only applies
-  // when the call proceeds; defer discards it, as Claude documents.
-  const context = results.flatMap((result) => {
-    const parsed = tryParseJson(result.stdout)
-    if (parsed?.hookSpecificOutput?.permissionDecision === 'defer') return []
-    const text = parsed?.hookSpecificOutput?.additionalContext
-    return typeof text === 'string' && text.length > 0 ? [text] : []
-  })
+  const context = preToolContexts(results)
   // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
   // scan for any deny first, and only fall back to the first ask.
   let ask: HookDecision | undefined
