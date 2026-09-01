@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { discoverAgents } from '../extensions/subagent/agents.ts'
+import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
 
 // The 'both' scope also scans the user's agent dirs; point them at throwaway dirs so
 // an agent in the developer's real ~/.claude/agents or ~/.pi/agent/agents cannot
@@ -256,5 +256,18 @@ describe('plugin-scoped agent ids and frontmatter fields', () => {
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     writeFileSync(join(cwd, '.claude', 'agents', 'bg.md'), '---\nname: bg\ndescription: b\nbackground: true\n---\nwork')
     expect(discoverAgents(cwd, 'both').agents.find((a) => a.name === 'bg')?.background).toBe(true)
+  })
+})
+
+describe('skill preloading and model invocation', () => {
+  it('preloads a skill even when its frontmatter sets disable-model-invocation', () => {
+    // Claude: disable-model-invocation removes a skill from the model-facing list,
+    // but the agent `skills` field can still preload it in full.
+    const root = mkdtempSync(join(tmpdir(), 'skills-'))
+    mkdirSync(join(root, 'quiet-skill'), { recursive: true })
+    writeFileSync(join(root, 'quiet-skill', 'SKILL.md'), '---\nname: quiet-skill\ndescription: q\ndisable-model-invocation: true\n---\nThe quiet body')
+
+    const prompt = withPreloadedSkills('base prompt', ['quiet-skill'], [root])
+    expect(prompt).toContain('The quiet body')
   })
 })
