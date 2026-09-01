@@ -6,7 +6,7 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.js'
+import { FileOAuthProvider, type OAuthServerConfig, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.js'
 import { type AuthUi, connectWithTimeout, isUnauthorized, type MakeTransport, OAuthRequiredError } from './transport.js'
 
 /** Browser logins are human-paced; a connect-sized timeout would cut them off. */
@@ -45,13 +45,17 @@ export function serializeInteractiveOAuth<T>(run: () => Promise<T>): Promise<T> 
  * token exchange error) is wrapped as an auth failure, not a transport mismatch: that
  * keeps the typeless-url caller from retrying over SSE and prompting for a second login.
  */
-export async function runInteractiveOAuth(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, authUi: AuthUi, newClient: () => Client): Promise<Client> {
+export async function runInteractiveOAuth(name: string, config: { url: string; oauth?: OAuthServerConfig }, makeTransport: MakeTransport, label: string, authUi: AuthUi, newClient: () => Client): Promise<Client> {
   const approved = await authUi.confirm(`MCP server "${name}" requires login`, `Open your browser to authorize ${config.url}?`)
   if (!approved) throw new OAuthRequiredError(`login declined for ${name}`)
-  const provider = new FileOAuthProvider(name, (authorizationUrl) => {
-    openBrowser(String(authorizationUrl))
-    authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
-  })
+  const provider = new FileOAuthProvider(
+    name,
+    (authorizationUrl) => {
+      openBrowser(String(authorizationUrl))
+      authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
+    },
+    config.oauth,
+  )
   const { server, port } = await startCallbackServer(provider.savedRedirectPort())
   provider.bindRedirectPort(port)
   try {

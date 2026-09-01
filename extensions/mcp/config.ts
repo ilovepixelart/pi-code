@@ -7,6 +7,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
+import type { OAuthServerConfig } from '../internal/mcp-oauth.js'
 import type { InstalledPlugin } from '../internal/plugins.js'
 import { findNearestFile } from '../internal/project-root.js'
 
@@ -32,6 +33,8 @@ export interface HttpServerConfig {
   headers?: Record<string, string>
   bearerToken?: string
   bearerTokenEnv?: string
+  /** Claude's oauth object: pre-registered client, fixed callback port, pinned scopes. */
+  oauth?: OAuthServerConfig
   /** A command whose JSON stdout is merged into the connect headers, for auth
    * schemes other than OAuth/static tokens (Claude's headersHelper). */
   headersHelper?: string
