@@ -25,6 +25,9 @@ export interface HookCommand {
    * the next turn, and any still running are killed at session end. */
   async?: boolean
   asyncRewake?: boolean
+  /** Claude's permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`): evaluated only
+   * on tool events; on any other event a hook carrying `if` never runs. */
+  if?: string
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
   headers?: Record<string, string>

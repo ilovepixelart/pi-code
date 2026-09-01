@@ -39,6 +39,17 @@
  * InstructionsLoaded) ignore it, as Claude documents for them.
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
+ * Payloads speak Claude's vocabulary for pi's built-in tools: tool_name Bash/Edit/
+ * Write/Read/Grep/Glob, the documented tool_input shapes with absolute file_path,
+ * and the documented Bash/Write tool_response shapes, with `updatedInput`
+ * translated back to pi's shape (see claude-tools; an incomplete rewrite keeps
+ * the original input). PreToolUse `additionalContext` lands next to the tool
+ * result; `updatedToolOutput` replaces the output the model sees (schema-checked
+ * for built-ins, unvalidated for MCP); `permissionDecision: "defer"` blocks the
+ * call, since pi cannot resume a deferred one. The `if` permission-rule filter is
+ * honored on tool events, and a hook carrying it never runs elsewhere; Stop and
+ * UserPromptSubmit ignore a stray matcher, and a Stop hook's `additionalContext`
+ * continues the conversation under the same block cap.
  * `async`/`asyncRewake` (command hooks only, as Claude documents) run in the
  * background on every event: they never block or delay the event that fired them
  * and render no decision. An asyncRewake hook exiting 2 wakes the model with its
@@ -80,9 +91,10 @@ import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
+import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
 import { blockedToolCall, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
-import { matchingCommands } from './matcher.js'
+import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, timeoutMs } from './runners.js'
 
 export * from './config.js'
@@ -122,7 +134,17 @@ export function stopHookBlockCap(env: Record<string, string | undefined> = proce
 }
 
 async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner: HookRunner): Promise<HookRunResult[]> {
-  return await Promise.all(commands.map((command) => runner(command, payload, timeoutMs(command))))
+  // Non-tool events: a hook carrying `if` never runs, as Claude documents.
+  const runnable = commands.filter((command) => passesIfFilter(command, undefined))
+  return await Promise.all(runnable.map((command) => runner(command, payload, timeoutMs(command))))
+}
+
+/** The text of a result's content blocks, for Claude-shaped tool_response fields. */
+function textContent(content: ReadonlyArray<{ type: string; text?: string }>): string {
+  return content
+    .filter((block) => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n')
 }
 
 /** pi's lifecycle vocabularies differ from Claude's documented ones. The matcher is
@@ -153,6 +175,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let hooksDisabled = false
   /** Which settings file each resolved entry came from, for the /hooks viewer. */
   const hookSources = new Map<HookMatcher, string>()
+  /** PreToolUse additionalContext per tool call, delivered alongside its result. */
+  const pendingToolContext = new Map<string, string[]>()
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
@@ -280,6 +304,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // carry into the next session, so reset before any early return (disableAllHooks below).
     stopHookActive = false
     stopHookBlockCount = 0
+    pendingToolContext.clear()
     const trusted = await isProjectApproved(ctx)
     // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
     // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
@@ -325,8 +350,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('tool_call', async (event, ctx) => {
-    const decision = await runPreToolUse(config, event.toolName, event.input, boundRunner(ctx, { tool_use_id: event.toolCallId }), mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'))
-    if (!decision.block) return undefined
+    const anchors = { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() }
+    const decision = await runPreToolUse(config, event.toolName, event.input, boundRunner(ctx, { tool_use_id: event.toolCallId }), mcpAliases.get(event.toolName), (message) => ctx.ui.notify(message, 'warning'), anchors)
+    if (!decision.block) {
+      // additionalContext is delivered alongside the tool result, so stash it for
+      // this call's tool_result to append.
+      if (decision.context && decision.context.length > 0) pendingToolContext.set(event.toolCallId, decision.context)
+      return undefined
+    }
     // Claude's "ask": prompt the user and let the call through if they approve.
     // With no UI (headless) the block stands, which is the safe default.
     if (decision.ask && ctx.hasUI) {
@@ -341,20 +372,45 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // stderr) and additionalContext are appended, which is where Claude documents they
   // land. The failure branch shows the hook's stderr to the model too ("Shows stderr
   // to Claude; the tool already failed"), it just cannot block a call that failed.
+  // Payloads report the Claude vocabulary (names, input shapes, and the documented
+  // Bash/Write response shapes; see claude-tools), and a schema-valid
+  // updatedToolOutput replaces the output the model sees.
   pi.on('tool_result', async (event, ctx) => {
     const alias = mcpAliases.get(event.toolName)
-    const names = alias ? [event.toolName, alias] : [event.toolName]
-    const response = { content: event.content, details: event.details, isError: event.isError }
+    const translatedName = alias ?? claudeToolName(event.toolName)
+    const names = translatedName ? [event.toolName, translatedName] : [event.toolName]
     const eventName = event.isError ? 'PostToolUseFailure' : 'PostToolUse'
-    const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names)
-    if (commands.length === 0) return
-    const payload = { hook_event_name: eventName, tool_name: alias ?? event.toolName, tool_input: event.input, tool_response: response }
+    // Contexts stashed by this call's PreToolUse hooks land next to the result even
+    // when no PostToolUse hook is configured.
+    const pending = pendingToolContext.get(event.toolCallId) ?? []
+    pendingToolContext.delete(event.toolCallId)
+    const anchors = { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() }
+    const target = { piName: event.toolName, claudeName: translatedName, input: event.input, anchors }
+    const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names).filter((command) => passesIfFilter(command, target))
+    if (commands.length === 0 && pending.length === 0) return
+    const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
+    const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, textContent(event.content), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
+    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, tool_response: response }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
-    const feedback = results.flatMap((result) => postToolFeedback(result, eventName, event.isError))
-    if (feedback.length === 0) return
-    return { content: [...event.content, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
+    // Claude's updatedToolOutput replaces the output the model sees; a value that
+    // doesn't match the tool's output schema is ignored, MCP output passes through
+    // unvalidated, and a failed call keeps its error output.
+    const replacement = event.isError
+      ? undefined
+      : results
+          .filter((result) => !result.timedOut)
+          .map((result) => {
+            const parsed = tryParseJson(result.stdout)
+            const value = alias !== undefined ? (parsed?.updatedMCPToolOutput ?? parsed?.updatedToolOutput) : parsed?.updatedToolOutput
+            return value === undefined ? undefined : piToolOutput(event.toolName, value, alias !== undefined)
+          })
+          .find((text) => text !== undefined)
+    const feedback = [...pending, ...results.flatMap((result) => postToolFeedback(result, eventName, event.isError))]
+    if (replacement === undefined && feedback.length === 0) return
+    const base = replacement !== undefined ? [{ type: 'text' as const, text: replacement }] : event.content
+    return { content: [...base, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
   })
 
   // Claude's PreToolUse for Bash, extended to a command the user runs directly with the
@@ -370,7 +426,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // no execution result and fires only before the command runs, so there is deliberately
   // no PostToolUse for it.
   pi.on('user_bash', async (event, ctx) => {
-    const decision = await runPreToolUse(config, 'bash', { command: event.command }, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'))
+    const decision = await runPreToolUse(config, 'bash', { command: event.command }, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'), { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() })
     if (!decision.block) return undefined
     // Claude's "ask": prompt before running and let the command through on approval; with
     // no UI (headless) the block stands, the same safe default as the tool_call path.
@@ -420,7 +476,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
       void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, boundRunner(ctx)).catch(() => {})
     }
 
-    const commands = matchingCommands(config.Stop, 'Stop')
+    // Stop has no matcher support (a stray matcher is ignored, as Claude documents)
+    // and an `if`-carrying hook never runs on a non-tool event.
+    const commands = allCommands(config.Stop).filter((command) => passesIfFilter(command, undefined))
     if (commands.length === 0) {
       stopHookActive = false
       return
@@ -435,9 +493,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const block = results
       .filter((result) => !result.timedOut)
       .map((result) => {
-        if (result.code === 2) return { block: true, reason: result.stderr.trim() || 'Stop blocked by hook' }
         const parsed = tryParseJson(result.stdout)
+        if (result.code === 2) return { block: true, reason: (parsed?.decision === 'block' ? parsed.reason : undefined) ?? (result.stderr.trim() || 'Stop blocked by hook') }
         if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Stop blocked by hook' }
+        // Claude's non-error continue: additionalContext feeds back and the
+        // conversation continues so Claude can act on it. It rides the same
+        // continuation path (and the same block cap) so a hook emitting it every
+        // firing cannot loop the turn forever.
+        const context = parsed?.hookSpecificOutput?.additionalContext
+        if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
         return { block: false, reason: '' }
       })
       .find((verdict) => verdict.block)
