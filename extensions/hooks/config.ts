@@ -17,6 +17,14 @@ export interface HookCommand {
    * absent). $ARGUMENTS in each arg is replaced with the event JSON. */
   args?: string[]
   timeout?: number
+  /** Claude's background contract, honored on `type: "command"` hooks only: `async` runs
+   * without blocking its event and with no timeout enforced; `asyncRewake` also runs in
+   * the background but keeps its timeout, and wakes the model when the hook exits 2
+   * (stderr, or stdout when stderr is empty, feeds back as a new turn). Background hooks
+   * render no decision; their JSON `systemMessage`/`additionalContext` reach the model on
+   * the next turn, and any still running are killed at session end. */
+  async?: boolean
+  asyncRewake?: boolean
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
   headers?: Record<string, string>
@@ -34,6 +42,13 @@ export interface HookCommand {
 export interface HookMatcher {
   matcher?: string
   hooks: HookCommand[]
+}
+
+/** Whether a hook runs in the background. Claude documents `async`/`asyncRewake` on
+ * `type: "command"` hooks only; on any other type the fields are inert and the hook
+ * blocks, exactly as Claude runs it. */
+export function isBackgroundHook(hook: HookCommand): boolean {
+  return (hook.type === undefined || hook.type === 'command') && (hook.async === true || hook.asyncRewake === true)
 }
 export type HooksConfig = Record<string, HookMatcher[]>
 

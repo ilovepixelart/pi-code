@@ -38,6 +38,14 @@
  * user-facing warning).
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
+ * `async`/`asyncRewake` (command hooks only, as Claude documents) run in the
+ * background on every event: they never block or delay the event that fired them
+ * and render no decision. An asyncRewake hook exiting 2 wakes the model with its
+ * stderr (stdout when stderr is empty) as a new turn; any other background
+ * completion delivers the JSON response's systemMessage/additionalContext to the
+ * model on the next turn, shown to nobody else. No timeout is enforced on `async`
+ * (asyncRewake keeps its own), and hooks still running at session end are killed,
+ * as Claude does at teardown.
  *
  * SubagentStart/SubagentStop ride pi-code's own subagent extension, which publishes
  * child-run lifecycle on the shared bus (notify-style: a child has already exited by
@@ -71,7 +79,7 @@ import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
-import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
+import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
 import { blockedToolCall, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
 import { matchingCommands } from './matcher.js'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, timeoutMs } from './runners.js'
@@ -150,17 +158,62 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
     return common
   }
+  /** Kills for background hooks still running; Claude kills async hooks at teardown,
+   * so session_shutdown reaps anything left rather than let a hung hook pin the
+   * event loop past a one-shot run's end. */
+  const backgroundKills = new Set<() => void>()
+  /** Claude's background delivery: an asyncRewake exit 2 wakes the model with the
+   * hook's stderr (stdout when stderr is empty) as a new turn; any other completion
+   * feeds the JSON response's systemMessage/additionalContext to the model on the
+   * next turn, shown to nobody else. A timeout kill discards the output, like a
+   * canceled synchronous hook; it resolves with code 124, so it never reads as a wake. */
+  const deliverBackgroundResult = (hook: HookCommand, result: HookRunResult): void => {
+    if (result.timedOut) return
+    if (hook.asyncRewake === true && result.code === 2) {
+      const detail = result.stderr.trim() || result.stdout.trim()
+      const content = detail ? `Async hook requested attention (exit 2):\n${detail}` : 'Async hook requested attention (exit 2)'
+      pi.sendMessage({ customType: 'claude-async-hook', content, display: true }, { triggerTurn: true })
+      return
+    }
+    const parsed = tryParseJson(result.stdout)
+    // The typeof guard doubles as Claude's schema validation: a wrong-typed field is
+    // dropped rather than delivered.
+    const parts = [parsed?.systemMessage, parsed?.hookSpecificOutput?.additionalContext].filter((part): part is string => typeof part === 'string' && part.length > 0)
+    if (parts.length === 0) return
+    pi.sendMessage({ customType: 'claude-async-hook', content: parts.join('\n'), display: false }, { deliverAs: 'nextTurn' })
+  }
   /** A runner bound to the firing context, filling the common fields into each
-   * payload and dispatching on the entry's type. */
+   * payload and dispatching on the entry's type. A background hook (see
+   * isBackgroundHook) is fired and the caller immediately gets a no-verdict result,
+   * so it can neither block nor delay the event that fired it; its completion is
+   * delivered by deliverBackgroundResult whenever it lands. */
   const boundRunner =
     (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
     (hook, payload, ms) => {
       const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
-      if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
-      if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
-      if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
-      if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-      return runHookCommand(hook.command, merged, ms, projectDir, hook.args)
+      const dispatch = (onChild?: (kill: () => void) => void): Promise<HookRunResult> => {
+        if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
+        if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
+        if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
+        if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
+        return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild)
+      }
+      if (!isBackgroundHook(hook)) return dispatch()
+      let kill: (() => void) | undefined
+      void dispatch((registered) => {
+        kill = registered
+        backgroundKills.add(registered)
+      })
+        .then((result) => deliverBackgroundResult(hook, result))
+        .catch(() => {
+          // The hook may outlive the session (/new, shutdown): sendMessage asserts
+          // liveness, and nothing awaits this chain, so a throw would otherwise
+          // escape as an unhandled rejection.
+        })
+        .finally(() => {
+          if (kill) backgroundKills.delete(kill)
+        })
+      return Promise.resolve({ code: 0, stdout: '', stderr: '', timedOut: false })
     }
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
@@ -422,6 +475,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
     const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude kills async hooks still running at teardown; the session that spawned
+    // these is over, and their delivery would target a disposed context anyway.
+    for (const kill of backgroundKills) kill()
+    backgroundKills.clear()
   })
 
   // Claude's /hooks manages hook configuration; pi-code's is a viewer: hook failures
