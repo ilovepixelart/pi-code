@@ -41,6 +41,7 @@ import { setMcpToolCaller } from '../internal/mcp-call.js'
 import { capForContext } from '../internal/output-guard.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
+import { repoRoot } from '../internal/project-root.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
 import { loadConfigFrom, loadPluginServers, loadUserScope, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
@@ -424,7 +425,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     // Plugin servers merge under the user scope (plugins are user-installed);
     // the user's own entry wins a name clash with a plugin's.
-    const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), repoRoot(ctx.cwd) ?? ctx.cwd)
     const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already

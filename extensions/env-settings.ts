@@ -104,12 +104,47 @@ function userEnv(home: string): Record<string, string> {
   return envFromSettings(readSettingsFile(path.join(claudeConfigDir(home), 'settings.json')))
 }
 
+/** Keys a checked-out repository must not control even once trusted, per Claude's
+ * documented drop list: variables that choose where config and files are written
+ * (redirecting later home-scope reads and every subprocess), variables that export
+ * session content, and variables that change how the agent starts or syncs.
+ * PI_CODING_AGENT_DIR is pi's own config-dir analogue of CLAUDE_CONFIG_DIR. */
+const REPO_HOSTILE_ENV_KEYS = new Set([
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_TMPDIR',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'OTEL_LOG_RAW_API_BODIES',
+  'ENABLE_BETA_TRACING_DETAILED',
+  'BETA_TRACING_ENDPOINT',
+  'CLAUDE_CODE_PROCESS_WRAPPER',
+  'CLAUDE_CODE_SYNC_SKILLS',
+  'CLAUDE_CODE_SYNC_PLUGINS',
+  'CLAUDE_CODE_PLUGIN_CACHE_DIR',
+  'CLAUDE_CODE_PLUGIN_SEED_DIR',
+  'PI_CODING_AGENT_DIR',
+])
+
+/** Drop the keys a repository's settings must not set, warning each, as Claude
+ * documents ("Claude Code drops each one and logs a warning"). Set them in the
+ * shell, user settings, or managed settings instead. */
+export function sanitizeProjectEnv(env: Record<string, string>, warn: (key: string) => void = (key) => console.warn(`pi-code-env: dropping ${key} from project settings env (a checked-out repository must not control it; set it in user or managed settings)`)): Record<string, string> {
+  const kept: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (REPO_HOSTILE_ENV_KEYS.has(key) || key.startsWith('XDG_')) warn(key)
+    else kept[key] = value
+  }
+  return kept
+}
+
 /** The project scope's env: .claude/settings.json with settings.local.json overlaid,
  * each the nearest of its name at or above cwd (matching the hooks settings chain). */
 function projectEnv(cwd: string): Record<string, string> {
   const base = envFromSettings(readSettingsFile(findNearestFile(cwd, path.join('.claude', 'settings.json')) ?? path.join(cwd, '.claude', 'settings.json')))
   const local = envFromSettings(readSettingsFile(findNearestFile(cwd, path.join('.claude', 'settings.local.json')) ?? path.join(cwd, '.claude', 'settings.local.json')))
-  return { ...base, ...local }
+  return sanitizeProjectEnv({ ...base, ...local })
 }
 
 export default function envSettingsExtension(pi: ExtensionAPI) {

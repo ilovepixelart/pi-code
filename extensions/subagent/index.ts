@@ -25,13 +25,14 @@ import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
 import { type AgentRunRequest, setAgentRunner } from '../internal/agent-run.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
+import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
-import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
+import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, expandMcpToolPatterns, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
 import { type AgentWorktree, cleanupAgentWorktree, createAgentWorktree } from './worktree.js'
@@ -680,6 +681,15 @@ function childPromptBody(agent: AgentConfig, skillRoots: string[], memorySection
   return [prompt, memorySection].filter((part) => part.trim()).join('\n\n')
 }
 
+/** The parent's MCP tool aliases, published by the mcp extension on the shared bus;
+ * the module-level seam matches setMcpToolCaller's. Children read the same MCP config
+ * files, so the parent's roster is the translation table for server-level patterns. */
+let knownMcpAliases: ReadonlyArray<{ pi: string; claude: string }> = []
+
+export function setKnownMcpAliases(aliases: ReadonlyArray<{ pi: string; claude: string }>): void {
+  knownMcpAliases = aliases
+}
+
 /** CLI args shared by foreground and background children, from the agent's config. */
 function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] {
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
@@ -689,8 +699,11 @@ function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] 
   const model = agent.model ?? aliasModel
   if (model) args.push('--model', agent.effort ? `${model}:${agent.effort}` : model)
   else if (agent.effort) args.push('--thinking', agent.effort)
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
-  if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', agent.disallowedTools.join(','))
+  // Claude's mcp__<server> / mcp__* patterns expand against the parent's MCP roster;
+  // without this a server-level deny removed nothing (fail open) and a server-level
+  // grant granted nothing.
+  if (agent.tools && agent.tools.length > 0) args.push('--tools', expandMcpToolPatterns(agent.tools, knownMcpAliases).join(','))
+  if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', expandMcpToolPatterns(agent.disallowedTools, knownMcpAliases).join(','))
   return args
 }
 
@@ -1280,6 +1293,13 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
+  // Claude's mcp__<server> tool patterns translate against the parent's MCP roster,
+  // published by the mcp extension on the shared bus. Optional-chained so a minimal
+  // test stub without an event bus can still register the extension.
+  pi.events?.on(MCP_TOOLS_CHANNEL, (data) => {
+    if (isMcpToolAliases(data)) setKnownMcpAliases(data)
+  })
+
   // /tasks resolves these against the registry at print time. background.ts owns the
   // run records but does not enumerate them, so the ids started here are remembered;
   // a run the registry has since evicted simply drops out of the listing.

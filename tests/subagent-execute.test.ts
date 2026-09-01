@@ -143,6 +143,7 @@ const sendMessageMock = vi.fn()
 const emittedEvents: Array<{ channel: string; data: unknown }> = []
 
 const eventHandlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+const busHandlers = new Map<string, (data: unknown) => void>()
 
 interface CapturedCommand {
   description?: string
@@ -166,7 +167,13 @@ const getExecute = (): Execute => {
     },
     registerCommand: (name: string, options: CapturedCommand) => registeredCommands.set(name, options),
     sendMessage: sendMessageMock,
-    events: { emit: (channel: string, data: unknown) => emittedEvents.push({ channel, data }), on: () => () => {} },
+    events: {
+      emit: (channel: string, data: unknown) => emittedEvents.push({ channel, data }),
+      on: (channel: string, fn: (data: unknown) => void) => {
+        busHandlers.set(channel, fn)
+        return () => {}
+      },
+    },
     on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => eventHandlers.set(name, fn),
   } as never)
   if (!execute) throw new Error('subagent tool was not registered')
@@ -1774,5 +1781,23 @@ describe('isolation: worktree execution', () => {
     const result = await pending
     expect(fs.existsSync(spawnCalls[0].options.cwd as string)).toBe(true)
     expect(JSON.stringify(result.content)).toContain('worktree kept at')
+  })
+})
+
+describe('MCP server-level tool patterns', () => {
+  it('expands a disallowedTools server pattern into the concrete tool names, closing the fail-open deny', async () => {
+    // Claude: "mcp__<server> ... removes every tool from the named server" in
+    // disallowedTools; pi filters by exact name, so the unexpanded pattern removed
+    // nothing.
+    busHandlers.get('pi-code:mcp-tools')?.([
+      { pi: 'github_search', claude: 'mcp__github__search' },
+      { pi: 'github_create', claude: 'mcp__github__create' },
+    ])
+    discoverAgentsMock.mockReturnValue({ agents: [{ ...agentConfig({ name: 'guarded' }), disallowedTools: ['mcp__github'] }], projectAgentsDir: null })
+    script('probe tools', { stdout: [say('done')] })
+    await execute('c1', { agent: 'guarded', task: 'probe tools' }, undefined, undefined, trustedCtx)
+    const args = spawnCalls[0].args
+    const exclude = args[args.indexOf('--exclude-tools') + 1]
+    expect(exclude).toBe('github_search,github_create')
   })
 })

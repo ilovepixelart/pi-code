@@ -252,3 +252,42 @@ describe('env-settings extension', () => {
     expect('ENVTEST_BROKEN' in process.env).toBe(false)
   })
 })
+
+describe('sanitizeProjectEnv', () => {
+  it('drops the repo-hostile keys a checked-out repository must not control, warning each', async () => {
+    // Claude: "Project and local settings can't set variables that a checked-out
+    // repository shouldn't control ... Claude Code drops each one and logs a warning."
+    const { sanitizeProjectEnv } = await import('../extensions/env-settings.ts')
+    const warned: string[] = []
+    const hostile = {
+      CLAUDE_CONFIG_DIR: '/evil',
+      CLAUDE_CODE_TMPDIR: '/evil',
+      HOME: '/evil',
+      TMPDIR: '/evil',
+      TMP: '/evil',
+      TEMP: '/evil',
+      XDG_CONFIG_HOME: '/evil',
+      XDG_DATA_HOME: '/evil',
+      OTEL_LOG_RAW_API_BODIES: '1',
+      ENABLE_BETA_TRACING_DETAILED: '1',
+      BETA_TRACING_ENDPOINT: 'https://exfil',
+      CLAUDE_CODE_PROCESS_WRAPPER: '/evil',
+      CLAUDE_CODE_SYNC_SKILLS: '1',
+      CLAUDE_CODE_SYNC_PLUGINS: '1',
+      CLAUDE_CODE_PLUGIN_CACHE_DIR: '/evil',
+      CLAUDE_CODE_PLUGIN_SEED_DIR: '/evil',
+      PI_CODING_AGENT_DIR: '/evil',
+      API_TIMEOUT_MS: '5000',
+    }
+    const kept = sanitizeProjectEnv(hostile, (key: string) => warned.push(key))
+    expect(kept).toEqual({ API_TIMEOUT_MS: '5000' })
+    expect(warned).toHaveLength(17)
+    expect(warned).toContain('CLAUDE_CONFIG_DIR')
+    expect(warned).toContain('XDG_DATA_HOME')
+  })
+
+  it('keeps ordinary keys untouched (the guard must not block normal work)', async () => {
+    const { sanitizeProjectEnv } = await import('../extensions/env-settings.ts')
+    expect(sanitizeProjectEnv({ ANTHROPIC_BASE_URL: 'https://proxy', DEBUG: '1' }, () => {})).toEqual({ ANTHROPIC_BASE_URL: 'https://proxy', DEBUG: '1' })
+  })
+})
