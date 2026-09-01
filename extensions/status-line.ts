@@ -5,10 +5,14 @@
  * with the session JSON on stdin (model, workspace, cost, context_window, effort,
  * output_style, session ids) and its first stdout line becomes the footer segment,
  * padded per `padding`. It re-runs, debounced 300ms as Claude does, at session
- * start, after turns, after compaction, on plan-mode changes (the permission-mode
- * analogue, off the shared bus), and on the optional `refreshInterval` timer
- * (minimum 1s). A project-defined command is arbitrary shell, so project settings
- * count only once the project is already approved, read without prompting.
+ * start, after turns and each assistant message, after compaction, on plan-mode
+ * changes (the permission-mode analogue, off the shared bus), when a rate-limit
+ * window in the last payload reaches its resets_at time, when the statusLine
+ * settings change mid-session (file watcher), and on the optional
+ * `refreshInterval` timer (minimum 1s). A new trigger while the script is still
+ * running cancels the in-flight run, as Claude does. A project-defined command is
+ * arbitrary shell, so project settings count only once the project is already
+ * approved, read without prompting.
  * Claude's `disableAllHooks` setting turns the configured command off too, and
  * the built-in segment stands in.
  *
@@ -29,8 +33,10 @@ import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { watchSettingsFiles } from './internal/settings-watch.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
 
 const COMMAND_TIMEOUT_MS = 5_000
@@ -149,22 +155,33 @@ export interface StatusLineConfig {
   refreshInterval: number | undefined
 }
 
-/** The `statusLine` recorded in settings, last file winning. Claude's shape is
- * `{type: "command", command, padding?, refreshInterval?}`; entries without a
- * command string are ignored, and refreshInterval has a documented minimum of 1. */
-export function readStatusLineConfig(files: string[]): StatusLineConfig | undefined {
+/** One settings `statusLine` entry parsed into a config, or undefined when it is
+ * not Claude's `{type: "command", command, padding?, refreshInterval?}` shape;
+ * refreshInterval has a documented minimum of 1. */
+function parseStatusLineEntry(entry: unknown): StatusLineConfig | undefined {
+  if (entry === null || typeof entry !== 'object') return undefined
+  const record = entry as { type?: unknown; command?: unknown; padding?: unknown; refreshInterval?: unknown }
+  if (typeof record.command !== 'string') return undefined
+  if (record.type !== undefined && record.type !== 'command') return undefined
+  return {
+    command: record.command,
+    padding: typeof record.padding === 'number' && record.padding > 0 ? record.padding : 0,
+    refreshInterval: typeof record.refreshInterval === 'number' && record.refreshInterval >= 1 ? record.refreshInterval : undefined,
+  }
+}
+
+/** The `statusLine` recorded in settings, last file winning; a managed policy
+ * entry wins over every file, and allowManagedHooksOnly narrows the setting to
+ * managed settings entirely, as Claude documents. */
+export function readStatusLineConfig(files: string[], managed: Record<string, unknown> = readManagedSettings()): StatusLineConfig | undefined {
+  const managedConfig = parseStatusLineEntry(managed.statusLine)
+  if (managedConfig) return managedConfig
+  if (managed.allowManagedHooksOnly === true) return undefined
   let found: StatusLineConfig | undefined
   for (const file of files) {
     try {
       const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      const entry = settings.statusLine
-      if (!entry || typeof entry.command !== 'string') continue
-      if (entry.type !== undefined && entry.type !== 'command') continue
-      found = {
-        command: entry.command,
-        padding: typeof entry.padding === 'number' && entry.padding > 0 ? entry.padding : 0,
-        refreshInterval: typeof entry.refreshInterval === 'number' && entry.refreshInterval >= 1 ? entry.refreshInterval : undefined,
-      }
+      found = parseStatusLineEntry(settings.statusLine) ?? found
     } catch {
       // missing or invalid file: skip
     }
@@ -205,6 +222,11 @@ export default function statusLine(pi: ExtensionAPI) {
   let rateLimitWarned = false
   let refreshTimer: ReturnType<typeof setInterval> | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined
+  /** Kills the script currently in flight; Claude cancels it on a new trigger. */
+  let killInflight: (() => void) | undefined
+  /** Stops the settings watcher of the previous session. */
+  let disposeSettingsWatch: () => void = () => {}
   let running = false
   let rerunQueued = false
 
@@ -293,6 +315,9 @@ export default function statusLine(pi: ExtensionAPI) {
   async function runCommand(ctx: ExtensionContext): Promise<void> {
     if (!config) return
     if (running) {
+      // Claude cancels the in-flight script when a new update triggers; the
+      // rerun below then runs the fresh one.
+      killInflight?.()
       rerunQueued = true
       return
     }
@@ -301,7 +326,9 @@ export default function statusLine(pi: ExtensionAPI) {
       // Everything below can touch ctx after an await, and every ctx getter throws
       // once the session is disposed. This promise is started from a timer with no
       // awaiter, so an escaping rejection becomes an uncaughtException and exits pi.
-      const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS)
+      const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS, undefined, undefined, (kill) => {
+        killInflight = kill
+      })
       const first = result.stdout.split('\n')[0].trimEnd()
       const pad = ' '.repeat(config.padding)
       commandLine = first ? `${pad}${first}${pad}` : undefined
@@ -310,12 +337,25 @@ export default function statusLine(pi: ExtensionAPI) {
       // A replaced or reloaded session invalidates ctx while the command is in
       // flight; there is nothing left to update, and the next session starts fresh.
     } finally {
+      killInflight = undefined
       running = false
       if (rerunQueued) {
         rerunQueued = false
         void runCommand(ctx)
       }
     }
+  }
+
+  /** Claude re-runs the script when a rate-limit window in the last data reaches
+   * its resets_at time, so an expired segment clears without another event. */
+  function scheduleExpiryRefresh(snapshot: RateLimitSnapshot): void {
+    clearTimeout(expiryTimer)
+    const resets = [snapshot.five_hour?.resets_at, snapshot.seven_day?.resets_at].filter((value): value is number => typeof value === 'number')
+    if (resets.length === 0) return
+    const delayMs = Math.min(...resets) * 1000 - Date.now()
+    if (delayMs <= 0) return
+    expiryTimer = setTimeout(() => scheduleRefresh(), delayMs)
+    expiryTimer.unref?.()
   }
 
   /** Claude debounces statusline updates at 300ms so rapid triggers batch. */
@@ -361,7 +401,10 @@ export default function statusLine(pi: ExtensionAPI) {
     // names and presence vary, so parse only what is there and never throw.
     const headers = normalizeHeaders(event.headers)
     const snapshot = parseRateLimits(headers)
-    if (snapshot) rateLimits = snapshot
+    if (snapshot) {
+      rateLimits = snapshot
+      scheduleExpiryRefresh(snapshot)
+    }
     if (event.status === 429 && !rateLimitWarned) {
       rateLimitWarned = true
       const retryAfter = headers['retry-after']
@@ -380,6 +423,8 @@ export default function statusLine(pi: ExtensionAPI) {
     if (!usage) return
     lastUsage = usage
     costTotal += usage.cost?.total ?? 0
+    // Claude re-runs the status line after each assistant message.
+    scheduleRefresh()
   })
 
   pi.on('session_start', async (_event, ctx) => {
@@ -415,6 +460,13 @@ export default function statusLine(pi: ExtensionAPI) {
     if (config?.refreshInterval) {
       refreshTimer = setInterval(() => scheduleRefresh(), config.refreshInterval * 1000)
     }
+    // Claude re-runs the script when the statusLine settings change mid-session; a
+    // command change re-resolves and re-runs.
+    disposeSettingsWatch()
+    disposeSettingsWatch = watchSettingsFiles(files, () => {
+      config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
+      scheduleRefresh()
+    })
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
     scheduleRefresh()
   })

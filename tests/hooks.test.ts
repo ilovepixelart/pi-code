@@ -296,15 +296,17 @@ describe('hookFiles', () => {
     expect(hookFiles('/proj', '/home', true)).toEqual(['/home/.claude/settings.json', '/proj/.claude/settings.json', '/proj/.claude/settings.local.json'])
   })
 
-  it('finds project settings at the repository root from a subdirectory session', () => {
+  it('reads settings.json from the primary working directory and settings.local.json from the repository root', () => {
+    // Claude: "reads the shared .claude/settings.json from the session's primary
+    // working directory" (never an ancestor), while settings.local.json lives at
+    // the repository root; a legacy cwd-local file is still read, root winning.
     const repo = tempDir()
     mkdirSync(join(repo, '.git'))
     mkdirSync(join(repo, '.claude'))
     writeFileSync(join(repo, '.claude', 'settings.json'), '{}')
     const sub = join(repo, 'src')
     mkdirSync(sub)
-    // settings.local.json exists nowhere, so its entry stays anchored at the session cwd.
-    expect(hookFiles(sub, '/home', true)).toEqual(['/home/.claude/settings.json', join(repo, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json')])
+    expect(hookFiles(sub, '/home', true)).toEqual(['/home/.claude/settings.json', join(sub, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json'), join(repo, '.claude', 'settings.local.json')])
   })
 })
 

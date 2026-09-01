@@ -2470,3 +2470,51 @@ describe('hooks from agent frontmatter in the child', () => {
     expect(JSON.parse(recordFor('agent-done').stdin)).toMatchObject({ hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'fg-9' })
   })
 })
+
+describe('allowManagedHooksOnly', () => {
+  it('runs only managed hooks when the managed policy sets allowManagedHooksOnly', async () => {
+    // Claude: "Your user, project, local, and plugin hooks are blocked."
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-only' }] }] } }))
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-blocked' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['managed-only'])
+  })
+
+  it('blocks skill-frontmatter hooks too under allowManagedHooksOnly', async () => {
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    ext.emitSkillHooks({ skillName: 's', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-blocked' }] }] } })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('settings watching', () => {
+  it('picks up a settings edit mid-session without a restart', async () => {
+    // Claude: "Direct edits to hooks in settings files are normally picked up
+    // automatically by the file watcher."
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    try {
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'before-edit' }] }] })
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'after-edit' }] }] })
+      await vi.waitFor(
+        async () => {
+          hoisted.calls.length = 0
+          await ext.toolCall('bash', {})
+          expect(commandsRun()).toEqual(['after-edit'])
+        },
+        { timeout: 3000, interval: 100 },
+      )
+    } finally {
+      delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
+    }
+  })
+})

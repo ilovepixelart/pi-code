@@ -9,16 +9,22 @@
 
 import * as path from 'node:path'
 import { claudeConfigDir } from './config-dir.js'
-import { findNearestFile } from './project-root.js'
+import { repoRoot } from './project-root.js'
 
-/** The user settings.json, then (only when `includeProject`) the nearest project
- * settings.json and settings.local.json at or above cwd, with cwd's own `.claude/` as
- * the fallback for each. Later files win. */
+/** The user settings.json, then (only when `includeProject`) the project files by
+ * Claude's placement rules: the shared `.claude/settings.json` is read from the
+ * session's primary working directory (never an ancestor; "to use a file committed
+ * at the repository root, start Claude Code there"), while `settings.local.json`
+ * lives at the repository root, falling back to the primary directory outside a
+ * repository or when the root is the home directory. A legacy local file at the
+ * primary directory is still read, with the root's values winning. Later files win. */
 export function claudeSettingsChain(cwd: string, home: string, includeProject: boolean): string[] {
   const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!includeProject) return files
-  for (const name of ['settings.json', 'settings.local.json']) {
-    files.push(findNearestFile(cwd, path.join('.claude', name)) ?? path.join(cwd, '.claude', name))
-  }
+  files.push(path.join(cwd, '.claude', 'settings.json'))
+  const root = repoRoot(cwd)
+  const localDir = root !== undefined && root !== home ? root : cwd
+  if (localDir !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
+  files.push(path.join(localDir, '.claude', 'settings.local.json'))
   return files
 }
