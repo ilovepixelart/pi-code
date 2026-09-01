@@ -182,6 +182,13 @@ function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void
   appendResultNote(result, `[isolation: worktree kept at ${worktree.dir} (branch ${worktree.branch}); the agent's changes live there]`)
 }
 
+/** Claude marks a maxTurns-capped run's output as partial; the note rides the
+ * final assistant message like the worktree note, so the parent model sees it
+ * with the output. A no-op for uncapped runs. */
+function appendPartialNote(result: SingleResult): void {
+  if (result.partial) appendResultNote(result, '[Output is partial: the subagent stopped at its maxTurns limit.]')
+}
+
 async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
   const agent = options.agents.find((a) => a.name === options.agentName)
   if (!agent) return runSingleAgentInner(options)
@@ -402,9 +409,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
 
     currentResult.exitCode = exitCode
     if (wasAborted) throw new Error('Subagent was aborted')
-    // The note rides the final assistant message like the worktree note, so the
-    // parent model sees the partial marking with the output.
-    if (currentResult.partial) appendResultNote(currentResult, '[Output is partial: the subagent stopped at its maxTurns limit.]')
+    appendPartialNote(currentResult)
     return currentResult
   } finally {
     // Cleanup runs on abort too: it only removes a pristine worktree, so an
