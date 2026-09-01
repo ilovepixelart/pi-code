@@ -7,8 +7,10 @@
  * root (the settings source), and bare or `./` from the current directory. As
  * allow rules, a single-segment directory pattern anchors at cwd; a bare
  * filename matches at any depth. `*` stays within one segment, `**` crosses
- * directories. Matching is lexical, on resolved paths; bracket expressions are
- * not supported and match literally, which can only over-block, never widen.
+ * directories. Matching is lexical, on resolved paths. Bracket expressions parse
+ * per Claude's documented glob contract: `[abc]` classes with ranges and `!`
+ * negation, an unreadable `[` making the pattern match nothing, and `\[` for a
+ * literal bracket.
  */
 
 import * as path from 'node:path'
@@ -79,26 +81,63 @@ function expandBraces(pattern: string): string[] | null {
   return expanded
 }
 
-/** One glob pattern, braces already expanded, as a regular expression source. */
-function translateGlob(pattern: string): string {
+/** The end index of a bracket expression starting at `start` (`[`), or -1 when it
+ * cannot be read as one, which per Claude makes the whole pattern invalid. A `]`
+ * directly after the opening (or after a leading negation) is a literal member. */
+function bracketEnd(pattern: string, start: number): number {
+  let i = start + 1
+  if (pattern[i] === '!' || pattern[i] === '^') i += 1
+  if (pattern[i] === ']') i += 1
+  for (; i < pattern.length; i += 1) {
+    if (pattern[i] === ']') return i
+  }
+  return -1
+}
+
+/** A bracket expression body as a regex character class, escaping regex-relevant
+ * characters while keeping `-` ranges; a leading `!` (or `^`) negates. */
+function bracketClass(body: string): string {
+  const negated = body.startsWith('!') || body.startsWith('^')
+  const members = (negated ? body.slice(1) : body).replace(/[\\\]^]/g, (ch) => `\\${ch}`)
+  return `[${negated ? '^' : ''}${members}]`
+}
+
+/** A `*` run starting at `i`: a double star followed by a slash spans whole
+ * directories, a bare double star crosses segments, and a single `*` stays within
+ * one. Returns the regex source and the index after the run. */
+function translateStar(pattern: string, i: number): { source: string; next: number } {
+  if (pattern[i + 1] === '*') {
+    const prevSlash = i === 0 || pattern[i - 1] === '/'
+    if (prevSlash && pattern[i + 2] === '/') return { source: '(?:[^/]+/)*', next: i + 3 }
+    return { source: '.*', next: i + 2 }
+  }
+  return { source: '[^/]*', next: i + 1 }
+}
+
+function translateGlob(pattern: string): string | null {
   let out = ''
   let i = 0
   while (i < pattern.length) {
     const ch = pattern[i]
+    // Claude: to match a literal bracket, escape it; the escape consumes both chars.
+    if (ch === '\\' && (pattern[i + 1] === '[' || pattern[i + 1] === ']')) {
+      out += escapeRegExp(pattern[i + 1])
+      i += 2
+      continue
+    }
+    // Claude: `[` starts a bracket expression such as `[abc]`; a `[` that cannot be
+    // read as one makes the pattern invalid, matching nothing.
+    if (ch === '[') {
+      const end = bracketEnd(pattern, i)
+      if (end === -1) return null
+      out += bracketClass(pattern.slice(i + 1, end))
+      i = end + 1
+      continue
+    }
     if (ch === '*') {
-      if (pattern[i + 1] === '*') {
-        const prevSlash = i === 0 || pattern[i - 1] === '/'
-        if (prevSlash && pattern[i + 2] === '/') {
-          out += '(?:[^/]+/)*' // `**/` spans zero or more whole directories
-          i += 3
-          continue
-        }
-        out += '.*'
-        i += 2
-        continue
-      }
-      out += '[^/]*'
-      i += 1
+      const star = translateStar(pattern, i)
+      out += star.source
+      i = star.next
       continue
     }
     if (ch === '?') {
@@ -112,13 +151,20 @@ function translateGlob(pattern: string): string {
   return out
 }
 
+/** A regex source that matches nothing: the compiled form of an invalid pattern. */
+const NEVER_MATCH = '(?!)'
+
 /** One gitignore-style pattern as an anchored regular expression source. Brace
  * groups (`{ts,tsx}`, nested, Cartesian across groups) expand into ORed
- * alternatives; an over-budget expansion falls back to the literal pattern. */
+ * alternatives; an over-budget expansion falls back to the literal pattern. An
+ * invalid pattern (an unreadable bracket expression) matches nothing, as Claude
+ * documents, rather than matching its literal spelling. */
 export function globToRegExpSource(pattern: string): string {
   const alternatives = expandBraces(pattern) ?? [pattern]
-  if (alternatives.length === 1) return translateGlob(alternatives[0])
-  return `(?:${alternatives.map(translateGlob).join('|')})`
+  const sources = alternatives.map(translateGlob)
+  if (sources.includes(null)) return NEVER_MATCH
+  if (sources.length === 1) return sources[0] as string
+  return `(?:${sources.join('|')})`
 }
 
 /** A rule resolved to an absolute glob per its anchor form. */

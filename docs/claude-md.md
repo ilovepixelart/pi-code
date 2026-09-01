@@ -16,3 +16,5 @@ Context files and path-scoped rules, beyond what pi loads natively. Sources: [`e
 
 - `~/.claude/rules` and `.claude/rules` (nearest at or above cwd).
 - Unscoped rules are inlined in full; `paths:`-scoped rules are surfaced as pointers and auto-attached: the rule body is appended to a read/edit/write result when a matching file is touched, once per rule per session.
+- Rule `paths` globs support bracket expressions (`[jt]`, ranges, `[!...]` negation); an unreadable `[` makes the pattern invalid (matching nothing) and `\[` matches a literal bracket, as Claude documents. Attach matching compares realpaths, so a symlinked checkout still matches.
+- `claudeMdExcludes` covers rules files too: the docs' monorepo recipe of excluding another team's `.claude/rules/**` works, with globs matched against both the lexical and resolved path.

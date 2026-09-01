@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -423,7 +423,7 @@ describe('extension wiring', () => {
       await handlers.get('session_start')?.({}, approvedCtx(cwd))
 
       await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })
-      expect(instructionEvents()).toEqual([{ file_path: join(cwd, '.claude', 'rules', 'testing.md'), memory_type: 'Project', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(cwd, 'db', 'schema.sql') }])
+      expect(instructionEvents()).toEqual([{ file_path: join(cwd, '.claude', 'rules', 'testing.md'), memory_type: 'Project', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(realpathSync(cwd), 'db', 'schema.sql') }])
 
       // The rule attaches once per session, so the event fires once too.
       await handlers.get('tool_result')?.(readResult('db/other.sql'), { cwd })
@@ -440,7 +440,7 @@ describe('extension wiring', () => {
       await handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, ui: { notify: () => {} } })
       await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })
 
-      expect(instructionEvents()).toEqual([{ file_path: join(rulesDir, 'sql.md'), memory_type: 'User', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(cwd, 'db', 'schema.sql') }])
+      expect(instructionEvents()).toEqual([{ file_path: join(rulesDir, 'sql.md'), memory_type: 'User', load_reason: 'path_glob_match', globs: ['db/**'], trigger_file_path: join(realpathSync(cwd), 'db', 'schema.sql') }])
     })
 
     it('publishes nothing for a non-matching touch', async () => {
@@ -457,5 +457,57 @@ describe('extension wiring', () => {
 describe('parseFrontmatter CRLF', () => {
   it('parses CRLF frontmatter authored on Windows', () => {
     expect(parseFrontmatter('---\r\npaths:\r\n  - "**/*.ts"\r\n---\r\nbody').paths).toEqual(['**/*.ts'])
+  })
+})
+
+describe('claudeMdExcludes and symlinked checkouts', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    hoisted.home = mkdtempSync(join(tmpdir(), 'rules-home-'))
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'rules-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  const wire = () => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    claudeRules({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    return handlers
+  }
+  const approvedCtx = (cwd: string): Record<string, unknown> => ({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+
+  it('honors claudeMdExcludes for rules files, as the docs monorepo recipe shows', async () => {
+    // Claude's worked example excludes "other-team/.claude/rules/**".
+    const cwd = mkdtempSync(join(tmpdir(), 'rules-'))
+    mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'rules', 'noisy.md'), 'NOISY RULE BODY')
+    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: [`${cwd}/.claude/rules/**`] }))
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string } | undefined
+    expect(result?.systemPrompt ?? 'BASE').not.toContain('NOISY RULE BODY')
+  })
+
+  it('attaches a scoped rule when the file is reached through a symlinked checkout path', async () => {
+    // Claude: "matching also works when Claude reaches a file through a symlinked
+    // path to the project directory".
+    const real = mkdtempSync(join(tmpdir(), 'rules-real-'))
+    mkdirSync(join(real, '.claude', 'rules'), { recursive: true })
+    mkdirSync(join(real, 'db'), { recursive: true })
+    writeFileSync(join(real, 'db', 'schema.sql'), 'x')
+    writeFileSync(join(real, '.claude', 'rules', 'db.md'), '---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    const linkParent = mkdtempSync(join(tmpdir(), 'rules-link-'))
+    const linked = join(linkParent, 'checkout')
+    symlinkSync(real, linked)
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(linked))
+    // The tool reports the resolved REAL path while the session cwd is the symlink:
+    // lexically the file sits outside the root, only realpaths agree.
+    const result = await handlers.get('tool_result')?.({ toolName: 'read', input: { path: join(real, 'db', 'schema.sql') }, content: [{ type: 'text', text: 'FILE BODY' }], isError: false }, { cwd: linked })
+    const texts = ((result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []).map((block) => block.text ?? '')
+    expect(texts.join('\n')).toContain('parameterized queries')
   })
 })
