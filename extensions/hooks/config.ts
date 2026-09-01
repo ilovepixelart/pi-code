@@ -44,6 +44,11 @@ export interface HookCommand {
   /** Dedup scope: unset for settings files (identical handlers collapse across
    * them); a plugin's or skill's copy carries its origin and stays separate. */
   origin?: string
+  /** Claude's `once`: remove after the first successful run. Honored only for
+   * skill-frontmatter hooks; ignored in settings files and agent frontmatter. */
+  once?: boolean
+  /** Set after a once-hook's first successful run; collection skips spent hooks. */
+  spent?: boolean
 }
 export interface HookMatcher {
   matcher?: string
@@ -76,7 +81,13 @@ export function hookFiles(cwd: string, home: string, trusted: boolean): string[]
  * disabled in their own settings would defeat the escape hatch. The chain itself
  * already gates project files on trust (see hookFiles). */
 export function readDisableAllHooks(files: string[], managed: Record<string, unknown> = readManagedSettings()): boolean {
-  if (managed.disableAllHooks === true) return true
+  return managed.disableAllHooks === true || readSettingsDisableAllHooks(files)
+}
+
+/** The settings-chain half of disableAllHooks alone. Claude: user/project/local
+ * disableAllHooks cannot disable hooks configured through managed policy settings,
+ * so the caller keeps managed hooks running when only this half is set. */
+export function readSettingsDisableAllHooks(files: string[]): boolean {
   for (const file of files) {
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
@@ -86,6 +97,22 @@ export function readDisableAllHooks(files: string[], managed: Record<string, unk
     }
   }
   return false
+}
+
+/** Hooks from managed policy settings, one of Claude's hook locations. They run
+ * even when user/project/local disableAllHooks is set; only the managed level's
+ * own disableAllHooks turns them off (the caller checks that tier). */
+export function loadManagedHooks(sources?: Map<HookMatcher, string>, managed: Record<string, unknown> = readManagedSettings()): HooksConfig {
+  const config: HooksConfig = {}
+  if (isRecord(managed.hooks)) mergeHooksJson(config, JSON.stringify({ hooks: managed.hooks }), 'managed settings', sources)
+  return config
+}
+
+/** Hooks a skill's frontmatter declares, registered when the skill is invoked and
+ * kept for the rest of the session, as Claude documents. They carry a skill origin
+ * so dedup keeps them separate from settings copies and `once` is honored. */
+export function mergeSkillHooks(config: HooksConfig, skillName: string, hooks: unknown, sources?: Map<HookMatcher, string>): void {
+  mergeHooksJson(config, JSON.stringify({ hooks }), `${skillName} (skill)`, sources, `skill:${skillName}`)
 }
 
 /** Claude's `allowedHttpHookUrls` setting: URL patterns http hooks may target, with

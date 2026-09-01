@@ -179,3 +179,45 @@ describe('Claude skill lookup edge cases', () => {
     await expect(handlers.get('input')?.({ text: '/skill:rough', source: 'interactive' }, { cwd })).resolves.toBeUndefined()
   })
 })
+
+describe('skill frontmatter hooks publication', () => {
+  const setupWithBus = (cwd: string) => {
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const emitted: Array<{ channel: string; data: unknown }> = []
+    const api = {
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+      events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
+    }
+    skillsExt(api as never)
+    return { input: (text: string) => handlers.get('input')?.({ text, source: 'interactive' }, { cwd }), emitted }
+  }
+
+  it('publishes frontmatter hooks on the shared bus when a skill is invoked', async () => {
+    // Claude registers hooks from skill frontmatter when the skill is invoked and
+    // keeps them for the rest of the session; the hooks extension owns the running,
+    // so the skill side publishes them over the shared bus.
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'secure-ops'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'secure-ops', 'SKILL.md'), '---\nname: secure-ops\ndescription: guarded\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./scripts/check.sh\n---\nBody')
+    const { input, emitted } = setupWithBus(cwd)
+    await input('/skill:secure-ops')
+
+    expect(emitted).toContainEqual({
+      channel: 'pi-code:skill-hooks',
+      data: { skillName: 'secure-ops', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: './scripts/check.sh' }] }] } },
+    })
+  })
+
+  it('publishes nothing for a skill without frontmatter hooks', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'plain'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'plain', 'SKILL.md'), '---\nname: plain\ndescription: p\n---\nBody')
+    const { input, emitted } = setupWithBus(cwd)
+    await input('/skill:plain')
+
+    expect(emitted).toEqual([])
+  })
+})

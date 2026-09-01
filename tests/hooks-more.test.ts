@@ -205,6 +205,7 @@ const setupExtension = () => {
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: (event: Record<string, unknown> = { systemPrompt: '' }) => handler('before_agent_start')(event),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
+    emitSkillHooks: (event: unknown) => busHandlers.get('pi-code:skill-hooks')?.(event),
     emitPlanMode: (state: unknown) => busHandlers.get('pi-code:plan-mode')?.(state),
     emitSubagent: (event: unknown) => busHandlers.get('pi-code:subagent')?.(event),
     emitInstruction: (event: unknown) => busHandlers.get('pi-code:instructions')?.(event),
@@ -2224,5 +2225,90 @@ describe('hooks extension dedup scope', () => {
     await ext.toolResult('write', { input: { path: 'a.ts' } })
 
     expect(commandsRun()).toEqual(['shared-format.sh', 'shared-format.sh'])
+  })
+})
+
+describe('hooks from managed policy settings', () => {
+  it('runs hooks declared in managed settings', async () => {
+    // Claude's hook locations include managed policy settings.
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-guard' }] }] } }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['managed-guard'])
+  })
+
+  it('keeps managed hooks running when settings-level disableAllHooks is set', async () => {
+    // Claude: disableAllHooks in user/project/local settings cannot disable hooks
+    // an administrator configured through managed policy settings.
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-guard' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-guard' }] }] } }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['managed-guard'])
+  })
+
+  it('turns managed hooks off only via managed-level disableAllHooks', async () => {
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ disableAllHooks: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-guard' }] }] } }))
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('hooks from skill frontmatter', () => {
+  const invokeSkill = (ext: ReturnType<typeof setupExtension>, hooks: unknown, skillName = 'secure-ops') => {
+    ext.emitSkillHooks({ skillName, hooks })
+  }
+
+  it('registers skill hooks at invocation and keeps them for the rest of the session', async () => {
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-guard' }] }] })
+    await ext.toolCall('bash', {})
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['skill-guard', 'skill-guard'])
+  })
+
+  it('removes a once hook after its first successful run', async () => {
+    // Claude: once removes the hook after its first successful run; honored only
+    // for skill-frontmatter hooks.
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-once', once: true }] }] })
+    await ext.toolCall('bash', {})
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['skill-once'])
+  })
+
+  it('keeps a once hook in place after a failing run', async () => {
+    // Claude: a run that fails, blocks with exit code 2, or times out leaves the
+    // hook in place, so it runs again on the next matching event.
+    script('skill-once', { code: 1 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-once', once: true }] }] })
+    await ext.toolCall('bash', {})
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['skill-once', 'skill-once'])
+  })
+
+  it('ignores once on a settings-file hook', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'settings-once', once: true }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['settings-once', 'settings-once'])
   })
 })

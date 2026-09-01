@@ -73,12 +73,13 @@
  * `{"hookSpecificOutput": {"permissionDecision": "deny", ...}}` (or the older
  * `{"decision": "block"}`).
  *
- * Config is merged from ~/.claude/settings.json (always) plus the project's
- * .claude/settings.json and settings.local.json (only when the project is
- * trusted, since hooks execute arbitrary shell). Claude's `disableAllHooks`
- * setting (managed settings or any honored file in that chain) short-circuits
- * the load entirely, so no event fires any hook; /hooks prints the resolved
- * chain per event with each entry's source settings file. Matchers follow Claude's rule:
+ * Config is merged from managed policy settings, ~/.claude/settings.json (always),
+ * the project's .claude/settings.json and settings.local.json (only when the
+ * project is trusted, since hooks execute arbitrary shell), plugins, and invoked
+ * skills' frontmatter. Claude's `disableAllHooks` is tiered: at the managed level
+ * it turns everything off; in any honored settings file it disables the
+ * non-managed hooks while managed policy hooks keep running. /hooks prints the
+ * resolved chain per event with each entry's source. Matchers follow Claude's rule:
  * `*`/empty match all, plain names are exact (with `|`/`,` list separators), and
  * anything with other regex characters is an unanchored regex. Claude matchers
  * are PascalCase (`Bash`); pi tool names are lowercase (`bash`), so comparison
@@ -90,14 +91,16 @@
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
+import { readManagedSettings } from '../internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
+import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
-import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
+import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.js'
 import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, sessionEndTimeoutMs, timeoutMs } from './runners.js'
@@ -257,7 +260,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
         return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild)
       }
-      if (!isBackgroundHook(hook)) return dispatch()
+      // Claude's `once` (skill-frontmatter hooks only): removed after the first
+      // successful run; a failure, block, or timeout leaves it in place.
+      const markOnce = async (run: Promise<HookRunResult>): Promise<HookRunResult> => {
+        const result = await run
+        if (hook.once === true && hook.origin?.startsWith('skill:') === true && result.code === 0 && !result.timedOut) hook.spent = true
+        return result
+      }
+      if (!isBackgroundHook(hook)) return markOnce(dispatch())
       let kill: (() => void) | undefined
       void dispatch((registered) => {
         kill = registered
@@ -274,6 +284,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
         })
       return Promise.resolve({ code: 0, stdout: '', stderr: '', timedOut: false })
     }
+  // Hooks a skill's frontmatter declares arrive over the shared bus when the skill
+  // is invoked (see skills.ts) and stay registered for the rest of the session, as
+  // Claude documents; a session restart reloads config and drops them.
+  pi.events.on(SKILL_HOOKS_CHANNEL, (data) => {
+    if (!isSkillHooksEvent(data)) return
+    if (hooksDisabled) return
+    mergeSkillHooks(config, data.skillName, data.hooks, hookSources)
+  })
+
   // Claude matchers name MCP tools mcp__<server>__<tool>; pi-code registers them as
   // <server>_<tool>. The mcp extension publishes the mapping on pi's shared bus.
   const mcpAliases = new Map<string, string>()
@@ -345,15 +364,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const files = hookFiles(ctx.cwd, os.homedir(), trusted)
     hookSources.clear()
     allowedHttpHookUrls = readAllowedHttpHookUrls(files)
-    // The disableAllHooks escape hatch, checked before any config loads: with no
-    // config resolved, no event, plugin hooks included, can fire a hook.
-    hooksDisabled = readDisableAllHooks(files)
-    if (hooksDisabled) {
+    // The disableAllHooks escape hatch, checked before any config loads. The tiers
+    // differ, as Claude documents: managed-level disableAllHooks turns everything
+    // off, while a settings-level one cannot disable the hooks an administrator
+    // configured through managed policy settings.
+    const managedSettings = readManagedSettings()
+    hooksDisabled = readDisableAllHooks(files, managedSettings)
+    if (managedSettings.disableAllHooks === true) {
       config = {}
       pendingSessionContext = []
       return
     }
-    config = loadHooks(files, hookSources)
+    config = loadManagedHooks(hookSources, managedSettings)
+    if (readSettingsDisableAllHooks(files)) {
+      pendingSessionContext = []
+      return
+    }
+    for (const [event, matchers] of Object.entries(loadHooks(files, hookSources))) config[event] = [...(config[event] ?? []), ...matchers]
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
     loadPluginHooks(config, installedPlugins(os.homedir()), hookSources)
@@ -639,7 +666,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.registerCommand('hooks', {
     description: 'Show the hook configuration resolved from settings',
     handler: async (_args, ctx) => {
-      if (hooksDisabled) {
+      // With a settings-level disable, managed policy hooks stay active and the
+      // viewer still shows them; only a fully empty config reports disabled.
+      if (hooksDisabled && Object.keys(config).length === 0) {
         ctx.ui.notify('All hooks are disabled by the disableAllHooks setting.', 'info')
         return
       }

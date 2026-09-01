@@ -104,8 +104,14 @@ function syntheticCommand(hook: HookCommand): string | undefined {
 /** A matched entry with its `command` filled in: mirroring the synthetic identity into
  * `command` keeps dedup, timeout messages and display working for non-shell hooks. */
 function withCommand(raw: HookCommand): HookCommand {
-  const identity = syntheticCommand(raw)
-  return identity !== undefined && typeof raw.command !== 'string' ? { ...raw, command: identity } : raw
+  // Fill the identity onto the config entry itself rather than a clone: the runner
+  // must receive the same object collection reads, so a once-hook marked spent
+  // after a successful run is the object the next collection filters out.
+  if (typeof raw.command !== 'string') {
+    const identity = syntheticCommand(raw)
+    if (identity !== undefined) raw.command = identity
+  }
+  return raw
 }
 
 function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {
@@ -114,6 +120,8 @@ function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: H
   for (const entry of matchers ?? []) {
     if (!applies(entry)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
+      // A once-hook that already ran successfully is removed, as Claude documents.
+      if (raw.spent === true) continue
       const hook = withCommand(raw)
       // Claude runs a handler defined in more than one settings file once; a
       // plugin's or skill's copy of the same handler stays separate, and http

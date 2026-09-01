@@ -30,6 +30,7 @@ import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
+import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.js'
 
 function isDirectory(target: string): boolean {
   try {
@@ -139,13 +140,22 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
   if (!found) return
   let parsed: ReturnType<typeof parseCommandFile>
+  let content: string
   try {
-    parsed = parseCommandFile(fs.readFileSync(found.filePath, 'utf-8'))
+    content = fs.readFileSync(found.filePath, 'utf-8')
+    parsed = parseCommandFile(content)
   } catch {
     // Unreadable, or malformed frontmatter: pass through to pi's plain expansion
     // (the loader registered the skill and delivers the raw body), rather than
     // failing the invocation over the dynamic features it cannot have.
     return
+  }
+  // Claude registers hooks a skill's frontmatter declares when the skill is
+  // invoked, for the rest of the session; the hooks extension owns running them,
+  // so the declaration is announced over the shared bus.
+  const declaredHooks = parseFrontmatter<Record<string, unknown>>(content).frontmatter.hooks
+  if (declaredHooks !== null && typeof declaredHooks === 'object' && !Array.isArray(declaredHooks)) {
+    pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })
   }
   const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
