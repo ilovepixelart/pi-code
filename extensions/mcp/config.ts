@@ -20,6 +20,10 @@ export interface StdioServerConfig {
   timeout?: number
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
+  /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
+  pluginRoot?: string
+  /** Loaded from the project scope, whose helpers run credential-stripped. */
+  projectScope?: boolean
 }
 
 export interface HttpServerConfig {
@@ -35,6 +39,10 @@ export interface HttpServerConfig {
   timeout?: number
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
+  /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
+  pluginRoot?: string
+  /** Loaded from the project scope, whose helpers run credential-stripped. */
+  projectScope?: boolean
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig
@@ -200,7 +208,7 @@ export function loadPluginServers(plugins: InstalledPlugin[], projectDir?: strin
   for (const plugin of plugins) {
     for (const [name, config] of Object.entries(rawPluginServerEntries(plugin))) {
       const substituted = substitutedPluginServer(plugin, name, config, projectDir)
-      if (substituted) servers[name] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__` }
+      if (substituted) servers[name] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__`, pluginRoot: plugin.root }
     }
   }
   return servers

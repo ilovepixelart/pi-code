@@ -479,6 +479,22 @@ describe('plugin server substitution safety', () => {
     expect(api.headersHelper).not.toContain('${CLAUDE_PLUGIN_ROOT}')
   })
 
+  it('treats 403 as an authentication failure alongside 401, as Claude documents', async () => {
+    // Claude: "either status code flags it in /mcp so you can complete the OAuth flow".
+    const { isUnauthorized } = await import('../extensions/mcp/transport.ts')
+    expect(isUnauthorized(Object.assign(new Error('denied'), { code: 403 }))).toBe(true)
+    expect(isUnauthorized(Object.assign(new Error('denied'), { code: 401 }))).toBe(true)
+    expect(isUnauthorized(Object.assign(new Error('gone'), { code: 404 }))).toBe(false)
+  })
+
+  it('records the plugin root on plugin server configs for the helper environment', async () => {
+    // Claude sets CLAUDE_PLUGIN_ROOT when a plugin provides the server's headersHelper.
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const declared = plugin({ api: { type: 'http', url: 'https://api.example.com' } }) as { root: string }
+    const servers = loadPluginServers([declared as never], '/work/repo')
+    expect((servers.api as { pluginRoot?: string }).pluginRoot).toBe(declared.root)
+  })
+
   it('keeps hyphens in the tool alias prefix, folding only characters outside A-Za-z0-9_-', async () => {
     // Claude's plugin tool names keep the plugin and server names' hyphens; only
     // characters outside A-Za-z0-9_- become underscores.
