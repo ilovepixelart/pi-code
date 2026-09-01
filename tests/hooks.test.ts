@@ -542,7 +542,8 @@ describe('runPreToolUse', () => {
       return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
     await runPreToolUse(config, 'bash', { command: 'git status' }, runner)
-    expect(seen).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'git status' } })
+    // Built-ins report Claude's name in the payload; the matcher still sees both.
+    expect(seen).toEqual({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git status' } })
   })
 })
 

@@ -1,0 +1,84 @@
+import * as os from 'node:os'
+import { describe, expect, it } from 'vitest'
+
+import { claudeToolInput, claudeToolName, claudeToolResponse, piToolInput, piToolOutput } from '../extensions/hooks/claude-tools.ts'
+
+describe('claudeToolName', () => {
+  it('maps the documented built-ins and leaves unknown tools untranslated', () => {
+    expect(claudeToolName('bash')).toBe('Bash')
+    expect(claudeToolName('edit')).toBe('Edit')
+    expect(claudeToolName('write')).toBe('Write')
+    expect(claudeToolName('read')).toBe('Read')
+    expect(claudeToolName('grep')).toBe('Grep')
+    expect(claudeToolName('find')).toBe('Glob')
+    expect(claudeToolName('ls')).toBeUndefined()
+  })
+})
+
+describe('claudeToolInput', () => {
+  it('converts bash timeout from pi seconds to Claude milliseconds', () => {
+    expect(claudeToolInput('bash', { command: 'ls', timeout: 30 }, '/proj')).toEqual({ command: 'ls', timeout: 30000 })
+  })
+
+  it('makes file paths absolute, expanding ~, as Claude documents', () => {
+    expect(claudeToolInput('write', { path: 'src/a.ts', content: 'x' }, '/proj')).toEqual({ file_path: '/proj/src/a.ts', content: 'x' })
+    expect(claudeToolInput('read', { path: '~/notes.md' }, '/proj')).toEqual({ file_path: `${os.homedir()}/notes.md` })
+  })
+
+  it('maps a single pi edit to the documented Edit fields', () => {
+    expect(claudeToolInput('edit', { path: '/p/a.ts', edits: [{ oldText: 'x', newText: 'y' }] }, '/proj')).toEqual({ file_path: '/p/a.ts', old_string: 'x', new_string: 'y', replace_all: false })
+  })
+
+  it('carries a multi-entry edits array alongside the first documented fields', () => {
+    const edits = [
+      { oldText: 'a', newText: 'b' },
+      { oldText: 'c', newText: 'd' },
+    ]
+    expect(claudeToolInput('edit', { path: '/p/a.ts', edits }, '/proj')).toEqual({ file_path: '/p/a.ts', old_string: 'a', new_string: 'b', replace_all: false, edits })
+  })
+
+  it('maps grep ignoreCase to the documented -i flag', () => {
+    expect(claudeToolInput('grep', { pattern: 'todo', ignoreCase: true }, '/proj')).toEqual({ pattern: 'todo', '-i': true })
+  })
+})
+
+describe('piToolInput', () => {
+  it('converts a Claude rewrite back to the pi shape', () => {
+    expect(piToolInput('bash', { command: 'ls', timeout: 30000 })).toEqual({ command: 'ls', timeout: 30 })
+    expect(piToolInput('edit', { file_path: '/p/a.ts', old_string: 'x', new_string: 'z' })).toEqual({ path: '/p/a.ts', edits: [{ oldText: 'x', newText: 'z' }] })
+    expect(piToolInput('write', { file_path: '/p/a.ts', content: 'c' })).toEqual({ path: '/p/a.ts', content: 'c' })
+  })
+
+  it('returns undefined for a rewrite missing the tool required fields, so the original survives', () => {
+    expect(piToolInput('bash', { description: 'no command' })).toBeUndefined()
+    expect(piToolInput('edit', { file_path: '/p/a.ts' })).toBeUndefined()
+    expect(piToolInput('write', { file_path: '/p/a.ts' })).toBeUndefined()
+  })
+})
+
+describe('claudeToolResponse', () => {
+  it('reports the documented Bash and Write shapes and leaves other tools untranslated', () => {
+    expect(claudeToolResponse('bash', { command: 'ls' }, 'out', false, '/proj')).toEqual({ stdout: 'out', stderr: '', interrupted: false, isImage: false })
+    expect(claudeToolResponse('write', { path: 'a.ts', content: 'x' }, '', false, '/proj')).toEqual({ filePath: '/proj/a.ts', success: true })
+    expect(claudeToolResponse('read', { path: 'a.ts' }, 'text', false, '/proj')).toBeUndefined()
+  })
+})
+
+describe('piToolOutput', () => {
+  it('accepts a schema-valid Bash replacement and rejects a mismatched one', () => {
+    // Claude: "a value that doesn't match the tool's output schema is ignored".
+    expect(piToolOutput('bash', { stdout: 'clean', stderr: '', interrupted: false, isImage: false }, false)).toBe('clean')
+    expect(piToolOutput('bash', { stdout: 'clean', stderr: 'warn' }, false)).toBe('clean\nwarn')
+    expect(piToolOutput('bash', 'just a string', false)).toBeUndefined()
+  })
+
+  it('passes MCP replacements through unvalidated', () => {
+    expect(piToolOutput('srv_tool', 'text', true)).toBe('text')
+    expect(piToolOutput('srv_tool', { any: 'shape' }, true)).toBe('{"any":"shape"}')
+  })
+
+  it('accepts a plain string for other built-ins whose pi output is text', () => {
+    expect(piToolOutput('read', 'replaced', false)).toBe('replaced')
+    expect(piToolOutput('read', { structured: true }, false)).toBeUndefined()
+  })
+})

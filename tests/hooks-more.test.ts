@@ -843,7 +843,8 @@ describe('hooks extension tool_call', () => {
   it('forwards the tool name and input to the hook payload', async () => {
     const ext = await withPreHook({ code: 0 })
     await ext.toolCall('bash', { command: 'ls -la' })
-    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'ls -la' }, tool_use_id: 't1' })
+    // The payload reports Claude's vocabulary for built-ins: "Bash", not pi's "bash".
+    expect(JSON.parse(recordFor('guard').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls -la' }, tool_use_id: 't1' })
   })
 
   it('runs no hook and allows the tool before any session_start has loaded a config', async () => {
@@ -924,7 +925,8 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     const ext = await withPostHooks([{ command: 'post' }])
     await ext.toolResult('bash', { input: { command: 'ls' }, content: okText })
     expect(commandsRun()).toEqual(['post'])
-    expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'ls' }, tool_use_id: 't1', tool_response: { content: okText, isError: false } })
+    // Claude's documented Bash response shape; pi's single combined stream is stdout.
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1', tool_response: { stdout: 'file.txt', stderr: '', interrupted: false, isImage: false } })
   })
 
   it('returns no patch when every hook stays silent', async () => {
@@ -960,7 +962,8 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })
     expect(commandsRun()).toEqual(['failed'])
-    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
+    // A failed call keeps pi's response shape (the error details are the payload).
+    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
   })
 
   it('does not run PostToolUseFailure hooks on a successful execution', async () => {
@@ -1717,14 +1720,14 @@ describe('hook execution parallelism', () => {
     const seen: unknown[] = []
     const runner: HookRunner = async (command, payload) => {
       seen.push(structuredClone((payload as { tool_input: unknown }).tool_input))
-      const stdout = command.command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { a: 2 } } }) : ''
+      const stdout = command.command === 'first' ? JSON.stringify({ hookSpecificOutput: { updatedInput: { command: 'two' } } }) : ''
       return { code: 0, stdout, stderr: '', timedOut: false }
     }
     const two = { PreToolUse: [{ hooks: [{ command: 'first' }, { command: 'second' }] }] }
-    const input = { a: 1 }
+    const input = { command: 'one' }
     await runPreToolUse(two, 'bash', input, runner)
-    expect(seen).toEqual([{ a: 1 }, { a: 1 }])
-    expect(input).toEqual({ a: 2 })
+    expect(seen).toEqual([{ command: 'one' }, { command: 'one' }])
+    expect(input).toEqual({ command: 'two' })
   })
 
   it('launches every matching UserPromptSubmit hook before any completes', async () => {
@@ -1923,5 +1926,155 @@ describe('hook spawn failures', () => {
     expect(decision?.block).toBe(true)
     expect(decision?.reason).toContain('ENOENT')
     expect(ext.notes.some((note) => note.msg.includes('guard') && note.msg.includes('ENOENT'))).toBe(true)
+  })
+})
+
+describe('Claude vocabulary and decision-control conformance', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('reports built-in tool calls with the Claude name and input shape, paths absolute', async () => {
+    // Claude: tool_name "Edit", tool_input.file_path "always absolute".
+    const ext = await withHooks({ PreToolUse: [{ matcher: 'Edit', hooks: [{ command: 'guard' }] }] })
+    await ext.toolCall('edit', { path: 'src/a.ts', edits: [{ oldText: 'x', newText: 'y' }] })
+    const stdin = JSON.parse(recordFor('guard').stdin)
+    expect(stdin.tool_name).toBe('Edit')
+    expect(stdin.tool_input.file_path).toBe('/proj/src/a.ts')
+    expect(stdin.tool_input.old_string).toBe('x')
+    expect(stdin.tool_input.new_string).toBe('y')
+  })
+
+  it('translates a Claude-shaped updatedInput back into the pi input in place', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'rewrite' }] }] })
+    script('rewrite', { stdout: [JSON.stringify({ hookSpecificOutput: { updatedInput: { file_path: '/proj/b.ts', old_string: 'x', new_string: 'z' } } })], code: 0 })
+    const input: Record<string, unknown> = { path: 'b.ts', edits: [{ oldText: 'x', newText: 'y' }] }
+    await ext.toolCall('edit', input)
+    expect(input).toEqual({ path: '/proj/b.ts', edits: [{ oldText: 'x', newText: 'z' }] })
+  })
+
+  it('keeps the original pi input when a translated rewrite is missing required fields', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'rewrite' }] }] })
+    script('rewrite', { stdout: [JSON.stringify({ hookSpecificOutput: { updatedInput: { file_path: '/proj/b.ts' } } })], code: 0 })
+    const input: Record<string, unknown> = { path: 'b.ts', edits: [{ oldText: 'x', newText: 'y' }] }
+    await ext.toolCall('edit', input)
+    expect(input).toEqual({ path: 'b.ts', edits: [{ oldText: 'x', newText: 'y' }] })
+  })
+
+  it('reports the documented Bash tool_response shape on PostToolUse', async () => {
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'post' }] }] })
+    await ext.toolResult('bash', { input: { command: 'ls' }, content: [{ type: 'text', text: 'file-a\nfile-b' }] })
+    const stdin = JSON.parse(recordFor('post').stdin)
+    expect(stdin.tool_name).toBe('Bash')
+    expect(stdin.tool_response).toEqual({ stdout: 'file-a\nfile-b', stderr: '', interrupted: false, isImage: false })
+  })
+
+  it('replaces the tool output the model sees via a schema-valid updatedToolOutput', async () => {
+    // Claude: "Replaces the tool's output ... The value must match the tool's output shape."
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
+    script('redact', { stdout: [JSON.stringify({ updatedToolOutput: { stdout: '[redacted]', stderr: '', interrupted: false, isImage: false } })], code: 0 })
+    const patch = (await ext.toolResult('bash', { input: { command: 'env' }, content: [{ type: 'text', text: 'SECRET=x' }] })) as { content: Array<{ type: string; text: string }> }
+    expect(patch.content[0].text).toBe('[redacted]')
+  })
+
+  it('ignores a schema-mismatched updatedToolOutput and keeps the original output', async () => {
+    // Claude: "a value that doesn't match the tool's output schema is ignored".
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
+    script('redact', { stdout: [JSON.stringify({ updatedToolOutput: 'just a string' })], code: 0 })
+    const patch = await ext.toolResult('bash', { input: { command: 'env' }, content: [{ type: 'text', text: 'SECRET=x' }] })
+    expect(patch).toBeUndefined()
+  })
+
+  it('adds a PreToolUse additionalContext alongside the eventual tool result', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'ctx' }] }] })
+    script('ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'Current environment: production' } })], code: 0 })
+    await ext.toolCall('bash', { command: 'ls' })
+    const patch = (await ext.toolResult('bash', { input: { command: 'ls' }, content: [{ type: 'text', text: 'ok' }] })) as { content: Array<{ type: string; text: string }> }
+    expect(patch.content.some((block) => block.text?.includes('Current environment: production'))).toBe(true)
+  })
+
+  it('continues the conversation on a Stop hook additionalContext without an error verdict', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'nudge' }] }] })
+    script('nudge', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'Please run the test suite before finishing.' } })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'Please run the test suite before finishing.', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('blocks a deferred tool call instead of running it', async () => {
+    // Claude: "defer exits gracefully so the tool can be resumed later"; pi cannot
+    // resume, so running the tool now would invert the intent.
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'defer' }] }] })
+    script('defer', { stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'defer' } })], code: 0 })
+    const decision = (await ext.toolCall('bash', { command: 'deploy' })) as { block?: boolean; reason?: string }
+    expect(decision?.block).toBe(true)
+    expect(decision?.reason).toContain('defer')
+  })
+
+  it('prefers the JSON blocking reason over stderr on exit 2', async () => {
+    // Claude: "The blocking message is the reason from your JSON's blocking decision
+    // when it makes one, and your stderr text otherwise."
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'guard' }] }] })
+    script('guard', { stdout: [JSON.stringify({ decision: 'block', reason: 'from json' })], stderr: ['from stderr'], code: 2 })
+    const decision = (await ext.toolCall('bash', { command: 'x' })) as { reason?: string }
+    expect(decision?.reason).toBe('from json')
+  })
+
+  it('runs an if-filtered hook only for tool calls matching the pattern', async () => {
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'git-guard', if: 'Bash(git *)' }] }] })
+    await ext.toolCall('bash', { command: 'ls -la' })
+    expect(commandsRun()).toEqual([])
+    await ext.toolCall('bash', { command: 'git push' })
+    expect(commandsRun()).toEqual(['git-guard'])
+  })
+
+  it('never runs an if-carrying hook on a non-tool event', async () => {
+    // Claude: "On other events, a hook with `if` set never runs."
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopper', if: 'Bash(git *)' }] }] })
+    await ext.agentEnd()
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('ignores a stray matcher on an event without matcher support', async () => {
+    // Claude: "If you add a matcher field to an event without matcher support, it
+    // is silently ignored."
+    const ext = await withHooks({ Stop: [{ matcher: 'SomethingElse', hooks: [{ command: 'stopped' }] }] })
+    await ext.agentEnd()
+    expect(commandsRun()).toEqual(['stopped'])
+  })
+})
+
+describe('prompt-style decisions on Stop and PostToolUse', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('blocks the stop when a hook answers with a permissionDecision deny', async () => {
+    // A type: "prompt"/"agent" hook's reply arrives as stdout in this shape.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'gate' }] }] })
+    script('gate', { stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'tests are red' } })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'tests are red', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('blocks the stop on the documented prompt-hook ok:false schema', async () => {
+    // Claude: prompt hooks respond {"ok": false, "reason": ...}; on Stop the reason
+    // is fed back and the turn continues.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'gate' }] }] })
+    script('gate', { stdout: [JSON.stringify({ ok: false, reason: 'not done yet' })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'not done yet', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('feeds an ok:false PostToolUse verdict back as feedback next to the result', async () => {
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'review' }] }] })
+    script('review', { stdout: [JSON.stringify({ ok: false, reason: 'lint failed' })], code: 0 })
+    const patch = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'out' }] })) as { content: Array<{ text?: string }> }
+    expect(patch.content.some((block) => block.text?.includes('lint failed'))).toBe(true)
   })
 })

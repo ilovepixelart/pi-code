@@ -4,6 +4,8 @@
  * commands an event fires. Owns the module-level compiled-matcher cache.
  */
 
+import { matchesBashRules } from '../internal/bash-rules.js'
+import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
 import type { HookCommand, HookMatcher } from './config.js'
 
 /** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
@@ -106,14 +108,11 @@ function withCommand(raw: HookCommand): HookCommand {
   return identity !== undefined && typeof raw.command !== 'string' ? { ...raw, command: identity } : raw
 }
 
-/** Command specs whose matcher applies to any of the given tool/source names.
- * Multiple candidates let one event offer both the pi name and its Claude alias. */
-export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
-  const candidates = typeof names === 'string' ? [names] : names
+function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {
   const result: HookCommand[] = []
   const seen = new Set<string>()
   for (const entry of matchers ?? []) {
-    if (!matcherApplies(entry.matcher, candidates)) continue
+    if (!applies(entry)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
       const hook = withCommand(raw)
       // Claude runs a handler defined in more than one settings file once.
@@ -123,4 +122,54 @@ export function matchingCommands(matchers: HookMatcher[] | undefined, names: str
     }
   }
   return result
+}
+
+/** Command specs whose matcher applies to any of the given tool/source names.
+ * Multiple candidates let one event offer both the pi name and its Claude alias. */
+export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
+  const candidates = typeof names === 'string' ? [names] : names
+  return collectCommands(matchers, (entry) => matcherApplies(entry.matcher, candidates))
+}
+
+/** Command specs for an event without matcher support (Stop, UserPromptSubmit): a
+ * stray `matcher` on such an event is silently ignored, as Claude documents, so
+ * every entry's hooks run. */
+export function allCommands(matchers: HookMatcher[] | undefined): HookCommand[] {
+  return collectCommands(matchers, () => true)
+}
+
+/** The tool call an `if` filter evaluates against; absent on non-tool events. */
+export interface IfFilterTarget {
+  piName: string
+  claudeName?: string
+  input: unknown
+  anchors: PathAnchors
+}
+
+/** Claude's `if` handler field: permission-rule syntax evaluated only on tool
+ * events; on any other event a hook carrying `if` never runs. A bare tool name
+ * matches by name; `Bash(pattern)` evaluates against the command via the shared
+ * bash-rule matcher and file-tool patterns against the path via the shared
+ * permission path rules. A pattern for any other tool matches nothing, which is
+ * also what an unparseable rule does. */
+export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undefined): boolean {
+  if (hook.if === undefined) return true
+  if (target === undefined) return false
+  const parsed = /^([A-Za-z_|]+?)(?:\((.*)\))?$/.exec(hook.if.trim())
+  if (!parsed) return false
+  const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
+  const ruleTools = new Set(parsed[1].split('|').map(fold))
+  const toolMatches = ruleTools.has(fold(target.piName)) || (target.claudeName !== undefined && ruleTools.has(fold(target.claudeName)))
+  if (!toolMatches) return false
+  const pattern = parsed[2]
+  if (pattern === undefined) return true
+  const input = target.input as Record<string, unknown> | null
+  if (fold(target.piName) === 'bash' || (target.claudeName !== undefined && fold(target.claudeName) === 'bash')) {
+    const command = typeof input?.command === 'string' ? input.command : ''
+    return command.length > 0 && matchesBashRules(command, [pattern])
+  }
+  let filePath = ''
+  if (typeof input?.path === 'string') filePath = input.path
+  else if (typeof input?.file_path === 'string') filePath = input.file_path
+  return filePath.length > 0 && matchesPathRules(filePath, [pattern], target.anchors)
 }

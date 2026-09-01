@@ -5,8 +5,10 @@
  */
 
 import type { ToolCallEventResult } from '@earendil-works/pi-coding-agent'
+import type { PathAnchors } from '../internal/path-rules.js'
+import { claudeToolInput, claudeToolName, piToolInput } from './claude-tools.js'
 import { type HookCommand, type HooksConfig, isRecord } from './config.js'
-import { matchingCommands } from './matcher.js'
+import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, timeoutMs } from './runners.js'
 
 export interface HookDecision {
@@ -17,7 +19,19 @@ export interface HookDecision {
   ask?: boolean
 }
 
-export function tryParseJson(text: string): { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string; systemMessage?: string } | undefined {
+export function tryParseJson(text: string):
+  | {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }
+      decision?: string
+      reason?: string
+      continue?: boolean
+      stopReason?: string
+      systemMessage?: string
+      updatedToolOutput?: unknown
+      updatedMCPToolOutput?: unknown
+      ok?: boolean
+    }
+  | undefined {
   try {
     return JSON.parse(text)
   } catch {
@@ -25,16 +39,42 @@ export function tryParseJson(text: string): { hookSpecificOutput?: { permissionD
   }
 }
 
+/** The reason a JSON body's blocking decision carries, whichever spelling made it. */
+function jsonBlockingReason(parsed: ReturnType<typeof tryParseJson>): string | undefined {
+  if (parsed?.hookSpecificOutput?.permissionDecision === 'deny') return parsed.hookSpecificOutput.permissionDecisionReason
+  if (parsed?.decision === 'block') return parsed.reason
+  if (parsed?.continue === false) return parsed.stopReason
+  return undefined
+}
+
+/** A blocking verdict in any of the JSON spellings a hook can answer with: the
+ * command-hook fields, and the prompt/agent reply schemas (`permissionDecision:
+ * "deny"` from pi's prompt-hook system prompt, `ok: false` from Claude's documented
+ * prompt-hook response). Undefined when the body renders no block. */
+export function jsonBlockVerdict(parsed: ReturnType<typeof tryParseJson>, fallback: string): { reason: string } | undefined {
+  if (parsed?.decision === 'block') return { reason: parsed.reason ?? fallback }
+  if (parsed?.hookSpecificOutput?.permissionDecision === 'deny') return { reason: parsed.hookSpecificOutput.permissionDecisionReason ?? fallback }
+  if (parsed?.ok === false) return { reason: parsed.reason ?? fallback }
+  return undefined
+}
+
 /** Map a hook's exit code / output to a block-or-allow decision. */
 export function interpretHookResult(code: number, stdout: string, stderr: string): HookDecision {
-  if (code === 2) return { block: true, reason: stderr.trim() || 'Blocked by hook' }
   const parsed = tryParseJson(stdout)
+  // Claude: on exit 2 the blocking message is the JSON blocking decision's reason
+  // when it makes one, and the stderr text otherwise.
+  if (code === 2) return { block: true, reason: jsonBlockingReason(parsed) ?? (stderr.trim() || 'Blocked by hook') }
   const specific = parsed?.hookSpecificOutput
   // Claude's "ask" prompts the user; the tool_call handler turns this into a
   // ctx.ui.confirm and blocks only on decline. block:true is the fallback for a
   // headless run with no dialog to show, which is the safe reading on a gated path.
   if (specific?.permissionDecision === 'ask') return { block: true, ask: true, reason: specific.permissionDecisionReason ?? 'A hook asks you to confirm this tool call.' }
   if (specific?.permissionDecision === 'deny') return { block: true, reason: specific.permissionDecisionReason ?? 'Blocked by hook' }
+  // Claude's "defer" exits gracefully so the tool can be resumed later; pi cannot
+  // resume a deferred call, so running it now would invert the intent. The block
+  // carries its own explanation (the hook's reason is ignored for defer, as
+  // documented).
+  if (specific?.permissionDecision === 'defer') return { block: true, reason: 'Tool call deferred by hook; pi cannot resume a deferred call, so it was not run.' }
   if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Blocked by hook' }
   if (parsed?.continue === false) return { block: true, reason: parsed.stopReason ?? 'Blocked by hook' }
   return { block: false }
@@ -57,36 +97,80 @@ function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], 
   }
 }
 
+/** What PreToolUse resolved to: the decision, plus any additionalContext strings
+ * the hooks contributed, delivered alongside the eventual tool result. */
+export interface PreToolUseOutcome extends HookDecision {
+  context?: string[]
+}
+
 /** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
- * verdict in config order wins. For MCP tools the matcher sees both the pi name and
- * the Claude alias, and the payload reports the alias, which is the name a
- * Claude-written hook script expects in tool_name. Every hook sees the original
- * tool input; hookSpecificOutput.updatedInput replaces the input in place as each
- * hook completes, so with several rewrites the last to finish takes effect (the
- * docs leave multi-rewrite ordering unspecified). */
-export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink): Promise<HookDecision> {
-  const names = claudeName ? [toolName, claudeName] : [toolName]
-  const commands = matchingCommands(config.PreToolUse, names)
-  const results = await Promise.all(
-    commands.map((command) =>
-      runner(command, { hook_event_name: 'PreToolUse', tool_name: claudeName ?? toolName, tool_input: toolInput }, timeoutMs(command)).then((result) => {
-        const updated = tryParseJson(result.stdout)?.hookSpecificOutput?.updatedInput
-        if (isRecord(updated) && isRecord(toolInput)) replaceRecord(toolInput, updated)
-        return result
-      }),
-    ),
-  )
-  surfaceHookFailures(commands, results, onSystemMessage)
+ * verdict in config order wins. The payload reports the Claude vocabulary: the MCP
+ * alias for MCP tools, and the documented name and tool_input shape for pi's
+ * built-ins (see claude-tools). Every hook sees the original tool input;
+ * hookSpecificOutput.updatedInput replaces the input in place as each hook
+ * completes, translated back to the pi shape for a built-in (an incomplete rewrite
+ * keeps the original input rather than corrupting it), so with several rewrites
+ * the last to finish takes effect (the docs leave multi-rewrite ordering
+ * unspecified). */
+/** Apply a hook's updatedInput rewrite in place, translating a built-in rewrite
+ * back to the pi shape; an incomplete built-in rewrite keeps the original input
+ * rather than corrupting it. */
+function applyUpdatedInput(toolName: string, toolInput: unknown, translated: boolean, stdout: string): void {
+  const updated = tryParseJson(stdout)?.hookSpecificOutput?.updatedInput
+  if (!isRecord(updated) || !isRecord(toolInput)) return
+  const replacement = translated ? piToolInput(toolName, updated) : updated
+  if (replacement) replaceRecord(toolInput, replacement)
+}
+
+/** The fail-closed scan for the gated events: a timed-out or never-spawned hook
+ * reached no verdict, and its silence must not read as an allow. */
+function failClosedVerdict(commands: HookCommand[], results: HookRunResult[]): HookDecision | undefined {
   for (const [i, result] of results.entries()) {
-    // A killed hook never reached its verdict, and SIGKILL leaves a null exit code that
-    // would otherwise read as a clean allow. Fail closed instead.
+    // A killed hook never reached its verdict, and SIGKILL leaves a null exit code
+    // that would otherwise read as a clean allow.
     if (result.timedOut) return { block: true, reason: `Hook timed out after ${timeoutMs(commands[i])}ms: ${commands[i].command}` }
     // A hook that never spawned (EMFILE, missing /bin/sh) reached no verdict either;
     // its code 0 must fail closed like a timeout, not read as an allow exactly when
     // the machine is degraded.
     if (result.spawnFailed) return { block: true, reason: `Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}` }
   }
+  return undefined
+}
+
+/** additionalContext strings the PreToolUse hooks contributed; delivered alongside
+ * the tool result, so a deferring hook's context is discarded, as Claude documents. */
+function preToolContexts(results: HookRunResult[]): string[] {
+  return results.flatMap((result) => {
+    const parsed = tryParseJson(result.stdout)
+    if (parsed?.hookSpecificOutput?.permissionDecision === 'defer') return []
+    const text = parsed?.hookSpecificOutput?.additionalContext
+    return typeof text === 'string' && text.length > 0 ? [text] : []
+  })
+}
+
+export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink, anchors?: PathAnchors): Promise<PreToolUseOutcome> {
+  const cwd = anchors?.cwd ?? process.cwd()
+  const translatedName = claudeName ?? claudeToolName(toolName)
+  // A built-in's payload input is the translated Claude shape; MCP and unknown
+  // tools keep the pi shape (MCP input passes through untranslated in Claude too).
+  const translatedInput = claudeName === undefined ? claudeToolInput(toolName, toolInput, cwd) : undefined
+  const names = translatedName ? [toolName, translatedName] : [toolName]
+  const target = anchors ? { piName: toolName, claudeName: translatedName, input: toolInput, anchors } : undefined
+  const commands = matchingCommands(config.PreToolUse, names).filter((command) => passesIfFilter(command, target))
+  const payload = { hook_event_name: 'PreToolUse', tool_name: translatedName ?? toolName, tool_input: translatedInput ?? toolInput }
+  const results = await Promise.all(
+    commands.map((command) =>
+      runner(command, payload, timeoutMs(command)).then((result) => {
+        applyUpdatedInput(toolName, toolInput, translatedInput !== undefined, result.stdout)
+        return result
+      }),
+    ),
+  )
+  surfaceHookFailures(commands, results, onSystemMessage)
+  const failClosed = failClosedVerdict(commands, results)
+  if (failClosed) return failClosed
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
+  const context = preToolContexts(results)
   // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
   // scan for any deny first, and only fall back to the first ask.
   let ask: HookDecision | undefined
@@ -95,7 +179,7 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
     if (decision.block && !decision.ask) return decision
     if (decision.ask && ask === undefined) ask = decision
   }
-  return ask ?? { block: false }
+  return ask ?? { block: false, context: context.length > 0 ? context : undefined }
 }
 
 type SystemMessageSink = (message: string) => void
@@ -124,9 +208,10 @@ export function promptContext(stdout: string): string {
 
 /** Run UserPromptSubmit hooks, in parallel as Claude does: the first blocking
  * verdict in config order wins; otherwise their additional context is concatenated
- * in config order for injection ahead of the prompt. */
+ * in config order for injection ahead of the prompt. The event has no matcher
+ * support (a stray matcher is ignored) and an `if`-carrying hook never runs here. */
 export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner, onSystemMessage?: SystemMessageSink): Promise<PromptDecision> {
-  const commands = matchingCommands(config.UserPromptSubmit, 'UserPromptSubmit')
+  const commands = allCommands(config.UserPromptSubmit).filter((command) => passesIfFilter(command, undefined))
   const results = await Promise.all(commands.map((command) => runner(command, { hook_event_name: 'UserPromptSubmit', prompt }, timeoutMs(command))))
   surfaceHookFailures(commands, results, onSystemMessage)
   for (const [i, result] of results.entries()) {
@@ -155,7 +240,12 @@ export function postToolFeedback(result: HookRunResult, eventName: string, isErr
   // A failed tool cannot be blocked, but the hook's stderr is still shown; on
   // success, exit-2 / decision:block feed back as a block notice.
   if (!result.timedOut && result.code === 2) lines.push(`${eventName} hook: ${result.stderr.trim() || (isError ? 'hook reported an error' : 'Blocked by hook')}`)
-  else if (!isError && parsed?.decision === 'block') lines.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
+  else if (!isError) {
+    // Any JSON blocking spelling feeds back, including the prompt/agent hook reply
+    // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
+    const verdict = jsonBlockVerdict(parsed, 'Blocked by hook')
+    if (verdict) lines.push(`PostToolUse hook: ${verdict.reason}`)
+  }
   const context = parsed?.hookSpecificOutput?.additionalContext
   if (context) lines.push(context)
   return lines
