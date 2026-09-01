@@ -2,6 +2,6 @@
 
 Exports `env` blocks from settings into the session. Source: [`extensions/env-settings.ts`](../extensions/env-settings.ts).
 
-- Reads `managed-settings.json`, `~/.claude/settings.json`, and the project `.claude/settings.json`/`settings.local.json`, per-key with Claude's settings precedence: managed > project (with `settings.local.json` overlaying `settings.json`) > user.
+- Reads `managed-settings.json` (plus `managed-settings.d/*.json` drop-ins, merged alphabetically after the base file with Claude's rules: single values replace, lists union, nested blocks merge), `~/.claude/settings.json`, and the project `.claude/settings.json`/`settings.local.json`, per-key with Claude's settings precedence: managed > project (with `settings.local.json` overlaying `settings.json`) > user.
 - A settings value replaces a value inherited from the shell, as Claude documents, and an empty string is the documented override for an export that cannot be unset; when a later session no longer defines a key, the shell's original value is restored.
 - The project scope is approval-gated (a repo's env can redirect providers), and the keys a checked-out repository must not control (`CLAUDE_CONFIG_DIR`, `HOME`, the TMP family, `XDG_*`, content-exporting telemetry variables, start/sync variables, and pi's own `PI_CODING_AGENT_DIR`) are dropped from project and local settings with a warning; set those in the shell, user settings, or managed settings instead.

@@ -66,7 +66,8 @@ function formatCost(cost: number): string {
 
 interface RateLimitWindow {
   used_percentage: number
-  resets_at?: string
+  /** Unix epoch seconds when the window resets, per Claude's documented field. */
+  resets_at?: number
 }
 interface RateLimitSnapshot {
   five_hour?: RateLimitWindow
@@ -109,8 +110,24 @@ function readRateLimitWindow(headers: Record<string, string>, prefix: string): R
   // the computed value negative); clamp so the payload never carries a nonsense percentage.
   const window: RateLimitWindow = { used_percentage: Math.max(0, Math.min(100, usedPercentage)) }
   const resetsAt = headers[`${base}-reset`] ?? headers[`${base}-resets-at`]
-  if (resetsAt) window.resets_at = resetsAt
+  if (resetsAt) {
+    // Claude documents resets_at as Unix epoch seconds; the header carries an ISO
+    // timestamp (or, from some providers, a bare epoch number already).
+    const epoch = /^\d+$/.test(resetsAt.trim()) ? Number(resetsAt.trim()) : Math.floor(Date.parse(resetsAt) / 1000)
+    if (Number.isFinite(epoch)) window.resets_at = epoch
+  }
   return window
+}
+
+/** The snapshot with expired windows dropped, so a window whose reset time has
+ * passed never lingers in the payload; undefined when nothing remains. */
+function liveRateLimits(snapshot: RateLimitSnapshot): RateLimitSnapshot | undefined {
+  const nowSeconds = Date.now() / 1000
+  const keep = (window?: RateLimitWindow): RateLimitWindow | undefined => (window && (window.resets_at === undefined || window.resets_at > nowSeconds) ? window : undefined)
+  const fiveHour = keep(snapshot.five_hour)
+  const sevenDay = keep(snapshot.seven_day)
+  if (!fiveHour && !sevenDay) return undefined
+  return { ...(fiveHour ? { five_hour: fiveHour } : {}), ...(sevenDay ? { seven_day: sevenDay } : {}) }
 }
 
 /** The five-hour and seven-day utilization windows Claude's statusline reports,
@@ -216,7 +233,9 @@ export default function statusLine(pi: ExtensionAPI) {
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
       version: PACKAGE_VERSION,
-      workspace: { current_dir: ctx.cwd, project_dir: ctx.cwd },
+      // added_dirs is always empty: pi has no /add-dir; the field stays present
+      // because Claude documents "Empty array if none have been added".
+      workspace: { current_dir: ctx.cwd, project_dir: ctx.cwd, added_dirs: [] },
       // Both fields, per Claude's documented contract: published statusline scripts
       // read .model.display_name and render the literal "null" when it is missing.
       model: { id: model?.id ?? '', display_name: model?.name ?? model?.id ?? '' },
@@ -255,13 +274,19 @@ export default function statusLine(pi: ExtensionAPI) {
     const sessionName = ctx.sessionManager.getSessionName?.()
     if (sessionName) payload.session_name = sessionName
     if (ctx.thinkingLevel) {
-      payload.effort = { level: ctx.thinkingLevel }
+      // pi's off/minimal are outside Claude's effort vocabulary: minimal maps to
+      // low, and off omits effort entirely (thinking disabled says the rest).
       payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
+      if (ctx.thinkingLevel !== 'off') payload.effort = { level: ctx.thinkingLevel === 'minimal' ? 'low' : ctx.thinkingLevel }
     }
     if (styleName) payload.output_style = { name: styleName }
     // The current utilization of the account's rate-limit windows, when the
-    // provider reported them; omitted entirely until a response has carried them.
-    if (rateLimits) payload.rate_limits = rateLimits
+    // provider reported them; omitted until a response has carried them, and an
+    // expired window is dropped rather than left stale.
+    if (rateLimits) {
+      const live = liveRateLimits(rateLimits)
+      if (live) payload.rate_limits = live
+    }
     return payload
   }
 

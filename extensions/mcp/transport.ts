@@ -184,7 +184,9 @@ function helperEnv(name: string, config: HttpServerConfig): NodeJS.ProcessEnv {
  * env block, and Claude's path variables (CLAUDE_PROJECT_DIR, and CLAUDE_PLUGIN_ROOT
  * for a plugin's server). */
 function stdioEnv(config: StdioServerConfig, fill: (value: string) => string, session?: SessionDirs): Record<string, string> {
-  const env: Record<string, string> = { ...getDefaultEnvironment() }
+  // CLAUDECODE marks every subprocess; the long-lived server deliberately gets no
+  // CLAUDE_CODE_CHILD_SESSION, which Claude reserves for per-call children.
+  const env: Record<string, string> = { ...getDefaultEnvironment(), CLAUDECODE: '1' }
   for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
   if (session) env.CLAUDE_PROJECT_DIR = session.projectDir
   if (config.pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = config.pluginRoot

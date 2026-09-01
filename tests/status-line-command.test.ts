@@ -346,6 +346,9 @@ describe('statusLine rate limits', () => {
     hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
     const { handlers, ctx } = setup(cwd)
     vi.useFakeTimers()
+    // The header timestamps must be in the future of the (frozen) clock, or the
+    // expiry rule below would rightly drop them.
+    vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
     await handlers.get('session_start')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
     await handlers.get('after_provider_response')?.(
@@ -365,9 +368,10 @@ describe('statusLine rate limits', () => {
     await vi.advanceTimersByTimeAsync(400)
 
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    // Claude documents resets_at as Unix epoch seconds, not the raw header string.
     expect(payload.rate_limits).toEqual({
-      five_hour: { used_percentage: 35.5, resets_at: '2026-08-16T12:00:00Z' },
-      seven_day: { used_percentage: 12, resets_at: '2026-08-22T00:00:00Z' },
+      five_hour: { used_percentage: 35.5, resets_at: Date.parse('2026-08-16T12:00:00Z') / 1000 },
+      seven_day: { used_percentage: 12, resets_at: Date.parse('2026-08-22T00:00:00Z') / 1000 },
     })
   })
 
@@ -562,5 +566,70 @@ describe('statusLine settings caching', () => {
     await handlers.get('turn_end')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
     expect(styleOf(hoisted.runs.at(-1))).toBe('Terse')
+  })
+})
+
+describe('statusLine payload and expiry conformance', () => {
+  it('drops a rate-limit window whose resets_at has passed instead of leaving it stale', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T11:00:00Z'))
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 200,
+        headers: {
+          'anthropic-ratelimit-unified-5h-utilization': '35.5',
+          'anthropic-ratelimit-unified-5h-reset': '2026-08-16T12:00:00Z',
+        },
+      },
+      ctx,
+    )
+    await vi.advanceTimersByTimeAsync(400)
+
+    // Two hours later the window has reset; the next payload must not carry it.
+    vi.setSystemTime(new Date('2026-08-16T13:00:00Z'))
+    hoisted.runs.length = 0
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toBeUndefined()
+  })
+
+  it('reports workspace.added_dirs as an empty array and maps pi effort levels onto the documented vocabulary', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    ;(ctx as { thinkingLevel: string }).thinkingLevel = 'minimal'
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.workspace as { added_dirs?: unknown }).added_dirs).toEqual([])
+    // pi's 'minimal' is off-contract; Claude's vocabulary starts at 'low'.
+    expect((payload.effort as { level: string }).level).toBe('low')
+  })
+
+  it('omits effort and reports thinking disabled when the level is off', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    ;(ctx as { thinkingLevel: string }).thinkingLevel = 'off'
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.effort).toBeUndefined()
+    expect((payload.thinking as { enabled: boolean }).enabled).toBe(false)
   })
 })

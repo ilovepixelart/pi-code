@@ -873,3 +873,23 @@ describe('hook stdout parsing rule', () => {
     expect(hookJsonError('{"note":1}\n{"note":2}')).toBeUndefined()
   })
 })
+
+describe('hook command child environment', () => {
+  it('marks hook commands with CLAUDE_CODE_CHILD_SESSION and passes terminal dimensions', async () => {
+    // Claude sets CLAUDE_CODE_CHILD_SESSION=1 in hook and status line commands
+    // (not stdio MCP servers), and COLUMNS/LINES to the terminal dimensions.
+    const savedColumns = Object.getOwnPropertyDescriptor(process.stdout, 'columns')
+    const savedRows = Object.getOwnPropertyDescriptor(process.stdout, 'rows')
+    Object.defineProperty(process.stdout, 'columns', { value: 121, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: 43, configurable: true })
+    try {
+      const result = await runHookCommand('echo "$CLAUDE_CODE_CHILD_SESSION:$COLUMNS:$LINES"', {}, 5000)
+      expect(result.stdout.trim()).toBe('1:121:43')
+    } finally {
+      if (savedColumns) Object.defineProperty(process.stdout, 'columns', savedColumns)
+      else delete (process.stdout as unknown as Record<string, unknown>).columns
+      if (savedRows) Object.defineProperty(process.stdout, 'rows', savedRows)
+      else delete (process.stdout as unknown as Record<string, unknown>).rows
+    }
+  })
+})

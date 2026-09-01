@@ -2248,6 +2248,10 @@ describe('mcp stdio session context', () => {
     // The harness cwd has no repo markers, so the project root falls back to cwd.
     const env = hoisted.transports[0].options.env as Record<string, string>
     expect(env.CLAUDE_PROJECT_DIR).toBe(harness.cwd)
+    // Claude sets CLAUDECODE=1 in stdio MCP server subprocesses; the long-lived
+    // server never gets CLAUDE_CODE_CHILD_SESSION, which marks per-call children.
+    expect(env.CLAUDECODE).toBe('1')
+    expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined()
     // A plugin-provided stdio server also gets CLAUDE_PLUGIN_ROOT, which Claude
     // exports to MCP server subprocesses.
     const pluggedEnv = hoisted.transports[1].options.env as Record<string, string>
