@@ -340,7 +340,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (!isSubagentPhaseEvent(data) || !sessionCtx) return
     const ctx = sessionCtx
     const eventName = data.phase === 'start' ? 'SubagentStart' : 'SubagentStop'
-    const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId }
+    // Claude's SubagentStop carries the subagent's final text; agent_transcript_path
+    // stays absent (a --no-session child writes no transcript, see docs/hooks.md).
+    const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId, ...(data.phase === 'stop' && data.lastAssistantMessage !== undefined ? { last_assistant_message: data.lastAssistantMessage } : {}) }
     try {
       const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
       surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))

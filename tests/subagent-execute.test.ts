@@ -70,7 +70,7 @@ interface SpawnCall {
   command: string
   args: string[]
   options: { cwd?: string; shell?: boolean }
-  /** Content of the --append-system-prompt file as it existed at spawn time, if any. */
+  /** Content of the --system-prompt file as it existed at spawn time, if any. */
   promptFile: { path: string; content: string } | null
 }
 
@@ -180,7 +180,7 @@ const getExecute = (): Execute => {
   return execute
 }
 
-const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; disallowedTools: string[]; effort: string; filePath: string; memory: 'user' | 'project' | 'local' }> = {}) => ({
+const agentConfig = (over: Partial<{ name: string; systemPrompt: string; source: string; model: string; tools: string[]; disallowedTools: string[]; effort: string; filePath: string; memory: 'user' | 'project' | 'local'; maxTurns: number }> = {}) => ({
   name: 'scout',
   description: 'a scout',
   systemPrompt: '',
@@ -215,7 +215,7 @@ beforeEach(() => {
   scripts = new Map()
   spawnMock.mockReset()
   spawnMock.mockImplementation((command: string, args: string[], options: { cwd?: string }) => {
-    const promptIndex = args.indexOf('--append-system-prompt')
+    const promptIndex = args.indexOf('--system-prompt')
     const promptPath = promptIndex === -1 ? null : args[promptIndex + 1]
     spawnCalls.push({
       command,
@@ -525,7 +525,7 @@ describe('background mode', () => {
 
     expect(text(result)).toContain('Too many background runs')
     const invocation = startBackgroundRunMock.mock.calls[0][2]
-    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    const promptPath = invocation.args[invocation.args.indexOf('--system-prompt') + 1]
     expect(fs.existsSync(promptPath)).toBe(false)
   })
 
@@ -570,7 +570,7 @@ describe('background mode', () => {
     await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
 
     const invocation = startBackgroundRunMock.mock.calls[0][2]
-    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    const promptPath = invocation.args[invocation.args.indexOf('--system-prompt') + 1]
     expect(fs.readFileSync(promptPath, 'utf-8')).toBe('You audit.')
 
     const onComplete = startBackgroundRunMock.mock.calls[0][3]
@@ -652,7 +652,7 @@ describe('runSingleAgent process handling', () => {
     await execute('c1', { agent: 'my agent/1', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     const call = spawnCalls[0]
-    expect(piArgs(call).slice(0, 5)).toEqual(['--mode', 'json', '-p', '--no-session', '--append-system-prompt'])
+    expect(piArgs(call).slice(0, 5)).toEqual(['--mode', 'json', '-p', '--no-session', '--system-prompt'])
     expect(call.promptFile?.content).toBe('Be terse.')
     // Unsafe characters in the agent name are replaced before it reaches the filesystem.
     expect(call.promptFile?.path.endsWith('/prompt-my_agent_1.md')).toBe(true)
@@ -1703,7 +1703,7 @@ describe('agent memory', () => {
 
     const invocation = startBackgroundRunMock.mock.calls[0][2]
     expect(invocation.args[invocation.args.indexOf('--tools') + 1]).toBe('grep,read,write,edit')
-    const promptPath = invocation.args[invocation.args.indexOf('--append-system-prompt') + 1]
+    const promptPath = invocation.args[invocation.args.indexOf('--system-prompt') + 1]
     const content = fs.readFileSync(promptPath, 'utf-8')
     expect(content).toContain('## Agent memory')
     expect(content).toContain('- audit patterns')
@@ -1799,5 +1799,92 @@ describe('MCP server-level tool patterns', () => {
     const args = spawnCalls[0].args
     const exclude = args[args.indexOf('--exclude-tools') + 1]
     expect(exclude).toBe('github_search,github_create')
+  })
+})
+
+describe('subagent run semantics conformance', () => {
+  it('replaces the child system prompt instead of appending, as Claude does for agents', async () => {
+    // Claude: the agent body is the subagent's system prompt, not an addition to
+    // the host prompt.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'You are the scout.' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('done')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls[0].args).toContain('--system-prompt')
+    expect(spawnCalls[0].args).not.toContain('--append-system-prompt')
+  })
+
+  it('honors CLAUDE_CODE_SUBAGENT_MODEL when nothing else assigns a model', async () => {
+    // Claude's model order: invocation model, frontmatter model, then this
+    // environment variable, then the main conversation's model.
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
+    try {
+      script('inspect', { stdout: [say('done')] })
+      await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+      const args = spawnCalls[0].args
+      expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-4-5')
+    } finally {
+      delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
+    }
+  })
+
+  it('lets the agent frontmatter model outrank CLAUDE_CODE_SUBAGENT_MODEL', async () => {
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
+    try {
+      discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ model: 'claude-opus-5' })], projectAgentsDir: null })
+      script('inspect', { stdout: [say('done')] })
+      await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+      const args = spawnCalls[0].args
+      expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-5')
+    } finally {
+      delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
+    }
+  })
+
+  it('marks a maxTurns-capped foreground run as partial in the returned output', async () => {
+    // Claude: when the subagent reaches the limit, the output is returned marked
+    // as partial.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 1 })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('first turn'), say('second turn')] })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnedChildren[0].kill).toHaveBeenCalledWith('SIGTERM')
+    expect(text(result)).toContain('partial')
+  })
+
+  it('does not mark an uncapped clean run as partial', async () => {
+    script('inspect', { stdout: [say('all done')] })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).not.toContain('partial')
+  })
+
+  it('refuses to launch an agent whose tools list resolves to no tool, naming the entries', async () => {
+    // Claude: "If no entry in the list resolves to a tool, the subagent usually
+    // fails to launch with an error naming the entries."
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ tools: ['BogusTool', 'AlsoFake'] })], projectAgentsDir: null })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('BogusTool')
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('launches when at least one tools entry resolves', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ tools: ['read', 'BogusTool'] })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('ok')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls).toHaveLength(1)
+  })
+
+  it('publishes the final assistant text on the subagent stop event for SubagentStop hooks', async () => {
+    // Claude's SubagentStop carries last_assistant_message so hooks need not parse
+    // a transcript.
+    script('inspect', { stdout: [say('the findings')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const stop = emittedEvents.find((e) => e.channel === 'pi-code:subagent' && (e.data as { phase: string }).phase === 'stop')
+    if (!stop) throw new Error('no subagent stop event was emitted')
+    expect((stop.data as { lastAssistantMessage?: string }).lastAssistantMessage).toBe('the findings')
   })
 })

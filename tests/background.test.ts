@@ -176,18 +176,18 @@ describe('background run lifecycle', () => {
   })
 
   it('rebuilds the prompt file once and reuses it across resumes', () => {
-    const id = startBackgroundRun('scout', 'one', spec({ args: ['--append-system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
     children.at(-1)!.emit('close', 0)
 
     expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('resumed')
     const firstArgs = spawnMock.mock.calls.at(-1)![1] as string[]
-    const promptPath = firstArgs[firstArgs.indexOf('--append-system-prompt') + 1]
+    const promptPath = firstArgs[firstArgs.indexOf('--system-prompt') + 1]
     expect(existsSync(promptPath)).toBe(true)
     children.at(-1)!.emit('close', 0)
 
     expect(resumeBackgroundRun(id!, 'three', () => {})).toBe('resumed')
     const secondArgs = spawnMock.mock.calls.at(-1)![1] as string[]
-    expect(secondArgs[secondArgs.indexOf('--append-system-prompt') + 1]).toBe(promptPath)
+    expect(secondArgs[secondArgs.indexOf('--system-prompt') + 1]).toBe(promptPath)
     children.at(-1)!.emit('close', 0)
     rmSync(dirname(promptPath), { recursive: true, force: true })
   })

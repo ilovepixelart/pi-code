@@ -10,6 +10,9 @@ export interface SubagentPhaseEvent {
   phase: 'start' | 'stop'
   agentType: string
   agentId: string
+  /** The run's final assistant text, on stop: Claude's SubagentStop delivers it
+   * as last_assistant_message so hooks need not parse a transcript. */
+  lastAssistantMessage?: string
 }
 
 export function isSubagentPhaseEvent(data: unknown): data is SubagentPhaseEvent {

@@ -1497,6 +1497,14 @@ describe('hooks subagent lifecycle', () => {
     expect(JSON.parse(recordFor('sub-stop').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'bg-1234' })
   })
 
+  it('passes last_assistant_message to SubagentStop hooks when the stop event carries it', async () => {
+    // Claude: SubagentStop hooks receive last_assistant_message so they need not
+    // parse the transcript for the subagent's final text.
+    const { ext } = await withHooks({ SubagentStop: [{ hooks: [{ command: 'sub-stop' }] }] })
+    await ext.emitSubagent({ phase: 'stop', agentType: 'scout', agentId: 'bg-9', lastAssistantMessage: 'the findings' })
+    expect(JSON.parse(recordFor('sub-stop').stdin).last_assistant_message).toBe('the findings')
+  })
+
   it('does not run subagent hooks whose matcher misses the agent type', async () => {
     const { ext } = await withHooks({ SubagentStart: [{ matcher: 'reviewer', hooks: [{ command: 'sub-start' }] }] })
     await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
