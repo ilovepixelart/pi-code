@@ -43,6 +43,25 @@ describe('parseCommandFile', () => {
     expect(parsed.bashRules).toEqual(['git add:*', 'git status:*'])
   })
 
+  it('splits space-separated allowed-tools entries, as Claude documents', () => {
+    // Claude: "Accepts a space- or comma-separated string, or a YAML list", and the
+    // docs' own examples are space-separated (`allowed-tools: Read Grep`).
+    const md = ['---', 'allowed-tools: Read Grep', '---', 'Look around.'].join('\n')
+
+    const parsed = parseCommandFile(md)
+    expect(parsed.allowedTools).toEqual(['read', 'grep'])
+  })
+
+  it('splits space-separated scoped grants while keeping spaces inside a scope', () => {
+    // The docs' commit example: `Bash(git add *) Bash(git commit *) Bash(git status *)`.
+    // A space at paren depth zero separates entries; inside a scope it belongs to the rule.
+    const md = ['---', 'allowed-tools: Bash(git add *) Bash(git status:*)', '---', 'Stage.'].join('\n')
+
+    const parsed = parseCommandFile(md)
+    expect(parsed.allowedTools).toEqual(['bash'])
+    expect(parsed.bashRules).toEqual(['git add *', 'git status:*'])
+  })
+
   it('keeps Read and Edit path scopes, with Edit scopes governing writes too', () => {
     const md = ['---', 'allowed-tools: Read(docs/**), Edit(docs/**), Write(tmp/**)', '---', 'Docs only.'].join('\n')
 
