@@ -30,6 +30,7 @@ import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
+import { runSubagentStartHooks } from '../internal/subagent-hooks.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, expandMcpToolPatterns, resolveModelAlias, withPreloadedSkills } from './agents.js'
@@ -151,6 +152,10 @@ interface RunAgentOptions {
   onUpdate?: OnUpdateCallback
   makeDetails: (results: SingleResult[]) => SubagentDetails
   onPhase?: SubagentPhaseSink
+  /** The child's run id, set by the wrapper so the spawn env can carry it. */
+  agentId?: string
+  /** SubagentStart hook context, injected ahead of the child's first prompt. */
+  startContexts?: string[]
   /** Skill directories to preload from, resolved where project trust is known. */
   skillRoots?: string[]
   /** Models this user can actually run, for resolving a tier alias. */
@@ -208,10 +213,13 @@ async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
     }
   }
   const agentId = `fg-${randomUUID().slice(0, 8)}`
+  // SubagentStart hooks run pre-spawn through the seam so their additionalContext
+  // reaches the child before its first prompt.
+  const startContexts = await runSubagentStartHooks(agent.name, agentId)
   options.onPhase?.('start', agent.name, agentId)
   let result: SingleResult | undefined
   try {
-    result = await runSingleAgentInner(options)
+    result = await runSingleAgentInner({ ...options, agentId, startContexts })
     return result
   } finally {
     options.onPhase?.('stop', agent.name, agentId, result ? getFinalOutput(result.messages) || undefined : undefined)
@@ -302,7 +310,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       args.push('--system-prompt', tmpPromptPath)
     }
 
-    args.push(`Task: ${task}`)
+    args.push(taskWithStartContext(task, options.startContexts ?? []))
     let wasAborted = false
 
     const exitCode = await new Promise<number>((resolve) => {
@@ -315,7 +323,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         // direct child orphans a build or dev server the agent started.
         detached: true,
         // The marker lets the child's subagent tool refuse to nest further.
-        env: { ...process.env, PI_CODE_SUBAGENT: '1' },
+        env: { ...process.env, PI_CODE_SUBAGENT: '1', ...agentHooksEnv(agent, options.agentId ?? '') },
       })
       let buffer = ''
       let assistantTurns = 0
@@ -764,7 +772,39 @@ function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] 
   // grant granted nothing.
   if (agent.tools && agent.tools.length > 0) args.push('--tools', expandMcpToolPatterns(agent.tools, knownMcpAliases).join(','))
   if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', expandMcpToolPatterns(agent.disallowedTools, knownMcpAliases).join(','))
+  // Claude: "Explore and Plan are the only subagents that omit CLAUDE.md" (and no
+  // field or setting changes which agents skip them), to keep research fast.
+  if (agent.source === 'builtin' && (agent.name === 'Explore' || agent.name === 'Plan')) args.push('--no-context-files')
   return args
+}
+
+/** Claude's agent-frontmatter hooks ride to the child as env; the child's hooks
+ * extension merges them for the run only (they die with the process, matching
+ * "only while that subagent is running"). Stop converts to SubagentStop, the
+ * event the child fires when it completes, as Claude documents. */
+function agentHooksEnv(agent: AgentConfig, agentId: string): Record<string, string> {
+  if (!agent.hooks) return {}
+  const hooks: Record<string, unknown> = { ...agent.hooks }
+  const stop = hooks.Stop
+  delete hooks.Stop
+  if (Array.isArray(stop)) hooks.SubagentStop = [...(Array.isArray(hooks.SubagentStop) ? (hooks.SubagentStop as unknown[]) : []), ...stop]
+  return { PI_CODE_AGENT_HOOKS: JSON.stringify({ agent: agent.name, id: agentId, hooks }) }
+}
+
+/** Whether a run belongs in the background: the caller asked, or Claude's
+ * `background: true` frontmatter keeps the agent there even on a foreground ask
+ * (single mode). */
+function wantsBackground(params: { background?: boolean; agent?: string }, agents: AgentConfig[]): boolean {
+  if (params.background) return true
+  return params.agent !== undefined && agents.find((a) => a.name === params.agent)?.background === true
+}
+
+/** The task argument with any SubagentStart hook context ahead of it, per Claude:
+ * "added to the subagent's context at the start of its conversation, before its
+ * first prompt". */
+function taskWithStartContext(task: string, contexts: string[]): string {
+  const context = contexts.filter(Boolean).join('\n')
+  return context ? `${context}\n\nTask: ${task}` : `Task: ${task}`
 }
 
 function backgroundCapResult(makeDetails: MakeDetails): ToolResult {
@@ -853,35 +893,45 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
     // foreground path).
     args.push('--system-prompt', tmpPrompt.filePath)
   }
-  args.push(`Task: ${task}`)
+  // The id is preset so SubagentStart hooks run pre-spawn with the id the run
+  // will actually carry, and their context lands before the child's first prompt.
+  const presetId = `bg-${randomUUID().slice(0, 8)}`
+  const startContexts = await runSubagentStartHooks(agent.name, presetId)
+  args.push(taskWithStartContext(task, startContexts))
   const invocation = getPiInvocation(args)
-  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: worktree?.dir ?? runCwd, promptBody: tmpPrompt ? promptBody : undefined, maxTurns: agent.maxTurns }, (run) => {
-    removeTmpPrompt(tmpPrompt)
-    const finish = (): void => {
-      // Both calls throw once the session that started the run is disposed. driveRun's
-      // catch covers the synchronous path, but the worktree branch reaches here from an
-      // async continuation outside it, so the guard must live in finish itself.
-      try {
-        pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, ...(run.output?.trim() ? { lastAssistantMessage: run.output.trim() } : {}) })
-        pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
-      } catch {
-        // Session disposed after the run outlived it; nothing to notify.
+  const id = startBackgroundRun(
+    agent.name,
+    task,
+    { command: invocation.command, args: invocation.args, cwd: worktree?.dir ?? runCwd, env: agentHooksEnv(agent, presetId), promptBody: tmpPrompt ? promptBody : undefined, maxTurns: agent.maxTurns },
+    (run) => {
+      removeTmpPrompt(tmpPrompt)
+      const finish = (): void => {
+        // Both calls throw once the session that started the run is disposed. driveRun's
+        // catch covers the synchronous path, but the worktree branch reaches here from an
+        // async continuation outside it, so the guard must live in finish itself.
+        try {
+          pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, ...(run.output?.trim() ? { lastAssistantMessage: run.output.trim() } : {}) })
+          pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+        } catch {
+          // Session disposed after the run outlived it; nothing to notify.
+        }
       }
-    }
-    if (!worktree) {
-      finish()
-      return
-    }
-    // Cleanup only removes a pristine worktree; a kept one is reported in the
-    // completion text so the parent knows where the changes live.
-    const keptWorktree = worktree
-    void cleanupAgentWorktree(runCwd, keptWorktree)
-      .then((outcome) => {
-        if (outcome === 'kept') run.output = `${run.output ?? ''}\n[isolation: worktree kept at ${keptWorktree.dir} (branch ${keptWorktree.branch}); the agent's changes live there]`.trim()
-      })
-      .catch(() => {})
-      .finally(finish)
-  })
+      if (!worktree) {
+        finish()
+        return
+      }
+      // Cleanup only removes a pristine worktree; a kept one is reported in the
+      // completion text so the parent knows where the changes live.
+      const keptWorktree = worktree
+      void cleanupAgentWorktree(runCwd, keptWorktree)
+        .then((outcome) => {
+          if (outcome === 'kept') run.output = `${run.output ?? ''}\n[isolation: worktree kept at ${keptWorktree.dir} (branch ${keptWorktree.branch}); the agent's changes live there]`.trim()
+        })
+        .catch(() => {})
+        .finally(finish)
+    },
+    presetId,
+  )
   if (id === null) {
     // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
     removeTmpPrompt(tmpPrompt)
@@ -1553,7 +1603,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (params.background) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
+      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
 
       const mode: ModeContext = {
         agents,

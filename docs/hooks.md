@@ -2,7 +2,7 @@
 
 Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Source: [`extensions/hooks/`](../extensions/hooks) (the module header in `index.ts` is the authoritative contract).
 
-Hook locations: settings files, managed policy settings, plugins, and skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run). Agent-frontmatter hooks are not yet loaded (tracked with the subagent work).
+Hook locations: settings files, managed policy settings, plugins, skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run), and agent frontmatter (passed to the subagent child via env, running only while it runs, with `Stop` converted to `SubagentStop`).
 
 ## Events
 
@@ -12,7 +12,7 @@ Hook locations: settings files, managed policy settings, plugins, and skill fron
 - **SessionStart**: context injection before the first prompt.
 - **UserPromptSubmit**: blocks the prompt or injects context ahead of it.
 - **Stop**: a block (or `additionalContext`) feeds back as a new turn, with `stop_hook_active` as the loop guard and a consecutive-block cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; `0` disables the cap). Does not run when the turn ended on a user interrupt, as Claude documents.
-- **SubagentStart / SubagentStop**: notify-only (a child has already exited by SubagentStop).
+- **SubagentStart / SubagentStop**: SubagentStart runs pre-spawn so its `additionalContext` reaches the child before its first prompt (it cannot block the spawn); SubagentStop is notify-only (the child has already exited) and carries `last_assistant_message`.
 - **PreCompact / PostCompact / SessionEnd / Notification** (`idle_prompt`, the one type pi can source): notify-only. `idle_prompt` fires when the turn ended about 60 seconds ago and the user hasn't typed since, per Claude's timing; input or the next turn cancels it. After compaction, **SessionStart** also fires with source `compact`.
 - **PostModelSwitch**: fires after the session's model changes, matched against the new model id; stdout/`additionalContext` reaches the model on the next turn. `requested_model` is `null` (pi does not carry the requested alias) and the cost-estimate fields are absent rather than fabricated. PreModelSwitch stays unbridged: pi's `model_select` event has no veto seam, and a blocking hook whose decision is silently ignored would be worse than an absent event. MessageDisplay is likewise unbridged (pi has no display-replacement seam).
 - **InstructionsLoaded**: observational; fires per loaded context file at session start, plus `path_glob_match` on a scoped-rule attach and `include` per resolved `@import`, deduped per session. `nested_traversal`/`compact` reasons never fire (pi does not lazily load nested CLAUDE.md or reload after compaction).

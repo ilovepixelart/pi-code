@@ -43,6 +43,8 @@ export interface BackgroundSpawn {
   command: string
   args: string[]
   cwd: string
+  /** Extra child environment (agent-frontmatter hooks ride here). */
+  env?: Record<string, string>
   /** The --system-prompt body, kept so a resume can rebuild the file the
    * completing run deleted. Without it the resumed child is handed a path that no
    * longer exists, and pi falls back to using that path as the prompt text. */
@@ -213,12 +215,14 @@ function withRebuiltPrompt(spawnSpec: BackgroundSpawn): string[] {
   }
 }
 
-export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): string | null {
+export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void, presetId?: string): string | null {
   // Checked here, synchronously with registration: callers await temp-file writes
   // between any check of their own and this call, so a parallel tool-call batch
   // could otherwise all pass that earlier check and overshoot the cap.
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) return null
-  const id = `bg-${randomUUID().slice(0, 8)}`
+  // A preset id lets the caller run SubagentStart hooks pre-spawn with the same
+  // id the run will carry.
+  const id = presetId ?? `bg-${randomUUID().slice(0, 8)}`
   // A stable session id per run: the child persists its session, so a follow-up can
   // resume it instead of starting cold.
   const sessionId = `pi-code-${id}-${randomUUID().slice(0, 8)}`
@@ -240,7 +244,7 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     // Its own group, so cancelling reaches any grandchild the agent spawned.
     detached: true,
     // The marker lets the child's subagent tool refuse to nest further.
-    env: { ...process.env, PI_CODE_SUBAGENT: '1' },
+    env: { ...process.env, PI_CODE_SUBAGENT: '1', ...invocation.env },
   })
   run.live = true
   const killGroup = (signal: NodeJS.Signals): void => {

@@ -64,9 +64,13 @@
  * (asyncRewake keeps its own), and hooks still running at session end are killed,
  * as Claude does at teardown.
  *
- * SubagentStart/SubagentStop ride pi-code's own subagent extension, which publishes
- * child-run lifecycle on the shared bus (notify-style: a child has already exited by
- * the time SubagentStop fires, so its exit-2 block semantics cannot be honored).
+ * SubagentStart runs through the pre-spawn seam (internal/subagent-hooks) so its
+ * additionalContext reaches the child before its first prompt; it cannot block a
+ * spawn, as Claude documents. SubagentStop rides the subagent extension's bus stop
+ * event (notify-style: the child has already exited, so exit-2 block semantics
+ * cannot be honored) and carries last_assistant_message. Inside a subagent child,
+ * agent-frontmatter hooks arrive via PI_CODE_AGENT_HOOKS (Stop pre-converted to
+ * SubagentStop, fired at the child's own agent end) and die with the process.
  *
  * Hook commands run via `sh -c` with the event JSON on stdin. A PreToolUse
  * hook blocks the tool by exiting 2 (stderr becomes the reason) or by printing
@@ -99,8 +103,9 @@ import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
+import { setSubagentStartHookRunner } from '../internal/subagent-hooks.js'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
-import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.js'
+import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeAgentEnvHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.js'
 import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, sessionEndTimeoutMs, timeoutMs } from './runners.js'
@@ -199,6 +204,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     idlePromptTimer = undefined
   }
   let sessionCtx: ExtensionContext | undefined
+  /** Set inside a subagent child that carries agent-frontmatter hooks: the child's
+   * own agent end fires their SubagentStop, per Claude's Stop conversion. */
+  let agentIdentity: { agent: string; id?: string } | undefined
   /** Claude's disableAllHooks escape hatch was set somewhere in the honored chain. */
   let hooksDisabled = false
   /** Which settings file each resolved entry came from, for the /hooks viewer. */
@@ -337,20 +345,35 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // Subagent lifecycle arrives over the bus without a pi context; the session context
   // captured at session_start supplies the common payload fields.
   pi.events.on(SUBAGENT_CHANNEL, async (data) => {
-    if (!isSubagentPhaseEvent(data) || !sessionCtx) return
+    // SubagentStart runs through the pre-spawn seam below (so its context can
+    // reach the child before its first prompt); the bus start event would
+    // double-run it, so only the stop phase is handled here.
+    if (!isSubagentPhaseEvent(data) || data.phase !== 'stop' || !sessionCtx) return
     const ctx = sessionCtx
-    const eventName = data.phase === 'start' ? 'SubagentStart' : 'SubagentStop'
     // Claude's SubagentStop carries the subagent's final text; agent_transcript_path
     // stays absent (a --no-session child writes no transcript, see docs/hooks.md).
-    const payload = { hook_event_name: eventName, agent_type: data.agentType, agent_id: data.agentId, ...(data.phase === 'stop' && data.lastAssistantMessage !== undefined ? { last_assistant_message: data.lastAssistantMessage } : {}) }
+    const payload = { hook_event_name: 'SubagentStop', agent_type: data.agentType, agent_id: data.agentId, ...(data.lastAssistantMessage !== undefined ? { last_assistant_message: data.lastAssistantMessage } : {}) }
     try {
-      const results = await runNotifyHooks(matchingCommands(config[eventName], data.agentType), payload, boundRunner(ctx))
+      const results = await runNotifyHooks(matchingCommands(config.SubagentStop, data.agentType), payload, boundRunner(ctx))
       surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     } catch {
       // The bus outlives the session: an event landing between /new disposing this
       // ctx and the next session_start hits disposed getters, and nothing awaits a
       // bus listener, so a throw here would escape as an unhandled rejection.
     }
+  })
+
+  // Claude's SubagentStart hooks inject additionalContext into the subagent before
+  // its first prompt, so they must run before the spawn: the subagent extension
+  // calls this seam pre-spawn and prepends the returned context to the child's task.
+  setSubagentStartHookRunner(async (agentType, agentId) => {
+    if (!sessionCtx) return []
+    const ctx = sessionCtx
+    const commands = matchingCommands(config.SubagentStart, agentType)
+    if (commands.length === 0) return []
+    const results = await runNotifyHooks(commands, { hook_event_name: 'SubagentStart', agent_type: agentType, agent_id: agentId }, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    return results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
 
   pi.on('session_start', async (event, ctx) => {
@@ -389,6 +412,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
     loadPluginHooks(config, installedPlugins(os.homedir()), hookSources)
+    // Inside a subagent child, the parent passes the agent's frontmatter hooks via
+    // env (Stop already converted to SubagentStop, per Claude); they run only for
+    // this child process.
+    agentIdentity = mergeAgentEnvHooks(config, hookSources)
     // "reload" re-fires in-process with the same conversation and would double-run hooks;
     // a fork is a genuine session begin, which Claude reports as source "fork".
     if (event.reason === 'reload') return
@@ -558,6 +585,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
         void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, runner).catch(() => {})
       }, IDLE_PROMPT_DELAY_MS)
       idlePromptTimer.unref?.()
+    }
+
+    // In a subagent child, the agent-frontmatter Stop hooks were converted to
+    // SubagentStop and fire here, at the child's own end, notify-style; before the
+    // Stop early-returns, which do not apply to them.
+    if (agentIdentity) {
+      const subStop = matchingCommands(config.SubagentStop, agentIdentity.agent)
+      if (subStop.length > 0) {
+        const subText = lastAssistantText((event as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [])
+        const subPayload = { hook_event_name: 'SubagentStop', agent_type: agentIdentity.agent, ...(agentIdentity.id ? { agent_id: agentIdentity.id } : {}), stop_hook_active: false, ...(subText ? { last_assistant_message: subText } : {}) }
+        await runNotifyHooks(subStop, subPayload, boundRunner(ctx)).catch(() => {})
+      }
     }
 
     // Stop has no matcher support (a stray matcher is ignored, as Claude documents)
