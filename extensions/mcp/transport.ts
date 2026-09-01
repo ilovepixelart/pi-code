@@ -15,7 +15,7 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { FileOAuthProvider } from '../internal/mcp-oauth.js'
+import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
 
@@ -247,6 +247,11 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     await connectWithTimeout(client, transport, `connect ${name} (ws)`)
     return client
   }
+  // The SDK's OAuth discovery has no override seam, so a configured metadata URL
+  // cannot be honored; say so instead of silently using standard discovery.
+  if (config.oauth?.authServerMetadataUrl) {
+    console.warn(`pi-code-mcp: server ${name} sets oauth.authServerMetadataUrl, which the MCP SDK cannot override; using standard discovery`)
+  }
   const headers: Record<string, string> = {}
   for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = fill(value)
   const token = resolveBearerToken(config)
@@ -268,6 +273,33 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     // An explicitly declared streamable transport must not silently degrade to SSE.
     if (config.type !== undefined || isUnauthorized(error)) throw error
     return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, configuredAuth, authUi, session)
+  }
+}
+
+/** Whether a connect failure is worth retrying: a 5xx response, a refused or reset
+ * connection, or a timeout. Auth and not-found errors need a configuration change. */
+function isTransientConnectError(error: unknown): boolean {
+  if (isUnauthorized(error)) return false
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (typeof code === 'number') return code >= 500
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|timed out after/.test(String(error))
+}
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Connect with Claude's first-connection retry: an HTTP or SSE server's transient
+ * failure (5xx, connection refused, timeout) is retried up to three times with a
+ * 1s-doubling delay. Stdio and WebSocket connects are attempted once, as are auth
+ * and not-found failures. */
+export async function connectWithRetries(name: string, config: ServerConfig, authUi?: AuthUi, session?: SessionDirs): Promise<Client> {
+  const retriable = !isStdio(config) && config.type !== 'ws' && config.type !== 'websocket'
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await connect(name, config, authUi, session)
+    } catch (error) {
+      if (!retriable || attempt >= 3 || !isTransientConnectError(error)) throw error
+      await delay(1000 * 2 ** attempt)
+    }
   }
 }
 
@@ -318,13 +350,15 @@ export type MakeTransport = (authProvider?: OAuthClientProvider) => HttpFamilyTr
  * header, or one from a headersHelper) never enters the OAuth path: the credential
  * to fix is the configured one, so an auth failure reports as a failed connection.
  */
-async function connectHttpFamily(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, hasConfiguredAuth: boolean, authUi: AuthUi | undefined, session?: SessionDirs): Promise<Client> {
+async function connectHttpFamily(name: string, config: { url: string; oauth?: OAuthServerConfig }, makeTransport: MakeTransport, label: string, hasConfiguredAuth: boolean, authUi: AuthUi | undefined, session?: SessionDirs): Promise<Client> {
   const newClient = () => makeClient(session)
   // Stored tokens ride the first attempt so the SDK refreshes them; with none, no
   // provider is attached, so a 401 surfaces as a transport error carrying code 401
   // (isUnauthorized detects it) and only the interactive provider below ever runs
-  // dynamic registration, keeping it bound to the real callback port.
-  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {})
+  // dynamic registration, keeping it bound to the real callback port. A
+  // pre-configured client (oauth.clientId) rides the silent provider too, so its
+  // stored tokens refresh with the configured credentials.
+  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth)
   try {
     const client = newClient()
     await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)

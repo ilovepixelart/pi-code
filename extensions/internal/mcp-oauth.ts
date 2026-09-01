@@ -28,6 +28,17 @@ interface StoredAuth {
   redirectPort?: number
 }
 
+/** Claude's per-server `oauth` config object: a pre-registered client (secret via
+ * MCP_CLIENT_SECRET), a fixed callback port for pre-registered redirect URIs, and
+ * pinned scopes. authServerMetadataUrl is accepted but unsupported (the MCP SDK
+ * offers no discovery override); the connect path warns when it is set. */
+export interface OAuthServerConfig {
+  clientId?: string
+  callbackPort?: number
+  scopes?: string
+  authServerMetadataUrl?: string
+}
+
 /** A server name is config-controlled text; the digest keeps hostile names inside
  * the store directory and distinct names from colliding after sanitization. */
 function storeFileFor(serverName: string): string {
@@ -55,9 +66,10 @@ export class FileOAuthProvider implements OAuthClientProvider {
   // page cannot inject an authorization code into this login (RFC 8252 8.9).
   private readonly loginState = crypto.randomBytes(16).toString('hex')
 
-  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void) {
+  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void, oauth?: OAuthServerConfig) {
     this.storePath = storeFileFor(serverName)
     this.onRedirect = onRedirect
+    this.oauth = oauth
     try {
       this.data = JSON.parse(fs.readFileSync(this.storePath, 'utf-8'))
     } catch {
@@ -65,14 +77,22 @@ export class FileOAuthProvider implements OAuthClientProvider {
     }
   }
 
+  private readonly oauth?: OAuthServerConfig
+
+  /** The client secret for a pre-configured client, from Claude's MCP_CLIENT_SECRET. */
+  private clientSecret(): string | undefined {
+    return this.oauth?.clientId ? process.env.MCP_CLIENT_SECRET : undefined
+  }
+
   private persist(): void {
     fs.mkdirSync(path.dirname(this.storePath), { recursive: true })
     fs.writeFileSync(this.storePath, JSON.stringify(this.data), { mode: 0o600 })
   }
 
-  /** The port a prior login registered, so a re-login can bind the same one. */
+  /** The configured callbackPort (Claude: for pre-registered redirect URIs), else
+   * the port a prior login registered, so a re-login can bind the same one. */
   savedRedirectPort(): number | undefined {
-    return this.data.redirectPort
+    return this.oauth?.callbackPort ?? this.data.redirectPort
   }
 
   /** Record the loopback port the callback server actually bound; the redirect
@@ -96,11 +116,19 @@ export class FileOAuthProvider implements OAuthClientProvider {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       // A local CLI is a public client; PKCE carries the proof instead of a secret.
-      token_endpoint_auth_method: 'none',
+      // A pre-configured client with an MCP_CLIENT_SECRET authenticates with it.
+      token_endpoint_auth_method: this.clientSecret() ? 'client_secret_post' : 'none',
+      // Claude: oauth.scopes pins the scopes requested during authorization.
+      ...(this.oauth?.scopes ? { scope: this.oauth.scopes } : {}),
     }
   }
 
   clientInformation(): OAuthClientInformationMixed | undefined {
+    // A pre-configured clientId replaces dynamic registration entirely.
+    if (this.oauth?.clientId) {
+      const secret = this.clientSecret()
+      return { client_id: this.oauth.clientId, ...(secret ? { client_secret: secret } : {}) }
+    }
     return this.data.client
   }
 

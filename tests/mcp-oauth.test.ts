@@ -88,6 +88,36 @@ describe('FileOAuthProvider', () => {
     expect(a.state()).not.toBe(b.state()) // a fresh token per attempt
   })
 
+  it('serves pre-configured oauth credentials from the config instead of dynamic registration', () => {
+    // Claude's oauth object: clientId names a pre-registered client, and the client
+    // secret comes from the MCP_CLIENT_SECRET environment variable.
+    const saved = process.env.MCP_CLIENT_SECRET
+    process.env.MCP_CLIENT_SECRET = 'shh'
+    try {
+      const provider = new FileOAuthProvider('pre', () => {}, { clientId: 'cid-9' })
+      expect(provider.clientInformation()).toEqual({ client_id: 'cid-9', client_secret: 'shh' })
+    } finally {
+      if (saved === undefined) delete process.env.MCP_CLIENT_SECRET
+      else process.env.MCP_CLIENT_SECRET = saved
+    }
+  })
+
+  it('serves a public pre-configured client when no MCP_CLIENT_SECRET is set', () => {
+    delete process.env.MCP_CLIENT_SECRET
+    const provider = new FileOAuthProvider('pre', () => {}, { clientId: 'cid-9' })
+    expect(provider.clientInformation()).toEqual({ client_id: 'cid-9' })
+  })
+
+  it('pins the requested scopes from oauth.scopes in the client metadata', () => {
+    const provider = new FileOAuthProvider('scoped', () => {}, { scopes: 'channels:read chat:write' })
+    expect(provider.clientMetadata.scope).toBe('channels:read chat:write')
+  })
+
+  it('prefers the configured callbackPort over a previously bound port', () => {
+    const provider = new FileOAuthProvider('ported', () => {}, { callbackPort: 8123 })
+    expect(provider.savedRedirectPort()).toBe(8123)
+  })
+
   it('fails closed when the code verifier is read before one is saved', () => {
     // The SDK asks for the PKCE verifier during the token exchange; a fresh provider has
     // none, so it must throw rather than hand back an empty proof.

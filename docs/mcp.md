@@ -19,6 +19,8 @@ Managed `allowedMcpServers`/`deniedMcpServers` entries are typed and matched per
 - Stdio servers get `CLAUDE_PROJECT_DIR` (and `CLAUDE_PLUGIN_ROOT` for a plugin's server) in their environment; every client answers `roots/list` with the session's launch directory.
 - A `headersHelper` command's stdout JSON merges into the transport headers (http/sse). The helper runs with `CLAUDE_CODE_MCP_SERVER_NAME` and `CLAUDE_CODE_MCP_SERVER_URL` set (credential-expanded url parts shown as `REDACTED`); a project- or plugin-supplied helper runs without credential-named variables (`TOKEN`/`SECRET`/`PASSWORD`/`KEY`/`AUTH`).
 - Bearer tokens, or OAuth for remote servers: browser login on 401/403 after a confirm, CSRF-guarded loopback callback, tokens under `~/.pi/agent/mcp-oauth`, silent refresh later. A configured `Authorization` header (static, bearer, or helper-supplied) is the server's authentication: auth failures report as failed connections with no OAuth fallback.
+- The per-server `oauth` object: `clientId` (secret via `MCP_CLIENT_SECRET`) replaces dynamic registration, `callbackPort` fixes the loopback port, `scopes` pins the requested scopes. `authServerMetadataUrl` is accepted but warned as unsupported (the MCP SDK has no discovery override).
+- Lifecycle: a transient first-connect failure of a remote server (5xx, refused, timeout) retries up to three times; a remote server that drops mid-session reconnects with exponential backoff (five attempts, 1s doubling); stdio servers are not auto-reconnected. A tool call rejected with 401/403 reconnects once (re-running the `headersHelper`, refreshing OAuth tokens) and retries once.
 
 ## Budgets
 

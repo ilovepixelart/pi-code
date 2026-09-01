@@ -2367,3 +2367,146 @@ describe('mcp configured authorization', () => {
     expect(line.startsWith('locked: failed: ')).toBe(true)
   })
 })
+
+describe('mcp automatic reconnection', () => {
+  const dropLastClient = (): void => {
+    const client = hoisted.clients.at(-1) as { onclose?: () => void }
+    client.onclose?.()
+  }
+
+  it('reconnects a dropped remote server after a one-second backoff', async () => {
+    // Claude reconnects a remote server that drops mid-session with exponential
+    // backoff, starting at one second.
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { remote: { type: 'http', url: 'https://api.example/mcp' } } })
+    const before = hoisted.transports.length
+    vi.useFakeTimers()
+
+    dropLastClient()
+    expect((await statusLinesOf(harness))[0]).toContain('disconnected')
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(hoisted.transports.length).toBeGreaterThan(before)
+    expect((await statusLinesOf(harness))[0]).toContain('remote: connected')
+  })
+
+  it('doubles the delay each attempt and gives up after five failed reconnects', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { remote: { type: 'http', url: 'https://api.example/mcp' } } })
+    const before = hoisted.transports.length
+    hoisted.control.connect = async () => {
+      throw new Error('still down')
+    }
+    vi.useFakeTimers()
+
+    dropLastClient()
+    // Delays 1+2+4+8+16 = 31s cover all five attempts.
+    await vi.advanceTimersByTimeAsync(31_000)
+    const afterFive = hoisted.transports.length
+    expect(afterFive - before).toBe(5)
+
+    // No sixth attempt, and the server reports failed.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(hoisted.transports.length).toBe(afterFive)
+    expect((await statusLinesOf(harness))[0]).toContain('remote: failed')
+  })
+
+  it('does not reconnect a dropped stdio server, which is a local process', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { local: { command: 'x' } } })
+    const before = hoisted.transports.length
+    vi.useFakeTimers()
+
+    dropLastClient()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(hoisted.transports.length).toBe(before)
+    expect((await statusLinesOf(harness))[0]).toContain('disconnected')
+  })
+
+  it('retries a transient first connect of a remote server, but not an auth error', async () => {
+    // Claude retries an HTTP/SSE first connection after a transient error (5xx,
+    // connection refused, timeout), up to three times.
+    withTools([{ name: 'go' }])
+    let attempts = 0
+    hoisted.control.connect = async () => {
+      attempts++
+      if (attempts === 1) throw Object.assign(new Error('bad gateway'), { code: 502 })
+    }
+    vi.useFakeTimers()
+    const harness = await setup({ user: { flaky: { type: 'http', url: 'https://api.example/mcp' } } })
+    const starting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(1000)
+    await starting
+
+    expect(attempts).toBe(2)
+    expect((await statusLinesOf(harness))[0]).toContain('flaky: connected')
+  })
+
+  it('gives up a transient first connect after three retries', async () => {
+    withTools([{ name: 'go' }])
+    let attempts = 0
+    hoisted.control.connect = async () => {
+      attempts++
+      throw Object.assign(new Error('bad gateway'), { code: 502 })
+    }
+    vi.useFakeTimers()
+    const harness = await setup({ user: { down: { type: 'http', url: 'https://api.example/mcp' } } })
+    const starting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(31_000)
+    await starting
+
+    expect(attempts).toBe(4)
+    expect((await statusLinesOf(harness))[0]).toContain('down: failed')
+  })
+
+  it('does not retry a not-found first connect or a stdio spawn failure', async () => {
+    withTools([{ name: 'go' }])
+    let attempts = 0
+    hoisted.control.connect = async () => {
+      attempts++
+      throw Object.assign(new Error('no such endpoint'), { code: 404 })
+    }
+    vi.useFakeTimers()
+    const harness = await setup({ user: { gone: { type: 'http', url: 'https://api.example/mcp' }, broken: { command: 'x' } } })
+    const starting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(31_000)
+    await starting
+
+    expect(attempts).toBe(2) // one per server, no retries
+  })
+})
+
+describe('mcp tool-call auth retry', () => {
+  it('reconnects and retries a tool call once after a 401, picking up fresh headers', async () => {
+    // Claude: on a 401/403 tool result, re-run the helper, reconnect, retry once.
+    withTools([{ name: 'go' }])
+    let calls = 0
+    hoisted.control.callTool = async () => {
+      calls++
+      if (calls === 1) throw Object.assign(new Error('expired'), { code: 401 })
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+    const harness = await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp' } } })
+    const before = hoisted.transports.length
+
+    const result = await harness.tools[0].execute('c1', {})
+
+    expect(calls).toBe(2)
+    expect(hoisted.transports.length).toBeGreaterThan(before)
+    expect((result.content[0] as { text: string }).text).toBe('ok')
+  })
+
+  it('retries the call only once: a second 401 surfaces as the error', async () => {
+    withTools([{ name: 'go' }])
+    let calls = 0
+    hoisted.control.callTool = async () => {
+      calls++
+      throw Object.assign(new Error('expired'), { code: 401 })
+    }
+    const harness = await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp' } } })
+
+    await expect(harness.tools[0].execute('c1', {})).rejects.toThrow('expired')
+    expect(calls).toBe(2)
+  })
+})

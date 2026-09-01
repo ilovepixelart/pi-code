@@ -48,7 +48,7 @@ import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, 
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
-import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
+import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isUnauthorized, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
@@ -91,16 +91,25 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // The session's directories, set at session_start before any connect: the launch
   // directory answers roots/list, the project root feeds CLAUDE_PROJECT_DIR.
   let sessionDirs: SessionDirs | undefined
+  // Shutdown closes clients while they are still in the map; the onclose handlers
+  // must not schedule reconnects for that deliberate teardown.
+  let shuttingDown = false
   const callTuning = (name: string): ServerCallTuning => {
     const config = serverConfigs.get(name)
     return config ? serverCallTuning(config) : {}
   }
   // Let other extensions (hooks' mcp_tool type) call a connected server's tool.
+  // The same 401/403 reconnect-and-retry-once as registered tools, when the
+  // server's config is known; a name with no stored config calls through once.
   setMcpToolCaller(async (server, tool, input) => {
-    const client = clients.get(server)
-    if (!client) throw new Error(`MCP server "${server}" is not connected`)
-    const tuning = callTuning(server)
-    const result = await client.callTool({ name: tool, arguments: input }, undefined, callRequestOptions(tuning.serverTimeoutMs ?? callTimeoutMs(), tuning))
+    const config = serverConfigs.get(server)
+    const result = config
+      ? await callToolWithAuthRetry(server, config, { name: tool, arguments: input }, `${server}: ${tool}`)
+      : await (async () => {
+          const client = clients.get(server)
+          if (!client) throw new Error(`MCP server "${server}" is not connected`)
+          return await client.callTool({ name: tool, arguments: input }, undefined, callRequestOptions(callTimeoutMs()))
+        })()
     const text = mapContent(result.content as McpContentBlock[], result.structuredContent)
       .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
       .map((part) => part.text)
@@ -142,17 +151,13 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           // present at registration: pi has no tool unregister, so after a server drops
           // and a later session_start reconnects it, registerTools skips re-registration
           // and this closure would otherwise keep calling the old, closed client.
-          const current = clients.get(name)
-          if (!current) throw new Error(`MCP server "${name}" is not connected`)
           // The per-server timeout (Claude's, 1s floor) or MCP_TOOL_TIMEOUT is the
           // wall-clock ceiling; callRequestOptions layers the idle timeout under it, which
-          // the SDK enforces (resetting on progress). Pass the options to the SDK too: its
-          // own default request timeout is 60s and would otherwise reject first. The outer
-          // race uses the wall budget, never the idle window, so a progressing call is not
-          // cut off at the idle timeout.
-          const tuning = serverCallTuning(config)
-          const wall = tuning.serverTimeoutMs ?? callTimeoutMs()
-          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, callRequestOptions(wall, tuning)), wall, toolName)
+          // the SDK enforces (resetting on progress). The outer race uses the wall
+          // budget, never the idle window, so a progressing call is not cut off at the
+          // idle timeout. A 401/403 reconnects once (fresh helper headers or refreshed
+          // OAuth tokens) and retries once.
+          const result = await callToolWithAuthRetry(name, config, { name: tool.name, arguments: params as Record<string, unknown> }, toolName)
           const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
           const details: { error?: string } = {}
           if (result.isError) {
@@ -165,6 +170,53 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       })
     }
     return count
+  }
+
+  /** Claude's mid-session reconnect for a dropped remote server: five attempts with
+   * a delay doubling from one second. connectServers redoes the full bring-up
+   * (tools, prompts, subscriptions, a fresh onclose) and its duplicate guard skips
+   * out if another path already reconnected the name. Runs without authUi: a server
+   * that now needs a login ends failed, and after the fifth failure the last
+   * attempt's failed status stands, with a session restart as the manual retry. */
+  async function reconnectWithBackoff(name: string, config: ServerConfig): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt))
+      if (shuttingDown || clients.has(name)) return
+      await connectServers({ [name]: config }, undefined, true)
+      if (clients.has(name)) return
+    }
+  }
+
+  /** Claude's 401/403 tool-call recovery: drop the client and reconnect once, so the
+   * headersHelper re-runs (fresh credential) or the OAuth tokens refresh, then the
+   * caller retries the call once. The map delete precedes the close so the onclose
+   * guard does not also schedule a backoff reconnect. */
+  async function reconnectForAuth(name: string, config: ServerConfig): Promise<void> {
+    const old = clients.get(name)
+    if (old) {
+      clients.delete(name)
+      await withTimeout(old.close(), 3000, 'close').catch(() => {})
+    }
+    await connectServers({ [name]: config }, undefined, true)
+  }
+
+  /** A tool call with the auth retry: on a 401/403 rejection, reconnect once and
+   * retry once; a second auth failure surfaces to the caller. */
+  async function callToolWithAuthRetry(name: string, config: ServerConfig, args: { name: string; arguments: Record<string, unknown> }, label: string): Promise<Awaited<ReturnType<Client['callTool']>>> {
+    const tuning = serverCallTuning(config)
+    const wall = tuning.serverTimeoutMs ?? callTimeoutMs()
+    const callOnce = async () => {
+      const current = clients.get(name)
+      if (!current) throw new Error(`MCP server "${name}" is not connected`)
+      return await withTimeout(current.callTool(args, undefined, callRequestOptions(wall, tuning)), wall, label)
+    }
+    try {
+      return await callOnce()
+    } catch (error) {
+      if (!isUnauthorized(error)) throw error
+      await reconnectForAuth(name, config)
+      return await callOnce()
+    }
   }
 
   // Prompt command name -> the server and prompt that own it, so a refresh re-listing
@@ -340,7 +392,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
-  async function connectServers(servers: Record<string, ServerConfig>, authUi?: AuthUi): Promise<void> {
+  async function connectServers(servers: Record<string, ServerConfig>, authUi?: AuthUi, noRetry = false): Promise<void> {
     const pending: [string, ServerConfig][] = []
     for (const [name, config] of Object.entries(servers)) {
       // A later scope must not take the name of a server that already connected: it
@@ -360,7 +412,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       pending.map(async ([name, config]) => {
         warnOnTypelessUrl(name, config)
         try {
-          const client = await connect(name, config, authUi, sessionDirs)
+          // First connections retry transient failures (Claude: up to three times for
+          // HTTP/SSE); the backoff reconnect below carries its own schedule instead.
+          const client = noRetry ? await connect(name, config, authUi, sessionDirs) : await connectWithRetries(name, config, authUi, sessionDirs)
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
           registerTools(name, config, tools)
@@ -382,6 +436,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             if (clients.get(name) !== client) return
             clients.delete(name)
             status.set(name, { state: 'disconnected', tools: 0 })
+            // Claude reconnects a dropped remote server with exponential backoff;
+            // stdio servers are local processes and are not reconnected. Shutdown
+            // closes clients while they are still in the map, so the flag guards
+            // against scheduling a reconnect for a deliberate teardown.
+            if (!shuttingDown && !serverCallTuning(config).stdio) void reconnectWithBackoff(name, config)
           }
         } catch (error) {
           status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
@@ -487,6 +546,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // withdrawn tool keeps its registration and surfaces the server's own error), which
     // is why serverToolCount reads from `registered` to recover the true count here.
     status.clear()
+    // A same-process session switch (/new, /resume) shut the last session down;
+    // this one may reconnect again.
+    shuttingDown = false
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd }
@@ -519,6 +581,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_shutdown', async () => {
+    // Closing fires each client's onclose while it is still in the map; the flag
+    // stops those handlers (and any in-flight backoff loop) from reconnecting.
+    shuttingDown = true
     // Close in parallel with a per-client timeout so one hung server can't stall pi's exit.
     await Promise.all([...clients.values()].map((client) => withTimeout(client.close(), 3000, 'close').catch(() => {})))
     // Drop the closed clients and their status now rather than waiting on each client's
