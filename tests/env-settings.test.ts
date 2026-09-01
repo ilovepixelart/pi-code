@@ -41,70 +41,62 @@ describe('envFromSettings', () => {
 })
 
 describe('mergeEnvScopes', () => {
-  it('merges per key with precedence managed > user > project without wiping other scopes', () => {
-    const merged = mergeEnvScopes({ A: 'm', C: 'mc' }, { A: 'u', B: 'ub' }, { A: 'p', D: 'pd' })
-    expect(merged).toEqual({ A: 'm', B: 'ub', C: 'mc', D: 'pd' })
+  it('merges per key with the documented precedence managed > project > user, without wiping other scopes', () => {
+    // Claude: "env values follow settings precedence" - managed > local > shared
+    // project > user (local overlays project inside projectEnv before this merge).
+    const merged = mergeEnvScopes({ A: 'm', C: 'mc' }, { A: 'u', B: 'ub', E: 'ue' }, { A: 'p', D: 'pd', E: 'pe' })
+    expect(merged).toEqual({ A: 'm', B: 'ub', C: 'mc', D: 'pd', E: 'pe' })
   })
 })
 
 describe('applyEnvSettings', () => {
   it('sets new keys and records them as owned', () => {
     const env: NodeJS.ProcessEnv = {}
-    const owned = new Set<string>()
+    const owned = new Map<string, string | undefined>()
     applyEnvSettings({ A: '1' }, env, owned)
     expect(env.A).toBe('1')
     expect(owned.has('A')).toBe(true)
   })
 
-  it('never overwrites a variable already in the real environment it did not set', () => {
+  it('replaces a shell-inherited value, as Claude documents, and restores it when the key is dropped', () => {
+    // Claude: "When the same variable is set in both your shell and a settings file
+    // env block, the settings file value applies. Claude Code writes each env entry
+    // into the process environment, replacing the value inherited from the shell."
     const env: NodeJS.ProcessEnv = { A: 'shell' }
-    const owned = new Set<string>()
+    const owned = new Map<string, string | undefined>()
     applyEnvSettings({ A: 'settings' }, env, owned)
+    expect(env.A).toBe('settings')
+    applyEnvSettings({}, env, owned)
     expect(env.A).toBe('shell')
-    expect(owned.has('A')).toBe(false)
   })
 
-  it('updates a key it owns on a later refresh', () => {
-    const env: NodeJS.ProcessEnv = {}
-    const owned = new Set<string>()
+  it('honors the documented empty-string override of an export that cannot be unset', () => {
+    // Claude: 'set it to an empty string in the env block: "CLAUDE_CODE_USE_VERTEX": ""'.
+    const env: NodeJS.ProcessEnv = { CLAUDE_CODE_USE_VERTEX: '1' }
+    const owned = new Map<string, string | undefined>()
+    applyEnvSettings({ CLAUDE_CODE_USE_VERTEX: '' }, env, owned)
+    expect(env.CLAUDE_CODE_USE_VERTEX).toBe('')
+  })
+
+  it('updates a key it owns on a later refresh without forgetting the original', () => {
+    const env: NodeJS.ProcessEnv = { A: 'shell' }
+    const owned = new Map<string, string | undefined>()
     applyEnvSettings({ A: '1' }, env, owned)
     applyEnvSettings({ A: '2' }, env, owned)
     expect(env.A).toBe('2')
+    applyEnvSettings({}, env, owned)
+    expect(env.A).toBe('shell')
   })
 
   it('unsets a key it owns once a later apply no longer defines it', () => {
     // Cross-project leak guard: a key an approved project set must not persist into a
     // later apply (session or project) that does not define it.
     const env: NodeJS.ProcessEnv = {}
-    const owned = new Set<string>()
+    const owned = new Map<string, string | undefined>()
     applyEnvSettings({ A: '1' }, env, owned)
     applyEnvSettings({}, env, owned)
     expect('A' in env).toBe(false)
     expect(owned.has('A')).toBe(false)
-  })
-
-  it('leaves a key it never owned (a shell export) untouched on unset', () => {
-    // The unset guard only removes keys this module set, never a shell export it skipped.
-    const env: NodeJS.ProcessEnv = { A: 'shell' }
-    const owned = new Set<string>()
-    applyEnvSettings({ A: 'settings' }, env, owned) // skipped: shell outranks
-    applyEnvSettings({}, env, owned)
-    expect(env.A).toBe('shell')
-  })
-
-  it('lets a managed key overwrite a shell export, but a user key does not', () => {
-    // Managed policy outranks even an ambient shell export; user/project do not.
-    const managedEnv: NodeJS.ProcessEnv = { A: 'shell' }
-    const managedOwned = new Set<string>()
-    applyEnvSettings({ A: 'managed' }, managedEnv, managedOwned, new Set(['A']))
-    expect(managedEnv.A).toBe('managed')
-    expect(managedOwned.has('A')).toBe(true)
-
-    const userEnvVar: NodeJS.ProcessEnv = { A: 'shell' }
-    const userOwned = new Set<string>()
-    applyEnvSettings({ A: 'user' }, userEnvVar, userOwned, new Set())
-    expect(userEnvVar.A).toBe('shell')
-    expect(userOwned.has('A')).toBe(false)
   })
 })
 
@@ -194,12 +186,14 @@ describe('env-settings extension', () => {
     expect(process.env.ENVTEST_PROJECT).toBeUndefined()
   })
 
-  it('does not overwrite a variable already in the real environment', async () => {
+  it('replaces a shell export with the settings value, as Claude documents', async () => {
+    // Claude: "the settings file value applies ... replacing the value inherited
+    // from the shell".
     setReal('ENVTEST_REAL', 'from-shell')
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_REAL: 'from-settings' })
 
     setup()
-    expect(process.env.ENVTEST_REAL).toBe('from-shell')
+    expect(process.env.ENVTEST_REAL).toBe('from-settings')
   })
 
   it('applies managed over user per key at factory time', async () => {
@@ -229,7 +223,7 @@ describe('env-settings extension', () => {
     expect(process.env.ENVTEST_PROJECT).toBeUndefined()
   })
 
-  it('lets managed env override a preexisting shell export, but user env does not', async () => {
+  it('lets every settings scope override a preexisting shell export', async () => {
     track('ENVTEST_MANAGED_OVR', 'ENVTEST_USER_OVR')
     setReal('ENVTEST_MANAGED_OVR', 'from-shell')
     setReal('ENVTEST_USER_OVR', 'from-shell')
@@ -237,8 +231,8 @@ describe('env-settings extension', () => {
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_USER_OVR: 'from-user' })
 
     setup()
-    expect(process.env.ENVTEST_MANAGED_OVR).toBe('from-managed') // managed outranks the shell
-    expect(process.env.ENVTEST_USER_OVR).toBe('from-shell') // user does not
+    expect(process.env.ENVTEST_MANAGED_OVR).toBe('from-managed')
+    expect(process.env.ENVTEST_USER_OVR).toBe('from-user')
   })
 
   it('does not throw and applies nothing when the user settings.json is invalid JSON', () => {
