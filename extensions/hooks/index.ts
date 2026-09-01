@@ -34,8 +34,9 @@
  *
  * Every payload carries session_id, transcript_path (pi's session file), cwd,
  * permission_mode (plan-mode state off the shared bus) and effort; tool events add
- * tool_use_id. Every event honors the universal `systemMessage` output (a
- * user-facing warning).
+ * tool_use_id. The universal `systemMessage` output (a user-facing warning) is
+ * honored on the decision-bearing events; the observational paths (Notification,
+ * InstructionsLoaded) ignore it, as Claude documents for them.
  * `suppressOutput` is accepted and inert: pi never echoes hook stdout to the
  * transcript in the first place.
  * `async`/`asyncRewake` (command hooks only, as Claude documents) run in the
@@ -111,10 +112,12 @@ export function lastAssistantText(messages: ReadonlyArray<{ role: string; conten
 const DEFAULT_STOP_HOOK_BLOCK_CAP = 8
 
 /** The consecutive-block cap for the Stop hook: CLAUDE_CODE_STOP_HOOK_BLOCK_CAP when it
- * is a positive integer, else the default. A non-positive or malformed value falls back
- * to the default rather than capping at zero (which would suppress the very first block). */
+ * is a positive integer, the documented "disable the cap" for 0 (unbounded, not a
+ * zero-cap that would suppress the very first block), else the default for a negative
+ * or malformed value. */
 export function stopHookBlockCap(env: Record<string, string | undefined> = process.env): number {
   const override = Number.parseInt(env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP ?? '', 10)
+  if (override === 0) return Number.POSITIVE_INFINITY
   return Number.isInteger(override) && override > 0 ? override : DEFAULT_STOP_HOOK_BLOCK_CAP
 }
 
