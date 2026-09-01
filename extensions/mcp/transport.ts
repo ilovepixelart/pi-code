@@ -144,7 +144,9 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     // The SDK's WebSocket transport takes only a url: it carries no headers, bearer
     // token, or headersHelper output. Warn rather than silently dropping configured
     // auth, and skip the helper entirely (running it would block the connect for up to
-    // 10s while contributing nothing). A ws server must be reachable without auth.
+    // 10s while contributing nothing). Divergence: Claude documents header auth as the
+    // ws mechanism ("Authentication is header-only"); under pi an authenticated ws
+    // server cannot be used until the SDK transport grows header support.
     if (config.headers || config.bearerToken || config.bearerTokenEnv || config.headersHelper) {
       console.warn(`pi-code-mcp: server ${name} is a WebSocket server; the SDK ws transport is url-only, so its headers/bearerToken/headersHelper are ignored`)
     }

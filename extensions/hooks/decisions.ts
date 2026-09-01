@@ -62,8 +62,8 @@ function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], 
  * the Claude alias, and the payload reports the alias, which is the name a
  * Claude-written hook script expects in tool_name. Every hook sees the original
  * tool input; hookSpecificOutput.updatedInput replaces the input in place as each
- * hook completes, so with several rewrites the last to finish takes effect, which
- * is Claude's documented (non-deterministic) behavior. */
+ * hook completes, so with several rewrites the last to finish takes effect (the
+ * docs leave multi-rewrite ordering unspecified). */
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink): Promise<HookDecision> {
   const names = claudeName ? [toolName, claudeName] : [toolName]
   const commands = matchingCommands(config.PreToolUse, names)

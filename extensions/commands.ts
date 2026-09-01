@@ -3,9 +3,10 @@
  *
  * Registers Claude Code's custom slash commands with pi directly, rather than
  * handing `.claude/commands` to pi's prompt-template loader. Owning registration
- * is what makes the rest of Claude's command contract reachable: namespaced
- * subdirectories (`frontend/build.md` is `/frontend:build`), `$ARGUMENTS` and
- * positional substitution, `` !`cmd` `` bash output, `@file` inlining, and the
+ * is what makes the rest of Claude's command contract reachable: `$ARGUMENTS` and
+ * positional substitution, `` !`cmd` `` bash output, `@file` inlining, subdirectory
+ * commands (registered as `/frontend:build`; current Claude docs name a command by
+ * file name alone, so the qualified form is a pi-code divergence), and the
  * `allowed-tools`, `argument-hint` and `model` frontmatter (`model` switches the
  * session model for the command's run via `pi.setModel`, restored on agent_end).
  * `shell: powershell` runs a command's injected spans through PowerShell when a
