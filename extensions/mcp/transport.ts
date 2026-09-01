@@ -17,38 +17,60 @@ import { FileOAuthProvider } from '../internal/mcp-oauth.js'
 import { expandCwd, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
 
-const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
+// Claude's MCP_TIMEOUT default: 30 seconds per connect attempt.
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000
 // Claude's MCP_TOOL_TIMEOUT default is effectively hours: the per-call wall-clock budget
 // is only a ceiling, and the idle timeout below is the real guard. 4h matches that model,
 // so a legitimately slow-but-progressing tool is not killed at the old 2 minutes.
 const DEFAULT_CALL_TIMEOUT_MS = 14_400_000
 // The idle timeout: the longest a call may go with no response or progress before it is
-// abandoned. Claude uses a separate idle guard (minutes) rather than the hours-long
-// wall-clock budget; the SDK resets this window on every progress notification.
+// abandoned. Claude uses a separate idle guard rather than the hours-long wall-clock
+// budget, defaulting to five minutes for remote transports and 30 minutes for stdio
+// servers; the SDK resets this window on every progress notification.
 const DEFAULT_CALL_IDLE_TIMEOUT_MS = 300_000
+const DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS = 1_800_000
+
+/** Claude's numeric env vars accept scientific notation and digit-separator spellings
+ * (2e3 as 2000, 64_000 as 64000). A non-numeric value is undefined, not zero. */
+function parseNumericEnv(raw: string): number | undefined {
+  const cleaned = raw.replaceAll('_', '')
+  if (cleaned.trim() === '') return undefined
+  const value = Number(cleaned)
+  return Number.isFinite(value) ? Math.floor(value) : undefined
+}
 
 /** A positive-integer env override, or the default when unset or unparseable. */
 function envTimeout(name: string, fallback: number): number {
   const raw = process.env[name]
   if (raw === undefined) return fallback
-  const value = Number.parseInt(raw, 10)
-  return Number.isInteger(value) && value > 0 ? value : fallback
+  const value = parseNumericEnv(raw)
+  return value !== undefined && value > 0 ? value : fallback
 }
 
 // Claude honors MCP_TIMEOUT (connect) and MCP_TOOL_TIMEOUT (per-call), both in ms.
 export const connectTimeoutMs = (): number => envTimeout('MCP_TIMEOUT', DEFAULT_CONNECT_TIMEOUT_MS)
 export const callTimeoutMs = (): number => envTimeout('MCP_TOOL_TIMEOUT', DEFAULT_CALL_TIMEOUT_MS)
 
+/** Per-server inputs to the idle-window choice: the transport kind picks the default
+ * tier, and a per-server `timeout` of at least 1000 also floors the idle window. */
+export interface ServerCallTuning {
+  stdio?: boolean
+  serverTimeoutMs?: number
+}
+
 /** The idle timeout in ms: the longest a call may go with no response or progress before
- * it is abandoned, overridable by CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, with 0 disabling it
- * (leaving only the wall-clock budget). Unlike envTimeout, an explicit 0 is honored as
- * "disabled" rather than falling back to the default. */
-function idleTimeoutMs(): number {
+ * it is abandoned. Defaults to Claude's tiers (five minutes remote, 30 minutes stdio),
+ * overridable by CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, with 0 disabling it (leaving only
+ * the wall-clock budget). Unlike envTimeout, an explicit 0 is honored as "disabled"
+ * rather than falling back to the default. A per-server timeout of at least 1000 floors
+ * the enabled window, so a server granted a long wall budget is not idled out earlier. */
+function idleTimeoutMs(tuning: ServerCallTuning): number {
   const raw = process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT
-  if (raw === undefined) return DEFAULT_CALL_IDLE_TIMEOUT_MS
-  const value = Number.parseInt(raw, 10)
-  if (value === 0) return 0
-  return Number.isInteger(value) && value > 0 ? value : DEFAULT_CALL_IDLE_TIMEOUT_MS
+  const override = raw === undefined ? undefined : parseNumericEnv(raw)
+  if (override === 0) return 0
+  const base = override !== undefined && override > 0 ? override : tuning.stdio ? DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS : DEFAULT_CALL_IDLE_TIMEOUT_MS
+  const floor = tuning.serverTimeoutMs !== undefined && tuning.serverTimeoutMs >= 1000 ? tuning.serverTimeoutMs : 0
+  return Math.max(base, floor)
 }
 
 /** The SDK RequestOptions for a call under pi's two-tier timeout: a wall-clock ceiling and,
@@ -60,10 +82,18 @@ function idleTimeoutMs(): number {
  * wall budget, only the wall budget applies. The outer withTimeout race is a wall-clock
  * backstop and must be raced against `wall`, never the idle window, so a legitimately
  * progressing call is not cut off. */
-export function callRequestOptions(wall: number): { timeout: number; resetTimeoutOnProgress?: boolean; maxTotalTimeout?: number; onprogress?: () => void } {
-  const idle = idleTimeoutMs()
+export function callRequestOptions(wall: number, tuning: ServerCallTuning = {}): { timeout: number; resetTimeoutOnProgress?: boolean; maxTotalTimeout?: number; onprogress?: () => void } {
+  const idle = idleTimeoutMs(tuning)
   if (idle === 0 || idle >= wall) return { timeout: wall }
   return { timeout: idle, resetTimeoutOnProgress: true, maxTotalTimeout: wall, onprogress: () => {} }
+}
+
+/** The tuning one server's config yields: its transport kind, and its declared
+ * per-server timeout. Per Claude, timeout values below 1000 are ignored and fall
+ * through to MCP_TOOL_TIMEOUT. */
+export function serverCallTuning(config: ServerConfig): ServerCallTuning {
+  const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
+  return { stdio: isStdio(config), ...(declared !== undefined ? { serverTimeoutMs: declared } : {}) }
 }
 
 /** Claude reports a config entry that has a url but no type as an error; pi-code

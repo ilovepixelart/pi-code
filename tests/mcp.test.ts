@@ -367,23 +367,35 @@ describe('mcp adapter helpers', () => {
 })
 
 describe('mcp prompt command naming', () => {
-  it('builds mcp__server__prompt with dashes and spaces normalized to underscores', () => {
+  it('keeps hyphens in the server name, folding only characters outside A-Za-z0-9_-', () => {
+    // Claude: "replaces any character in the server name outside A-Z, a-z, 0-9, _,
+    // and - with _, and uses the prompt name as the server declares it".
     expect(formatPromptCommandName('demo', 'greet')).toBe('mcp__demo__greet')
-    expect(formatPromptCommandName('my-server', 'code review')).toBe('mcp__my_server__code_review')
+    expect(formatPromptCommandName('my-server', 'pr-review')).toBe('mcp__my-server__pr-review')
+    // Per-character replacement: each out-of-class character becomes its own underscore.
+    expect(formatPromptCommandName('my server', 'greet')).toBe('mcp__my_server__greet')
+    expect(formatPromptCommandName('a!b', 'x')).toBe('mcp__a_b__x')
+  })
+
+  it('keeps the prompt name as declared, except whitespace, which pi command dispatch cannot carry', () => {
+    // Divergence: Claude uses the prompt name verbatim; pi dispatches commands on the
+    // first whitespace-delimited token, so a space would make the command unreachable.
+    expect(formatPromptCommandName('demo', 'code review')).toBe('mcp__demo__code_review')
   })
 })
 
 describe('mcp prompt argument mapping', () => {
-  it('maps space-separated tokens positionally onto the declared arguments', () => {
+  it('maps whitespace-separated tokens positionally onto the declared arguments', () => {
     expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one two')).toEqual({ a: 'one', b: 'two' })
   })
 
-  it('keeps a quoted run together as one value, like slash-command args', () => {
-    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], '"one two" three')).toEqual({ a: 'one two', b: 'three' })
+  it('treats a quoted run as plain tokens: Claude splits on whitespace, one token per argument', () => {
+    // Claude: "splits the arguments on whitespace, so each argument is a single token".
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], '"one two" three')).toEqual({ a: '"one', b: 'two"' })
   })
 
-  it('folds extra trailing tokens into the last declared argument so no input is dropped', () => {
-    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one two three four')).toEqual({ a: 'one', b: 'two three four' })
+  it('gives each declared argument exactly one token, dropping extra trailing tokens', () => {
+    expect(mapPromptArguments([{ name: 'a' }, { name: 'b' }], 'one two three four')).toEqual({ a: 'one', b: 'two' })
   })
 
   it('omits declared arguments with no token, and maps nothing when none are declared', () => {
@@ -465,5 +477,27 @@ describe('plugin server substitution safety', () => {
     expect(api.headers.Authorization).toBe('Bearer sekrit')
     expect(api.headersHelper).toMatch(/\/helper\.sh$/)
     expect(api.headersHelper).not.toContain('${CLAUDE_PLUGIN_ROOT}')
+  })
+
+  it('keeps hyphens in the tool alias prefix, folding only characters outside A-Za-z0-9_-', async () => {
+    // Claude's plugin tool names keep the plugin and server names' hyphens; only
+    // characters outside A-Za-z0-9_- become underscores.
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const withName = { ...(plugin({ 'db-tools': { command: 'srv' } }) as { name: string }), name: 'my-plugin' }
+    const servers = loadPluginServers([withName as never], '/work/repo')
+    expect((servers['db-tools'] as { aliasPrefix: string }).aliasPrefix).toBe('mcp__plugin_my-plugin_db-tools__')
+  })
+
+  it('loads a manifest mcpServers array as a list of config file paths, merging all of them', async () => {
+    // plugins-reference: mcpServers is string|array|object; the array form lists
+    // MCP config paths.
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const base = plugin() as { name: string; root: string; manifest: Record<string, unknown> }
+    writeFileSync(join(base.root, 'a.json'), JSON.stringify({ mcpServers: { alpha: { command: 'a-srv' } } }))
+    writeFileSync(join(base.root, 'b.json'), JSON.stringify({ mcpServers: { beta: { command: 'b-srv' } } }))
+    base.manifest = { mcpServers: ['./a.json', './b.json'] }
+    const servers = loadPluginServers([base as never], '/work/repo')
+    expect((servers.alpha as { command: string }).command).toBe('a-srv')
+    expect((servers.beta as { command: string }).command).toBe('b-srv')
   })
 })
