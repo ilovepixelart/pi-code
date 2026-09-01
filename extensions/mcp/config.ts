@@ -7,7 +7,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
-import { type InstalledPlugin, substitutePluginVars } from '../internal/plugins.js'
+import type { InstalledPlugin } from '../internal/plugins.js'
 import { findNearestFile } from '../internal/project-root.js'
 
 export interface StdioServerConfig {
@@ -108,39 +108,73 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
   return servers
 }
 
-/** The mcpServers one plugin declares: an inline map on the manifest, or the file it
- * points to (default .mcp.json at the plugin root), with ${CLAUDE_PLUGIN_*} substituted
- * before parsing. Malformed or missing JSON yields no entries. */
-function pluginServerEntries(plugin: InstalledPlugin): Record<string, ServerConfig> {
+/** The mcpServers one plugin declares, parsed WITHOUT substitution: an inline map on
+ * the manifest, or the file it points to (default .mcp.json at the plugin root).
+ * Malformed or missing JSON yields no entries. Substitution happens per field
+ * afterwards, so a user_config value with JSON-breaking characters cannot corrupt
+ * the parse and headersHelper can be shielded. */
+function rawPluginServerEntries(plugin: InstalledPlugin): Record<string, unknown> {
   const declared = plugin.manifest.mcpServers
   // An inline map of name -> config; an array is not a valid mcpServers map (it
   // would register a server named '0'), so it falls through to the path branch.
   if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-    try {
-      return JSON.parse(substitutePluginVars(JSON.stringify(declared), plugin))
-    } catch {
-      return {}
-    }
+    return { ...(declared as Record<string, unknown>) }
   }
   const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : '.mcp.json')
   try {
-    const parsed = JSON.parse(substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin))
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
     return parsed.mcpServers ?? {}
   } catch {
     return {}
   }
 }
 
+/** Every string in the value mapped through `substitute`, arrays and objects walked. */
+function mapStrings(value: unknown, substitute: (text: string) => string): unknown {
+  if (typeof value === 'string') return substitute(value)
+  if (Array.isArray(value)) return value.map((entry) => mapStrings(entry, substitute))
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, mapStrings(entry, substitute)]))
+  return value
+}
+
+/** One plugin server with Claude's substitutions applied: the plugin path variables
+ * and ${CLAUDE_PROJECT_DIR} everywhere, ${user_config.*} everywhere EXCEPT
+ * headersHelper (the command runs through a shell, so Claude reports such a server
+ * as misconfigured rather than substituting a user-supplied value into it; pi-code
+ * skips it with a warning). */
+function substitutedPluginServer(plugin: InstalledPlugin, name: string, config: unknown, projectDir: string | undefined): ServerConfig | undefined {
+  if (config === null || typeof config !== 'object') return undefined
+  const helper = (config as { headersHelper?: unknown }).headersHelper
+  if (typeof helper === 'string' && /\$\{user_config\./.test(helper)) {
+    console.warn(`pi-code-mcp: plugin ${plugin.name} server ${name} is misconfigured: headersHelper references \${user_config.*}, which cannot be substituted into a shell command; the server was not loaded`)
+    return undefined
+  }
+  const pathVars = (text: string): string => {
+    const withPlugin = substitutePathPluginVars(text, plugin)
+    return projectDir === undefined ? withPlugin : withPlugin.replaceAll('${CLAUDE_PROJECT_DIR}', projectDir)
+  }
+  const full = (text: string): string => pathVars(text).replace(/\$\{user_config\.(\w+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '')
+  const substituted = mapStrings(config, full) as ServerConfig
+  if (typeof helper === 'string') (substituted as { headersHelper?: string }).headersHelper = pathVars(helper)
+  return substituted
+}
+
+/** The plugin path variables only, without user_config. */
+function substitutePathPluginVars(text: string, plugin: InstalledPlugin): string {
+  return text.replaceAll('${CLAUDE_PLUGIN_ROOT}', plugin.root).replaceAll('${CLAUDE_PLUGIN_DATA}', plugin.dataDir)
+}
+
 /** Servers shipped by enabled plugins (.mcp.json or the manifest's `mcpServers`,
  * inline or by path), with ${CLAUDE_PLUGIN_*} substituted before parsing. Their
  * tools alias as mcp__plugin_<plugin>_<server>__<tool> for hook matchers, as
  * Claude scopes them. */
-export function loadPluginServers(plugins: InstalledPlugin[]): Record<string, ServerConfig> {
+export function loadPluginServers(plugins: InstalledPlugin[], projectDir?: string): Record<string, ServerConfig> {
   const fold = (name: string): string => name.replaceAll('-', '_')
   const servers: Record<string, ServerConfig> = {}
   for (const plugin of plugins) {
-    for (const [name, config] of Object.entries(pluginServerEntries(plugin))) {
-      servers[name] = { ...config, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__` }
+    for (const [name, config] of Object.entries(rawPluginServerEntries(plugin))) {
+      const substituted = substitutedPluginServer(plugin, name, config, projectDir)
+      if (substituted) servers[name] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__` }
     }
   }
   return servers

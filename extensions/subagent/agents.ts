@@ -213,6 +213,30 @@ function parseIsolationField(raw: unknown): 'worktree' | undefined | null {
   return null
 }
 
+/** Claude's MCP server-level patterns in agent `tools`/`disallowedTools`:
+ * `mcp__<server>` or `mcp__<server>__*` covers every tool of that server, and
+ * `mcp__*` every MCP tool from any server. pi registers MCP tools under its own
+ * `<server>_<tool>` names, so the parent's alias list is the translation table;
+ * matching folds case and dashes like hook matchers do. A pattern that matches
+ * nothing is kept verbatim (harmless to pi's exact-name filter), so a server that
+ * failed to connect is not silently dropped from a deny list. */
+export function expandMcpToolPatterns(entries: string[], aliases: ReadonlyArray<{ pi: string; claude: string }>): string[] {
+  const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
+  const expanded: string[] = []
+  for (const entry of entries) {
+    const folded = fold(entry)
+    if (!folded.startsWith('mcp__')) {
+      expanded.push(entry)
+      continue
+    }
+    const server = folded === 'mcp__*' ? undefined : folded.replace(/__\*$/, '')
+    const matches = aliases.filter((alias) => (server === undefined ? true : fold(alias.claude).startsWith(`${server}__`))).map((alias) => alias.pi)
+    if (matches.length === 0) expanded.push(entry)
+    else expanded.push(...matches)
+  }
+  return [...new Set(expanded)]
+}
+
 /** Claude's `maxTurns`: a positive integer cap on the subagent's agentic turns.
  * Anything else (0, negative, non-number) is ignored, so the run is uncapped. */
 function parseMaxTurns(raw: unknown): number | undefined {

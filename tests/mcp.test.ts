@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   applyServerPolicy,
@@ -427,5 +427,43 @@ describe('mcp prompt message content', () => {
     const blocks = promptMessageContent([{ content: { type: 'text', text: 'x'.repeat(60_000) } }])
     expect(blocks[0]).toMatchObject({ type: 'text' })
     expect(blocks[0].type === 'text' && blocks[0].text).toContain('[truncated')
+  })
+})
+
+describe('plugin server substitution safety', () => {
+  const plugin = (over: Record<string, unknown> = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-plugin-'))
+    return { name: 'toolbox', root: dir, dataDir: join(dir, 'data'), manifest: { mcpServers: over }, userConfig: { TOKEN: 'sekrit' } }
+  }
+
+  it('substitutes ${CLAUDE_PROJECT_DIR} in plugin server config, as Claude documents', async () => {
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const servers = loadPluginServers([plugin({ db: { command: '${CLAUDE_PROJECT_DIR}/bin/server', args: ['--root', '${CLAUDE_PROJECT_DIR}'] } }) as never], '/work/repo')
+    expect((servers.db as { command: string }).command).toBe('/work/repo/bin/server')
+    expect((servers.db as { args: string[] }).args).toEqual(['--root', '/work/repo'])
+  })
+
+  it('rejects a plugin server whose headersHelper references ${user_config.*} instead of substituting into a shell command', async () => {
+    // Claude: "A plugin-provided headersHelper can't reference the plugin's
+    // ${user_config.*} values, because the command runs through a shell. Claude Code
+    // reports the server as misconfigured with an error and doesn't substitute."
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const servers = loadPluginServers([plugin({ api: { type: 'http', url: 'https://api.example.com', headersHelper: 'auth-helper --token ${user_config.TOKEN}' } }) as never], '/work/repo')
+      expect(servers.api).toBeUndefined()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('user_config'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('still substitutes user_config outside headersHelper and plugin path vars inside it', async () => {
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const servers = loadPluginServers([plugin({ api: { type: 'http', url: 'https://api.example.com', headers: { Authorization: 'Bearer ${user_config.TOKEN}' }, headersHelper: '${CLAUDE_PLUGIN_ROOT}/helper.sh' } }) as never], '/work/repo')
+    const api = servers.api as { headers: Record<string, string>; headersHelper: string }
+    expect(api.headers.Authorization).toBe('Bearer sekrit')
+    expect(api.headersHelper).toMatch(/\/helper\.sh$/)
+    expect(api.headersHelper).not.toContain('${CLAUDE_PLUGIN_ROOT}')
   })
 })
