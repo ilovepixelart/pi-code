@@ -41,6 +41,9 @@ export interface HookCommand {
   /** prompt/agent entries: an optional model override; agent adds a system prompt. */
   model?: string
   systemPrompt?: string
+  /** Dedup scope: unset for settings files (identical handlers collapse across
+   * them); a plugin's or skill's copy carries its origin and stays separate. */
+  origin?: string
 }
 export interface HookMatcher {
   matcher?: string
@@ -135,7 +138,15 @@ export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): 
   return config
 }
 
-function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>): void {
+/** Claude dedups identical handlers across settings files only; a plugin's copy
+ * stays separate, so plugin entries carry their origin into the dedup key. */
+function stampOrigin(entries: HookMatcher[], origin: string): void {
+  for (const entry of entries) {
+    for (const hook of entry.hooks ?? []) hook.origin = origin
+  }
+}
+
+function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>, origin?: string): void {
   let parsed: { hooks?: HooksConfig }
   try {
     parsed = JSON.parse(raw)
@@ -150,6 +161,7 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
     // call for the rest of the session failed with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
+    if (origin !== undefined) stampOrigin(usable, origin)
     config[event] = [...(config[event] ?? []), ...usable]
     // Each parse produces fresh entry objects, so object identity keys the /hooks
     // viewer's source attribution without touching the entries themselves.
@@ -167,12 +179,12 @@ export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[],
     // numeric event keys), so it falls through to the default path rather than
     // silently registering nothing.
     if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`, sources)
+      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`, sources, `plugin:${plugin.name}`)
       continue
     }
     const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
     try {
-      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file, sources)
+      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file, sources, `plugin:${plugin.name}`)
     } catch {
       // a plugin without hooks contributes nothing
     }

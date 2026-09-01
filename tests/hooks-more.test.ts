@@ -198,6 +198,7 @@ const setupExtension = () => {
     userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
     input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
+    modelSelect: (to: string, from?: string, source = 'set') => handler('model_select')({ model: { id: to, name: to }, previousModel: from ? { id: from, name: from } : undefined, source }, defaultCtx),
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
     beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
     compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
@@ -617,7 +618,7 @@ describe('malformed hook config', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'user_bash', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'user_bash', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'model_select', 'session_shutdown'])
   })
 })
 
@@ -1075,8 +1076,9 @@ describe('hooks extension notify-style events', () => {
   })
 
   it('bridges Notification hooks for idle_prompt on agent end, matcher-filtered', async () => {
-    // The one notification pi can honestly source today: the agent finished and
-    // is waiting for input. Observational only, like Claude documents.
+    // Claude: idle_prompt fires when "Claude finished responding about 60 seconds
+    // ago and you haven't typed since". Observational only, like Claude documents.
+    vi.useFakeTimers()
     const ext = await withHooks({
       Notification: [
         { matcher: 'idle_prompt', hooks: [{ command: 'notify-idle' }] },
@@ -1084,12 +1086,26 @@ describe('hooks extension notify-style events', () => {
       ],
     })
     await ext.agentEnd()
+    expect(commandsRun()).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(commandsRun()).toEqual(['notify-idle'])
     const stdin = JSON.parse(recordFor('notify-idle').stdin)
     expect(stdin.hook_event_name).toBe('Notification')
     expect(stdin.notification_type).toBe('idle_prompt')
     expect(typeof stdin.message).toBe('string')
+  })
+
+  it('cancels the pending idle_prompt when the user types before the 60s idle window ends', async () => {
+    vi.useFakeTimers()
+    const ext = await withHooks({ Notification: [{ matcher: 'idle_prompt', hooks: [{ command: 'notify-idle' }] }] })
+    await ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(30_000)
+    await ext.input('typing now')
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(commandsRun()).toEqual([])
   })
 
   it('runs Stop hooks on agent end with stop_hook_active false', async () => {
@@ -2128,5 +2144,85 @@ describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () 
     expect(result.code).toBe(0)
     expect(seenPrompt).toContain('Should this stop?')
     expect(seenPrompt).toContain('"hook_event_name":"Stop"')
+  })
+})
+
+describe('hooks extension PostModelSwitch', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('runs PostModelSwitch hooks after a model change, matched against the new model', async () => {
+    // Claude runs PostModelSwitch after the session's model changes; the matcher
+    // compares against the canonical name of the model switched to.
+    const ext = await withHooks({
+      PostModelSwitch: [
+        { matcher: '.*opus.*', hooks: [{ command: 'on-opus' }] },
+        { matcher: '.*haiku.*', hooks: [{ command: 'on-haiku' }] },
+      ],
+    })
+    await ext.modelSelect('claude-opus-5', 'claude-sonnet-5', 'set')
+
+    expect(commandsRun()).toEqual(['on-opus'])
+    const stdin = JSON.parse(recordFor('on-opus').stdin)
+    expect(stdin).toMatchObject({ hook_event_name: 'PostModelSwitch', from_model: 'claude-sonnet-5', to_model: 'claude-opus-5', source: 'command' })
+  })
+
+  it("maps pi's model_select sources onto Claude's vocabulary", async () => {
+    const ext = await withHooks({ PostModelSwitch: [{ hooks: [{ command: 'switched' }] }] })
+    await ext.modelSelect('claude-opus-5', 'claude-sonnet-5', 'restore')
+
+    // pi's restore (model restored on resume) is Claude's "resume".
+    expect(JSON.parse(recordFor('switched').stdin).source).toBe('resume')
+  })
+})
+
+describe('hooks extension SessionStart compact source', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('fires SessionStart with source compact after a compaction, alongside PostCompact', async () => {
+    // Claude fires SessionStart with source "compact" when a session continues
+    // after compaction, in addition to the PostCompact event itself.
+    const ext = await withHooks({
+      SessionStart: [{ matcher: 'compact', hooks: [{ command: 'fresh-context' }] }],
+      PostCompact: [{ hooks: [{ command: 'post-compact' }] }],
+    })
+    await ext.compacted('manual')
+
+    expect(commandsRun().sort()).toEqual(['fresh-context', 'post-compact'])
+    expect(JSON.parse(recordFor('fresh-context').stdin)).toMatchObject({ hook_event_name: 'SessionStart', source: 'compact' })
+  })
+
+  it('does not fire compact-matched SessionStart hooks on a startup begin', async () => {
+    const ext = await withHooks({ SessionStart: [{ matcher: 'compact', hooks: [{ command: 'fresh-context' }] }] })
+    await ext.agentEnd()
+    expect(commandsRun()).toEqual([])
+    void ext
+  })
+})
+
+describe('hooks extension dedup scope', () => {
+  it('keeps a plugin copy of a settings-file handler separate, running both', async () => {
+    // Claude: "If you define the same handler in more than one settings file, it
+    // runs once. A plugin's or skill's copy of the same handler stays separate."
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: 'shared-format.sh' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { fmt: true }, hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: 'shared-format.sh' }] }] } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    expect(commandsRun()).toEqual(['shared-format.sh', 'shared-format.sh'])
   })
 })

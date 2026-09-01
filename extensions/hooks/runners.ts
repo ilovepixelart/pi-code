@@ -247,6 +247,33 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
   }
 }
 
+/** A dotted path into the hook's JSON input, or undefined when any step is missing. */
+function lookupPath(payload: unknown, dotted: string): unknown {
+  let current: unknown = payload
+  for (const key of dotted.split('.')) {
+    if (current === null || typeof current !== 'object') return undefined
+    current = (current as Record<string, unknown>)[key]
+  }
+  return current
+}
+
+/** Claude's ${path} substitution for mcp_tool input: string values may reference the
+ * hook's JSON input, such as ${tool_input.file_path}. Arrays and nested objects are
+ * walked; an unresolvable path stays literal; non-string looked-up values are
+ * JSON-encoded into the string. */
+function substituteInputPaths(value: unknown, payload: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([\w.]+)\}/g, (matchText, dotted: string) => {
+      const found = lookupPath(payload, dotted)
+      if (found === undefined) return matchText
+      return typeof found === 'string' ? found : JSON.stringify(found)
+    })
+  }
+  if (Array.isArray(value)) return value.map((entry) => substituteInputPaths(entry, payload))
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, substituteInputPaths(entry, payload)]))
+  return value
+}
+
 /**
  * Claude's `type: "mcp_tool"` hook: call a tool on an already-connected MCP server
  * and treat its text output like command stdout. pi reaches the server through the
@@ -255,7 +282,9 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
  */
 export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
   if (!hook.server || !hook.tool) return { code: 1, stdout: '', stderr: 'mcp_tool hook needs server and tool', timedOut: false }
-  const input = hook.input && typeof hook.input === 'object' ? hook.input : (payload as Record<string, unknown>)
+  // Claude: `input` is the arguments passed to the tool; without it the tool is
+  // called with no arguments, never handed the whole event payload.
+  const input = hook.input && typeof hook.input === 'object' ? (substituteInputPaths(hook.input, payload) as Record<string, unknown>) : {}
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<HookRunResult>((resolve) => {
     timer = setTimeout(() => resolve({ code: 1, stdout: '', stderr: `mcp_tool hook timed out after ${timeoutMs}ms`, timedOut: false }), timeoutMs)
