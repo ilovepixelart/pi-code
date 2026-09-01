@@ -15,6 +15,7 @@ import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { repoRoot } from './internal/project-root.js'
@@ -141,6 +142,18 @@ export function indexWouldOverflow(index: string, name: string, description: str
   return next.split('\n').length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
 }
 
+/** Where the index stands against the read limits, measured on the loaded content
+ * (frontmatter and comments stripped): 'over' past either bound, 'near' within
+ * 10% of one, else 'ok'. Claude reminds near a limit and errors over it. */
+export function indexReadState(index: string): 'ok' | 'near' | 'over' {
+  const loaded = stripNonLoaded(index)
+  const lines = loaded.split('\n').length
+  const bytes = Buffer.byteLength(loaded, 'utf-8')
+  if (lines > INDEX_MAX_LINES || bytes > INDEX_MAX_BYTES) return 'over'
+  if (lines > INDEX_MAX_LINES * 0.9 || bytes > INDEX_MAX_BYTES * 0.9) return 'near'
+  return 'ok'
+}
+
 type MemoryToolResult = { content: Array<{ type: 'text'; text: string }>; details: Record<string, never> }
 
 /** Write a memory and its index line, or say why it cannot be written. The whole
@@ -156,18 +169,29 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   }
   return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
     const index = readIndex(dir)
-    // Claude reports an explicit error rather than writing a memory the next session
-    // would never load, and says what to do about it.
-    if (indexWouldOverflow(index, name, description)) {
-      return {
-        content: [{ type: 'text', text: `Memory index is full (${INDEX_MAX_LINES} entries or ${INDEX_MAX_BYTES} bytes). Delete or consolidate memories before saving ${name}.` }],
-        details: {},
-      }
-    }
     fs.mkdirSync(dir, { recursive: true })
     // A memory with frontmatter records its write time; one without is left as-is.
     fs.writeFileSync(path.join(dir, `${name}.md`), stampModified(content, now))
-    writeIndex(indexPath, upsertIndexLine(index, name, description))
+    const nextIndex = upsertIndexLine(index, name, description)
+    writeIndex(indexPath, nextIndex)
+    // Claude measures the index after the write: over a read limit the write still
+    // succeeds, but an error tells Claude to rewrite the index (everything past
+    // the limit is dropped on the next load); near a limit, a reminder to shorten.
+    const state = indexReadState(nextIndex)
+    if (state === 'over') {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Saved memory ${name}, but the memory index is over its read limit (${INDEX_MAX_LINES} lines / ${INDEX_MAX_BYTES} bytes): rewrite MEMORY.md now. Keep one line per entry, move detail into topic files, and merge or drop stale entries; everything past the limit is dropped on the next load.`,
+          },
+        ],
+        details: {},
+      }
+    }
+    if (state === 'near') {
+      return { content: [{ type: 'text', text: `Saved memory ${name}. The memory index is near its read limit; shorten it: keep one line per entry, move detail into topic files, and merge or drop stale entries.` }], details: {} }
+    }
     return { content: [{ type: 'text', text: `Saved memory ${name}.` }], details: {} }
   })
 }
@@ -294,8 +318,9 @@ export function memorySettingsFiles(cwd: string, home: string, approved: boolean
   return claudeSettingsChain(cwd, home, approved)
 }
 
-/** Merge the two memory settings across the chain, later files winning per key. */
-export function readMemorySettings(files: string[]): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
+/** Merge the two memory settings across the chain, later files winning per key;
+ * managed policy settings win over every file, per Claude's settings precedence. */
+export function readMemorySettings(files: string[], managed: Record<string, unknown> = readManagedSettings()): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
   const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } = {}
   for (const file of files) {
     try {
@@ -307,6 +332,8 @@ export function readMemorySettings(files: string[]): { autoMemoryEnabled?: unkno
       // missing or invalid settings file: skip
     }
   }
+  if ('autoMemoryEnabled' in managed) merged.autoMemoryEnabled = managed.autoMemoryEnabled
+  if ('autoMemoryDirectory' in managed) merged.autoMemoryDirectory = managed.autoMemoryDirectory
   return merged
 }
 
@@ -405,7 +432,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'memory',
     label: 'Memory',
-    description: 'Persistent memory across sessions. Save durable facts, user preferences, corrections, and project decisions that are not derivable from the code. Actions: save (name + description + content), read (name), delete (name), list.',
+    description:
+      'Persistent memory across sessions. Save durable facts, user preferences, corrections, and project decisions that are not derivable from the code. Give each saved memory `type` frontmatter from the documented vocabulary: user (who the user is), feedback (guidance on how to work), project (ongoing work and constraints), or reference (pointers to external resources). Actions: save (name + description + content), read (name), delete (name), list.',
     parameters: MemoryParams,
     async execute(_id, params) {
       if (inSubagent()) {
@@ -492,6 +520,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
         `  Index:       ${path.join(store, INDEX_FILE)}`,
         `  User memory (CLAUDE.md):    ${path.join(home, '.claude', 'CLAUDE.md')}`,
         `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
+        // Claude's /memory lists every documented location, including files that
+        // do not exist yet.
+        `  Project memory (CLAUDE.local.md): ${path.join(ctx.cwd, 'CLAUDE.local.md')}`,
+        `  Project memory (alternate):       ${path.join(ctx.cwd, '.claude', 'CLAUDE.md')}`,
         'Toggle with /memory on or /memory off.',
       ]
       ctx.ui.notify(lines.join('\n'), 'info')

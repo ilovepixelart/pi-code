@@ -1456,3 +1456,19 @@ describe('managed CLAUDE.md file', () => {
     expect(await wireWithBus().fire(tempDir())).toBe('BASE')
   })
 })
+
+describe('context file size limit', () => {
+  it('skips a CLAUDE.local.md larger than 4 MiB instead of loading it', async () => {
+    // Claude: "Claude Code loads a CLAUDE.md file of up to 4 MiB in full and
+    // skips a larger file."
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'CLAUDE.local.md'), `HUGE START\n${'x'.repeat(4 * 1024 * 1024)}`)
+
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    await handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+    const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: [] } }, {})) as { systemPrompt: string } | undefined
+
+    expect(result?.systemPrompt ?? 'BASE').not.toContain('HUGE START')
+  })
+})

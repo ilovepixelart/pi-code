@@ -198,9 +198,14 @@ export function globCompileStats(): { compiled: number; evaluated: number } {
 /** Rule `paths:` globs compiled once for repeated matching, with claude-rules'
  * pathMatchesGlobs semantics: `./` and leading `/` anchors are stripped, a trailing
  * slash scopes to the directory's contents, and blank entries drop out. */
+/** Claude's shared list budget: rule patterns past ~1000 compiled entries are
+ * ignored rather than compiled without bound. */
+const LIST_PATTERN_BUDGET = 1000
+
 export function compileGlobs(globs: string[]): CompiledGlob[] {
   const compiled: CompiledGlob[] = []
   for (const raw of globs) {
+    if (compiled.length >= LIST_PATTERN_BUDGET) break
     let glob = raw.trim()
     if (!glob) continue
     if (glob.startsWith('./')) glob = glob.slice(2)

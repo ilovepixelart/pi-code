@@ -139,3 +139,25 @@ describe('memory command', () => {
     }
   })
 })
+
+describe('memory location listing, per the documented /memory contract', () => {
+  const wire = () => {
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    memoryExtension({ on: () => {}, registerTool: () => {}, registerCommand: (name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec) } as never)
+    return commands
+  }
+
+  it('lists CLAUDE.local.md and the project .claude/CLAUDE.md alternate', async () => {
+    // Claude: "/memory lists your CLAUDE.md, CLAUDE.local.md, and other memory
+    // file locations across user and project scopes, including entries for files
+    // that don't exist yet."
+    const cwd = mkdtempSync(join(tmpdir(), 'memcmd-'))
+    const notify = vi.fn()
+    await wire()
+      .get('memory')
+      ?.handler('', { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify } })
+    const text = notify.mock.calls[0][0] as string
+    expect(text).toContain('CLAUDE.local.md')
+    expect(text).toContain(join('.claude', 'CLAUDE.md'))
+  })
+})

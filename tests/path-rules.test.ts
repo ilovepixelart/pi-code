@@ -137,3 +137,12 @@ describe('bracket expressions', () => {
     expect(pathMatchesGlobs('photos [2024/x.png', ['photos \\[2024/**'])).toBe(true)
   })
 })
+
+describe('rule list budget', () => {
+  it('stops compiling past the shared 1000-pattern list budget', () => {
+    // Claude's rules share a list-level budget (~1000 patterns); entries past it
+    // are ignored rather than compiled without bound.
+    const globs = Array.from({ length: 1005 }, (_, i) => `dir${i}/*.ts`)
+    expect(compileGlobs(globs)).toHaveLength(1000)
+  })
+})

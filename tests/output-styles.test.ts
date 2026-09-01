@@ -19,11 +19,11 @@ const tempDir = (): string => mkdtempSync(join(tmpdir(), 'os-'))
 describe('parseStyle', () => {
   it('reads name and description from frontmatter and trims the body', () => {
     const md = '---\nname: Explanatory\ndescription: Teach while you work\n---\nExplain your reasoning.\n'
-    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Explanatory', description: 'Teach while you work', body: 'Explain your reasoning.', keepCodingInstructions: false })
+    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Explanatory', description: 'Teach while you work', body: 'Explain your reasoning.', keepCodingInstructions: false, forceForPlugin: false })
   })
 
   it('falls back to the filename when name is absent and keeps the whole body', () => {
-    expect(parseStyle('Just a persona.', 'concise')).toEqual({ name: 'concise', description: '', body: 'Just a persona.', keepCodingInstructions: false })
+    expect(parseStyle('Just a persona.', 'concise')).toEqual({ name: 'concise', description: '', body: 'Just a persona.', keepCodingInstructions: false, forceForPlugin: false })
   })
 
   it('reads keep-coding-instructions true from frontmatter', () => {
@@ -33,13 +33,13 @@ describe('parseStyle', () => {
 
   it('parses CRLF frontmatter (Windows-authored files)', () => {
     const md = '---\r\nname: Terse\r\ndescription: Few words\r\n---\r\nBe terse.\r\n'
-    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.', keepCodingInstructions: false })
+    expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.', keepCodingInstructions: false, forceForPlugin: false })
   })
 })
 
 describe('applyStyle', () => {
   const prompt = `You are a coding agent.\nGuidelines here.\n${CODING_BASE_MARKER}\n\n<project_context>CLAUDE.md content</project_context>\n\nCurrent working directory: /p\n\n## Global Rules\nrules here`
-  const style = { name: 'Writer', description: '', body: 'You are a writing assistant.', keepCodingInstructions: false }
+  const style = { name: 'Writer', description: '', body: 'You are a writing assistant.', keepCodingInstructions: false, forceForPlugin: false }
 
   it('replaces the coding instructions and keeps everything after the marker', () => {
     const applied = applyStyle(prompt, style)
@@ -51,7 +51,7 @@ describe('applyStyle', () => {
   })
 
   it('appends instead when the style keeps the coding instructions', () => {
-    const applied = applyStyle(prompt, { ...style, keepCodingInstructions: true })
+    const applied = applyStyle(prompt, { ...style, keepCodingInstructions: true, forceForPlugin: false })
     expect(applied).toContain('You are a coding agent.')
     expect(applied.endsWith('## Output Style: Writer\n\nYou are a writing assistant.')).toBe(true)
   })
@@ -144,7 +144,8 @@ describe('builtin styles', () => {
   it('ships Explanatory, Learning and Proactive as lowest-precedence styles', () => {
     const styles = loadStyles([BUILTIN_STYLES_DIR])
     const names = styles.map((style) => style.name).sort()
-    expect(names).toEqual(['Explanatory', 'Learning', 'Proactive'])
+    // Claude's built-ins include Concise (v2.1.237+).
+    expect(names).toEqual(['Concise', 'Explanatory', 'Learning', 'Proactive'])
     // Claude's built-ins are coding styles: they keep the software engineering instructions.
     expect(styles.every((style) => style.keepCodingInstructions)).toBe(true)
   })
@@ -178,8 +179,8 @@ describe('readActiveStyleName', () => {
 
 describe('styleForName', () => {
   const styles = [
-    { name: 'a', description: '', body: 'A', keepCodingInstructions: false },
-    { name: 'b', description: '', body: 'B', keepCodingInstructions: false },
+    { name: 'a', description: '', body: 'A', keepCodingInstructions: false, forceForPlugin: false },
+    { name: 'b', description: '', body: 'B', keepCodingInstructions: false, forceForPlugin: false },
   ]
 
   it('finds the matching style, or nothing for an unknown/undefined name', () => {
@@ -336,5 +337,28 @@ describe('extension wiring', () => {
     const cwd = projectWithStyle('Evil', 'Injected instructions.')
     const result = await wireSession({ cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {}, confirm: async () => false } })
     expect(result).toBeUndefined()
+  })
+})
+
+describe('force-for-plugin and managed outputStyle', () => {
+  it('parses force-for-plugin frontmatter', () => {
+    const style = parseStyle('---\nname: Corp\ndescription: c\nforce-for-plugin: true\n---\nBody', 'x')
+    expect(style.forceForPlugin).toBe(true)
+  })
+
+  it('applies the first loaded forced plugin style over the outputStyle setting', async () => {
+    // Claude: "apply this style automatically whenever the plugin is enabled...
+    // Overrides the user's outputStyle setting. If multiple enabled plugins set
+    // this, Claude Code uses the first one loaded."
+    const { forcedPluginStyle } = await import('../extensions/output-styles.ts')
+    const styles = [parseStyle('---\nname: Normal\ndescription: n\n---\nBody', 'n'), parseStyle('---\nname: First\ndescription: f\nforce-for-plugin: true\n---\nBody', 'f'), parseStyle('---\nname: Second\ndescription: s\nforce-for-plugin: true\n---\nBody', 's')]
+    expect(forcedPluginStyle(styles)?.name).toBe('First')
+  })
+
+  it('lets a managed-settings outputStyle win over every settings file', () => {
+    const dir = tempDir()
+    const user = join(dir, 'user.json')
+    writeFileSync(user, JSON.stringify({ outputStyle: 'Explanatory' }))
+    expect(readActiveStyleName([user], { outputStyle: 'Learning' })).toBe('Learning')
   })
 })
