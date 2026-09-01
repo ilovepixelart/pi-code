@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import contextImports from '../extensions/context-imports.ts'
-import hooksExtension, { type HookRunner, interpretHookResult, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit } from '../extensions/hooks/index.ts'
+import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
@@ -1305,6 +1305,152 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ SessionEnd: [{ matcher: 'quit', hooks: [{ command: 'bye' }] }] })
     await ext.shutdown('quit')
     expect(commandsRun()).toEqual(['bye'])
+  })
+})
+
+describe('background hooks (Claude async/asyncRewake contract, #123)', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  /** Give a fire-and-forget chain every chance to finish without any hook exiting:
+   * flush micro- and macrotasks repeatedly, but advance no timers (a hung hook is
+   * still running the whole time). */
+  const drain = async () => {
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  it('does not hold the turn open for a Stop hook marked async', async () => {
+    // Claude runs `async: true` hooks in the background without blocking; awaiting one
+    // is the freeze in #123, so agent_end must settle while the hook still runs.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true, timeout: 28800 }] }] })
+    script('monitor', { hang: true })
+    let ended = false
+    const pending = ext.agentEnd().then(() => {
+      ended = true
+    })
+    await drain()
+    expect(ended).toBe(true)
+    await pending
+    // Backgrounded, not skipped: the hook itself must still have been spawned.
+    expect(commandsRun()).toEqual(['monitor'])
+    expect(ext.sent).toEqual([])
+  })
+
+  it('does not hold the turn open for a Stop hook marked asyncRewake', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', asyncRewake: true, timeout: 28800 }] }] })
+    script('monitor', { hang: true })
+    let ended = false
+    const pending = ext.agentEnd().then(() => {
+      ended = true
+    })
+    await drain()
+    expect(ended).toBe(true)
+    await pending
+    expect(ext.sent).toEqual([])
+  })
+
+  it('honors a synchronous Stop block without waiting for a hung async sibling', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true, timeout: 28800 }, { command: 'guard' }] }] })
+    script('monitor', { hang: true })
+    script('guard', { stderr: ['not done'], code: 2 })
+    let ended = false
+    const pending = ext.agentEnd().then(() => {
+      ended = true
+    })
+    await drain()
+    expect(ended).toBe(true)
+    await pending
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'not done', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('wakes pi with stderr when an asyncRewake hook exits 2, not with a stop-block continuation', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', asyncRewake: true }] }] })
+    script('monitor', { stderr: ['deploy went red'], code: 2 })
+    await ext.agentEnd()
+    await drain()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-async-hook', content: expect.stringContaining('deploy went red'), display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('does not treat a background exit 2 as a Stop block for the next firing', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', asyncRewake: true }] }] })
+    script('monitor', { stderr: ['deploy went red'], code: 2 })
+    await ext.agentEnd()
+    await drain()
+    await ext.agentEnd()
+    const second = hoisted.calls.filter((call) => call.command === 'monitor')[1]
+    expect(JSON.parse(second.stdin).stop_hook_active).toBe(false)
+  })
+
+  it('does not delay a tool call for a hung PreToolUse hook marked async', async () => {
+    // The fields are honored on every event, not just Stop; a background guard can
+    // neither gate nor delay the call it observes.
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'monitor', async: true, timeout: 28800 }] }] })
+    script('monitor', { hang: true })
+    let ended = false
+    let verdict: unknown = 'unset'
+    const pending = ext.toolCall('bash', {}).then((result) => {
+      ended = true
+      verdict = result
+    })
+    await drain()
+    expect(ended).toBe(true)
+    expect(verdict).toBeUndefined()
+    await pending
+  })
+
+  it('delivers a background systemMessage and additionalContext to the model on the next turn, invisible to the user', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'reporter', async: true }] }] })
+    script('reporter', { stdout: [JSON.stringify({ systemMessage: 'heads up', hookSpecificOutput: { additionalContext: 'tests are green' } })], code: 0 })
+    await ext.agentEnd()
+    await drain()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-async-hook', content: 'heads up\ntests are green', display: false }, options: { deliverAs: 'nextTurn' } }])
+    expect(ext.notes).toEqual([])
+  })
+
+  it('discards the output of an asyncRewake hook killed at its timeout', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'late', asyncRewake: true, timeout: 1 }] }] })
+    script('late', { stdout: [JSON.stringify({ systemMessage: 'late news' })], hang: true })
+    vi.useFakeTimers()
+    await ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(1500)
+    vi.useRealTimers()
+    await drain()
+    expect(ext.sent).toEqual([])
+  })
+
+  it('kills a background hook still running at session end', async () => {
+    // Claude kills async hooks at teardown; without this a hung background hook
+    // pins the event loop past a one-shot run's end.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true }] }] })
+    script('monitor', { hang: true })
+    await ext.agentEnd()
+    expect(recordFor('monitor').killSignals).toEqual([])
+    await ext.shutdown('quit')
+    expect(recordFor('monitor').killSignals).toEqual(['SIGKILL'])
+  })
+
+  it('does not enforce a timeout on an async command hook, while asyncRewake keeps its own', () => {
+    // Claude's contract: `timeout` is not enforced on `async: true`; the returned
+    // budget is the Node timer ceiling, so the timer never fires as a deadline.
+    const ceiling = 2_147_483 * 1000
+    expect(timeoutMs({ command: 'x', async: true, timeout: 5 })).toBe(ceiling)
+    expect(timeoutMs({ command: 'x', async: true })).toBe(ceiling)
+    expect(timeoutMs({ command: 'x', asyncRewake: true, timeout: 5 })).toBe(5000)
+    expect(timeoutMs({ command: 'x', asyncRewake: true })).toBe(60_000)
+    expect(timeoutMs({ command: 'x', timeout: 5 })).toBe(5000)
+  })
+
+  it('treats the background flags as inert on non-command hook types', () => {
+    expect(isBackgroundHook({ command: 'x', async: true })).toBe(true)
+    expect(isBackgroundHook({ type: 'command', command: 'x', asyncRewake: true })).toBe(true)
+    expect(isBackgroundHook({ command: 'x' })).toBe(false)
+    for (const type of ['http', 'prompt', 'agent', 'mcp_tool']) {
+      expect(isBackgroundHook({ type, command: 'x', async: true, asyncRewake: true })).toBe(false)
+    }
   })
 })
 

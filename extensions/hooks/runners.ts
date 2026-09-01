@@ -9,7 +9,7 @@ import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
 import { completeText } from '../internal/model-complete.js'
-import { type HookCommand, httpUrlAllowed } from './config.js'
+import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
 
 // Claude defaults to 600s and lets a timed-out hook proceed; here a timed-out
 // PreToolUse or UserPromptSubmit hook fails closed (pi has no permission prompt
@@ -30,13 +30,20 @@ export interface HookRunResult {
 /** Runs one configured hook entry, whatever its type; boundRunner dispatches. */
 export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
 /** The shell path specifically; the statusline reuses it for its own command. With an
- * `args` array it becomes the exec path: `command` is spawned directly with those args. */
-export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[]) => Promise<HookRunResult>
+ * `args` array it becomes the exec path: `command` is spawned directly with those args.
+ * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
+ * still running at session end can be reaped (Claude kills async hooks at teardown). */
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[], onChild?: (kill: () => void) => void) => Promise<HookRunResult>
 
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
 
 export function timeoutMs(command: HookCommand): number {
+  // Claude does not enforce `timeout` on an `async` command hook (it does on
+  // `asyncRewake`), so the budget is the Node timer ceiling: the timer exists only
+  // so the delay never clamps, not as a deadline. Still-running background hooks
+  // are killed at session end instead.
+  if (isBackgroundHook(command) && command.asyncRewake !== true) return MAX_TIMEOUT_S * 1000
   // Non-positive values fall back to the default: a 0ms timer would fire before the
   // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
   const declared = command.timeout
@@ -67,7 +74,7 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args, onChild) =>
   new Promise((resolve) => {
     // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
     // `detached` makes the shell its own process group leader so the timeout can kill
@@ -84,6 +91,7 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, p
     const file = Array.isArray(args) ? command : '/bin/sh'
     const spawnArgs = Array.isArray(args) ? args.map((arg) => substituteArguments(arg, payload)) : ['-c', command]
     const child = spawn(file, spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env })
+    onChild?.(() => killTree(child))
     let stdout = ''
     let stderr = ''
     let settled = false
