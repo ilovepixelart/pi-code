@@ -220,8 +220,12 @@ describe('runHookCommand process wiring', () => {
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
     // the grandchildren a compound command forks. Claude marks every subprocess it
-    // spawns with CLAUDECODE=1, so the child env inherits the parent's plus that flag.
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: { ...process.env, CLAUDECODE: '1' } })
+    // spawns with CLAUDECODE=1 and per-call children with CLAUDE_CODE_CHILD_SESSION=1;
+    // COLUMNS/LINES ride along only when the parent terminal reports dimensions.
+    const expectedEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
+    if (process.stdout.columns) expectedEnv.COLUMNS = String(process.stdout.columns)
+    if (process.stdout.rows) expectedEnv.LINES = String(process.stdout.rows)
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: expectedEnv })
   })
 
   it('marks the hook child with CLAUDECODE=1 even when the parent env lacks it', async () => {
