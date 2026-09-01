@@ -22,7 +22,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { type ExtensionAPI, parseFrontmatter } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionContext, parseFrontmatter } from '@earendil-works/pi-coding-agent'
 
 import { expandCommand, shellExecutionDisabled } from './commands.js'
 import { parseCommandFile } from './internal/command-file.js'
@@ -39,7 +39,6 @@ function isDirectory(target: string): boolean {
   }
 }
 
-/** Existing `.claude/skills` directories, user first then project. */
 /** Existing `.claude/skills` directories, user first then project. The project
  * directory is included only for approved projects: pi's loader surfaces every skill's
  * name and description to the model, so an untrusted repository would otherwise get
@@ -108,33 +107,36 @@ export default function skillsExtension(pi: ExtensionAPI) {
   })
 
   // The dynamic-content shim: only for skills this extension contributed; pi's own
-  // `.pi/skills` (or an unknown name) pass through to pi's plain expansion. The
-  // expanded body is wrapped in pi's skill-block format so downstream behavior
-  // (baseDir note for relative references) matches an untouched invocation.
+  // `.pi/skills` (or an unknown name) pass through to pi's plain expansion.
   pi.on('input', async (event, ctx) => {
     if (event.source === 'extension') return
-    const text = event.text.trimStart()
-    if (!text.startsWith('/skill:')) return
-    const space = text.indexOf(' ')
-    const name = (space === -1 ? text.slice(7) : text.slice(7, space)).trim()
-    const args = space === -1 ? '' : text.slice(space + 1).trim()
-    if (!name) return
-    const trusted = isProjectApprovedSilently(ctx)
-    const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
-    if (!found) return
-    let content: string
-    let parsed: ReturnType<typeof parseCommandFile>
-    try {
-      content = fs.readFileSync(found.filePath, 'utf-8')
-      parsed = parseCommandFile(content)
-    } catch {
-      // Unreadable, or malformed frontmatter: pass through to pi's plain expansion
-      // (the loader registered the skill and delivers the raw body), rather than
-      // failing the invocation over the dynamic features it cannot have.
-      return
-    }
-    const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
-    const block = `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>`
-    return { action: 'transform', text: block }
+    return expandSkillInvocation(pi, event.text, ctx)
   })
+}
+
+/** A `/skill:name args` invocation into its expanded skill block, or undefined to
+ * pass the input through to pi untouched. The expanded body is wrapped in pi's
+ * skill-block format so downstream behavior (the baseDir note for relative
+ * references) matches an untouched invocation. */
+async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | undefined> {
+  const text = rawText.trimStart()
+  if (!text.startsWith('/skill:')) return
+  const space = text.indexOf(' ')
+  const name = (space === -1 ? text.slice(7) : text.slice(7, space)).trim()
+  const args = space === -1 ? '' : text.slice(space + 1).trim()
+  if (!name) return
+  const trusted = isProjectApprovedSilently(ctx)
+  const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+  if (!found) return
+  let parsed: ReturnType<typeof parseCommandFile>
+  try {
+    parsed = parseCommandFile(fs.readFileSync(found.filePath, 'utf-8'))
+  } catch {
+    // Unreadable, or malformed frontmatter: pass through to pi's plain expansion
+    // (the loader registered the skill and delivers the raw body), rather than
+    // failing the invocation over the dynamic features it cannot have.
+    return
+  }
+  const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
 }
