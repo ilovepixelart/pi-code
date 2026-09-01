@@ -52,7 +52,7 @@ import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { ancestorDirs, findNearestDir, repoRoot } from './internal/project-root.js'
+import { ancestorDirs, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { createTurnOverride } from './internal/turn-override.js'
 
