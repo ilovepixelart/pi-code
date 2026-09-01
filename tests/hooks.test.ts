@@ -835,3 +835,41 @@ describe('runPreToolUse on a timed-out hook', () => {
     expect(run).toEqual(['guard.sh', 'second.sh'])
   })
 })
+
+describe('hook stdout parsing rule', () => {
+  it('reads only {..}-shaped stdout as JSON output, per the documented rule', async () => {
+    // Claude: stdout starting with { and ending with } parses as JSON; a JSON
+    // array, a quoted string, or a bare number is plain text.
+    const { tryParseJson } = await import('../extensions/hooks/decisions.ts')
+    expect(tryParseJson('{"decision":"block","reason":"no"}')).toMatchObject({ decision: 'block' })
+    expect(tryParseJson('[1,2]')).toBeUndefined()
+    expect(tryParseJson('"just quoted text"')).toBeUndefined()
+    expect(tryParseJson('42')).toBeUndefined()
+    expect(tryParseJson('{"a":1} trailing')).toBeUndefined()
+  })
+
+  it('treats multi-line JSON objects with no output fields as plain text', async () => {
+    // Claude: two or more lines that each parse as JSON on their own, none setting
+    // an output field, are plain text.
+    const { tryParseJson } = await import('../extensions/hooks/decisions.ts')
+    expect(tryParseJson('{"note":1}\n{"note":2}')).toBeUndefined()
+  })
+
+  it('keeps a quoted-string stdout as plain-text context instead of silently dropping it', async () => {
+    const { promptContext } = await import('../extensions/hooks/decisions.ts')
+    expect(promptContext('"quoted context"')).toBe('"quoted context"')
+  })
+
+  it('reports a hook error for {..}-shaped stdout that is not valid JSON output', async () => {
+    // Claude: when stdout looks like JSON but cannot be parsed, the transcript
+    // shows a hook error notice and the output is not treated as plain text.
+    const { hookJsonError } = await import('../extensions/hooks/decisions.ts')
+    expect(hookJsonError('{"decision": broken}')).toContain('JSON')
+    expect(hookJsonError('plain text')).toBeUndefined()
+    expect(hookJsonError('{"decision":"block"}')).toBeUndefined()
+    // A multi-line output where one line sets an output field is a parse failure;
+    // with no output field set it is plain text, not an error.
+    expect(hookJsonError('{"decision":"block"}\n{"note":2}')).toContain('JSON')
+    expect(hookJsonError('{"note":1}\n{"note":2}')).toBeUndefined()
+  })
+})

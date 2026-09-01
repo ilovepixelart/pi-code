@@ -19,9 +19,14 @@ export interface HookDecision {
   ask?: boolean
 }
 
+/** Claude's stdout shape rule: only output that starts with `{` and ends with `}`
+ * (ignoring surrounding whitespace) is read as JSON output; a JSON array, a quoted
+ * string, or a bare number is plain text. Multi-line output whose lines each parse
+ * as JSON on their own with no output field set is plain text too (that case
+ * arrives here as a parse failure and hookJsonError sorts it from a real error). */
 export function tryParseJson(text: string):
   | {
-      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown; suppressOriginalPrompt?: boolean }
       decision?: string
       reason?: string
       continue?: boolean
@@ -32,11 +37,56 @@ export function tryParseJson(text: string):
       ok?: boolean
     }
   | undefined {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return undefined
   try {
-    return JSON.parse(text)
+    const parsed: unknown = JSON.parse(trimmed)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as ReturnType<typeof tryParseJson>) : undefined
   } catch {
     return undefined
   }
+}
+
+/** Top-level JSON output fields; a multi-line output where a line sets one of
+ * these is a parse failure rather than plain text, as Claude documents. */
+const OUTPUT_FIELDS = new Set(['decision', 'reason', 'continue', 'stopReason', 'systemMessage', 'suppressOutput', 'hookSpecificOutput', 'updatedToolOutput', 'updatedMCPToolOutput', 'ok'])
+
+/** Claude reports a `<hook> hook error` notice when {..}-shaped stdout cannot be
+ * read as JSON output, and does not treat that stdout as plain text. Returns the
+ * error message for that case; undefined for valid JSON output and for output the
+ * shape rule already reads as plain text (including the multi-line case). */
+export function hookJsonError(text: string): string | undefined {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return undefined
+  let parseError: string
+  try {
+    JSON.parse(trimmed)
+    return undefined
+  } catch (error) {
+    parseError = error instanceof Error ? error.message : String(error)
+  }
+  const lines = trimmed
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  if (lines.length >= 2 && !multiLineSetsOutputField(lines)) return undefined
+  return `invalid JSON output: ${parseError}`
+}
+
+/** Whether every line parses as JSON and at least one sets an output field; a
+ * non-JSON line means the multi-line rule does not apply (still a parse error). */
+function multiLineSetsOutputField(lines: string[]): boolean {
+  let setsField = false
+  for (const line of lines) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      return true // not all-JSON: the whole output is a parse failure
+    }
+    if (parsed !== null && typeof parsed === 'object' && Object.keys(parsed).some((key) => OUTPUT_FIELDS.has(key))) setsField = true
+  }
+  return setsField
 }
 
 /** The reason a JSON body's blocking decision carries, whichever spelling made it. */
@@ -94,6 +144,10 @@ function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], 
   if (!notify) return
   for (const [i, result] of results.entries()) {
     if (result.spawnFailed) notify(`Hook failed to run: ${commands[i].command}: ${result.stderr.trim() || 'unknown error'}`)
+    // Claude shows a `<hook> hook error` notice when {..}-shaped stdout cannot be
+    // read as JSON output (exit 2 still blocks and reads its own channels).
+    const jsonError = result.code === 2 ? undefined : hookJsonError(result.stdout)
+    if (jsonError !== undefined) notify(`${commands[i].command} hook error: ${jsonError}`)
   }
 }
 
@@ -196,6 +250,8 @@ export interface PromptDecision {
   block: boolean
   reason?: string
   context: string
+  /** Claude's suppressOriginalPrompt: the hook's context replaces the prompt. */
+  suppress?: boolean
 }
 
 /** Additional context a UserPromptSubmit hook contributes: an explicit
@@ -203,6 +259,8 @@ export interface PromptDecision {
 export function promptContext(stdout: string): string {
   const parsed = tryParseJson(stdout)
   if (parsed) return parsed.hookSpecificOutput?.additionalContext ?? ''
+  // Malformed JSON output is an error, not plain text: no context is added.
+  if (hookJsonError(stdout) !== undefined) return ''
   return stdout.trim()
 }
 
@@ -221,13 +279,17 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
   }
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const contexts: string[] = []
+  let suppress = false
   for (const result of results) {
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return { block: true, reason: decision.reason, context: '' }
+    // Claude's suppressOriginalPrompt: any hook setting it hides the original
+    // prompt, and the collected context is what reaches the model.
+    if (tryParseJson(result.stdout)?.hookSpecificOutput?.suppressOriginalPrompt === true) suppress = true
     const context = promptContext(result.stdout)
     if (context) contexts.push(context)
   }
-  return { block: false, context: contexts.join('\n') }
+  return { block: false, context: contexts.join('\n'), suppress }
 }
 
 /** The feedback lines one PostToolUse/PostToolUseFailure result appends next to the
