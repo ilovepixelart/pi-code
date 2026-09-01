@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import { managedSettingsFile } from '../internal/managed-settings.js'
 import { findNearestFile } from '../internal/project-root.js'
-import type { ServerConfig } from './config.js'
+import { interpolateEnv, type ServerConfig } from './config.js'
 
 export interface ProjectServerPolicy {
   disabled: Set<string>
@@ -60,29 +60,131 @@ export function splitByPolicy(candidates: Record<string, ServerConfig>, policy: 
   return { consented, gated }
 }
 
-/** Claude's `allowedMcpServers`/`deniedMcpServers`, read from managed settings only
- * (not user or project settings, so a repo can neither widen nor narrow the policy),
- * applied globally to every server across scopes. Entries are `{ serverName }` objects
- * (bare strings tolerated). `allowed` is null when unset (no restriction); an empty
- * set is an explicit lockdown, as Claude documents (empty allow array = deny all). */
-export function mcpAllowDeny(managedFile: string = managedSettingsFile()): { allowed: Set<string> | null; denied: Set<string> } {
-  let settings: Record<string, unknown> = {}
-  try {
-    const parsed = JSON.parse(fs.readFileSync(managedFile, 'utf-8'))
-    if (parsed && typeof parsed === 'object') settings = parsed
-  } catch {
-    // No managed policy on this machine: no restriction.
+/** One allow/deny list entry, keyed by exactly one of Claude's three match kinds. */
+export interface McpPolicyEntry {
+  /** Exact user-assigned label; never expanded. */
+  serverName?: string
+  /** Remote server URL, exact or with `*` wildcards anywhere. */
+  serverUrl?: string
+  /** Exact command and arguments that start a stdio server. */
+  serverCommand?: string[]
+}
+
+export interface McpPolicy {
+  /** null when no honored scope sets allowedMcpServers: every server passing the denylist loads. */
+  allowed: McpPolicyEntry[] | null
+  denied: McpPolicyEntry[]
+}
+
+/** A raw list entry into its typed form. A bare string is a name (Claude tolerates it);
+ * an object is keyed serverUrl > serverCommand > serverName; anything else is dropped. */
+function parsePolicyEntry(entry: unknown): McpPolicyEntry | undefined {
+  if (typeof entry === 'string') return entry.length > 0 ? { serverName: entry } : undefined
+  if (entry === null || typeof entry !== 'object') return undefined
+  const { serverName, serverUrl, serverCommand } = entry as Record<string, unknown>
+  if (typeof serverUrl === 'string' && serverUrl.length > 0) return { serverUrl }
+  if (Array.isArray(serverCommand) && serverCommand.length > 0 && serverCommand.every((part): part is string => typeof part === 'string')) return { serverCommand: serverCommand as string[] }
+  if (typeof serverName === 'string' && serverName.length > 0) return { serverName }
+  return undefined
+}
+
+/** Claude's `allowedMcpServers`/`deniedMcpServers`. Both lists merge from every honored
+ * settings scope (the caller passes the trust-gated chain, so a repo's file counts only
+ * once the project is approved); managed `allowManagedMcpServersOnly: true` keeps only
+ * the managed allowlist, while the denylist always merges from every scope, as Claude
+ * documents. An allowlist `serverName` entry is limited to letters, numbers, hyphens and
+ * underscores (a denylist name accepts any non-empty string). `allowed` is null when no
+ * honored scope sets the key; an empty list is an explicit lockdown (deny all). */
+export function mcpAllowDeny(scopeFiles: string[] = [], managedFile: string = managedSettingsFile()): McpPolicy {
+  const read = (file: string): Record<string, unknown> => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      // Missing or invalid file contributes no policy.
+      return {}
+    }
   }
-  const entryName = (entry: unknown): string | undefined => {
-    if (typeof entry === 'string') return entry
-    const serverName = (entry as { serverName?: unknown })?.serverName
-    return typeof serverName === 'string' ? serverName : undefined
-  }
-  const names = (value: unknown): string[] => (Array.isArray(value) ? value.map(entryName).filter((name): name is string => typeof name === 'string' && name.length > 0) : [])
+  const entries = (value: unknown): McpPolicyEntry[] => (Array.isArray(value) ? value.map(parsePolicyEntry).filter((entry): entry is McpPolicyEntry => entry !== undefined) : [])
+  const managed = read(managedFile)
+  const scopes = scopeFiles.map(read)
+  const allowSources = managed.allowManagedMcpServersOnly === true ? [managed] : [managed, ...scopes]
+  const allowSet = allowSources.some((settings) => Array.isArray(settings.allowedMcpServers))
   return {
-    allowed: Array.isArray(settings.allowedMcpServers) ? new Set(names(settings.allowedMcpServers)) : null,
-    denied: new Set(names(settings.deniedMcpServers)),
+    allowed: allowSet ? allowSources.flatMap((settings) => entries(settings.allowedMcpServers)).filter((entry) => entry.serverName === undefined || /^[A-Za-z0-9_-]+$/.test(entry.serverName)) : null,
+    denied: [managed, ...scopes].flatMap((settings) => entries(settings.deniedMcpServers)),
   }
+}
+
+/** `*` in a policy URL pattern matches any run of characters; everything else is literal. */
+function wildcardRegExp(pattern: string): RegExp {
+  const source = pattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`))
+    .join('.*')
+  return new RegExp(`^${source}$`)
+}
+
+/** Claude's URL pattern match: `*` anywhere including the scheme; the scheme/host/port
+ * part compares case-insensitively and ignores a trailing FQDN dot, the path stays
+ * case-sensitive, and a pattern with no path matches any path. */
+export function urlPatternMatches(pattern: string, url: string): boolean {
+  const split = (value: string): { pre: string; path: string | undefined } => {
+    const schemeEnd = value.indexOf('://')
+    const slash = value.indexOf('/', schemeEnd === -1 ? 0 : schemeEnd + 3)
+    if (slash === -1) return { pre: value, path: undefined }
+    return { pre: value.slice(0, slash), path: value.slice(slash) }
+  }
+  const pre = (value: string): string => value.toLowerCase().replace(/\.(?=:\d+$|$)/, '')
+  const patternParts = split(pattern)
+  const urlParts = split(url)
+  if (!wildcardRegExp(pre(patternParts.pre)).test(pre(urlParts.pre))) return false
+  if (patternParts.path === undefined) return true
+  return wildcardRegExp(patternParts.path).test(urlParts.path ?? '/')
+}
+
+const configUrl = (config: ServerConfig): string | undefined => (config as { url?: string }).url
+const configArgv = (config: ServerConfig): string[] | undefined => {
+  const command = (config as { command?: string }).command
+  if (typeof command !== 'string') return undefined
+  const args = (config as { args?: unknown }).args
+  return [command, ...(Array.isArray(args) ? args.filter((part): part is string => typeof part === 'string') : [])]
+}
+const argvEqual = (a: string[], b: string[]): boolean => a.length === b.length && a.every((part, i) => part === b[i])
+/** Policy-side expansion. Divergence from Claude, documented: Claude expands policy
+ * entries from a pinned startup environment; pi-code expands from the live process env.
+ * The deny path compensates by also matching the unexpanded forms (see entryMatches),
+ * which can only widen a deny, never weaken it. */
+const expand = (value: string): string => interpolateEnv(value)
+
+/** Whether one policy entry matches a server. `includeRawForms` is the deny-side rule:
+ * raw and expanded forms both count, so expansion drift can only widen a deny. The
+ * allow side matches expanded forms only, mirroring Claude ignoring an allow entry
+ * whose expansion would change what it means. */
+function entryMatches(entry: McpPolicyEntry, name: string, config: ServerConfig, includeRawForms: boolean): boolean {
+  if (entry.serverUrl !== undefined) {
+    const url = configUrl(config)
+    if (url === undefined) return false
+    return urlPatternMatches(expand(entry.serverUrl), expand(url)) || (includeRawForms && urlPatternMatches(entry.serverUrl, url))
+  }
+  if (entry.serverCommand !== undefined) {
+    const argv = configArgv(config)
+    if (argv === undefined) return false
+    return argvEqual(entry.serverCommand.map(expand), argv.map(expand)) || (includeRawForms && argvEqual(entry.serverCommand, argv))
+  }
+  return entry.serverName === name
+}
+
+/** Claude's allowlist rule per server type: a remote server must match a `serverUrl`
+ * entry and a stdio server a `serverCommand` entry; a `serverName` match counts only
+ * when the allowlist contains no typed entries for that transport. */
+function serverAllowed(name: string, config: ServerConfig, allowed: McpPolicyEntry[] | null): boolean {
+  if (allowed === null) return true
+  const remote = configUrl(config) !== undefined
+  const typed = allowed.filter((entry) => (remote ? entry.serverUrl !== undefined : entry.serverCommand !== undefined))
+  if (typed.some((entry) => entryMatches(entry, name, config, false))) return true
+  if (typed.length > 0) return false
+  return allowed.some((entry) => entry.serverName === name)
 }
 
 /** The managed-mcp.json path: a sibling of managed-settings.json (same directory). Derived
@@ -126,14 +228,14 @@ export function loadManagedMcpServers(managedFile: string = managedSettingsFile(
   return servers as Record<string, ServerConfig>
 }
 
-/** Claude's managed allow/deny lists: `allowed` null means no allow list (keep all);
- * a set (even empty) is exclusive, so only its members survive; a deny list removes
- * servers on top, deny winning over allow. */
-export function applyServerPolicy(servers: Record<string, ServerConfig>, allowed: ReadonlySet<string> | null, denied: ReadonlySet<string>): Record<string, ServerConfig> {
+/** Claude's allow/deny lists: a denylist match by URL, command or name blocks, and
+ * nothing overrides it; then a null allowlist keeps all, while a present one (even
+ * empty) is exclusive per the typed rule in serverAllowed. */
+export function applyServerPolicy(servers: Record<string, ServerConfig>, policy: McpPolicy): Record<string, ServerConfig> {
   const out: Record<string, ServerConfig> = {}
   for (const [name, config] of Object.entries(servers)) {
-    if (denied.has(name)) continue
-    if (allowed !== null && !allowed.has(name)) continue
+    if (policy.denied.some((entry) => entryMatches(entry, name, config, true))) continue
+    if (!serverAllowed(name, config, policy.allowed)) continue
     out[name] = config
   }
   return out

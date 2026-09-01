@@ -41,10 +41,11 @@ import { setMcpToolCaller } from '../internal/mcp-call.js'
 import { capForContext } from '../internal/output-guard.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
+import { claudeSettingsChain } from '../internal/settings-chain.js'
 import { loadConfigFrom, loadPluginServers, loadUserScope, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
-import { applyServerPolicy, loadManagedMcpServers, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
+import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
 import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
@@ -57,7 +58,7 @@ export type { McpToolInfo } from './listing.js'
 export type { McpPromptArgumentInfo, McpPromptInfo, ToolContent } from './mapping.js'
 export { capTotal, formatPromptCommandName, formatToolName, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 export type { ProjectServerPolicy } from './policy.js'
-export { applyServerPolicy, loadManagedMcpServers, managedMcpPath, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
+export { applyServerPolicy, loadManagedMcpServers, type McpPolicy, type McpPolicyEntry, managedMcpPath, mcpAllowDeny, projectServerPolicy, splitByPolicy, urlPatternMatches } from './policy.js'
 export type { AuthUi } from './transport.js'
 export { parseHelperHeaders, resolveBearerToken } from './transport.js'
 
@@ -401,8 +402,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * connected client not in the managed set (delete it from the map first so the onclose
    * handler's guard sees it gone and does not overwrite the status, then close it
    * best-effort and mark it disabled), then connect only the managed servers. */
-  async function connectManagedExclusive(managed: Record<string, ServerConfig>, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
-    const managedServers = applyServerPolicy(managed, allowed, denied)
+  async function connectManagedExclusive(managed: Record<string, ServerConfig>, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
+    const managedServers = applyServerPolicy(managed, policy)
     const managedNames = new Set(Object.keys(managedServers))
     for (const [name, client] of Array.from(clients.entries())) {
       if (managedNames.has(name)) continue
@@ -420,11 +421,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * factory: pi runs the factory for invocations that never start a session. Names still
    * connected are filtered out, so a later session start only retries servers that failed
    * or whose transport dropped, without duplicate-name warnings. */
-  async function connectNormalScopes(ctx: ExtensionContext, allowed: Set<string> | null, denied: Set<string>, authUi?: AuthUi): Promise<void> {
+  async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     // Plugin servers merge under the user scope (plugins are user-installed);
     // the user's own entry wins a name clash with a plugin's.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()))
-    const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, allowed, denied)
+    const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
     // consented to it, or an approved project's), so a merely-present untrusted project
@@ -434,7 +435,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // The stored project decision, read without prompting: consent recorded inside
     // the project only counts once the project itself has been approved.
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), allowed, denied), projectPolicy)
+    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy), projectPolicy)
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     // The consented project servers carry no ordering dependency on the user scope:
@@ -462,8 +463,10 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // is why serverToolCount reads from `registered` to recover the true count here.
     status.clear()
     const authUi = authUiFor(ctx)
-    // The managed allow/deny lists filter every scope, including a managed-mcp.json set.
-    const { allowed, denied } = mcpAllowDeny()
+    // The allow/deny lists filter every scope, including a managed-mcp.json set. They
+    // merge from managed settings plus the trust-gated settings chain, as Claude
+    // documents (a repo's file counts only once the project is approved).
+    const policy = mcpAllowDeny(claudeSettingsChain(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx)))
     // managed-mcp.json (beside managed-settings.json) takes exclusive control when present:
     // only its servers load, and the user, project, and plugin scopes plus the whole
     // project-approval flow below are skipped. An empty map disables MCP entirely. An absent
@@ -471,9 +474,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // empty set (see loadManagedMcpServers).
     const managed = loadManagedMcpServers()
     if (managed !== null) {
-      await connectManagedExclusive(managed, allowed, denied, authUi)
+      await connectManagedExclusive(managed, policy, authUi)
     } else {
-      await connectNormalScopes(ctx, allowed, denied, authUi)
+      await connectNormalScopes(ctx, policy, authUi)
     }
 
     pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])

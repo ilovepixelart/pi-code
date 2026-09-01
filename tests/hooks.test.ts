@@ -96,10 +96,14 @@ describe('stopHookBlockCap', () => {
   it('defaults to 8 and honors a positive integer CLAUDE_CODE_STOP_HOOK_BLOCK_CAP override', () => {
     expect(stopHookBlockCap({})).toBe(8)
     expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '3' })).toBe(3)
-    // Non-positive or malformed values fall back to the default rather than capping at 0.
-    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '0' })).toBe(8)
+    // Negative or malformed values fall back to the default rather than capping at 0.
     expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '-2' })).toBe(8)
     expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 'lots' })).toBe(8)
+  })
+
+  it('disables the cap entirely for the documented 0', () => {
+    // Claude: "Set to `0` to disable the cap."
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '0' })).toBe(Number.POSITIVE_INFINITY)
   })
 })
 

@@ -11,11 +11,13 @@ import { callMcpTool } from '../internal/mcp-call.js'
 import { completeText } from '../internal/model-complete.js'
 import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
 
-// Claude defaults to 600s and lets a timed-out hook proceed; here a timed-out
-// PreToolUse or UserPromptSubmit hook fails closed (pi has no permission prompt
-// to fall back on), so ten minutes of default budget would wedge the turn for
-// ten minutes on a hung hook. Hooks that legitimately run long can raise their
-// own per-hook `timeout`.
+// Claude's defaults vary by type and event (600s for command/http/mcp_tool, 30s
+// for prompt, 60s for agent, lowered to 30s on UserPromptSubmit and to a shared
+// 1.5s budget on SessionEnd) and a timed-out hook proceeds; here one flat default
+// applies and a timed-out PreToolUse or UserPromptSubmit hook fails closed (pi
+// has no permission prompt to fall back on), so ten minutes of default budget
+// would wedge the turn on a hung hook. Hooks that legitimately run long can
+// raise their own per-hook `timeout`.
 const DEFAULT_TIMEOUT_S = 60
 
 export interface HookRunResult {

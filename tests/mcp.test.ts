@@ -20,6 +20,7 @@ import {
   projectConfigPaths,
   projectServerPolicy,
   promptMessageContent,
+  urlPatternMatches,
   userConfigPaths,
 } from '../extensions/mcp/index.ts'
 
@@ -36,19 +37,78 @@ describe('parseHelperHeaders', () => {
 
 describe('applyServerPolicy', () => {
   const servers = { a: { command: 'a' }, b: { command: 'b' }, c: { command: 'c' } } as never
+  const names = (list: string[]) => list.map((serverName) => ({ serverName }))
 
   it('keeps everything when there is no allow list and no deny', () => {
-    expect(Object.keys(applyServerPolicy(servers, null, new Set()))).toEqual(['a', 'b', 'c'])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: null, denied: [] }))).toEqual(['a', 'b', 'c'])
   })
   it('treats a configured empty allow list as a lockdown (Claude: empty array = deny all)', () => {
-    expect(Object.keys(applyServerPolicy(servers, new Set(), new Set()))).toEqual([])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: [], denied: [] }))).toEqual([])
   })
   it('an allow list is exclusive', () => {
-    expect(Object.keys(applyServerPolicy(servers, new Set(['a', 'c']), new Set()))).toEqual(['a', 'c'])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: names(['a', 'c']), denied: [] }))).toEqual(['a', 'c'])
   })
   it('deny removes servers and wins over allow (and over no allow list)', () => {
-    expect(Object.keys(applyServerPolicy(servers, null, new Set(['b'])))).toEqual(['a', 'c'])
-    expect(Object.keys(applyServerPolicy(servers, new Set(['a', 'b']), new Set(['b'])))).toEqual(['a'])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: null, denied: names(['b']) }))).toEqual(['a', 'c'])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: names(['a', 'b']), denied: names(['b']) }))).toEqual(['a'])
+  })
+
+  // Claude: "A server that matches any denylist entry, by URL, command, or name, is
+  // blocked. Nothing overrides a denylist match."
+  it('denies a remote server by serverUrl wildcard and keeps a non-matching one', () => {
+    const remotes = { bad: { url: 'https://mcp.untrusted.example.com/api' }, good: { url: 'https://mcp.example.com/api' } } as never
+    const denied = [{ serverUrl: 'https://*.untrusted.example.com/*' }]
+    expect(Object.keys(applyServerPolicy(remotes, { allowed: null, denied }))).toEqual(['good'])
+  })
+
+  // Claude: "Commands match exactly. Every argument, in order."
+  it('denies a stdio server by exact serverCommand and not by a longer or shorter argv', () => {
+    const stdio = {
+      exact: { command: 'npx', args: ['-y', 'server'] },
+      longer: { command: 'npx', args: ['-y', 'server', '--flag'] },
+      shorter: { command: 'npx', args: ['server'] },
+    } as never
+    const denied = [{ serverCommand: ['npx', '-y', 'server'] }]
+    expect(Object.keys(applyServerPolicy(stdio, { allowed: null, denied }))).toEqual(['longer', 'shorter'])
+  })
+
+  it('allows a remote server through a matching serverUrl entry (a url-only allowlist is not a lockdown)', () => {
+    const remotes = { hub: { url: 'https://api.githubcopilot.com/mcp' }, other: { url: 'https://elsewhere.example.com/' } } as never
+    const allowed = [{ serverUrl: 'https://api.githubcopilot.com/*' }]
+    expect(Object.keys(applyServerPolicy(remotes, { allowed, denied: [] }))).toEqual(['hub'])
+  })
+
+  // Claude: "A serverName match counts only when the allowlist contains no serverUrl
+  // entries" (and no serverCommand entries for stdio).
+  it('suppresses the serverName fallback for a transport that has typed allow entries', () => {
+    const mixed = { foo: { url: 'https://other.example.com/' }, bar: { command: 'bar' } } as never
+    const allowed = [{ serverUrl: 'https://allowed.example.com/*' }, { serverName: 'foo' }, { serverName: 'bar' }]
+    // foo is remote and url entries exist, so its name match does not count; bar is
+    // stdio with no serverCommand entries, so its name match does.
+    expect(Object.keys(applyServerPolicy(mixed, { allowed, denied: [] }))).toEqual(['bar'])
+  })
+})
+
+describe('urlPatternMatches', () => {
+  // The doc's pattern table, row by row.
+  it('matches all paths on a specific domain', () => {
+    expect(urlPatternMatches('https://mcp.example.com/*', 'https://mcp.example.com/api')).toBe(true)
+    expect(urlPatternMatches('https://mcp.example.com/*', 'https://mcp.example.com')).toBe(true)
+    expect(urlPatternMatches('https://mcp.example.com/*', 'https://other.example.com/api')).toBe(false)
+  })
+  it('a pattern with no path matches any path', () => {
+    expect(urlPatternMatches('https://mcp.example.com', 'https://mcp.example.com/deep/path')).toBe(true)
+  })
+  it('matches any subdomain, any localhost port, and any scheme', () => {
+    expect(urlPatternMatches('https://*.example.com/*', 'https://sub.example.com/x')).toBe(true)
+    expect(urlPatternMatches('http://localhost:*/*', 'http://localhost:8931/session')).toBe(true)
+    expect(urlPatternMatches('*://mcp.example.com/*', 'wss://mcp.example.com/feed')).toBe(true)
+  })
+  // Claude: "Hostname matching is case-insensitive and ignores a trailing FQDN dot
+  // ... Paths stay case-sensitive."
+  it('compares the host case-insensitively with a trailing-dot fold, and the path case-sensitively', () => {
+    expect(urlPatternMatches('https://Mcp.Example.com/*', 'https://mcp.example.com./api')).toBe(true)
+    expect(urlPatternMatches('https://mcp.example.com/API', 'https://mcp.example.com/api')).toBe(false)
   })
 })
 
@@ -67,36 +127,69 @@ describe('mcpAllowDeny', () => {
     return file
   }
 
-  it('reads allow/deny from managed settings as {serverName} objects', () => {
-    const file = writeManaged({ allowedMcpServers: [{ serverName: 'github' }], deniedMcpServers: [{ serverName: 'filesystem' }] })
-    const { allowed, denied } = mcpAllowDeny(file)
-    expect([...(allowed ?? [])]).toEqual(['github'])
-    expect([...denied]).toEqual(['filesystem'])
+  const writeScope = (settings: unknown): string => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-scope-')), 'settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    return file
+  }
+
+  it('reads allow/deny from managed settings, keeping serverUrl and serverCommand entries typed', () => {
+    const file = writeManaged({ allowedMcpServers: [{ serverName: 'github' }, { serverUrl: 'https://mcp.example.com/*' }], deniedMcpServers: [{ serverName: 'filesystem' }, { serverCommand: ['npx', '-y', 'evil'] }] })
+    const { allowed, denied } = mcpAllowDeny([], file)
+    expect(allowed).toEqual([{ serverName: 'github' }, { serverUrl: 'https://mcp.example.com/*' }])
+    expect(denied).toEqual([{ serverName: 'filesystem' }, { serverCommand: ['npx', '-y', 'evil'] }])
   })
 
   it('tolerates bare-string entries and drops malformed ones', () => {
     const file = writeManaged({ allowedMcpServers: ['a', { serverName: 'b' }, { name: 'c' }, 5] })
-    expect([...(mcpAllowDeny(file).allowed ?? [])]).toEqual(['a', 'b'])
+    expect(mcpAllowDeny([], file).allowed).toEqual([{ serverName: 'a' }, { serverName: 'b' }])
+  })
+
+  // Claude: an allowlist serverName "is limited to letters, numbers, hyphens, and
+  // underscores"; a denylist serverName "accepts any non-empty string".
+  it('drops an allowlist serverName with characters outside the documented set, keeping it in a denylist', () => {
+    const file = writeManaged({ allowedMcpServers: [{ serverName: 'claude.ai Slack' }, { serverName: 'ok_name-1' }], deniedMcpServers: [{ serverName: 'claude.ai Slack' }] })
+    const { allowed, denied } = mcpAllowDeny([], file)
+    expect(allowed).toEqual([{ serverName: 'ok_name-1' }])
+    expect(denied).toEqual([{ serverName: 'claude.ai Slack' }])
   })
 
   it('returns a null allow list when unset (no restriction) and empty deny', () => {
     const file = writeManaged({})
-    const { allowed, denied } = mcpAllowDeny(file)
+    const { allowed, denied } = mcpAllowDeny([], file)
     expect(allowed).toBeNull()
-    expect(denied.size).toBe(0)
+    expect(denied).toEqual([])
   })
 
-  it('returns an empty (lockdown) allow set for an explicit empty array', () => {
+  it('returns an empty (lockdown) allow list for an explicit empty array', () => {
     const file = writeManaged({ allowedMcpServers: [] })
-    const { allowed } = mcpAllowDeny(file)
-    expect(allowed).not.toBeNull()
-    expect(allowed?.size).toBe(0)
+    expect(mcpAllowDeny([], file).allowed).toEqual([])
   })
 
   it('treats a missing managed file as no policy', () => {
-    const { allowed, denied } = mcpAllowDeny(join(tmpdir(), 'no-such-managed-settings.json'))
+    const { allowed, denied } = mcpAllowDeny([], join(tmpdir(), 'no-such-managed-settings.json'))
     expect(allowed).toBeNull()
-    expect(denied.size).toBe(0)
+    expect(denied).toEqual([])
+  })
+
+  // Claude: "Allowlist and denylist entries from every settings scope combine into
+  // one allowlist and one denylist."
+  it('merges deny and allow entries from the settings chain with the managed lists', () => {
+    const managed = writeManaged({ deniedMcpServers: [{ serverName: 'm-deny' }] })
+    const user = writeScope({ allowedMcpServers: [{ serverName: 'u-allow' }], deniedMcpServers: [{ serverName: 'u-deny' }] })
+    const { allowed, denied } = mcpAllowDeny([user], managed)
+    expect(allowed).toEqual([{ serverName: 'u-allow' }])
+    expect(denied).toEqual([{ serverName: 'm-deny' }, { serverName: 'u-deny' }])
+  })
+
+  // Claude: "When allowManagedMcpServersOnly is true, only the managed allowlist is
+  // kept; the denylist always merges from every scope."
+  it('keeps only the managed allowlist under allowManagedMcpServersOnly while still merging denies', () => {
+    const managed = writeManaged({ allowManagedMcpServersOnly: true, allowedMcpServers: [{ serverName: 'approved' }] })
+    const user = writeScope({ allowedMcpServers: [{ serverName: 'broadened' }], deniedMcpServers: [{ serverName: 'u-deny' }] })
+    const { allowed, denied } = mcpAllowDeny([user], managed)
+    expect(allowed).toEqual([{ serverName: 'approved' }])
+    expect(denied).toEqual([{ serverName: 'u-deny' }])
   })
 })
 

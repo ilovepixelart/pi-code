@@ -99,10 +99,12 @@ export function normalizeToolName(name: string): string {
 }
 
 /**
- * Entries are comma-separated, except a comma inside an argument scope belongs to the
- * scope: `Bash(cat, tail)` is one grant, not three. Splitting on every comma made the
- * fragments between them top-level entries, so a command naming only `Bash` came away
- * with pi's `edit` tool active.
+ * Entries are comma- or space-separated, as Claude documents ("a space- or
+ * comma-separated string, or a YAML list"), except a separator inside an argument
+ * scope belongs to the scope: `Bash(cat, tail)` and `Bash(git add *)` are one grant
+ * each. Splitting on every comma made the fragments between them top-level entries,
+ * so a command naming only `Bash` came away with pi's `edit` tool active; splitting
+ * on no spaces mangled the docs' own space-separated examples into one garbage rule.
  *
  * Scanned rather than matched with a regex: the pattern form is quadratic on an input
  * of unclosed parens, and a command file comes from the repository.
@@ -114,7 +116,7 @@ function toolEntries(raw: string): string[] {
   for (const ch of raw) {
     if (ch === '(') depth++
     else if (ch === ')') depth = Math.max(0, depth - 1)
-    if (ch === ',' && depth === 0) {
+    if ((ch === ',' || ch === ' ' || ch === '\t') && depth === 0) {
       entries.push(current)
       current = ''
     } else {
