@@ -123,7 +123,14 @@ Fields with no pi seam are ignored, each verified against pi's CLI rather than
 assumed: `mcpServers` (a child reads MCP config from files, and writing config
 into the workspace to fake it would be worse than the gap). `maxTurns` and
 `memory` are honored (turn cap enforced at the turn boundary; per-agent memory
-directories injected into the child's prompt).
+directories injected into the child's prompt). `isolation: worktree` is honored:
+the child runs in a temporary git worktree branched from the repository's default
+branch, removed afterwards when the agent made no changes and reported in the
+run's output when kept; a run that cannot get its worktree fails rather than
+touching the real checkout, and an unrecognized `isolation` value rejects the
+definition. Divergence: pi sets the child's working directory into the worktree
+but does not police commands that navigate back out, which Claude additionally
+enforces per call.
 
 **Locations:**
 - `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)

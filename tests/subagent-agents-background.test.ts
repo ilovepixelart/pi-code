@@ -810,7 +810,9 @@ describe('agent skills preload', () => {
 })
 
 describe('resumeBackgroundRun', () => {
-  const invocation = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', 'Task: first'], cwd: '/work/dir' }
+  // A real directory: resume refuses a cwd that no longer exists (a cleaned-up
+  // isolation worktree), so the fixture cwd must actually exist.
+  const invocation = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', 'Task: first'], cwd: tmpdir() }
 
   it('spawns the follow-up under the same session id with the new task', async () => {
     const { startBackgroundRun, resumeBackgroundRun, backgroundRun } = await loadBackground()
@@ -833,7 +835,7 @@ describe('resumeBackgroundRun', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prompt-'))
     const promptPath = join(dir, 'prompt.md')
     writeFileSync(promptPath, 'AGENT PERSONA')
-    const withPrompt = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', '--append-system-prompt', promptPath, 'Task: first'], cwd: '/w', promptBody: 'AGENT PERSONA' }
+    const withPrompt = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', '--append-system-prompt', promptPath, 'Task: first'], cwd: tmpdir(), promptBody: 'AGENT PERSONA' }
 
     const id = startBackgroundRun('scout', 'first', withPrompt, () => {}) as string
     spawned.children[0].emit('close', 0)

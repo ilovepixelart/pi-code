@@ -84,6 +84,18 @@ describe('recursive discovery and model tiers', () => {
     expect(agents.find((a) => a.name === 'a')?.maxTurns).toBe(3)
     expect(agents.find((a) => a.name === 'b')?.maxTurns).toBeUndefined()
   })
+
+  it('parses isolation: worktree case-insensitively and rejects an unknown isolation value', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'w.md'), '---\nname: w\ndescription: isolated\nisolation: Worktree\n---\nwork')
+    writeFileSync(join(cwd, '.claude', 'agents', 'x.md'), '---\nname: x\ndescription: typo\nisolation: sandbox\n---\nwork')
+    const agents = discoverAgents(cwd, 'project').agents
+    expect(agents.find((a) => a.name === 'w')?.isolation).toBe('worktree')
+    // An unrecognized isolation value is a declared safety boundary pi cannot
+    // honor; the definition is rejected rather than run unisolated.
+    expect(agents.find((a) => a.name === 'x')).toBeUndefined()
+  })
 })
 
 describe('memory frontmatter', () => {

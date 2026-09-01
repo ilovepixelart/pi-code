@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -68,7 +69,9 @@ beforeEach(() => {
   })
 })
 
-const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ command: 'pi', args: ['--mode', 'json', 'Task: t'], cwd: '/w', ...over })
+// A real cwd: resume refuses a working directory that no longer exists (a
+// cleaned-up isolation worktree), so the fixture must point at one that does.
+const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ command: 'pi', args: ['--mode', 'json', 'Task: t'], cwd: tmpdir(), ...over })
 
 describe('background run lifecycle', () => {
   it('reports the final text of a stdout stream whose chunks split lines', () => {
