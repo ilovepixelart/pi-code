@@ -791,6 +791,14 @@ function agentHooksEnv(agent: AgentConfig, agentId: string): Record<string, stri
   return { PI_CODE_AGENT_HOOKS: JSON.stringify({ agent: agent.name, id: agentId, hooks }) }
 }
 
+/** Whether a run belongs in the background: the caller asked, or Claude's
+ * `background: true` frontmatter keeps the agent there even on a foreground ask
+ * (single mode). */
+function wantsBackground(params: { background?: boolean; agent?: string }, agents: AgentConfig[]): boolean {
+  if (params.background) return true
+  return params.agent !== undefined && agents.find((a) => a.name === params.agent)?.background === true
+}
+
 /** The task argument with any SubagentStart hook context ahead of it, per Claude:
  * "added to the subagent's context at the start of its conversation, before its
  * first prompt". */
@@ -1595,10 +1603,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      // Claude's `background: true` frontmatter keeps the agent in the background
-      // even when the caller asked to run it in the foreground (single mode).
-      const backgroundAgent = params.agent !== undefined && agents.find((a) => a.name === params.agent)?.background === true
-      if (params.background || backgroundAgent) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
+      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
 
       const mode: ModeContext = {
         agents,
