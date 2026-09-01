@@ -79,7 +79,6 @@ function expandBraces(pattern: string): string[] | null {
   return expanded
 }
 
-/** One glob pattern, braces already expanded, as a regular expression source. */
 /** The end index of a bracket expression starting at `start` (`[`), or -1 when it
  * cannot be read as one, which per Claude makes the whole pattern invalid. A `]`
  * directly after the opening (or after a leading negation) is a literal member. */
@@ -99,6 +98,18 @@ function bracketClass(body: string): string {
   const negated = body.startsWith('!') || body.startsWith('^')
   const members = (negated ? body.slice(1) : body).replace(/[\\\]^]/g, (ch) => `\\${ch}`)
   return `[${negated ? '^' : ''}${members}]`
+}
+
+/** A `*` run starting at `i`: a double star followed by a slash spans whole
+ * directories, a bare double star crosses segments, and a single `*` stays within
+ * one. Returns the regex source and the index after the run. */
+function translateStar(pattern: string, i: number): { source: string; next: number } {
+  if (pattern[i + 1] === '*') {
+    const prevSlash = i === 0 || pattern[i - 1] === '/'
+    if (prevSlash && pattern[i + 2] === '/') return { source: '(?:[^/]+/)*', next: i + 3 }
+    return { source: '.*', next: i + 2 }
+  }
+  return { source: '[^/]*', next: i + 1 }
 }
 
 function translateGlob(pattern: string): string | null {
@@ -122,19 +133,9 @@ function translateGlob(pattern: string): string | null {
       continue
     }
     if (ch === '*') {
-      if (pattern[i + 1] === '*') {
-        const prevSlash = i === 0 || pattern[i - 1] === '/'
-        if (prevSlash && pattern[i + 2] === '/') {
-          out += '(?:[^/]+/)*' // `**/` spans zero or more whole directories
-          i += 3
-          continue
-        }
-        out += '.*'
-        i += 2
-        continue
-      }
-      out += '[^/]*'
-      i += 1
+      const star = translateStar(pattern, i)
+      out += star.source
+      i = star.next
       continue
     }
     if (ch === '?') {
@@ -159,7 +160,7 @@ const NEVER_MATCH = '(?!)'
 export function globToRegExpSource(pattern: string): string {
   const alternatives = expandBraces(pattern) ?? [pattern]
   const sources = alternatives.map(translateGlob)
-  if (sources.some((source) => source === null)) return NEVER_MATCH
+  if (sources.includes(null)) return NEVER_MATCH
   if (sources.length === 1) return sources[0] as string
   return `(?:${sources.join('|')})`
 }
