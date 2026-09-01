@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import contextImports from '../extensions/context-imports.ts'
-import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runUserPromptSubmit, timeoutMs } from '../extensions/hooks/index.ts'
+import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
@@ -2076,5 +2076,57 @@ describe('prompt-style decisions on Stop and PostToolUse', () => {
     script('review', { stdout: [JSON.stringify({ ok: false, reason: 'lint failed' })], code: 0 })
     const patch = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'out' }] })) as { content: Array<{ text?: string }> }
     expect(patch.content.some((block) => block.text?.includes('lint failed'))).toBe(true)
+  })
+})
+
+describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('does not run Stop hooks when the turn ended on a user interrupt', async () => {
+    // Claude: Stop "does not run if the stoppage occurred due to a user interrupt";
+    // pi marks the aborted turn's final assistant message stopReason "aborted".
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopper' }] }] })
+    await ext.agentEnd([{ role: 'assistant', content: [{ type: 'text', text: 'partial' }], stopReason: 'aborted' }])
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('still runs Stop hooks for a normally completed turn', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'stopper' }] }] })
+    await ext.agentEnd([{ role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' }])
+    expect(commandsRun()).toEqual(['stopper'])
+  })
+
+  it('gives prompt hooks the documented 30s default and keeps command hooks at the noted 60s', () => {
+    // Claude defaults: 30 for prompt, 60 for agent; the 60s command default is
+    // pi-code's documented fail-closed divergence from Claude's 600.
+    expect(timeoutMs({ command: 'x', type: 'prompt' })).toBe(30_000)
+    expect(timeoutMs({ command: 'x', type: 'agent' })).toBe(60_000)
+    expect(timeoutMs({ command: 'x' })).toBe(60_000)
+  })
+
+  it('caps SessionEnd hooks at the documented 1.5s budget, raised by a declared timeout up to 60s', () => {
+    // Claude: "SessionEnd hooks share a 1.5-second budget; if your settings set a
+    // longer per-hook timeout, Claude Code raises the budget to match, up to 60s."
+    expect(sessionEndTimeoutMs({ command: 'x' })).toBe(1500)
+    expect(sessionEndTimeoutMs({ command: 'x', timeout: 10 })).toBe(10_000)
+    expect(sessionEndTimeoutMs({ command: 'x', timeout: 300 })).toBe(60_000)
+  })
+
+  it('appends the input JSON to a prompt hook that has no $ARGUMENTS placeholder', async () => {
+    // Claude: "If $ARGUMENTS is not present, input JSON is appended to the prompt."
+    let seenPrompt = ''
+    setCompleteBackend((async (_model: unknown, context: { messages: Array<{ content: string }> }) => {
+      seenPrompt = context.messages[0]?.content ?? ''
+      return { role: 'assistant', content: [{ type: 'text', text: '{}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }
+    }) as never)
+    const result = await runPromptHook({ command: '', type: 'prompt', prompt: 'Should this stop?' }, { hook_event_name: 'Stop' }, { id: 'session-model' } as never, 5000)
+    expect(result.code).toBe(0)
+    expect(seenPrompt).toContain('Should this stop?')
+    expect(seenPrompt).toContain('"hook_event_name":"Stop"')
   })
 })

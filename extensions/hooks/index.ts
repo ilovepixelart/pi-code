@@ -95,7 +95,7 @@ import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } fro
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
 import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
-import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, timeoutMs } from './runners.js'
+import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, sessionEndTimeoutMs, timeoutMs } from './runners.js'
 
 export * from './config.js'
 export * from './decisions.js'
@@ -185,6 +185,16 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
     return common
   }
+  /** Claude's prompt-hook `model` override, resolved against the models this user
+   * can run (exact id first, then a substring match); the session model otherwise. */
+  const resolveHookModel = (ctx: ExtensionContext, override: string | undefined): ExtensionContext['model'] => {
+    if (!override) return ctx.model
+    const available = (ctx as { modelRegistry?: { getAvailable?: () => ReadonlyArray<{ id: string; name?: string }> } }).modelRegistry?.getAvailable?.() ?? []
+    const needle = override.toLowerCase()
+    const match = available.find((model) => model.id.toLowerCase() === needle) ?? available.find((model) => model.id.toLowerCase().includes(needle) || model.name?.toLowerCase().includes(needle))
+    return (match as ExtensionContext['model']) ?? ctx.model
+  }
+
   /** Kills for background hooks still running; Claude kills async hooks at teardown,
    * so session_shutdown reaps anything left rather than let a hung hook pin the
    * event loop past a one-shot run's end. */
@@ -220,7 +230,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
       const dispatch = (onChild?: (kill: () => void) => void): Promise<HookRunResult> => {
         if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
-        if (hook.type === 'prompt') return runPromptHook(hook, merged, ctx.model, ms)
+        if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms)
         if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
         return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild)
@@ -483,6 +493,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
       stopHookActive = false
       return
     }
+    // Claude: Stop does not run when the stoppage was a user interrupt; pi marks
+    // the aborted turn's final assistant message stopReason "aborted".
+    const turnMessages = (event as { messages?: Array<{ role: string; stopReason?: string }> }).messages ?? []
+    const lastAssistant = [...turnMessages].reverse().find((message) => message.role === 'assistant')
+    if (lastAssistant?.stopReason === 'aborted') {
+      stopHookActive = false
+      return
+    }
     // Claude's Stop payload carries the turn's final assistant text so a hook need
     // not re-read the transcript; included only when there is one.
     const lastText = lastAssistantText((event as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [])
@@ -543,7 +561,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_shutdown', async (event, ctx) => {
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.SessionEnd, reason.names), { hook_event_name: 'SessionEnd', reason: reason.value }, boundRunner(ctx))
+    // SessionEnd rides Claude's short shared budget (see sessionEndTimeoutMs) so a
+    // slow hook cannot stall session exit, /new or /resume.
+    const sessionEndCommands = matchingCommands(config.SessionEnd, reason.names).filter((command) => passesIfFilter(command, undefined))
+    const runner = boundRunner(ctx)
+    const results = await Promise.all(sessionEndCommands.map((command) => runner(command, { hook_event_name: 'SessionEnd', reason: reason.value }, sessionEndTimeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     // Claude kills async hooks still running at teardown; the session that spawned
     // these is over, and their delivery would target a disposed context anyway.

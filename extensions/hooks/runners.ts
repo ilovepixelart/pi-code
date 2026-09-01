@@ -20,6 +20,12 @@ import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
 // raise their own per-hook `timeout`.
 const DEFAULT_TIMEOUT_S = 60
 
+/** Claude's per-type defaults where they are safe to mirror: 30s for `prompt`
+ * hooks and 60s for `agent` hooks. Command/http/mcp_tool keep the flat 60s
+ * documented divergence from Claude's 600 (a gated hook fails closed here, so ten
+ * minutes of default budget would wedge the turn). */
+const TYPE_DEFAULT_TIMEOUT_S: Record<string, number> = { prompt: 30, agent: 60 }
+
 export interface HookRunResult {
   code: number
   stdout: string
@@ -49,8 +55,18 @@ export function timeoutMs(command: HookCommand): number {
   // Non-positive values fall back to the default: a 0ms timer would fire before the
   // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
   const declared = command.timeout
-  const seconds = typeof declared === 'number' && declared > 0 ? Math.min(declared, MAX_TIMEOUT_S) : DEFAULT_TIMEOUT_S
+  const fallback = TYPE_DEFAULT_TIMEOUT_S[command.type ?? 'command'] ?? DEFAULT_TIMEOUT_S
+  const seconds = typeof declared === 'number' && declared > 0 ? Math.min(declared, MAX_TIMEOUT_S) : fallback
   return seconds * 1000
+}
+
+/** Claude's SessionEnd budget: hooks share 1.5 seconds so session exit (and /new,
+ * /resume) cannot stall on a slow hook; a declared per-hook `timeout` raises the
+ * budget to match, up to 60 seconds. */
+export function sessionEndTimeoutMs(command: HookCommand): number {
+  const declared = command.timeout
+  if (typeof declared === 'number' && declared > 0) return Math.min(declared, 60) * 1000
+  return 1500
 }
 
 /** Memory backstop for a runaway hook. A decision payload is orders of magnitude smaller. */
@@ -217,7 +233,11 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
   if (!model) return { code: 1, stdout: '', stderr: 'no model available for prompt hook', timedOut: false }
   // A replacer function, so `$$`/`$&`/`` $` ``/`$'` inside the payload JSON are inserted
   // verbatim rather than read as replacement patterns (a Bash `echo $$` is a common trigger).
-  const prompt = substituteArguments(hook.prompt, payload)
+  // Claude: when $ARGUMENTS is not present, the input JSON is appended to the
+  // prompt, so the model never evaluates blind.
+  const template = hook.prompt ?? ''
+  const withInput = template.includes('$ARGUMENTS') ? template : `${template}\n\n$ARGUMENTS`
+  const prompt = substituteArguments(withInput, payload)
   const signal = AbortSignal.timeout(timeoutMs)
   try {
     const { text: answer } = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal })
