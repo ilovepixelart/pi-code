@@ -4,8 +4,8 @@ Connects Claude Code's MCP configuration and registers each server's tools in pi
 
 ## Configuration scopes
 
-- User: `~/.claude.json` (including the per-project `projects[cwd].mcpServers` local scope) and `~/.pi/agent/mcp.json`.
-- Project: `.mcp.json` and `.pi/mcp.json`, loaded once the project is approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, with consent keys counted only from non-repo settings.
+- User: `~/.claude.json` (including the per-project `projects[cwd].mcpServers` local scope) and `~/.pi/agent/mcp.json`. The per-project `disabledMcpServers` toggle list mutes a user or plugin server without removing it.
+- Project: `.mcp.json` and `.pi/mcp.json`, loaded once the project is approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, with consent keys counted only from non-repo settings. Precedence on a name clash is local over project over user.
 - Managed: a `managed-mcp.json` beside `managed-settings.json` takes exclusive control — only its servers load, every other scope and the approval flow suppressed; an empty file disables MCP.
 
 ## Policy
@@ -21,7 +21,7 @@ Managed `allowedMcpServers`/`deniedMcpServers` entries are typed and matched per
 
 ## Budgets
 
-Connect and per-call budgets honor `MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT` over a 4-hour wall default, plus a 5-minute idle timeout that a progress notification resets (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, `0` disables).
+Connect and per-call budgets honor `MCP_TIMEOUT` (30s default) and `MCP_TOOL_TIMEOUT` (4-hour wall default), plus an idle timeout that a progress notification resets: 5 minutes for remote transports, 30 minutes for stdio (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` overrides, `0` disables). A per-server `timeout` of at least 1000 sets the wall budget and floors the idle window; lower values are ignored. Numeric env values accept `2e3` and `64_000` spellings.
 
 ## Surface
 

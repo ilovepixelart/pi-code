@@ -5,19 +5,19 @@
  */
 
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
-import { splitArgs } from '../internal/command-file.js'
 import { capForContext } from '../internal/output-guard.js'
 
 export function formatToolName(server: string, tool: string): string {
   return `${server}_${tool}`.replaceAll('-', '_')
 }
 
-/** Claude exposes server prompts as /mcp__<server>__<prompt> slash commands. Both
- * names normalize like formatToolName, extended to spaces: dashes and spaces each
- * become an underscore. */
+/** Claude exposes server prompts as /mcp__<server>__<prompt> slash commands: any
+ * character in the server name outside A-Za-z0-9_- becomes an underscore (hyphens
+ * stay), and the prompt name is used as the server declares it. Divergence: pi
+ * dispatches commands on the first whitespace-delimited token, so whitespace in the
+ * prompt name also folds to an underscore or the command would be unreachable. */
 export function formatPromptCommandName(server: string, prompt: string): string {
-  const normalize = (name: string): string => name.replace(/[\s-]/g, '_')
-  return `mcp__${normalize(server)}__${normalize(prompt)}`
+  return `mcp__${server.replace(/[^A-Za-z0-9_-]/g, '_')}__${prompt.replace(/\s/g, '_')}`
 }
 
 export interface McpPromptArgumentInfo {
@@ -32,17 +32,16 @@ export interface McpPromptInfo {
   arguments?: McpPromptArgumentInfo[]
 }
 
-/** Claude passes prompt arguments space-separated after the command. Tokens map
- * positionally onto the declared arguments, split the way slash-command args are
- * (quoted runs stay together); the last declared argument absorbs any trailing
- * tokens so free text at the end is not silently dropped. Declared arguments with
- * no token are omitted, and the server enforces its own `required`. */
+/** Claude passes prompt arguments space-separated after the command and "splits the
+ * arguments on whitespace, so each argument is a single token": no quote handling,
+ * one token per declared argument, extra trailing tokens dropped. Declared arguments
+ * with no token are omitted, and the server enforces its own `required`. */
 export function mapPromptArguments(declared: ReadonlyArray<{ name: string }> | undefined, args: string): Record<string, string> {
-  const tokens = splitArgs(args)
+  const tokens = args.split(/\s+/).filter((token) => token !== '')
   const names = (declared ?? []).map((argument) => argument.name)
   const mapped: Record<string, string> = {}
   for (let index = 0; index < names.length && index < tokens.length; index++) {
-    mapped[names[index]] = index === names.length - 1 ? tokens.slice(index).join(' ') : tokens[index]
+    mapped[names[index]] = tokens[index]
   }
   return mapped
 }

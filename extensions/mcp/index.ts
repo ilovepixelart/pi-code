@@ -43,11 +43,11 @@ import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
-import { loadConfigFrom, loadPluginServers, loadUserScope, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
+import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
-import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, withTimeout } from './transport.js'
+import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, type ServerCallTuning, serverCallTuning, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
@@ -84,11 +84,19 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   const status = new Map<string, { state: string; tools: number }>()
+  // Config per server name, kept for call-time timeout tuning: the idle tier follows
+  // the transport kind, and a declared per-server timeout governs the wall budget.
+  const serverConfigs = new Map<string, ServerConfig>()
+  const callTuning = (name: string): ServerCallTuning => {
+    const config = serverConfigs.get(name)
+    return config ? serverCallTuning(config) : {}
+  }
   // Let other extensions (hooks' mcp_tool type) call a connected server's tool.
   setMcpToolCaller(async (server, tool, input) => {
     const client = clients.get(server)
     if (!client) throw new Error(`MCP server "${server}" is not connected`)
-    const result = await client.callTool({ name: tool, arguments: input }, undefined, callRequestOptions(callTimeoutMs()))
+    const tuning = callTuning(server)
+    const result = await client.callTool({ name: tool, arguments: input }, undefined, callRequestOptions(tuning.serverTimeoutMs ?? callTimeoutMs(), tuning))
     const text = mapContent(result.content as McpContentBlock[], result.structuredContent)
       .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
       .map((part) => part.text)
@@ -138,9 +146,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           // own default request timeout is 60s and would otherwise reject first. The outer
           // race uses the wall budget, never the idle window, so a progressing call is not
           // cut off at the idle timeout.
-          const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
-          const wall = declared ?? callTimeoutMs()
-          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, callRequestOptions(wall)), wall, toolName)
+          const tuning = serverCallTuning(config)
+          const wall = tuning.serverTimeoutMs ?? callTimeoutMs()
+          const result = await withTimeout(current.callTool({ name: tool.name, arguments: params as Record<string, unknown> }, undefined, callRequestOptions(wall, tuning)), wall, toolName)
           const content = mapContent(result.content as McpContentBlock[], result.structuredContent)
           const details: { error?: string } = {}
           if (result.isError) {
@@ -193,7 +201,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
             if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
             const wall = callTimeoutMs()
-            const result = await withTimeout(current.getPrompt(params, callRequestOptions(wall)), wall, commandName)
+            const result = await withTimeout(current.getPrompt(params, callRequestOptions(wall, callTuning(name))), wall, commandName)
             // The prompt drives a turn exactly the way a custom slash command does
             // (see commands.ts), carrying its image blocks through. A prompt that
             // yields no content is reported rather than sent as an empty turn.
@@ -280,7 +288,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         const client = clients.get(server)
         if (!client) throw new Error(`MCP server "${server}" is not connected`)
         const wall = callTimeoutMs()
-        const result = await withTimeout(client.readResource({ uri }, callRequestOptions(wall)), wall, `read ${uri}`)
+        const result = await withTimeout(client.readResource({ uri }, callRequestOptions(wall, callTuning(server))), wall, `read ${uri}`)
         const blocks = (result.contents as Array<{ uri: string; text?: string; blob?: string; mimeType?: string }>).map((entry): McpContentBlock => {
           if (typeof entry.text === 'string') return { type: 'resource', resource: { uri: entry.uri, text: entry.text } }
           if (entry.blob && entry.mimeType?.startsWith('image/')) return { type: 'image', data: entry.blob, mimeType: entry.mimeType }
@@ -341,6 +349,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       // Seed in config order before connecting: parallel connects settle in completion
       // order, and /mcp plus the session summary iterate the map's insertion order.
       status.set(name, { state: 'connecting', tools: 0 })
+      serverConfigs.set(name, config)
       pending.push([name, config])
     }
     await Promise.all(
@@ -424,9 +433,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * or whose transport dropped, without duplicate-name warnings. */
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     // Plugin servers merge under the user scope (plugins are user-installed);
-    // the user's own entry wins a name clash with a plugin's.
+    // the user's own entry wins a name clash with a plugin's. A server toggled off
+    // in ~/.claude.json's per-project disabledMcpServers list never connects.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()), repoRoot(ctx.cwd) ?? ctx.cwd)
-    const scoped = applyServerPolicy({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }, policy)
+    const disabled = disabledServerNames(os.homedir(), ctx.cwd)
+    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }).filter(([name]) => !disabled.has(name)))
+    const scoped = applyServerPolicy(merged, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
     // consented to it, or an approved project's), so a merely-present untrusted project
@@ -436,7 +448,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // The stored project decision, read without prompting: consent recorded inside
     // the project only counts once the project itself has been approved.
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-    const { consented, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy), projectPolicy)
+    const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy), projectPolicy)
+    // Claude's scope precedence is local over project: a name the local scope defines
+    // stays with the local (user-side) definition, so the project's entry is dropped
+    // here rather than allowed to shadow it.
+    const localNames = localScopeServerNames(os.homedir(), ctx.cwd)
+    const consented = Object.fromEntries(Object.entries(consentedRaw).filter(([name]) => !localNames.has(name)))
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     // The consented project servers carry no ordering dependency on the user scope:

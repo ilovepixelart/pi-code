@@ -99,13 +99,34 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
  */
 export function loadUserScope(home: string, cwd: string): Record<string, ServerConfig> {
   const servers = loadConfigFrom(userConfigPaths(home))
+  Object.assign(servers, projectRecord(home, cwd).mcpServers ?? {})
+  return servers
+}
+
+/** The per-project record for `cwd` in ~/.claude.json, or an empty one when the file
+ * is missing, invalid, or has no entry for this project. */
+function projectRecord(home: string, cwd: string): { mcpServers?: Record<string, ServerConfig>; disabledMcpServers?: unknown } {
   try {
     const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath(home), 'utf-8'))
-    Object.assign(servers, claudeJson.projects?.[cwd]?.mcpServers ?? {})
+    return claudeJson.projects?.[cwd] ?? {}
   } catch {
-    // missing or invalid ~/.claude.json: the top-level user servers already loaded
+    return {}
   }
-  return servers
+}
+
+/** Names the local scope defines for this project. Claude's precedence is local over
+ * project over user, so a local name must also outrank a project .mcp.json entry. */
+export function localScopeServerNames(home: string, cwd: string): Set<string> {
+  return new Set(Object.keys(projectRecord(home, cwd).mcpServers ?? {}))
+}
+
+/** The per-project `disabledMcpServers` toggle list from ~/.claude.json: Claude's /mcp
+ * panel records a server toggled off here (an opt-out list for user-configured and
+ * plugin servers) and does not connect to it. The `enabledMcpServers` opt-in list
+ * covers only default-off built-in servers, which pi-code has none of. */
+export function disabledServerNames(home: string, cwd: string): Set<string> {
+  const listed = projectRecord(home, cwd).disabledMcpServers
+  return new Set(Array.isArray(listed) ? listed.filter((entry): entry is string => typeof entry === 'string') : [])
 }
 
 /** The mcpServers one plugin declares, parsed WITHOUT substitution: an inline map on
@@ -115,18 +136,22 @@ export function loadUserScope(home: string, cwd: string): Record<string, ServerC
  * the parse and headersHelper can be shielded. */
 function rawPluginServerEntries(plugin: InstalledPlugin): Record<string, unknown> {
   const declared = plugin.manifest.mcpServers
-  // An inline map of name -> config; an array is not a valid mcpServers map (it
-  // would register a server named '0'), so it falls through to the path branch.
+  // An inline map of name -> config. The manifest field is string|array|object per
+  // Claude's plugin reference; an array lists config file paths, merged in order.
   if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
     return { ...(declared as Record<string, unknown>) }
   }
-  const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : '.mcp.json')
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
-    return parsed.mcpServers ?? {}
-  } catch {
-    return {}
+  const paths = Array.isArray(declared) ? declared.filter((entry): entry is string => typeof entry === 'string') : [typeof declared === 'string' ? declared : '.mcp.json']
+  const servers: Record<string, unknown> = {}
+  for (const entry of paths) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.resolve(plugin.root, entry), 'utf-8'))
+      Object.assign(servers, parsed.mcpServers ?? {})
+    } catch {
+      // Malformed or missing JSON contributes no entries.
+    }
   }
+  return servers
 }
 
 /** Every string in the value mapped through `substitute`, arrays and objects walked. */
@@ -169,7 +194,8 @@ function substitutePathPluginVars(text: string, plugin: InstalledPlugin): string
  * tools alias as mcp__plugin_<plugin>_<server>__<tool> for hook matchers, as
  * Claude scopes them. */
 export function loadPluginServers(plugins: InstalledPlugin[], projectDir?: string): Record<string, ServerConfig> {
-  const fold = (name: string): string => name.replaceAll('-', '_')
+  // Claude keeps hyphens in the alias; only characters outside A-Za-z0-9_- fold to _.
+  const fold = (name: string): string => name.replace(/[^A-Za-z0-9_-]/g, '_')
   const servers: Record<string, ServerConfig> = {}
   for (const plugin of plugins) {
     for (const [name, config] of Object.entries(rawPluginServerEntries(plugin))) {

@@ -60,6 +60,17 @@ describe('installedPlugins', () => {
     expect(plugins[0].dataDir).toBe(join(h, '.claude', 'plugins', 'data', 'formatter-community'))
   })
 
+  it('keeps underscores and hyphens in the data-dir id, folding only characters outside a-zA-Z0-9_-', () => {
+    // plugins-reference: "{id} is the plugin identifier with characters outside a-z,
+    // A-Z, 0-9, _, and - replaced by -".
+    const h = home()
+    install(h, 'my-market', 'my_plugin', '1.0.0')
+    enable(h, { 'my_plugin@my-market': true })
+
+    const plugins = installedPlugins(h, [])
+    expect(plugins[0].dataDir).toBe(join(h, '.claude', 'plugins', 'data', 'my_plugin-my-market'))
+  })
+
   it('skips plugins that are not enabled or explicitly disabled', () => {
     const h = home()
     install(h, 'community', 'formatter', '1.0.0')

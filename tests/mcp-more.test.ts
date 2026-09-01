@@ -470,6 +470,56 @@ describe('mcp startup config scoping', () => {
     expect(hoisted.transports[0].options.command).toBe('proj-server')
   })
 
+  it('lets a local-scope server outrank a consented project server of the same name', async () => {
+    // Claude's scope precedence is local over project over user: the per-project
+    // entry in ~/.claude.json wins the name clash with the project's .mcp.json.
+    withTools([{ name: 'query' }])
+    const harness = await setup({ project: { shared: { command: 'proj-server' } } })
+    writeFileSync(join(harness.home, '.claude.json'), JSON.stringify({ projects: { [harness.cwd]: { mcpServers: { shared: { command: 'local-server' } } } } }))
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['shared'] }))
+    await harness.sessionStart(true)
+
+    expect(hoisted.transports).toHaveLength(1)
+    expect(hoisted.transports[0].options.command).toBe('local-server')
+  })
+
+  it('never connects a user server listed in the per-project disabledMcpServers toggle', async () => {
+    // Claude records the /mcp panel's off toggle per project in ~/.claude.json under
+    // disabledMcpServers, an opt-out list for user-configured and plugin servers.
+    withTools([{ name: 'query' }])
+    const harness = await setup()
+    writeFileSync(
+      join(harness.home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: { muted: { command: 'muted-server' }, live: { command: 'live-server' } },
+        projects: { [harness.cwd]: { disabledMcpServers: ['muted'] } },
+      }),
+    )
+    await harness.sessionStart()
+
+    expect(hoisted.transports).toHaveLength(1)
+    expect(hoisted.transports[0].options.command).toBe('live-server')
+  })
+
+  it('scopes the disabledMcpServers toggle to its own project', async () => {
+    // The toggle is recorded per project; another project's entry must not mute
+    // this session's server.
+    withTools([{ name: 'query' }])
+    const harness = await setup()
+    writeFileSync(
+      join(harness.home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: { muted: { command: 'muted-server' } },
+        projects: { '/some/other/project': { disabledMcpServers: ['muted'] } },
+      }),
+    )
+    await harness.sessionStart()
+
+    expect(hoisted.transports).toHaveLength(1)
+    expect(hoisted.transports[0].options.command).toBe('muted-server')
+  })
+
   it('connects project config only once across repeated sessions', async () => {
     withTools([{ name: 'query' }])
     const harness = await setup({ project: { proj: { command: 'proj-server' } } })
@@ -1048,6 +1098,20 @@ describe('mcp tool execution', () => {
     expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 5000 })
   })
 
+  it('accepts scientific-notation and digit-separator spellings of MCP_TOOL_TIMEOUT', async () => {
+    // Claude's numeric env vars "accept scientific notation and digit-separator
+    // spellings", reading 2e3 as 2000 and 64_000 as 64000.
+    setEnv('MCP_TOOL_TIMEOUT', '64_000')
+    hoisted.control.callTool = () => new Promise<CallResult>(() => {})
+    const harness = await registerOne()
+    vi.useFakeTimers()
+
+    const pending = harness.tools[0].execute('call-1', {})
+    const assertion = expect(pending).rejects.toThrow('timed out after 64000ms')
+    await vi.advanceTimersByTimeAsync(64_000)
+    await assertion
+  })
+
   it('passes the two-tier timeout to the SDK so its shorter default cannot fire first', async () => {
     hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
     const harness = await registerOne()
@@ -1055,8 +1119,9 @@ describe('mcp tool execution', () => {
     await harness.tools[0].execute('call-1', {})
 
     // The SDK gets the idle window as its per-quiet-period deadline (reset on progress),
-    // capped at the 4h wall; its own 60s default can no longer fire first.
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    // capped at the 4h wall; its own 60s default can no longer fire first. registerOne
+    // is a stdio server, so the idle tier is Claude's 30-minute stdio window.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
   })
 })
 
@@ -1066,15 +1131,26 @@ describe('mcp tool-call idle timeout', () => {
     return setupStarted({ user: { srv: config } })
   }
 
-  it('layers the default 300s idle window under the 4h wall budget, resetting on progress', async () => {
+  it('gives a stdio server the 30-minute idle window under the 4h wall budget, resetting on progress', async () => {
     hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
     const harness = await registerGo()
 
     await harness.tools[0].execute('c1', {})
 
-    // The idle window is the SDK's per-quiet-period deadline, reset on every progress
-    // notification; maxTotalTimeout caps the wall clock; onprogress is required so the
-    // server addresses progress here and the SDK resets the timer on it.
+    // Claude: the idle window "defaults to five minutes for HTTP, SSE, WebSocket...
+    // and to 30 minutes for stdio servers". The idle window is the SDK's
+    // per-quiet-period deadline, reset on every progress notification; maxTotalTimeout
+    // caps the wall clock; onprogress is required so the server addresses progress
+    // here and the SDK resets the timer on it.
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+  })
+
+  it('gives a remote server the 5-minute idle window under the 4h wall budget', async () => {
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo({ type: 'http', url: 'https://mcp.example.com/mcp' })
+
+    await harness.tools[0].execute('c1', {})
+
     expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
   })
 
@@ -1099,15 +1175,39 @@ describe('mcp tool-call idle timeout', () => {
     expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 14_400_000 })
   })
 
-  it('keeps a per-server timeout as the wall-clock ceiling above the idle window', async () => {
-    // A 10 min per-server budget, wider than the 5 min idle window: the idle timeout still
-    // guards each quiet period, and the per-server value caps the wall clock.
+  it('collapses to a plain wall timeout when the per-server budget sits under the idle window', async () => {
+    // A 10 min per-server budget under the 30 min stdio idle window: the idle window
+    // can never fire before the wall, so only the wall budget applies.
     hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
     const harness = await registerGo({ command: 'x', timeout: 600_000 })
 
     await harness.tools[0].execute('c1', {})
 
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 600_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 600_000 })
+  })
+
+  it('floors an overridden idle window at a per-server timeout of at least 1000', async () => {
+    // Claude: "A per-server timeout of at least 1000 also acts as a floor on the idle
+    // timeout". The 60s override is lifted to the 10 min per-server budget, which
+    // equals the wall, so only the wall budget applies.
+    setEnv('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT', '60000')
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo({ type: 'http', url: 'https://mcp.example.com/mcp', timeout: 600_000 })
+
+    await harness.tools[0].execute('c1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 600_000 })
+  })
+
+  it('ignores a per-server timeout below 1000, falling through to the MCP_TOOL_TIMEOUT wall', async () => {
+    // Claude: per-server timeout "Values below 1000 are ignored and fall through to
+    // MCP_TOOL_TIMEOUT", and such a value places no floor on the idle window.
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'ok' }] })
+    const harness = await registerGo({ command: 'x', timeout: 500 })
+
+    await harness.tools[0].execute('c1', {})
+
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
   })
 
   it('uses a plain wall timeout when a per-server budget is tighter than the idle window', async () => {
@@ -1168,20 +1268,34 @@ describe('mcp failure reporting', () => {
     expect(await statusLinesOf(harness)).toEqual(['broken: failed: plain string failure (0 tools)'])
   })
 
-  it('times out a connect that never settles after the connect budget', async () => {
+  it('times out a connect that never settles after the 30s default connect budget', async () => {
+    // Claude's MCP_TIMEOUT default is 30 seconds.
     hoisted.control.connect = () => new Promise<void>(() => {})
     vi.useFakeTimers()
 
     const harness = await setup({ user: { hung: { command: 'sleep' } } })
     const booting = harness.sessionStart()
-    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(30_000)
     await booting
 
-    expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 10000ms (0 tools)'])
+    expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 30000ms (0 tools)'])
   })
 
   it('honors MCP_TIMEOUT for the connect budget', async () => {
     setEnv('MCP_TIMEOUT', '2000')
+    hoisted.control.connect = () => new Promise<void>(() => {})
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { hung: { command: 'sleep' } } })
+    const booting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await booting
+
+    expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 2000ms (0 tools)'])
+  })
+
+  it('accepts a scientific-notation MCP_TIMEOUT spelling, reading 2e3 as 2000', async () => {
+    setEnv('MCP_TIMEOUT', '2e3')
     hoisted.control.connect = () => new Promise<void>(() => {})
     vi.useFakeTimers()
 
@@ -1202,7 +1316,7 @@ describe('mcp failure reporting', () => {
 
     const harness = await setup({ user: { slow: { command: 'x' } } })
     const booting = harness.sessionStart()
-    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(30_000)
     resolveConnect?.() // the server finishes connecting after the deadline
     await booting
 
@@ -1215,10 +1329,10 @@ describe('mcp failure reporting', () => {
 
     const harness = await setup({ user: { slow: { command: 'x' } } })
     const booting = harness.sessionStart()
-    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(30_000)
     await booting
 
-    expect(await statusLinesOf(harness)).toEqual(['slow: failed: list tools slow timed out after 10000ms (0 tools)'])
+    expect(await statusLinesOf(harness)).toEqual(['slow: failed: list tools slow timed out after 30000ms (0 tools)'])
   })
 
   it('keeps connecting the remaining servers after one fails', async () => {
@@ -1477,9 +1591,10 @@ describe('small MCP parity', () => {
     expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1500 })
 
     // Below Claude's documented 1s minimum the per-server value is ignored, so the call
-    // falls back to the global default, whose SDK deadline is the idle window under the 4h wall.
+    // falls back to the global default, whose SDK deadline is the idle window (the
+    // 30-minute stdio tier) under the 4h wall.
     await harness.tools[1].execute('c2', {})
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
   })
 
   it('expands environment variables in cwd', async () => {
@@ -1717,11 +1832,12 @@ describe('mcp prompts as slash commands', () => {
     hoisted.control.listPrompts = async () => ({ prompts })
   }
 
-  it('registers a normalized /mcp__server__prompt command for each advertised prompt', async () => {
+  it('registers a /mcp__server__prompt command per advertised prompt, keeping the declared name', async () => {
+    // Claude uses the prompt name as the server declares it, so the hyphen stays.
     withPrompts([{ name: 'code-review', description: 'Review code' }])
     const harness = await setupStarted({ user: { demo: { command: 'x' } } })
 
-    expect(harness.commandNames()).toContain('mcp__demo__code_review')
+    expect(harness.commandNames()).toContain('mcp__demo__code-review')
   })
 
   it('does not list prompts from a server that lacks the prompts capability', async () => {
@@ -1815,7 +1931,9 @@ describe('mcp prompts as slash commands', () => {
   })
 
   it('skips a second same-server prompt whose name normalizes onto one already taken', async () => {
-    withPrompts([{ name: 'deploy-prod' }, { name: 'deploy_prod' }])
+    // Hyphens no longer fold, so the collision surface is whitespace (pi's dispatch
+    // constraint): two prompts differing only by space vs underscore clash.
+    withPrompts([{ name: 'deploy prod' }, { name: 'deploy_prod' }])
     const harness = await setupStarted({ user: { demo: { command: 'x' } } })
 
     expect(harness.commandNames().filter((n) => n === 'mcp__demo__deploy_prod')).toEqual(['mcp__demo__deploy_prod'])

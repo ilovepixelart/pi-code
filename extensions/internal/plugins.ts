@@ -180,7 +180,9 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
   const root = path.join(cacheDir, marketplace, pluginDir, version)
   const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
-  const id = qualified.replace(/[^A-Za-z0-9]+/g, '-')
+  // Claude: "{id} is the plugin identifier with characters outside a-z, A-Z, 0-9,
+  // _, and - replaced by -", one dash per character, underscores kept.
+  const id = qualified.replace(/[^A-Za-z0-9_-]/g, '-')
   const userConfig = configs[qualified] ?? configs[pluginDir] ?? configs[name]
   return { name, root, dataDir: path.join(claudeConfigDir(home), 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
 }
