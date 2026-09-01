@@ -171,7 +171,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (result.timedOut) return
     if (hook.asyncRewake === true && result.code === 2) {
       const detail = result.stderr.trim() || result.stdout.trim()
-      pi.sendMessage({ customType: 'claude-async-hook', content: `Async hook requested attention (exit 2)${detail ? `:\n${detail}` : ''}`, display: true }, { triggerTurn: true })
+      const content = detail ? `Async hook requested attention (exit 2):\n${detail}` : 'Async hook requested attention (exit 2)'
+      pi.sendMessage({ customType: 'claude-async-hook', content, display: true }, { triggerTurn: true })
       return
     }
     const parsed = tryParseJson(result.stdout)
