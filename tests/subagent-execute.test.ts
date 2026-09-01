@@ -1725,3 +1725,54 @@ describe('foreground abort process group', () => {
     }
   })
 })
+
+describe('isolation: worktree execution', () => {
+  const { execFileSync } = require('node:child_process') as typeof import('node:child_process')
+  const makeRepo = (): string => {
+    const dir = fs.mkdtempSync(join(tmpdir(), 'iso-repo-'))
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: dir })
+    git('init', '--initial-branch=main')
+    git('config', 'user.email', 't@t')
+    git('config', 'user.name', 't')
+    fs.writeFileSync(join(dir, 'a.txt'), 'base\n')
+    git('add', 'a.txt')
+    git('commit', '-m', 'base')
+    return dir
+  }
+  const isoAgent = () => ({ ...agentConfig({ name: 'iso' }), isolation: 'worktree' as const })
+
+  it('fails the run with the reason when the worktree cannot be created', async () => {
+    // The declared boundary must fail loud, never run against the real checkout.
+    discoverAgentsMock.mockReturnValue({ agents: [isoAgent()], projectAgentsDir: null })
+    const ctx = { ...trustedCtx, cwd: fs.mkdtempSync(join(tmpdir(), 'iso-plain-')) }
+    const result = await execute('c1', { agent: 'iso', task: 'work' }, undefined, undefined, ctx)
+    expect(result.details.results[0].exitCode).toBe(1)
+    expect(result.details.results[0].stderr).toContain('isolation: worktree could not be created')
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('spawns the child inside a worktree and removes it after an unchanged run', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [isoAgent()], projectAgentsDir: null })
+    const repo = makeRepo()
+    script('look around', { stdout: [say('all read-only')] })
+    const result = await execute('c1', { agent: 'iso', task: 'look around' }, undefined, undefined, { ...trustedCtx, cwd: repo })
+    expect(spawnCalls).toHaveLength(1)
+    const childCwd = spawnCalls[0].options.cwd as string
+    expect(childCwd).not.toBe(repo)
+    // Claude: "The worktree is automatically cleaned up if the subagent makes no changes."
+    expect(fs.existsSync(childCwd)).toBe(false)
+    expect(JSON.stringify(result.content)).not.toContain('worktree kept')
+  })
+
+  it('keeps a dirty worktree and reports where the changes live', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [isoAgent()], projectAgentsDir: null })
+    const repo = makeRepo()
+    script('make changes', { stdout: [say('done editing')], delay: 150 })
+    const pending = execute('c1', { agent: 'iso', task: 'make changes' }, undefined, undefined, { ...trustedCtx, cwd: repo })
+    await vi.waitFor(() => expect(spawnCalls.length).toBe(1))
+    fs.writeFileSync(join(spawnCalls[0].options.cwd as string, 'dirty.txt'), 'work\n')
+    const result = await pending
+    expect(fs.existsSync(spawnCalls[0].options.cwd as string)).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('worktree kept at')
+  })
+})

@@ -111,3 +111,71 @@ describe('extension wiring', () => {
     expect(untrusted).toEqual({ skillPaths: [homeSkills] })
   })
 })
+
+describe('Claude skill invocation expansion', () => {
+  const setup = (cwd: string) => {
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const api = {
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      exec: async () => ({ stdout: 'SPAN-OUT\n', stderr: '', code: 0 }),
+    }
+    skillsExt(api as never)
+    return { input: (text: string) => handlers.get('input')?.({ text, source: 'interactive' }, { cwd }) }
+  }
+
+  it('expands dynamic content and arguments in a SKILL.md body, as Claude documents', async () => {
+    // Claude: a command file and a skill "work the same way": !`cmd` injection and
+    // $ARGUMENTS apply to SKILL.md bodies too. pi's loader delivers the raw text,
+    // so the docs' first-skill tutorial (built on !`git diff`) emitted literal text.
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'greet'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'greet', 'SKILL.md'), '---\nname: greet\ndescription: greets\n---\nDiff: !`git diff HEAD`\nHello $ARGUMENTS')
+    const { input } = setup(cwd)
+    const result = (await input('/skill:greet world')) as { action: string; text: string }
+    expect(result?.action).toBe('transform')
+    expect(result.text).toContain('<skill name="greet"')
+    expect(result.text).toContain('SPAN-OUT')
+    expect(result.text).toContain('Hello world')
+    expect(result.text).not.toContain('$ARGUMENTS')
+  })
+
+  it('matches a skill by frontmatter name over its directory name, like pi does', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'some-dir'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'some-dir', 'SKILL.md'), '---\nname: fancy\ndescription: named\n---\nBody here')
+    const { input } = setup(cwd)
+    const result = (await input('/skill:fancy')) as { action: string; text: string }
+    expect(result?.action).toBe('transform')
+    expect(result.text).toContain('Body here')
+  })
+
+  it('passes through a /skill: invocation it does not own', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    const { input } = setup(cwd)
+    expect(await input('/skill:not-ours x')).toBeUndefined()
+  })
+
+  it('passes through ordinary input untouched', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    const { input } = setup(cwd)
+    expect(await input('just a prompt')).toBeUndefined()
+  })
+})
+
+describe('Claude skill lookup edge cases', () => {
+  it('passes a malformed-frontmatter skill through to pi instead of throwing', async () => {
+    // parseCommandFile throws on broken YAML; the invocation must degrade to pi's
+    // plain expansion (raw body, no dynamic features), never fail the input.
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'rough'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'rough', 'SKILL.md'), '---\nname: [broken yaml\n---\nRough body')
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    skillsExt({ on: (name: string, fn: never) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: '', code: 0 }) } as never)
+    await expect(handlers.get('input')?.({ text: '/skill:rough', source: 'interactive' }, { cwd })).resolves.toBeUndefined()
+  })
+})
