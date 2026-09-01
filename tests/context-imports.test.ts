@@ -1472,3 +1472,25 @@ describe('context file size limit', () => {
     expect(result?.systemPrompt ?? 'BASE').not.toContain('HUGE START')
   })
 })
+
+describe('managed-settings.d drop-ins', () => {
+  it('merges managed-settings.d/*.json after the base file, alphabetically, with the documented rules', async () => {
+    // Claude merges managed-settings.json first, then every *.json in the
+    // directory alphabetically: single values replace, lists union with
+    // duplicates removed, nested blocks merge key by key; hidden files and
+    // non-json files are ignored.
+    const dir = tempDir()
+    const file = join(dir, 'managed-settings.json')
+    writeFileSync(file, JSON.stringify({ model: 'sonnet', permissions: { deny: ['Bash(rm *)'] }, env: { A: '1' } }))
+    mkdirSync(join(dir, 'managed-settings.d'))
+    writeFileSync(join(dir, 'managed-settings.d', '20-later.json'), JSON.stringify({ model: 'haiku', env: { C: '3' } }))
+    writeFileSync(join(dir, 'managed-settings.d', '10-early.json'), JSON.stringify({ model: 'opus', permissions: { deny: ['Bash(rm *)', 'WebFetch'] }, env: { B: '2' } }))
+    writeFileSync(join(dir, 'managed-settings.d', '.hidden.json'), JSON.stringify({ model: 'ignored' }))
+    writeFileSync(join(dir, 'managed-settings.d', 'notes.txt'), 'not json')
+
+    const merged = readManagedSettings(file)
+    expect(merged.model).toBe('haiku')
+    expect((merged.permissions as { deny: string[] }).deny).toEqual(['Bash(rm *)', 'WebFetch'])
+    expect(merged.env).toEqual({ A: '1', B: '2', C: '3' })
+  })
+})

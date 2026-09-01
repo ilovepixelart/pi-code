@@ -99,8 +99,14 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, p
     // the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
     // reference project files regardless of the shell's cwd. CLAUDECODE=1 marks every
     // subprocess Claude spawns, so it is set on the child unconditionally.
-    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1' }
+    // CLAUDE_CODE_CHILD_SESSION marks per-call children (hook and status line
+    // commands), never long-lived stdio MCP servers, as Claude documents; COLUMNS
+    // and LINES carry the terminal dimensions since the script's own width
+    // detection cannot see the captured terminal.
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
     if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
+    if (process.stdout.columns) env.COLUMNS = String(process.stdout.columns)
+    if (process.stdout.rows) env.LINES = String(process.stdout.rows)
     // An exec-form hook (an `args` array) spawns the executable directly with those args
     // and no shell, so shell metacharacters in the args arrive literally; $ARGUMENTS in
     // each arg is replaced with the event JSON by a replacer function (so $$/$& in the
