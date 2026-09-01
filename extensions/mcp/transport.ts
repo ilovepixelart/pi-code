@@ -68,7 +68,8 @@ function idleTimeoutMs(tuning: ServerCallTuning): number {
   const raw = process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT
   const override = raw === undefined ? undefined : parseNumericEnv(raw)
   if (override === 0) return 0
-  const base = override !== undefined && override > 0 ? override : tuning.stdio ? DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS : DEFAULT_CALL_IDLE_TIMEOUT_MS
+  const tierDefault = tuning.stdio ? DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS : DEFAULT_CALL_IDLE_TIMEOUT_MS
+  const base = override !== undefined && override > 0 ? override : tierDefault
   const floor = tuning.serverTimeoutMs !== undefined && tuning.serverTimeoutMs >= 1000 ? tuning.serverTimeoutMs : 0
   return Math.max(base, floor)
 }
