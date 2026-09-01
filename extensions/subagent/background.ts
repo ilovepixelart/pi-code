@@ -22,6 +22,8 @@ export interface BackgroundRun {
   turns: number
   /** Last stderr bytes of a failed child; the only diagnostics a boot failure leaves. */
   stderr?: string
+  /** Claude's partial marker: the run stopped at its maxTurns limit. */
+  partial?: boolean
   /** Set while running so the run can be cancelled; cleared on completion. */
   kill?: () => void
   /** True until the child process actually closes: a cancelled child that ignores
@@ -41,7 +43,7 @@ export interface BackgroundSpawn {
   command: string
   args: string[]
   cwd: string
-  /** The --append-system-prompt body, kept so a resume can rebuild the file the
+  /** The --system-prompt body, kept so a resume can rebuild the file the
    * completing run deleted. Without it the resumed child is handed a path that no
    * longer exists, and pi falls back to using that path as the prompt text. */
   promptBody?: string
@@ -191,9 +193,9 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   return 'resumed'
 }
 
-/** Re-point --append-system-prompt at a fresh file when the original is gone. */
+/** Re-point --system-prompt at a fresh file when the original is gone. */
 function withRebuiltPrompt(spawnSpec: BackgroundSpawn): string[] {
-  const flag = spawnSpec.args.indexOf('--append-system-prompt')
+  const flag = spawnSpec.args.indexOf('--system-prompt')
   if (flag === -1 || !spawnSpec.promptBody) return spawnSpec.args
   const current = spawnSpec.args[flag + 1]
   if (current && fs.existsSync(current)) return spawnSpec.args
@@ -314,6 +316,8 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     // maxTurns cap ends cleanly with output preserved, so it counts as done, not failed.
     if (run.state !== 'cancelled') run.state = code === 0 || cappedByMaxTurns ? 'done' : 'failed'
     run.exitCode = cappedByMaxTurns ? 0 : (code ?? 0)
+    // Claude marks a maxTurns-capped run's output as partial and offers a resume.
+    if (cappedByMaxTurns) run.partial = true
     run.output = text
     run.turns = turns
     run.stderr = stderrTail.trim() || undefined

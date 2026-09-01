@@ -835,7 +835,7 @@ describe('resumeBackgroundRun', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prompt-'))
     const promptPath = join(dir, 'prompt.md')
     writeFileSync(promptPath, 'AGENT PERSONA')
-    const withPrompt = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', '--append-system-prompt', promptPath, 'Task: first'], cwd: tmpdir(), promptBody: 'AGENT PERSONA' }
+    const withPrompt = { command: 'pi', args: ['--mode', 'json', '-p', '--no-session', '--system-prompt', promptPath, 'Task: first'], cwd: tmpdir(), promptBody: 'AGENT PERSONA' }
 
     const id = startBackgroundRun('scout', 'first', withPrompt, () => {}) as string
     spawned.children[0].emit('close', 0)
@@ -843,7 +843,7 @@ describe('resumeBackgroundRun', () => {
 
     expect(resumeBackgroundRun(id, 'second', () => {})).toBe('resumed')
     const args = spawned.calls[1].args
-    const rebuilt = args[args.indexOf('--append-system-prompt') + 1]
+    const rebuilt = args[args.indexOf('--system-prompt') + 1]
     // A path pi cannot read is used as the prompt text itself, replacing the persona.
     expect(existsSync(rebuilt)).toBe(true)
     expect(readFileSync(rebuilt, 'utf-8')).toBe('AGENT PERSONA')

@@ -67,6 +67,8 @@ interface SingleResult {
   stopReason?: string
   errorMessage?: string
   step?: number
+  /** Claude's partial marker: the run stopped at its maxTurns limit. */
+  partial?: boolean
 }
 
 interface SubagentDetails {
@@ -157,13 +159,14 @@ interface RunAgentOptions {
   projectApproved?: boolean
 }
 
-/** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
-type SubagentPhaseSink = (phase: 'start' | 'stop', agentType: string, agentId: string) => void
+/** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop.
+ * The stop carries the run's final assistant text, which Claude's SubagentStop
+ * delivers as last_assistant_message. */
+type SubagentPhaseSink = (phase: 'start' | 'stop', agentType: string, agentId: string, lastAssistantMessage?: string) => void
 
-/** Tell the parent where a kept worktree lives: appended to the final assistant
- * message so it rides the run's normal output; stderr when there is none. */
-function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void {
-  const note = `[isolation: worktree kept at ${worktree.dir} (branch ${worktree.branch}); the agent's changes live there]`
+/** Append a note to the final assistant message so it rides the run's normal
+ * output; stderr when there is none. */
+function appendResultNote(result: SingleResult, note: string): void {
   for (let i = result.messages.length - 1; i >= 0; i--) {
     const msg = result.messages[i]
     if (msg.role === 'assistant') {
@@ -174,15 +177,22 @@ function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void
   result.stderr = result.stderr ? `${result.stderr}\n${note}` : note
 }
 
+/** Tell the parent where a kept worktree lives. */
+function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void {
+  appendResultNote(result, `[isolation: worktree kept at ${worktree.dir} (branch ${worktree.branch}); the agent's changes live there]`)
+}
+
 async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
   const agent = options.agents.find((a) => a.name === options.agentName)
   if (!agent) return runSingleAgentInner(options)
   const agentId = `fg-${randomUUID().slice(0, 8)}`
   options.onPhase?.('start', agent.name, agentId)
+  let result: SingleResult | undefined
   try {
-    return await runSingleAgentInner(options)
+    result = await runSingleAgentInner(options)
+    return result
   } finally {
-    options.onPhase?.('stop', agent.name, agentId)
+    options.onPhase?.('stop', agent.name, agentId, result ? getFinalOutput(result.messages) || undefined : undefined)
   }
 }
 
@@ -199,6 +209,20 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+      step,
+    }
+  }
+
+  const toolsError = unresolvedToolsError(agent)
+  if (toolsError) {
+    return {
+      agent: agentName,
+      agentSource: agent.source,
+      task,
+      exitCode: 1,
+      messages: [],
+      stderr: toolsError,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
       step,
     }
@@ -265,7 +289,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       const tmp = await writePromptToTempFile(agent.name, promptBody)
       tmpPromptDir = tmp.dir
       tmpPromptPath = tmp.filePath
-      args.push('--append-system-prompt', tmpPromptPath)
+      // Claude: the agent body IS the subagent's system prompt, replacing the
+      // default, not an addition to it (--system-prompt reads a file path too).
+      args.push('--system-prompt', tmpPromptPath)
     }
 
     args.push(`Task: ${task}`)
@@ -304,8 +330,12 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
             accumulateAssistantMessage(currentResult, msg)
             assistantTurns++
             // Claude's maxTurns cap: end the child at the turn boundary once it has
-            // produced its Nth turn, so the collected output is kept and no turn is cut.
-            if (agent.maxTurns && assistantTurns >= agent.maxTurns) killGroup('SIGTERM')
+            // produced its Nth turn, so the collected output is kept and no turn is
+            // cut; the returned output is marked partial, as Claude documents.
+            if (agent.maxTurns && assistantTurns >= agent.maxTurns) {
+              currentResult.partial = true
+              killGroup('SIGTERM')
+            }
           }
           emitUpdate()
         } else if (event.type === 'tool_result_end') {
@@ -371,6 +401,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
 
     currentResult.exitCode = exitCode
     if (wasAborted) throw new Error('Subagent was aborted')
+    // The note rides the final assistant message like the worktree note, so the
+    // parent model sees the partial marking with the output.
+    if (currentResult.partial) appendResultNote(currentResult, '[Output is partial: the subagent stopped at its maxTurns limit.]')
     return currentResult
   } finally {
     // Cleanup runs on abort too: it only removes a pristine worktree, so an
@@ -452,12 +485,15 @@ type ChainStepParam = Static<typeof ChainItem>
 type TaskItemParam = Static<typeof TaskItem>
 
 /** The completion notice a background run sends when it finishes. */
-export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): string {
+export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string; partial?: boolean }): string {
   const output = capForContext(run.output ?? '') || '(no output)'
   // A child that dies at boot writes its reason only to stderr; without this the
   // notice reads "failed after 0 turns ... (no output)" with nothing to act on.
   const diagnostics = run.state === 'failed' && run.stderr ? `\n\nstderr tail:\n${capForContext(run.stderr)}` : ''
-  return `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}${diagnostics}`
+  // Claude marks maxTurns-capped output as partial and notes the run can be
+  // resumed to continue from where it stopped.
+  const partialNote = run.partial ? `\n\n[Output is partial: the run stopped at its maxTurns limit. Resume it with {resume: "${run.id}", task: "..."} to continue.]` : ''
+  return `Background subagent run ${run.id} (${run.agent}) ${run.state} after ${run.turns} turns.\n\n${output}${diagnostics}${partialNote}`
 }
 
 /** What to tell the model about a resume request. */
@@ -690,13 +726,31 @@ export function setKnownMcpAliases(aliases: ReadonlyArray<{ pi: string; claude: 
   knownMcpAliases = aliases
 }
 
+/** pi's built-in ToolName union (core/tools/index.d.ts; the package's export map
+ * does not expose allToolNames, so this mirrors it) plus the tools pi-code's own
+ * extensions register in a child. Claude's capitalized spellings fold onto these. */
+const CHILD_TOOL_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'web_fetch', 'web_search', 'list_mcp_resources', 'read_mcp_resource'])
+
+/** Claude: when no entry in a `tools` list resolves to a tool, the subagent fails
+ * to launch with an error naming the entries, instead of running tool-less. */
+function unresolvedToolsError(agent: AgentConfig): string | undefined {
+  if (!agent.tools || agent.tools.length === 0) return undefined
+  const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
+  const known = new Set(knownMcpAliases.map((alias) => fold(alias.pi)))
+  const resolves = expandMcpToolPatterns(agent.tools, knownMcpAliases).some((entry) => CHILD_TOOL_NAMES.has(fold(entry)) || known.has(fold(entry)))
+  if (resolves) return undefined
+  return `Agent "${agent.name}" would launch with zero tools: no entry in [${agent.tools.join(', ')}] resolves to a tool.`
+}
+
 /** CLI args shared by foreground and background children, from the agent's config. */
 function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] {
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
   // A concrete model wins; otherwise a Claude tier alias resolved against the models
-  // this user can actually run. pi reads a thinking level from the model pattern's
-  // :suffix when a model is pinned, and from --thinking otherwise.
-  const model = agent.model ?? aliasModel
+  // this user can actually run; then CLAUDE_CODE_SUBAGENT_MODEL, per Claude's model
+  // order (invocation model, frontmatter model, this variable, the session model).
+  // pi reads a thinking level from the model pattern's :suffix when a model is
+  // pinned, and from --thinking otherwise.
+  const model = agent.model ?? aliasModel ?? process.env.CLAUDE_CODE_SUBAGENT_MODEL
   if (model) args.push('--model', agent.effort ? `${model}:${agent.effort}` : model)
   else if (agent.effort) args.push('--thinking', agent.effort)
   // Claude's mcp__<server> / mcp__* patterns expand against the parent's MCP roster;
@@ -758,6 +812,13 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
       details: makeDetails('single')([]),
     }
   }
+  const toolsError = unresolvedToolsError(agent)
+  if (toolsError) {
+    return {
+      content: [{ type: 'text', text: toolsError }],
+      details: makeDetails('single')([]),
+    }
+  }
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
     return backgroundCapResult(makeDetails)
   }
@@ -782,7 +843,9 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
   const promptBody = childPromptBody(agent, skillRoots, memorySection)
   if (promptBody.trim()) {
     tmpPrompt = await writePromptToTempFile(agent.name, promptBody)
-    args.push('--append-system-prompt', tmpPrompt.filePath)
+    // Claude: the agent body replaces the default system prompt (see the
+    // foreground path).
+    args.push('--system-prompt', tmpPrompt.filePath)
   }
   args.push(`Task: ${task}`)
   const invocation = getPiInvocation(args)
@@ -793,7 +856,7 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
       // catch covers the synchronous path, but the worktree branch reaches here from an
       // async continuation outside it, so the guard must live in finish itself.
       try {
-        pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
+        pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, ...(run.output?.trim() ? { lastAssistantMessage: run.output.trim() } : {}) })
         pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
       } catch {
         // Session disposed after the run outlived it; nothing to notify.
@@ -1486,7 +1549,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
       if (params.background) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
 
-      const mode: ModeContext = { agents, defaultCwd: ctx.cwd, signal, onUpdate, makeDetails, skillRoots, availableModels, projectApproved, onPhase: (phase, agentType, agentId) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId }) }
+      const mode: ModeContext = {
+        agents,
+        defaultCwd: ctx.cwd,
+        signal,
+        onUpdate,
+        makeDetails,
+        skillRoots,
+        availableModels,
+        projectApproved,
+        onPhase: (phase, agentType, agentId, lastAssistantMessage) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId, ...(lastAssistantMessage === undefined ? {} : { lastAssistantMessage }) }),
+      }
 
       if (params.chain?.length) return runChainMode(params.chain, mode)
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)
