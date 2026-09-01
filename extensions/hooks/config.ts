@@ -138,6 +138,14 @@ export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): 
   return config
 }
 
+/** Claude dedups identical handlers across settings files only; a plugin's copy
+ * stays separate, so plugin entries carry their origin into the dedup key. */
+function stampOrigin(entries: HookMatcher[], origin: string): void {
+  for (const entry of entries) {
+    for (const hook of entry.hooks ?? []) hook.origin = origin
+  }
+}
+
 function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>, origin?: string): void {
   let parsed: { hooks?: HooksConfig }
   try {
@@ -153,11 +161,7 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
     // call for the rest of the session failed with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
-    // Claude dedups identical handlers across settings files only; a plugin's copy
-    // stays separate, so plugin entries carry their origin into the dedup key.
-    if (origin !== undefined) {
-      for (const entry of usable) for (const hook of entry.hooks ?? []) hook.origin = origin
-    }
+    if (origin !== undefined) stampOrigin(usable, origin)
     config[event] = [...(config[event] ?? []), ...usable]
     // Each parse produces fresh entry objects, so object identity keys the /hooks
     // viewer's source attribution without touching the entries themselves.
