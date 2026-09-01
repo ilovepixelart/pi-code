@@ -25,6 +25,7 @@ import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 import { claudeConfigDir } from './internal/config-dir.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
@@ -35,6 +36,8 @@ export interface OutputStyle {
   description: string
   body: string
   keepCodingInstructions: boolean
+  /** Claude's `force-for-plugin`: a plugin style applying automatically. */
+  forceForPlugin: boolean
 }
 
 function field(frontmatter: string, key: string): string {
@@ -47,7 +50,20 @@ export function parseStyle(content: string, fallbackName: string): OutputStyle {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   const frontmatter = match ? match[1] : ''
   const body = match ? content.slice(match[0].length) : content
-  return { name: field(frontmatter, 'name') || fallbackName, description: field(frontmatter, 'description'), body: body.trim(), keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true' }
+  return {
+    name: field(frontmatter, 'name') || fallbackName,
+    description: field(frontmatter, 'description'),
+    body: body.trim(),
+    keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true',
+    forceForPlugin: field(frontmatter, 'force-for-plugin') === 'true',
+  }
+}
+
+/** Claude's `force-for-plugin` (plugin output styles only): the first loaded style
+ * carrying it applies automatically, overriding the outputStyle setting. The
+ * caller passes only plugin-loaded styles. */
+export function forcedPluginStyle(styles: OutputStyle[]): OutputStyle | undefined {
+  return styles.find((style) => style.forceForPlugin)
 }
 
 /** Equivalents of Claude's built-in styles, shipped with pi-code as the
@@ -137,8 +153,10 @@ export function settingsFiles(cwd: string, home: string, trusted: boolean): stri
   return claudeSettingsChain(cwd, home, trusted)
 }
 
-/** The `outputStyle` recorded in settings, last file winning. */
-export function readActiveStyleName(files: string[]): string | undefined {
+/** The `outputStyle` recorded in settings, last file winning; a managed policy
+ * value wins over every file, per Claude's settings precedence. */
+export function readActiveStyleName(files: string[], managed: Record<string, unknown> = readManagedSettings()): string | undefined {
+  if (typeof managed.outputStyle === 'string') return managed.outputStyle
   let name: string | undefined
   for (const file of files) {
     try {
@@ -186,7 +204,10 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     const nearestLocal = findNearestFile(ctx.cwd, path.join('.claude', 'settings.local.json'))
     const claudeDir = findNearestDir(ctx.cwd, '.claude') ?? path.join(ctx.cwd, '.claude')
     localSettingsPath = nearestLocal ?? path.join(claudeDir, 'settings.local.json')
-    activeName = readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
+    // Claude's force-for-plugin: the first loaded forced plugin style applies
+    // automatically, overriding the outputStyle setting.
+    const forced = forcedPluginStyle(loadStyles(pluginStyleDirs(home)))
+    activeName = forced?.name ?? readActiveStyleName(settingsFiles(ctx.cwd, home, trusted))
     const active = styleForName(styles, activeName)
     if (active) ctx.ui.notify(`Output style: ${active.name}`, 'info')
   })

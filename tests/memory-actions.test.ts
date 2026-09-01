@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -189,5 +189,63 @@ describe('memory index robustness', () => {
     expect(result).not.toContain('Deleted')
     expect(existsSync(join(dir, 'keep.md'))).toBe(true)
     expect(readFileSync(indexPath, 'utf-8')).toContain('- [keep](keep.md):')
+  })
+})
+
+describe('memory index overflow, per the documented write-and-error rule', () => {
+  const origHome2 = process.env.HOME
+  afterEach(() => {
+    if (origHome2 === undefined) delete process.env.HOME
+    else process.env.HOME = origHome2
+  })
+
+  function setup() {
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
+    const handlers = new Map<string, Handler>()
+    let tool: Tool | undefined
+    memoryExtension({
+      on: (name: string, fn: Handler) => handlers.set(name, fn),
+      registerTool: (t: Tool) => {
+        tool = t
+      },
+      registerCommand: () => {},
+    } as never)
+    if (!tool) throw new Error('memory tool not registered')
+    return { handlers, tool, cwd, dir: memoryDir(cwd) }
+  }
+
+  const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, ui: { notify: () => {} } })
+
+  it('still writes the memory when the index is over its limit, and errors telling Claude to rewrite the index', async () => {
+    // Claude: "If the file is over a limit, the write still succeeds, but Claude
+    // Code returns an error telling Claude to rewrite the index."
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'MEMORY.md'), Array.from({ length: 201 }, (_, i) => `- [m${i}](m${i}.md) — x`).join('\n'))
+
+    const result = await tool.execute('1', { action: 'save', name: 'overflow-mem', description: 'd', content: 'the fact' })
+
+    expect(existsSync(join(dir, 'overflow-mem.md'))).toBe(true)
+    expect(result.content[0].text.toLowerCase()).toContain('rewrite')
+  })
+
+  it('reminds Claude to shorten the index when a write lands near a limit', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'MEMORY.md'), Array.from({ length: 185 }, (_, i) => `- [m${i}](m${i}.md) — x`).join('\n'))
+
+    const result = await tool.execute('1', { action: 'save', name: 'near-mem', description: 'd', content: 'the fact' })
+
+    expect(result.content[0].text.toLowerCase()).toContain('shorten')
+  })
+
+  it('names the documented type vocabulary in the tool description', () => {
+    const { tool } = setup()
+    const description = (tool as { description?: string }).description ?? ''
+    expect(description).toContain('feedback')
+    expect(description).toContain('reference')
   })
 })

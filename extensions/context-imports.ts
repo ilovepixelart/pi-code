@@ -81,6 +81,21 @@ import { fenceMarker, stripBlockComments } from './internal/strip-comments.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
+
+/** Claude loads a context file (CLAUDE.md and friends) of up to 4 MiB in full and
+ * skips a larger one. */
+const CONTEXT_FILE_MAX_BYTES = 4 * 1024 * 1024
+
+/** One context file's content, or undefined when it is absent, unreadable, or over
+ * the 4 MiB limit Claude documents. */
+function readContextFile(filePath: string): string | undefined {
+  try {
+    if (fs.statSync(filePath).size > CONTEXT_FILE_MAX_BYTES) return undefined
+    return fs.readFileSync(filePath, 'utf-8')
+  } catch {
+    return undefined
+  }
+}
 export const MAX_IMPORT_FILES = 50
 export const MAX_IMPORT_BYTES = 256 * 1024
 
@@ -292,11 +307,8 @@ export function additionalDirContextFiles(dir: string, includeLocal: boolean): A
   if (includeLocal) candidates.push(path.join(dir, 'CLAUDE.local.md'))
   const files: Array<{ path: string; content: string }> = []
   for (const candidate of candidates) {
-    try {
-      files.push({ path: candidate, content: fs.readFileSync(candidate, 'utf-8') })
-    } catch {
-      // absent or unreadable: treat as not there
-    }
+    const content = readContextFile(candidate)
+    if (content !== undefined) files.push({ path: candidate, content })
   }
   return files
 }
@@ -717,12 +729,9 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
 
     // ~/.claude/CLAUDE.md, Claude's user-scope memory. The user's own file, so no
     // project approval is required; a missing file simply leaves it unset.
-    try {
-      const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
-      userContext = { path: userClaudeMd, content: fs.readFileSync(userClaudeMd, 'utf-8') }
-    } catch {
-      // no user CLAUDE.md
-    }
+    const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
+    const userContent = readContextFile(userClaudeMd)
+    if (userContent !== undefined) userContext = { path: userClaudeMd, content: userContent }
 
     // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
     // skips it. A cloned repo can ship one, so it is gated like other project config.
@@ -735,18 +744,12 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
     if ((candidates.length > 0 || dotClaudeMd !== null) && (await isProjectApproved(ctx))) {
       for (const candidate of candidates) {
-        try {
-          localContexts.push({ path: candidate, content: fs.readFileSync(candidate, 'utf-8') })
-        } catch {
-          // unreadable: treat as absent
-        }
+        const content = readContextFile(candidate)
+        if (content !== undefined) localContexts.push({ path: candidate, content })
       }
       if (dotClaudeMd !== null) {
-        try {
-          projectDotClaude = { path: dotClaudeMd, content: fs.readFileSync(dotClaudeMd, 'utf-8') }
-        } catch {
-          // unreadable: treat as absent
-        }
+        const content = readContextFile(dotClaudeMd)
+        if (content !== undefined) projectDotClaude = { path: dotClaudeMd, content }
       }
     }
     // Read after the local-context flow so an approval it just recorded is honored.

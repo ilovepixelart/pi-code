@@ -28,7 +28,24 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync, renameSync }
 })
 
-import memoryExtension, { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, indexWouldOverflow, memoryDir, migrateLegacyStore, projectSlug, removeIndexLine, resolveMemoryDir, setAutoMemoryEnabledSetting, slugifyName, stampModified, stripNonLoaded, upsertIndexLine } from '../extensions/memory.ts'
+import memoryExtension, {
+  autoMemoryEnabled,
+  capIndexForPrompt,
+  INDEX_MAX_BYTES,
+  INDEX_MAX_LINES,
+  indexWouldOverflow,
+  memoryDir,
+  migrateLegacyStore,
+  projectSlug,
+  readMemorySettings,
+  removeIndexLine,
+  resolveMemoryDir,
+  setAutoMemoryEnabledSetting,
+  slugifyName,
+  stampModified,
+  stripNonLoaded,
+  upsertIndexLine,
+} from '../extensions/memory.ts'
 
 describe('memory helpers', () => {
   it('slugs project paths into directory names', () => {
@@ -451,5 +468,18 @@ describe('migrateLegacyStore', () => {
     rmSync(home, { recursive: true, force: true })
     rmSync(repo, { recursive: true, force: true })
     hoisted.home = ''
+  })
+})
+
+describe('managed autoMemory settings', () => {
+  it('lets managed policy settings override the settings-chain autoMemory values', () => {
+    // Claude's settings precedence: managed policy settings win over user and
+    // project files.
+    const dir = mkdtempSync(join(tmpdir(), 'mem-managed-'))
+    const user = join(dir, 'settings.json')
+    writeFileSync(user, JSON.stringify({ autoMemoryEnabled: true }))
+    const merged = readMemorySettings([user], { autoMemoryEnabled: false, autoMemoryDirectory: '/managed/dir' })
+    expect(merged.autoMemoryEnabled).toBe(false)
+    expect(merged.autoMemoryDirectory).toBe('/managed/dir')
   })
 })
