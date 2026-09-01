@@ -9,7 +9,7 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 - **PostToolUseFailure**: notify-only (the tool already failed); the hook's stderr is shown to the model.
 - **SessionStart**: context injection before the first prompt.
 - **UserPromptSubmit**: blocks the prompt or injects context ahead of it.
-- **Stop**: a block (or `additionalContext`) feeds back as a new turn, with `stop_hook_active` as the loop guard and a consecutive-block cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; `0` disables the cap).
+- **Stop**: a block (or `additionalContext`) feeds back as a new turn, with `stop_hook_active` as the loop guard and a consecutive-block cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; `0` disables the cap). Does not run when the turn ended on a user interrupt, as Claude documents.
 - **SubagentStart / SubagentStop**: notify-only (a child has already exited by SubagentStop).
 - **PreCompact / PostCompact / SessionEnd / Notification** (`idle_prompt`, the one type pi can source): notify-only.
 - **InstructionsLoaded**: observational; fires per loaded context file at session start, plus `path_glob_match` on a scoped-rule attach and `include` per resolved `@import`, deduped per session. `nested_traversal`/`compact` reasons never fire (pi does not lazily load nested CLAUDE.md or reload after compaction).
@@ -39,5 +39,6 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 
 ## Divergences from Claude Code
 
-- A timed-out PreToolUse/UserPromptSubmit hook fails closed at a 60s default (Claude: 600s for PreToolUse, 30s for UserPromptSubmit, both non-blocking), since pi has no permission prompt to fall back on.
+- A timed-out PreToolUse/UserPromptSubmit hook fails closed at a 60s default (Claude: 600s for PreToolUse, 30s for UserPromptSubmit, both non-blocking), since pi has no permission prompt to fall back on. Prompt hooks default to Claude's 30s and agent hooks to 60s; SessionEnd hooks share Claude's 1.5-second budget, raised by a declared per-hook `timeout` up to 60 seconds, so a slow hook cannot stall session exit.
+- Prompt hooks honor the `model` override (resolved against the models this user can run) and append the input JSON to the prompt when `$ARGUMENTS` is absent, as documented.
 - `disableAllHooks` in any scope turns the system off; `/hooks` prints the resolved configuration.
