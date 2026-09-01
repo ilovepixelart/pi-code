@@ -7,8 +7,10 @@
  * root (the settings source), and bare or `./` from the current directory. As
  * allow rules, a single-segment directory pattern anchors at cwd; a bare
  * filename matches at any depth. `*` stays within one segment, `**` crosses
- * directories. Matching is lexical, on resolved paths; bracket expressions are
- * not supported and match literally, which can only over-block, never widen.
+ * directories. Matching is lexical, on resolved paths. Bracket expressions parse
+ * per Claude's documented glob contract: `[abc]` classes with ranges and `!`
+ * negation, an unreadable `[` making the pattern match nothing, and `\[` for a
+ * literal bracket.
  */
 
 import * as path from 'node:path'
