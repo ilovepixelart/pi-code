@@ -101,6 +101,7 @@ import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
+import { watchSettingsFiles } from '../internal/settings-watch.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { setSubagentStartHookRunner } from '../internal/subagent-hooks.js'
@@ -207,6 +208,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
   /** Set inside a subagent child that carries agent-frontmatter hooks: the child's
    * own agent end fires their SubagentStop, per Claude's Stop conversion. */
   let agentIdentity: { agent: string; id?: string } | undefined
+  /** Claude's allowManagedHooksOnly: only the managed hook set runs. */
+  let managedHooksOnly = false
+  /** Skill hooks registered this session, re-applied when a settings edit reloads. */
+  const registeredSkillHooks: Array<{ skillName: string; hooks: Record<string, unknown> }> = []
+  /** Stops the settings watcher of the previous session. */
+  let disposeSettingsWatch: () => void = () => {}
   /** Claude's disableAllHooks escape hatch was set somewhere in the honored chain. */
   let hooksDisabled = false
   /** Which settings file each resolved entry came from, for the /hooks viewer. */
@@ -300,7 +307,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // Claude documents; a session restart reloads config and drops them.
   pi.events.on(SKILL_HOOKS_CHANNEL, (data) => {
     if (!isSkillHooksEvent(data)) return
-    if (hooksDisabled) return
+    // Blocked under the escape hatch and under allowManagedHooksOnly, which
+    // covers every non-managed hook source.
+    if (hooksDisabled || managedHooksOnly) return
+    registeredSkillHooks.push({ skillName: data.skillName, hooks: data.hooks })
     mergeSkillHooks(config, data.skillName, data.hooks, hookSources)
   })
 
@@ -376,20 +386,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
     return results.map((result) => promptContext(result.stdout)).filter(Boolean)
   })
 
-  pi.on('session_start', async (event, ctx) => {
-    sessionCtx = ctx
-    // One extension instance serves every session. A mid-turn /new fires session_start on
-    // the same instance while a Stop-hook continuation streak is in flight; it must not
-    // carry into the next session, so reset before any early return (disableAllHooks below).
-    stopHookActive = false
-    stopHookBlockCount = 0
-    pendingToolContext.clear()
-    const trusted = await isProjectApproved(ctx)
-    // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
-    // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
-    // subdirectory session too.
-    projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
-    const files = hookFiles(ctx.cwd, os.homedir(), trusted)
+  /** Resolve the whole hook configuration from disk. Runs at session start and
+   * again when the settings watcher sees an edit, so mid-session changes to
+   * hooks, disableAllHooks, or allowedHttpHookUrls apply without a restart. */
+  function resolveConfig(cwd: string, trusted: boolean): void {
+    const files = hookFiles(cwd, os.homedir(), trusted)
     hookSources.clear()
     allowedHttpHookUrls = readAllowedHttpHookUrls(files)
     // The disableAllHooks escape hatch, checked before any config loads. The tiers
@@ -400,15 +401,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
     hooksDisabled = readDisableAllHooks(files, managedSettings)
     if (managedSettings.disableAllHooks === true) {
       config = {}
-      pendingSessionContext = []
       return
     }
     config = loadManagedHooks(hookSources, managedSettings)
-    if (readSettingsDisableAllHooks(files)) {
-      pendingSessionContext = []
-      return
-    }
-    for (const [event, matchers] of Object.entries(loadHooks(files, hookSources))) config[event] = [...(config[event] ?? []), ...matchers]
+    // Claude's allowManagedHooksOnly: user, project, local, plugin, and skill
+    // hooks are blocked; only the managed set runs.
+    managedHooksOnly = managedSettings.allowManagedHooksOnly === true
+    if (managedHooksOnly || readSettingsDisableAllHooks(files)) return
+    for (const [eventName, matchers] of Object.entries(loadHooks(files, hookSources))) config[eventName] = [...(config[eventName] ?? []), ...matchers]
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
     loadPluginHooks(config, installedPlugins(os.homedir()), hookSources)
@@ -416,6 +416,31 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // env (Stop already converted to SubagentStop, per Claude); they run only for
     // this child process.
     agentIdentity = mergeAgentEnvHooks(config, hookSources)
+    // A reload must not drop the skill hooks the session already registered.
+    for (const skill of registeredSkillHooks) mergeSkillHooks(config, skill.skillName, skill.hooks, hookSources)
+  }
+
+  pi.on('session_start', async (event, ctx) => {
+    sessionCtx = ctx
+    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // the same instance while a Stop-hook continuation streak is in flight; it must not
+    // carry into the next session, so reset before any early return (disableAllHooks below).
+    stopHookActive = false
+    stopHookBlockCount = 0
+    pendingToolContext.clear()
+    registeredSkillHooks.length = 0
+    const trusted = await isProjectApproved(ctx)
+    // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
+    // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
+    // subdirectory session too.
+    projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
+    resolveConfig(ctx.cwd, trusted)
+    // Claude picks up direct settings edits mid-session via a file watcher.
+    disposeSettingsWatch()
+    disposeSettingsWatch = watchSettingsFiles(hookFiles(ctx.cwd, os.homedir(), trusted), () => resolveConfig(ctx.cwd, trusted))
+    // A disabled or managed-only resolution leaves config empty (or managed-only),
+    // so the SessionStart run below fires exactly what remains active.
+    pendingSessionContext = []
     // "reload" re-fires in-process with the same conversation and would double-run hooks;
     // a fork is a genuine session begin, which Claude reports as source "fork".
     if (event.reason === 'reload') return

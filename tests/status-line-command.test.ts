@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
 
-const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, fsReads: [] as string[] }))
+const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, fsReads: [] as string[], kills: [] as number[] }))
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()
@@ -29,8 +29,9 @@ vi.mock('../extensions/hooks/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../extensions/hooks/index.js')>()
   return {
     ...actual,
-    runHookCommand: async (command: string, payload: unknown) => {
+    runHookCommand: async (command: string, payload: unknown, _timeout?: number, _projectDir?: string, _args?: string[], onChild?: (kill: () => void) => void) => {
       hoisted.runs.push({ command, payload })
+      onChild?.(() => hoisted.kills.push(hoisted.runs.length))
       // A test can hold the first run open to exercise in-flight queueing.
       if (hoisted.gate) {
         const gate = hoisted.gate
@@ -631,5 +632,79 @@ describe('statusLine payload and expiry conformance', () => {
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
     expect(payload.effort).toBeUndefined()
     expect((payload.thinking as { enabled: boolean }).enabled).toBe(false)
+  })
+})
+
+describe('statusLine cadence and managed config', () => {
+  it('lets a managed statusLine win over the settings files', async () => {
+    const { readStatusLineConfig } = await import('../extensions/status-line.ts')
+    const dir = tempDir()
+    const user = join(dir, 'settings.json')
+    writeFileSync(user, JSON.stringify({ statusLine: { type: 'command', command: 'user.sh' } }))
+    const config = readStatusLineConfig([user], { statusLine: { type: 'command', command: 'managed.sh' } })
+    expect(config?.command).toBe('managed.sh')
+  })
+
+  it('refreshes after each assistant message, as Claude re-runs per message', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    hoisted.runs.length = 0
+
+    await handlers.get('message_end')?.({ message: { usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs.length).toBeGreaterThan(0)
+  })
+
+  it('re-runs on its own when a rate-limit window reaches its resets_at time', async () => {
+    // Claude re-runs the script when "a rate-limit window in the data your script
+    // last received reaches its resets_at time".
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '90', 'anthropic-ratelimit-unified-5h-reset': '2026-08-16T00:10:00Z' } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    hoisted.runs.length = 0
+
+    // Cross the reset time with no other trigger: the expiry timer re-runs the
+    // script and the expired window is gone from its payload.
+    await vi.advanceTimersByTimeAsync(11 * 60 * 1000)
+    expect(hoisted.runs.length).toBeGreaterThan(0)
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toBeUndefined()
+  })
+
+  it('cancels the in-flight script when a new update triggers', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    let release!: () => void
+    hoisted.gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    hoisted.kills.length = 0
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs.length).toBe(1)
+
+    // A new trigger while the first run is still in flight cancels it.
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.kills.length).toBe(1)
+    release()
+    hoisted.gate = undefined
+    await vi.advanceTimersByTimeAsync(400)
   })
 })

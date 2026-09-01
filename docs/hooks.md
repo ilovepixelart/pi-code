@@ -2,7 +2,7 @@
 
 Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Source: [`extensions/hooks/`](../extensions/hooks) (the module header in `index.ts` is the authoritative contract).
 
-Hook locations: settings files, managed policy settings, plugins, skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run), and agent frontmatter (passed to the subagent child via env, running only while it runs, with `Stop` converted to `SubagentStop`).
+Hook locations (settings.json from the session's primary working directory, settings.local.json at the repository root, per Claude's placement rules): settings files, managed policy settings, plugins, skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run), and agent frontmatter (passed to the subagent child via env, running only while it runs, with `Stop` converted to `SubagentStop`).
 
 ## Events
 
@@ -54,4 +54,4 @@ pi has no seam for these; a hook relying on them silently not working would be w
 
 - A timed-out PreToolUse/UserPromptSubmit hook fails closed at a 60s default (Claude: 600s for PreToolUse, 30s for UserPromptSubmit, both non-blocking), since pi has no permission prompt to fall back on. Prompt hooks default to Claude's 30s and agent hooks to 60s; SessionEnd hooks share Claude's 1.5-second budget, raised by a declared per-hook `timeout` up to 60 seconds, so a slow hook cannot stall session exit.
 - Prompt hooks honor the `model` override (resolved against the models this user can run) and append the input JSON to the prompt when `$ARGUMENTS` is absent, as documented.
-- `disableAllHooks` is tiered per Claude: the managed level turns everything off; a settings-file value disables non-managed hooks while managed policy hooks keep running. `/hooks` prints the resolved configuration.
+- `disableAllHooks` is tiered per Claude: the managed level turns everything off; a settings-file value disables non-managed hooks while managed policy hooks keep running. `allowManagedHooksOnly` blocks every non-managed hook source (settings files, plugins, skills). Settings edits are picked up mid-session by a file watcher. `/hooks` prints the resolved configuration.
