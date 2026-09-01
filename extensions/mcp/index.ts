@@ -20,8 +20,9 @@
  * environment plus its own `env` block, not the whole process environment.
  *
  * Servers advertising the `prompts` capability get their prompts registered as Claude's
- * /mcp__<server>__<prompt> slash commands (names normalized dashes/spaces to underscores,
- * args space-separated and mapped positionally); the prompt result drives a turn via
+ * /mcp__<server>__<prompt> slash commands (server-name characters outside A-Za-z0-9_-
+ * fold to underscores, args split on whitespace and mapped positionally, one token
+ * per declared argument); the prompt result drives a turn via
  * sendUserMessage, exactly how custom slash commands do. Servers advertising `resources`
  * make the global list_mcp_resources / read_mcp_resource tools available, mirroring
  * Claude's automatic resource tools. Resource and prompt output rides the same
@@ -47,7 +48,7 @@ import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, 
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
-import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, type ServerCallTuning, serverCallTuning, withTimeout } from './transport.js'
+import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
@@ -87,6 +88,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // Config per server name, kept for call-time timeout tuning: the idle tier follows
   // the transport kind, and a declared per-server timeout governs the wall budget.
   const serverConfigs = new Map<string, ServerConfig>()
+  // The session's directories, set at session_start before any connect: the launch
+  // directory answers roots/list, the project root feeds CLAUDE_PROJECT_DIR.
+  let sessionDirs: SessionDirs | undefined
   const callTuning = (name: string): ServerCallTuning => {
     const config = serverConfigs.get(name)
     return config ? serverCallTuning(config) : {}
@@ -356,7 +360,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       pending.map(async ([name, config]) => {
         warnOnTypelessUrl(name, config)
         try {
-          const client = await connect(name, config, authUi)
+          const client = await connect(name, config, authUi, sessionDirs)
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
           registerTools(name, config, tools)
@@ -448,7 +452,10 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // The stored project decision, read without prompting: consent recorded inside
     // the project only counts once the project itself has been approved.
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
-    const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(loadConfigFrom(projectConfigPaths(ctx.cwd)), policy), projectPolicy)
+    // Tag the scope on each project server: a repository-supplied headersHelper runs
+    // with credential variables stripped, unlike a user-scope one.
+    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(projectConfigPaths(ctx.cwd))).map(([name, config]) => [name, { ...config, projectScope: true }]))
+    const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
     // here rather than allowed to shadow it.
@@ -480,6 +487,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // withdrawn tool keeps its registration and surfaces the server's own error), which
     // is why serverToolCount reads from `registered` to recover the true count here.
     status.clear()
+    // Claude answers roots/list with the session's launch directory and exports the
+    // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
+    sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd }
     const authUi = authUiFor(ctx)
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They
     // merge from managed settings plus the trust-gated settings chain, as Claude

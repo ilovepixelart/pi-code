@@ -65,6 +65,9 @@ const hoisted = vi.hoisted(() => {
     // Codes handed to a transport's finishAuth, so the interactive OAuth exchange is observable.
     finishAuthCalls: [] as string[],
     notify: new Map<string, () => void | Promise<void>>(),
+    // Client constructor options (capabilities) and roots/list-style request handlers.
+    clientOptions: [] as Array<unknown>,
+    requests: new Map<string, (request: unknown) => unknown>(),
     control: {} as {
       connect: (transport: TransportRecord, client: ClientRecord) => Promise<void>
       listTools: (args: { cursor?: string }, client: ClientRecord) => Promise<ListPage>
@@ -89,8 +92,16 @@ vi.mock('node:os', async (importOriginal) => {
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: class FakeClient implements ClientRecord {
     transport?: TransportRecord
-    constructor(public info: { name: string; version: string }) {
+    constructor(
+      public info: { name: string; version: string },
+      options?: unknown,
+    ) {
       hoisted.clients.push(this)
+      hoisted.clientOptions.push(options)
+    }
+    setRequestHandler(schema: unknown, handler: (request: unknown) => unknown): void {
+      const shape = (schema as { shape?: { method?: { value?: string } } })?.shape
+      hoisted.requests.set(shape?.method?.value ?? 'unknown', handler)
     }
     async connect(transport: TransportRecord): Promise<void> {
       this.transport = transport
@@ -356,6 +367,8 @@ beforeEach(() => {
   hoisted.finishAuthCalls.length = 0
   hoisted.control = defaultControl()
   hoisted.notify.clear()
+  hoisted.clientOptions.length = 0
+  hoisted.requests.clear()
 })
 
 afterEach(() => {
@@ -2224,5 +2237,133 @@ describe('managed-mcp.json exclusive control', () => {
     await expect(starting).resolves.toBeUndefined()
     // The managed server still connected despite the hung eviction close.
     expect(hoisted.transports.map((t) => t.options.command)).toEqual(['u', 'm'])
+  })
+})
+
+describe('mcp stdio session context', () => {
+  it('sets CLAUDE_PROJECT_DIR in a stdio server environment, as Claude documents', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' }, plugged: { command: 'y', pluginRoot: '/plug/root' } } })
+
+    // The harness cwd has no repo markers, so the project root falls back to cwd.
+    const env = hoisted.transports[0].options.env as Record<string, string>
+    expect(env.CLAUDE_PROJECT_DIR).toBe(harness.cwd)
+    // A plugin-provided stdio server also gets CLAUDE_PLUGIN_ROOT, which Claude
+    // exports to MCP server subprocesses.
+    const pluggedEnv = hoisted.transports[1].options.env as Record<string, string>
+    expect(pluggedEnv.CLAUDE_PLUGIN_ROOT).toBe('/plug/root')
+  })
+
+  it('declares the roots capability and answers roots/list with the session launch directory', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+
+    // Claude Code answers roots/list with the session's launch directory (pi has no
+    // additional working directories, so the set is static and never changes).
+    expect(hoisted.clientOptions[0]).toMatchObject({ capabilities: { roots: {} } })
+    const handler = hoisted.requests.get('roots/list')
+    expect(handler).toBeDefined()
+    const result = handler?.({ method: 'roots/list' }) as { roots: Array<{ uri: string }> }
+    expect(result.roots).toHaveLength(1)
+    expect(result.roots[0].uri).toBe(`file://${harness.cwd}`)
+  })
+})
+
+describe('mcp headersHelper environment', () => {
+  it('passes the server name and a credential-redacted url to the helper', async () => {
+    // Claude sets CLAUDE_CODE_MCP_SERVER_NAME and CLAUDE_CODE_MCP_SERVER_URL when
+    // executing the helper; a url part expanded from a credential-named variable
+    // reaches the helper as REDACTED while the transport gets the real value.
+    setEnv('TEST_HELPER_KEY', 'sekret')
+    withTools([{ name: 'go' }])
+    const helper = `echo "{\\"X-N\\":\\"$CLAUDE_CODE_MCP_SERVER_NAME\\",\\"X-U\\":\\"$CLAUDE_CODE_MCP_SERVER_URL\\"}"`
+    await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/${TEST_HELPER_KEY}/mcp', headersHelper: helper } } })
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-N']).toBe('srv')
+    expect(headers['X-U']).toBe('https://api.example/REDACTED/mcp')
+    expect(String(hoisted.transports[0].url)).toBe('https://api.example/sekret/mcp')
+  })
+
+  it('strips credential-named variables from a project server helper environment', async () => {
+    // A helper a repository supplies runs without credential variables such as
+    // ANTHROPIC_API_KEY: any name with TOKEN/SECRET/PASSWORD/KEY/AUTH in it.
+    setEnv('MY_PROJ_TOKEN', 'leak')
+    withTools([{ name: 'go' }])
+    const helper = `echo "{\\"X-T\\":\\"\${MY_PROJ_TOKEN-absent}\\"}"`
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+    await harness.sessionStart(true)
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-T']).toBe('absent')
+  })
+
+  it('keeps credential variables for a user-scope helper, which the user wrote', async () => {
+    setEnv('MY_USER_TOKEN', 'mine')
+    withTools([{ name: 'go' }])
+    const helper = `echo "{\\"X-T\\":\\"\${MY_USER_TOKEN-absent}\\"}"`
+    await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-T']).toBe('mine')
+  })
+
+  it('gives a plugin server helper CLAUDE_PLUGIN_ROOT and the credential stripping', async () => {
+    setEnv('MY_PLUGIN_TOKEN', 'leak')
+    withTools([{ name: 'go' }])
+    const helper = `echo "{\\"X-R\\":\\"$CLAUDE_PLUGIN_ROOT\\",\\"X-T\\":\\"\${MY_PLUGIN_TOKEN-absent}\\"}"`
+    await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper, pluginRoot: '/plug/root' } } })
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-R']).toBe('/plug/root')
+    expect(headers['X-T']).toBe('absent')
+  })
+})
+
+describe('mcp configured authorization', () => {
+  it('fails a 401 server with a static Authorization header instead of starting OAuth', async () => {
+    // Claude: for a server whose Authorization header you configured, a 401 or 403
+    // while connecting reports the connection as failed; the credential to fix is
+    // the configured one, so there is no OAuth fallback.
+    withTools([{ name: 'go' }])
+    hoisted.control.connect = async () => {
+      throw Object.assign(new Error('denied'), { code: 401 })
+    }
+    let confirms = 0
+    const harness = await setup({
+      user: { locked: { type: 'http', url: 'https://api.example/mcp', headers: { Authorization: 'Bearer abc' } } },
+      confirm: async () => {
+        confirms++
+        return true
+      },
+    })
+    await harness.sessionStart()
+
+    expect(confirms).toBe(0)
+    const [line] = await statusLinesOf(harness)
+    expect(line.startsWith('locked: failed: ')).toBe(true)
+  })
+
+  it('fails a 401 server whose helper supplied Authorization instead of starting OAuth', async () => {
+    withTools([{ name: 'go' }])
+    hoisted.control.connect = async () => {
+      throw Object.assign(new Error('denied'), { code: 401 })
+    }
+    let confirms = 0
+    const helper = `echo "{\\"Authorization\\":\\"Bearer xyz\\"}"`
+    const harness = await setup({
+      user: { locked: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } },
+      confirm: async () => {
+        confirms++
+        return true
+      },
+    })
+    await harness.sessionStart()
+
+    expect(confirms).toBe(0)
+    const [line] = await statusLinesOf(harness)
+    expect(line.startsWith('locked: failed: ')).toBe(true)
   })
 })

@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
 import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -13,8 +14,9 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
+import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { FileOAuthProvider } from '../internal/mcp-oauth.js'
-import { expandCwd, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
+import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
 
 // Claude's MCP_TIMEOUT default: 30 seconds per connect attempt.
@@ -128,6 +130,67 @@ function isStdio(config: ServerConfig): config is StdioServerConfig {
   return 'command' in config && (config.type === undefined || config.type === 'stdio')
 }
 
+/** The session's directories: the launch directory answers roots/list, and the
+ * project root becomes CLAUDE_PROJECT_DIR in a stdio server's environment. */
+export interface SessionDirs {
+  projectDir: string
+  launchDir: string
+}
+
+/** A client that, like Claude, declares the roots capability and answers roots/list
+ * with the session's launch directory. pi's directory set is static, so no
+ * roots/list_changed notification is ever sent. */
+function makeClient(session?: SessionDirs): Client {
+  if (!session) return new Client({ name: 'pi-code-mcp', version: '0.1.0' })
+  const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' }, { capabilities: { roots: {} } })
+  client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(session.launchDir).href }] }))
+  return client
+}
+
+/** Claude's credential heuristic for helper environments: any name with TOKEN,
+ * SECRET, PASSWORD, KEY, or AUTH in it in either case (Git's GIT_CONFIG_KEY_<n>
+ * excepted), plus a fixed list of credential names outside the pattern. */
+const CREDENTIAL_NAME_EXTRAS = new Set(['ANTHROPIC_CUSTOM_HEADERS'])
+function isCredentialEnvName(name: string): boolean {
+  if (/^GIT_CONFIG_KEY_\d+$/.test(name)) return false
+  return /TOKEN|SECRET|PASSWORD|KEY|AUTH/i.test(name) || CREDENTIAL_NAME_EXTRAS.has(name)
+}
+
+/** process.env with every credential-named value replaced by REDACTED, used to
+ * expand the url a helper is shown without handing it the credential. */
+function redactedEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key, isCredentialEnvName(key) ? 'REDACTED' : value]))
+}
+
+/** The environment a headersHelper runs with: Claude's CLAUDE_CODE_MCP_SERVER_NAME
+ * and CLAUDE_CODE_MCP_SERVER_URL (credential-expanded url parts REDACTED), plus
+ * CLAUDE_PLUGIN_ROOT for a plugin's server. A helper a repository or plugin
+ * supplies is a command the user did not write, so it runs without the
+ * credential-named variables; a user-scope helper keeps them. */
+function helperEnv(name: string, config: HttpServerConfig): NodeJS.ProcessEnv {
+  const stripped = config.projectScope === true || config.pluginRoot !== undefined
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (stripped && isCredentialEnvName(key)) continue
+    env[key] = value
+  }
+  env.CLAUDE_CODE_MCP_SERVER_NAME = name
+  env.CLAUDE_CODE_MCP_SERVER_URL = interpolateEnv(config.url, redactedEnv())
+  if (config.pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = config.pluginRoot
+  return env
+}
+
+/** The env a stdio server process starts with: the SDK allowlist, the config's own
+ * env block, and Claude's path variables (CLAUDE_PROJECT_DIR, and CLAUDE_PLUGIN_ROOT
+ * for a plugin's server). */
+function stdioEnv(config: StdioServerConfig, fill: (value: string) => string, session?: SessionDirs): Record<string, string> {
+  const env: Record<string, string> = { ...getDefaultEnvironment() }
+  for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
+  if (session) env.CLAUDE_PROJECT_DIR = session.projectDir
+  if (config.pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = config.pluginRoot
+  return env
+}
+
 export async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
@@ -143,8 +206,8 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   }
 }
 
-export async function connect(name: string, config: ServerConfig, authUi?: AuthUi): Promise<Client> {
-  const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' })
+export async function connect(name: string, config: ServerConfig, authUi?: AuthUi, session?: SessionDirs): Promise<Client> {
+  const client = makeClient(session)
   // Names referenced by ${VAR} with no value and no default, gathered across this
   // server's interpolated fields so the connect can warn once rather than fail with a
   // mystery 401 or a command that lost an argument.
@@ -157,12 +220,10 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     // Start from the SDK's allowlist (PATH, HOME, SHELL, ...) rather than the whole
     // process env: a server should not receive ANTHROPIC_API_KEY or GITHUB_TOKEN just
     // for being launched. A server that needs a variable names it in its own env block.
-    const env: Record<string, string> = { ...getDefaultEnvironment() }
-    for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
     const transport = new StdioClientTransport({
       command: fill(config.command),
       args: (config.args ?? []).map((arg) => fill(arg)),
-      env,
+      env: stdioEnv(config, fill, session),
       cwd: expandCwd(config.cwd),
       stderr: 'ignore',
     })
@@ -192,26 +253,30 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   if (token) headers.Authorization = `Bearer ${token}`
   // A headersHelper generates connect-time headers for non-OAuth auth schemes; its
   // JSON stdout merges over the static headers.
-  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(fill(config.headersHelper)))
+  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(fill(config.headersHelper), helperEnv(name, config)))
   warnMissing()
+  // Claude: a configured Authorization header, whether static, a bearer token, or
+  // helper output, is the server's authentication; there is no OAuth fallback for it.
+  const configuredAuth = Boolean(token) || Object.keys(headers).some((header) => header.toLowerCase() === 'authorization')
   const sseTransport = (authProvider?: OAuthClientProvider) => new SSEClientTransport(url, { requestInit: { headers }, authProvider }) // NOSONAR: explicitly declared or deliberate legacy transport
   if (config.type === 'sse') {
-    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, token, authUi)
+    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, configuredAuth, authUi, session)
   }
   try {
-    return await connectHttpFamily(name, config, (authProvider) => new StreamableHTTPClientTransport(url, { requestInit: { headers }, authProvider }), `connect ${name}`, token, authUi)
+    return await connectHttpFamily(name, config, (authProvider) => new StreamableHTTPClientTransport(url, { requestInit: { headers }, authProvider }), `connect ${name}`, configuredAuth, authUi, session)
   } catch (error) {
     // An explicitly declared streamable transport must not silently degrade to SSE.
     if (config.type !== undefined || isUnauthorized(error)) throw error
-    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, token, authUi)
+    return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, configuredAuth, authUi, session)
   }
 }
 
-/** Run a headersHelper command and parse its JSON stdout into headers. A failure or
- * a 10s timeout yields no extra headers rather than blocking the connection. */
-function runHeadersHelper(command: string): Promise<Record<string, string>> {
+/** Run a headersHelper command and parse its JSON stdout into headers, under the
+ * environment helperEnv built. A failure or a 10s timeout yields no extra headers
+ * rather than blocking the connection. */
+function runHeadersHelper(command: string, env: NodeJS.ProcessEnv): Promise<Record<string, string>> {
   return new Promise((resolve) => {
-    execFile('/bin/sh', ['-c', command], { timeout: 10_000 }, (error, stdout) => {
+    execFile('/bin/sh', ['-c', command], { timeout: 10_000, env }, (error, stdout) => {
       resolve(error ? {} : parseHelperHeaders(stdout))
     })
   })
@@ -229,12 +294,12 @@ export interface AuthUi {
 export class OAuthRequiredError extends Error {}
 
 /** Whether a connect failure is an authentication problem: the SDK's own
- * UnauthorizedError, a transport error carrying HTTP 401 (which is what a 401
- * throws when no authProvider was attached, so a first-time login is detected),
- * or our own marker. */
+ * UnauthorizedError, a transport error carrying HTTP 401 or 403 (Claude: "either
+ * status code flags it" for OAuth), or our own marker. */
 export function isUnauthorized(error: unknown): boolean {
   if (error instanceof UnauthorizedError || error instanceof OAuthRequiredError) return true
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 401
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  return code === 401 || code === 403
 }
 
 // SSEClientTransport is deprecated in favour of Streamable HTTP, but both concrete
@@ -249,22 +314,23 @@ export type MakeTransport = (authProvider?: OAuthClientProvider) => HttpFamilyTr
  * demands one. Stored tokens ride the first attempt so the SDK refreshes
  * silently; a 401 without tokens asks the user, opens the browser, catches the
  * loopback redirect, and exchanges the code via the SDK's finishAuth.
- * Bearer-token servers never enter the OAuth path: an explicit token is the
- * user saying how auth works.
+ * A server with configured authentication (a bearer token, a static Authorization
+ * header, or one from a headersHelper) never enters the OAuth path: the credential
+ * to fix is the configured one, so an auth failure reports as a failed connection.
  */
-async function connectHttpFamily(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, bearerToken: string | undefined, authUi: AuthUi | undefined): Promise<Client> {
-  const newClient = () => new Client({ name: 'pi-code-mcp', version: '0.1.0' })
+async function connectHttpFamily(name: string, config: { url: string }, makeTransport: MakeTransport, label: string, hasConfiguredAuth: boolean, authUi: AuthUi | undefined, session?: SessionDirs): Promise<Client> {
+  const newClient = () => makeClient(session)
   // Stored tokens ride the first attempt so the SDK refreshes them; with none, no
   // provider is attached, so a 401 surfaces as a transport error carrying code 401
   // (isUnauthorized detects it) and only the interactive provider below ever runs
   // dynamic registration, keeping it bound to the real callback port.
-  const silent = bearerToken ? undefined : new FileOAuthProvider(name, () => {})
+  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {})
   try {
     const client = newClient()
     await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)
     return client
   } catch (error) {
-    if (bearerToken || !isUnauthorized(error)) throw error
+    if (hasConfiguredAuth || !isUnauthorized(error)) throw error
     if (!authUi) throw new OAuthRequiredError(`${name} requires a login; run pi interactively to authenticate`)
     return await serializeInteractiveOAuth(() => runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient))
   }
