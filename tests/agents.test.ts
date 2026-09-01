@@ -197,3 +197,21 @@ describe('agent discovery boundary', () => {
     expect(found.agents.map((a) => a.name)).toContain('mine')
   })
 })
+
+describe('monorepo agent discovery', () => {
+  it('finds root-level project agents from a subdirectory session, nearest winning a name clash', () => {
+    // Claude: "every .claude/agents/ between there and the repository root is
+    // scanned ... Claude Code uses the definition closest to the working directory."
+    const root = mkdtempSync(join(tmpdir(), 'agents-mono-'))
+    writeFileSync(join(root, 'package.json'), '{}')
+    mkdirSync(join(root, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'agents', 'deployer.md'), '---\nname: deployer\ndescription: root deployer\n---\nroot')
+    writeFileSync(join(root, '.claude', 'agents', 'shared.md'), '---\nname: shared\ndescription: root shared\n---\nroot')
+    const cwd = join(root, 'apps', 'web')
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'shared.md'), '---\nname: shared\ndescription: near shared\n---\nnear')
+    const agents = discoverAgents(cwd, 'project').agents
+    expect(agents.find((a) => a.name === 'deployer')?.description).toBe('root deployer')
+    expect(agents.find((a) => a.name === 'shared')?.description).toBe('near shared')
+  })
+})

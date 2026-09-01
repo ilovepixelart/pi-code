@@ -60,6 +60,24 @@ export function findNearestFile(cwd: string, relative: string): string | null {
   return findNearest(cwd, relative, false)
 }
 
+/** Every `relative` directory between cwd and the repository root, nearest first,
+ * matching Claude's "every .claude/<kind> between the working directory and the
+ * repository root" discovery where the entry closest to cwd wins a name clash. */
+export function ancestorDirs(cwd: string, relative: string): string[] {
+  const boundary = repoRoot(cwd) ?? cwd
+  const found: string[] = []
+  let currentDir = cwd
+  while (true) {
+    const candidate = path.join(currentDir, relative)
+    if (statOf(candidate)?.isDirectory()) found.push(candidate)
+    if (currentDir === boundary) break
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) break
+    currentDir = parentDir
+  }
+  return found
+}
+
 /** Every `relative` file between the repository root and cwd, ordered root first,
  * matching Claude's root-down ordering for hierarchy-loaded context. */
 export function ancestorFiles(cwd: string, relative: string): string[] {

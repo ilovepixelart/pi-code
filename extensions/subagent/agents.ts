@@ -13,7 +13,7 @@ import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works
 import { parseToolGrants } from '../internal/command-file.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import { installedPlugins } from '../internal/plugins.js'
-import { findNearestDir } from '../internal/project-root.js'
+import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -337,13 +337,16 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   const userDir = path.join(getAgentDir(), 'agents')
   const claudeUserDir = path.join(claudeConfigDir(os.homedir()), 'agents')
   const projectPiDir = findNearestDir(cwd, path.join('.pi', 'agents'))
-  const projectClaudeDir = findNearestDir(cwd, path.join('.claude', 'agents'))
+  // Claude scans every .claude/agents between cwd and the repository root, the
+  // definition closest to cwd winning a name clash; root-first load order makes
+  // the nearer directory's entry overwrite in the map below.
+  const projectClaudeDirs = ancestorDirs(cwd, path.join('.claude', 'agents')).reverse()
 
   // Plugins load after builtins and before the user's own dirs, so a user agent
   // wins a name clash with a plugin's, and ~/.pi/agent/agents wins over ~/.claude.
   const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...pluginAgentDirs(os.homedir()).flatMap((dir) => loadAgentsFromDir(dir, 'plugin')), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
   // project .claude/agents loads first so project .pi/agents wins on name conflicts
-  const projectAgents = scope === 'user' ? [] : [...(projectClaudeDir ? loadAgentsFromDir(projectClaudeDir, 'project') : []), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
+  const projectAgents = scope === 'user' ? [] : [...projectClaudeDirs.flatMap((dir) => loadAgentsFromDir(dir, 'project')), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
 
   const agentMap = buildAgentMap(userAgents, projectAgents, scope)
   return { agents: Array.from(agentMap.values()), projectAgentsDir: projectPiDir }

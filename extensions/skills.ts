@@ -29,7 +29,7 @@ import { parseCommandFile } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
-import { findNearestDir } from './internal/project-root.js'
+import { ancestorDirs } from './internal/project-root.js'
 
 function isDirectory(target: string): boolean {
   try {
@@ -53,7 +53,10 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
     const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'skills']
     candidates.push(...dirs.map((dir) => path.resolve(plugin.root, String(dir))))
   }
-  if (trusted) candidates.push(findNearestDir(cwd, path.join('.claude', 'skills')) ?? path.join(cwd, '.claude', 'skills'))
+  // Claude loads skills from every .claude/skills between cwd and the repository
+  // root; the list goes nearest-first so findClaudeSkill's first match is the
+  // closest definition (pi's loader receives the same order).
+  if (trusted) candidates.push(...ancestorDirs(cwd, path.join('.claude', 'skills')))
   const dirs: string[] = []
   for (const dir of candidates) {
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)

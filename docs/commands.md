@@ -4,7 +4,7 @@ Registers `.claude/commands/**/*.md` as slash commands with Claude's command con
 
 ## Naming and arguments
 
-- Subdirectory commands register as `/dir:name` (`frontend/build.md` is `/frontend:build`); current Claude docs name a command by file name alone, so the qualified form is a pi-code divergence.
+- Commands load from every `.claude/commands` between the working directory and the repository root, the nearest winning a name clash. Subdirectory commands register as `/dir:name` (`frontend/build.md` is `/frontend:build`); current Claude docs name a command by file name alone, so the qualified form is a pi-code divergence.
 - `$ARGUMENTS` (with the `ARGUMENTS:` append when unused), 0-based `$ARGUMENTS[N]`/`$N`, named `arguments:` frontmatter.
 - `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}` in bodies and `allowed-tools` rules.
 
