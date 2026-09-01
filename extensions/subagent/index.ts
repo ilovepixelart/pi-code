@@ -185,6 +185,21 @@ function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void
 async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
   const agent = options.agents.find((a) => a.name === options.agentName)
   if (!agent) return runSingleAgentInner(options)
+  // A refused launch (Claude's zero-tools error) never starts, so no
+  // SubagentStart/Stop pair fires for it.
+  const toolsError = unresolvedToolsError(agent)
+  if (toolsError) {
+    return {
+      agent: agent.name,
+      agentSource: agent.source,
+      task: options.task,
+      exitCode: 1,
+      messages: [],
+      stderr: toolsError,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+      step: options.step,
+    }
+  }
   const agentId = `fg-${randomUUID().slice(0, 8)}`
   options.onPhase?.('start', agent.name, agentId)
   let result: SingleResult | undefined
@@ -209,20 +224,6 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-      step,
-    }
-  }
-
-  const toolsError = unresolvedToolsError(agent)
-  if (toolsError) {
-    return {
-      agent: agentName,
-      agentSource: agent.source,
-      task,
-      exitCode: 1,
-      messages: [],
-      stderr: toolsError,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
       step,
     }
