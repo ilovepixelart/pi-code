@@ -247,12 +247,6 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
   }
 }
 
-/**
- * Claude's `type: "mcp_tool"` hook: call a tool on an already-connected MCP server
- * and treat its text output like command stdout. pi reaches the server through the
- * mcp-call seam the mcp extension registers. Like http, it never fails closed: a
- * missing server, a tool error, or the deadline is non-blocking.
- */
 /** A dotted path into the hook's JSON input, or undefined when any step is missing. */
 function lookupPath(payload: unknown, dotted: string): unknown {
   let current: unknown = payload
@@ -280,6 +274,12 @@ function substituteInputPaths(value: unknown, payload: unknown): unknown {
   return value
 }
 
+/**
+ * Claude's `type: "mcp_tool"` hook: call a tool on an already-connected MCP server
+ * and treat its text output like command stdout. pi reaches the server through the
+ * mcp-call seam the mcp extension registers. Like http, it never fails closed: a
+ * missing server, a tool error, or the deadline is non-blocking.
+ */
 export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
   if (!hook.server || !hook.tool) return { code: 1, stdout: '', stderr: 'mcp_tool hook needs server and tool', timedOut: false }
   // Claude: `input` is the arguments passed to the tool; without it the tool is
