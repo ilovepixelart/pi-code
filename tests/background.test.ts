@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -190,5 +190,17 @@ describe('background run lifecycle', () => {
     expect(secondArgs[secondArgs.indexOf('--append-system-prompt') + 1]).toBe(promptPath)
     children.at(-1)!.emit('close', 0)
     rmSync(dirname(promptPath), { recursive: true, force: true })
+  })
+})
+
+describe('resume after a cleaned-up working directory', () => {
+  it('refuses with cwd-gone instead of spawning into a missing directory', () => {
+    // An isolation worktree is removed once its run ends without changes; the
+    // resume must explain that, not die on a spawn ENOENT.
+    const dir = mkdtempSync(join(tmpdir(), 'bg-cwd-'))
+    const id = startBackgroundRun('scout', 'one', spec({ cwd: dir }), () => {})
+    children.at(-1)!.emit('close', 0)
+    rmSync(dir, { recursive: true, force: true })
+    expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('cwd-gone')
   })
 })
