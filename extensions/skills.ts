@@ -66,8 +66,28 @@ interface FoundSkill {
   baseDir: string
 }
 
-/** A Claude-contributed skill by the name pi's loader gives it (frontmatter
- * `name`, else the directory name). One directory level, the standard layout. */
+/** The skill a directory entry holds, named as pi's loader names it (frontmatter
+ * `name`, else the directory name); undefined without a readable SKILL.md. */
+function skillAt(root: string, dirName: string): { name: string; filePath: string } | undefined {
+  const filePath = path.join(root, dirName, 'SKILL.md')
+  let content: string
+  try {
+    content = fs.readFileSync(filePath, 'utf-8')
+  } catch {
+    return undefined
+  }
+  let name = dirName
+  try {
+    const declared = parseFrontmatter<Record<string, unknown>>(content).frontmatter.name
+    if (typeof declared === 'string' && declared.trim()) name = declared.trim()
+  } catch {
+    // Malformed frontmatter: pi's loader falls back to the directory name too.
+  }
+  return { name, filePath }
+}
+
+/** A Claude-contributed skill by the name pi's loader gives it. One directory
+ * level, the standard layout. */
 export function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
   for (const root of roots) {
     let entries: fs.Dirent[]
@@ -78,21 +98,8 @@ export function findClaudeSkill(name: string, roots: string[]): FoundSkill | und
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
-      const filePath = path.join(root, entry.name, 'SKILL.md')
-      let content: string
-      try {
-        content = fs.readFileSync(filePath, 'utf-8')
-      } catch {
-        continue
-      }
-      let skillName = entry.name
-      try {
-        const declared = parseFrontmatter<Record<string, unknown>>(content).frontmatter.name
-        if (typeof declared === 'string' && declared.trim()) skillName = declared.trim()
-      } catch {
-        // Malformed frontmatter: pi's loader falls back to the directory name too.
-      }
-      if (skillName === name) return { filePath, baseDir: path.dirname(filePath) }
+      const skill = skillAt(root, entry.name)
+      if (skill?.name === name) return { filePath: skill.filePath, baseDir: path.dirname(skill.filePath) }
     }
   }
   return undefined
