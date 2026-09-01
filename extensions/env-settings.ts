@@ -13,19 +13,21 @@
  * approval-gated on purpose: a checked-out repository's env can redirect providers
  * (ANTHROPIC_BASE_URL and friends), so an untrusted repo must not reach process.env.
  *
- * Precedence is per key, managed > user > project, matching Claude's merge: a scope
- * only supplies keys it names and never wipes another scope's keys. Values must be
- * strings; a number or boolean is coerced via String, anything else is skipped.
+ * Precedence is per key, managed > project (settings.local.json overlaying
+ * settings.json inside the project scope) > user, matching Claude's settings
+ * precedence: a scope only supplies keys it names and never wipes another scope's
+ * keys. Values must be strings; a number or boolean is coerced via String,
+ * anything else is skipped.
  *
- * A variable already present in the real environment that this module did not set is
- * left untouched for the user and project scopes: a shell `export` outranks them. The
- * managed scope is the exception: an org policy env must win over an ambient export, so
- * a managed key overwrites a preexisting shell value. The keys this module sets are
- * recorded so a later refresh can update them without clobbering unrelated env, and a
- * key an earlier apply set that the current merge no longer defines is unset (deleted
- * from process.env), so an approved project's env cannot leak into a later session or
- * project that does not define it. A managed overwrite of a shell var is owned like any
- * other set key; its original shell value cannot be restored, so on unset it is deleted.
+ * A settings value replaces a value inherited from the shell, as Claude documents
+ * ("Claude Code writes each env entry into the process environment, replacing the
+ * value inherited from the shell"), and an empty string is the documented way to
+ * override an export that cannot be unset. The original value of each key is
+ * recorded so a later apply that no longer defines the key restores the shell's
+ * value (or deletes a key the shell never had), so an approved project's env
+ * cannot leak into a later session or project that does not define it. The keys a
+ * repository must not control are dropped from the project scope before any of
+ * this (see sanitizeProjectEnv).
  *
  * Docs: https://code.claude.com/docs/en/settings.md
  */
@@ -57,35 +59,31 @@ export function envFromSettings(settings: unknown): Record<string, string> {
   return out
 }
 
-/** Merge the three env scopes with Claude's per-key precedence managed > user >
- * project: lower scopes are laid down first and higher ones overlay, so each key
- * takes its highest-precedence value and no scope wipes another's keys. */
+/** Merge the three env scopes with Claude's per-key settings precedence managed >
+ * project > user: lower scopes are laid down first and higher ones overlay, so each
+ * key takes its highest-precedence value and no scope wipes another's keys. */
 export function mergeEnvScopes(managed: Record<string, string>, user: Record<string, string>, project: Record<string, string>): Record<string, string> {
-  return { ...project, ...user, ...managed }
+  return { ...user, ...project, ...managed }
 }
 
-/** Assign the merged env into `env`, recording each key set into `owned`. A key already
- * present that this module did not set (a shell export) is left untouched for user and
- * project keys; a `managedKeys` entry overwrites it (an org policy outranks the shell).
- * A key this module set before is updated. A previously-owned key that the current
- * `merged` no longer defines is unset (deleted from `env` and `owned`), so an approved
- * project's env cannot leak into a later apply that does not define it. */
-export function applyEnvSettings(merged: Record<string, string>, env: NodeJS.ProcessEnv, owned: Set<string>, managedKeys: ReadonlySet<string> = new Set()): void {
-  // Unset any key an earlier apply set that the current merge dropped. Iterate a copy
-  // since `owned` is mutated. A shell export this module never owned is left in place.
-  for (const key of Array.from(owned)) {
-    if (!(key in merged)) {
-      delete env[key]
-      owned.delete(key)
-    }
+/** Assign the merged env into `env`. Every settings value applies, replacing a
+ * shell-inherited value, as Claude documents; an empty string is the documented
+ * override for an export that cannot be unset. `owned` records each key's original
+ * value at first ownership, so a later apply that drops the key restores the
+ * shell's value (or deletes a key the shell never had) rather than leaking a stale
+ * setting into the rest of the process. */
+export function applyEnvSettings(merged: Record<string, string>, env: NodeJS.ProcessEnv, owned: Map<string, string | undefined>): void {
+  // Restore any key an earlier apply set that the current merge dropped. Iterate a
+  // copy since `owned` is mutated.
+  for (const [key, original] of Array.from(owned.entries())) {
+    if (key in merged) continue
+    if (original === undefined) delete env[key]
+    else env[key] = original
+    owned.delete(key)
   }
   for (const [key, value] of Object.entries(merged)) {
-    // A shell export outranks user/project (skip), but a managed key outranks even the
-    // shell. Once owned, updates always apply. A managed overwrite is owned like any
-    // set key: its shell value is gone and cannot be restored, so on unset it is deleted.
-    if (key in env && !owned.has(key) && !managedKeys.has(key)) continue
+    if (!owned.has(key)) owned.set(key, env[key])
     env[key] = value
-    owned.add(key)
   }
 }
 
@@ -148,11 +146,10 @@ function projectEnv(cwd: string): Record<string, string> {
 }
 
 export default function envSettingsExtension(pi: ExtensionAPI) {
-  const owned = new Set<string>()
+  const owned = new Map<string, string | undefined>()
 
   const apply = (home: string, project: Record<string, string>): void => {
-    const managed = envFromSettings(readManagedSettings())
-    applyEnvSettings(mergeEnvScopes(managed, userEnv(home), project), process.env, owned, new Set(Object.keys(managed)))
+    applyEnvSettings(mergeEnvScopes(envFromSettings(readManagedSettings()), userEnv(home), project), process.env, owned)
   }
 
   // Factory time: managed + user only. Approval needs the session ctx, so the project
