@@ -108,3 +108,32 @@ describe('compileGlobs', () => {
     expect(matchesCompiledGlobs('anything', [])).toBe(false)
   })
 })
+
+const { pathMatchesGlobs } = await import('../extensions/claude-rules.ts')
+
+describe('bracket expressions', () => {
+  // Claude: "Glob syntax treats [ as the start of a bracket expression such as
+  // [abc]. A pattern with a [ that can't be read as a bracket expression ... is
+  // invalid: it matches nothing ... To match a literal [ ... escape it."
+  it('matches a character class against real files, not the literal bracket text', () => {
+    expect(pathMatchesGlobs('src/a.ts', ['src/*.[jt]s'])).toBe(true)
+    expect(pathMatchesGlobs('src/a.js', ['src/*.[jt]s'])).toBe(true)
+    expect(pathMatchesGlobs('src/a.cs', ['src/*.[jt]s'])).toBe(false)
+    expect(pathMatchesGlobs('src/a.[jt]s', ['src/*.[jt]s'])).toBe(false)
+  })
+
+  it('supports ranges and negation', () => {
+    expect(pathMatchesGlobs('v1.txt', ['v[0-9].txt'])).toBe(true)
+    expect(pathMatchesGlobs('vX.txt', ['v[0-9].txt'])).toBe(false)
+    expect(pathMatchesGlobs('vX.txt', ['v[!0-9].txt'])).toBe(true)
+  })
+
+  it('treats an unclosable bracket as an invalid pattern that matches nothing', () => {
+    expect(pathMatchesGlobs('photos [2024/x.png', ['photos [2024/**'])).toBe(false)
+    expect(pathMatchesGlobs('anything', ['photos [2024/**'])).toBe(false)
+  })
+
+  it('matches a literal bracket through the documented escape', () => {
+    expect(pathMatchesGlobs('photos [2024/x.png', ['photos \\[2024/**'])).toBe(true)
+  })
+})

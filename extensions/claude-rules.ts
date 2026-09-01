@@ -21,8 +21,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
+import { claudeMdExcludeFiles, isExcludedPath, readClaudeMdExcludes } from './context-imports.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { publishInstructionLoad } from './internal/instruction-events.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 import { type CompiledGlob, compileGlobs, matchesCompiledGlobs } from './internal/path-rules.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { findNearestDir } from './internal/project-root.js'
@@ -147,12 +149,36 @@ interface RuleSet {
 
 const EMPTY_RULES: RuleSet = { inline: [], scoped: [] }
 
+/** The canonical form of a path. A target that does not exist yet (a write
+ * creating a new file) canonicalises its nearest existing ancestor and keeps the
+ * remaining segments, so both sides of the attach match compare realpaths even
+ * for brand-new files in a symlinked checkout. */
+function realpathOr(target: string): string {
+  try {
+    return fs.realpathSync(target)
+  } catch {
+    const dir = path.dirname(target)
+    if (dir === target) return target
+    return path.join(realpathOr(dir), path.basename(target))
+  }
+}
+
 /** Unscoped rules are inlined; path-scoped ones keep their scope as pointers,
- * mirroring Claude Code, where scoped rules attach only to matching files. */
-function readRules(rulesDir: string): RuleSet {
+ * mirroring Claude Code, where scoped rules attach only to matching files. Files
+ * matching `claudeMdExcludes` are skipped entirely, as the docs' monorepo recipe
+ * (excluding another team's `.claude/rules/**`) relies on; the check runs on the
+ * realpath so a symlink cannot dodge an exclusion. */
+function readRules(rulesDir: string, isExcluded?: (realPath: string) => boolean): RuleSet {
   const inline: string[] = []
   const scoped: ScopedRule[] = []
   for (const file of findMarkdownFiles(rulesDir)) {
+    if (isExcluded) {
+      // Both spellings count: a glob written against the lexical path and one
+      // written against the resolved real path each exclude, which can only
+      // widen an exclusion, never dodge one.
+      const lexical = path.join(rulesDir, file)
+      if (isExcluded(lexical) || isExcluded(realpathOr(lexical))) continue
+    }
     let parsed: Frontmatter
     try {
       parsed = parseFrontmatter(fs.readFileSync(path.join(rulesDir, file), 'utf-8'))
@@ -223,15 +249,20 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   let attachTargets: AttachTarget[] = []
 
   pi.on('session_start', async (_event, ctx) => {
-    globalRules = readRules(globalRulesDir)
     // Project rules are repository text landing in the system prompt, so they load
     // only once the project is approved. isProjectTrusted alone is true for a repo
     // pi never asked about; see project-approval.
     const approved = await isProjectApproved(ctx)
+    // Claude's claudeMdExcludes covers rules files too (the docs' monorepo recipe
+    // excludes another team's .claude/rules/**), so the same merged glob list the
+    // context loader honors gates rule files here.
+    const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, os.homedir(), approved), readManagedSettings())
+    const isExcluded = (realPath: string): boolean => isExcludedPath(realPath, excludeGlobs, os.homedir())
+    globalRules = readRules(globalRulesDir, isExcluded)
     // Nearest at-or-above cwd, so a subdirectory session still reads the rules the
     // approval walk gated on.
     const projectRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
-    projectRules = projectRulesDir ? readRules(projectRulesDir) : EMPTY_RULES
+    projectRules = projectRulesDir ? readRules(projectRulesDir, isExcluded) : EMPTY_RULES
 
     // Global globs are relative to cwd; project globs to the project root (the dir
     // holding .claude), so `db/**` in a repo rule matches repo-relative paths even
@@ -239,8 +270,8 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     // than on every tool result; rebuilt per session so a re-run re-attaches.
     const projectRoot = projectRulesDir ? path.dirname(path.dirname(projectRulesDir)) : ctx.cwd
     attachTargets = [
-      ...globalRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: ctx.cwd, file: path.join(globalRulesDir, rule.rel), memoryType: 'User' as const })),
-      ...projectRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: projectRoot, file: path.join(projectRulesDir ?? path.join(ctx.cwd, '.claude', 'rules'), rule.rel), memoryType: 'Project' as const })),
+      ...globalRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: realpathOr(ctx.cwd), file: path.join(globalRulesDir, rule.rel), memoryType: 'User' as const })),
+      ...projectRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: realpathOr(projectRoot), file: path.join(projectRulesDir ?? path.join(ctx.cwd, '.claude', 'rules'), rule.rel), memoryType: 'Project' as const })),
     ]
     pendingScopedRules = attachTargets.length
     // Relative to cwd, which the read tool resolves: an ancestor dir yields a
@@ -274,7 +305,9 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     if (event.toolName !== 'read' && event.toolName !== 'edit' && event.toolName !== 'write') return
     const rel = (event.input as { path?: unknown } | undefined)?.path
     if (typeof rel !== 'string' || rel.length === 0) return
-    const abs = path.resolve(ctx.cwd, rel)
+    // Realpath both sides (roots canonicalise at session_start): a tool reporting
+    // the resolved real path in a symlinked checkout must still match.
+    const abs = realpathOr(path.resolve(ctx.cwd, rel))
 
     const bodies: string[] = []
     const remaining: AttachTarget[] = []
