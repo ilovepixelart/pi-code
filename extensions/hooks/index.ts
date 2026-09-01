@@ -20,7 +20,12 @@
  * - Stop            -> pi `agent_end` (a block feeds its reason back as a new turn,
  *                      with stop_hook_active as the loop guard)
  * - PreCompact      -> pi `session_before_compact` (fire-and-forget)
- * - PostCompact     -> pi `session_compact` (fire-and-forget)
+ * - PostCompact     -> pi `session_compact` (fire-and-forget); the same event also
+ *                      fires SessionStart with source "compact", as Claude does
+ *                      when a session continues after compaction
+ * - PostModelSwitch -> pi `model_select` (after the change, matched against the new
+ *                      model id; stdout context rides the next agent start;
+ *                      PreModelSwitch stays unbridged, pi has no veto seam)
  * - PostToolUseFailure -> pi `tool_result` error branch (stderr/additionalContext
  *                      appended to the failed result; it cannot block, the tool failed)
  * - SessionEnd      -> pi `session_shutdown` (fire-and-forget)
@@ -160,6 +165,15 @@ function claudeSpelling(map: Record<string, string>, raw: string): { names: stri
   return { names: value === raw ? [raw] : [raw, value], value }
 }
 
+/** Claude: idle_prompt fires when "Claude finished responding about 60 seconds ago
+ * and you haven't typed since". */
+const IDLE_PROMPT_DELAY_MS = 60_000
+
+/** pi's model_select sources in Claude's PostModelSwitch vocabulary: an explicit
+ * set is a command-style request, cycling is the picker, and restore is the model
+ * Claude Code restores on resume. */
+const MODEL_SELECT_SOURCE: Record<string, string> = { set: 'command', cycle: 'picker', restore: 'resume' }
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -170,6 +184,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
   /** Consecutive Stop-hook blocks with no user progress between them. Reset on user input
    * and on a non-blocking Stop; at the cap the continuation is suppressed and the turn ends. */
   let stopHookBlockCount = 0
+  /** The pending idle_prompt notification: Claude fires it when the turn ended about
+   * 60 seconds ago and the user hasn't typed since, so it arms on agent_end and is
+   * canceled by input or the next turn. */
+  let idlePromptTimer: ReturnType<typeof setTimeout> | undefined
+  const cancelIdlePrompt = (): void => {
+    clearTimeout(idlePromptTimer)
+    idlePromptTimer = undefined
+  }
   let sessionCtx: ExtensionContext | undefined
   /** Claude's disableAllHooks escape hatch was set somewhere in the honored chain. */
   let hooksDisabled = false
@@ -353,6 +375,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // over the bus from context-imports, which owns claudeMdExcludes; announcing
   // the raw contextFiles here would fire for a file the exclusion removed.
   pi.on('before_agent_start', async () => {
+    // A new turn is beginning, so the session is no longer idle.
+    cancelIdlePrompt()
     if (pendingSessionContext.length === 0) return
     const content = pendingSessionContext.join('\n')
     pendingSessionContext = []
@@ -452,6 +476,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Only genuine user input; extension-injected messages (plan-mode, subagent) are not
     // prompts the user submitted.
     if (event.source === 'extension') return { action: 'continue' }
+    // The user typed, so the pending idle_prompt no longer applies.
+    cancelIdlePrompt()
     // Genuine user input is progress, so it breaks a Stop-hook continuation streak: the
     // block cap counts only consecutive blocks with nothing from the user in between.
     stopHookBlockCount = 0
@@ -479,11 +505,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // automatic retry or compaction; that is the better tradeoff.
   pi.on('agent_end', async (event, ctx) => {
     // Claude's Notification event, for the one type pi can honestly source: the
-    // agent finished and is waiting for input (idle_prompt). Observational only;
-    // exit codes and JSON output are ignored, as Claude documents for this event.
+    // agent finished and is waiting for input. Per Claude, idle_prompt fires when
+    // the turn ended about 60 seconds ago and the user hasn't typed since, so it
+    // arms here and input or the next turn cancels it. Observational only; exit
+    // codes and JSON output are ignored, as Claude documents for this event.
+    cancelIdlePrompt()
     const notifyCommands = matchingCommands(config.Notification, ['idle_prompt'])
     if (notifyCommands.length > 0) {
-      void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, boundRunner(ctx)).catch(() => {})
+      const runner = boundRunner(ctx)
+      idlePromptTimer = setTimeout(() => {
+        void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, runner).catch(() => {})
+      }, IDLE_PROMPT_DELAY_MS)
+      idlePromptTimer.unref?.()
     }
 
     // Stop has no matcher support (a stray matcher is ignored, as Claude documents)
@@ -557,6 +590,33 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
     const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), { hook_event_name: 'PostCompact', trigger: trigger.value }, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude also fires SessionStart with source "compact" when the session
+    // continues after compaction; its stdout context rides the next agent start,
+    // the same as any other SessionStart context.
+    const sessionStart = matchingCommands(config.SessionStart, 'compact')
+    if (sessionStart.length > 0) {
+      const startResults = await runNotifyHooks(sessionStart, { hook_event_name: 'SessionStart', source: 'compact' }, boundRunner(ctx))
+      surfaceSystemMessages(startResults, (message) => ctx.ui.notify(message, 'warning'))
+      pendingSessionContext.push(...startResults.map((result) => promptContext(result.stdout)).filter(Boolean))
+    }
+  })
+
+  pi.on('model_select', async (event, ctx) => {
+    // Claude's PostModelSwitch: runs after the session's model changes, matched
+    // against the model switched to; it can't block. PreModelSwitch stays
+    // unbridged: pi's model_select has no veto seam, and a "Pre" hook whose block
+    // decision is silently ignored would be worse than an absent event.
+    const { model, previousModel, source } = event as { model: { id: string }; previousModel?: { id: string }; source: string }
+    if (!previousModel || previousModel.id === model.id) return
+    const commands = matchingCommands(config.PostModelSwitch, model.id)
+    if (commands.length === 0) return
+    // requested_model is null: pi does not carry the alias the request named.
+    const payload = { hook_event_name: 'PostModelSwitch', from_model: previousModel.id, to_model: model.id, requested_model: null, source: MODEL_SELECT_SOURCE[source] ?? 'command' }
+    const results = await runNotifyHooks(commands, payload, boundRunner(ctx))
+    surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude delivers the hook's stdout (or additionalContext) to Claude with the
+    // next request after the switch; pi's seam for that is the next agent start.
+    pendingSessionContext.push(...results.map((result) => promptContext(result.stdout)).filter(Boolean))
   })
 
   pi.on('session_shutdown', async (event, ctx) => {

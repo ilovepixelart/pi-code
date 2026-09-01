@@ -115,9 +115,12 @@ function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: H
     if (!applies(entry)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
       const hook = withCommand(raw)
-      // Claude runs a handler defined in more than one settings file once.
-      if (seen.has(hook.command)) continue
-      seen.add(hook.command)
+      // Claude runs a handler defined in more than one settings file once; a
+      // plugin's or skill's copy of the same handler stays separate, and http
+      // handlers with the same URL but different headers are distinct.
+      const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${hook.headers ? JSON.stringify(hook.headers) : ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
       result.push(hook)
     }
   }

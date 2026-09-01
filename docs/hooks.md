@@ -11,7 +11,8 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 - **UserPromptSubmit**: blocks the prompt or injects context ahead of it.
 - **Stop**: a block (or `additionalContext`) feeds back as a new turn, with `stop_hook_active` as the loop guard and a consecutive-block cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; `0` disables the cap). Does not run when the turn ended on a user interrupt, as Claude documents.
 - **SubagentStart / SubagentStop**: notify-only (a child has already exited by SubagentStop).
-- **PreCompact / PostCompact / SessionEnd / Notification** (`idle_prompt`, the one type pi can source): notify-only.
+- **PreCompact / PostCompact / SessionEnd / Notification** (`idle_prompt`, the one type pi can source): notify-only. `idle_prompt` fires when the turn ended about 60 seconds ago and the user hasn't typed since, per Claude's timing; input or the next turn cancels it. After compaction, **SessionStart** also fires with source `compact`.
+- **PostModelSwitch**: fires after the session's model changes, matched against the new model id; stdout/`additionalContext` reaches the model on the next turn. `requested_model` is `null` (pi does not carry the requested alias) and the cost-estimate fields are absent rather than fabricated. PreModelSwitch stays unbridged: pi's `model_select` event has no veto seam, and a blocking hook whose decision is silently ignored would be worse than an absent event. MessageDisplay is likewise unbridged (pi has no display-replacement seam).
 - **InstructionsLoaded**: observational; fires per loaded context file at session start, plus `path_glob_match` on a scoped-rule attach and `include` per resolved `@import`, deduped per session. `nested_traversal`/`compact` reasons never fire (pi does not lazily load nested CLAUDE.md or reload after compaction).
 
 ## Hook types
@@ -19,7 +20,7 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 - `type: "command"` (default): runs via `sh -c` with the event JSON on stdin, or exec form (`command` as an argv array, no shell); executes with `CLAUDECODE=1` and `CLAUDE_PROJECT_DIR` set.
 - `type: "http"`: POSTs the payload; a 2xx JSON body renders the decision, everything else is non-blocking per Claude's contract. Targets are gated by `allowedHttpHookUrls` (union of managed and settings scopes; unset allows all, `[]` blocks every http hook).
 - `type: "prompt"`: evaluates in-process against the session model.
-- `type: "mcp_tool"`: calls a connected server's tool.
+- `type: "mcp_tool"`: calls a connected server's tool. String values in `input` support `${path}` substitution from the hook's JSON input (`${tool_input.file_path}`); without `input` the tool is called with no arguments.
 - `type: "agent"` (experimental): spawns a read-only Read/Grep/Glob subagent that returns the JSON decision.
 - For all non-command types: a missing model/server/runner is non-blocking; only a PreToolUse timeout fails closed.
 
@@ -28,6 +29,7 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 - Payloads use Claude's vocabulary for pi's built-ins: `Bash`/`Edit`/`Write`/`Read`/`Grep`/`Glob` names, the documented input shapes with absolute `file_path`, and the documented Bash/Write response shapes; `updatedInput` is translated back to pi's shape (an incomplete rewrite keeps the original input).
 - Every payload carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`; tool events add `tool_use_id`.
 - Claude matcher semantics, including `mcp__server__tool` names; Stop and UserPromptSubmit ignore a stray matcher.
+- Identical handlers collapse across settings files only; a plugin's copy of the same handler stays separate, and http handlers differing only in headers are distinct.
 - The `if` permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`) runs on tool events only; a hook carrying it never runs elsewhere.
 - `permissionDecision: "ask"` prompts via a confirm dialog (blocks when headless); `"defer"` blocks the call, since pi cannot resume a deferred one.
 - Exit-2 blocking messages prefer the JSON reason over stderr.

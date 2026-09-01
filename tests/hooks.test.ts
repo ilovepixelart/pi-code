@@ -162,14 +162,40 @@ describe('runMcpToolHook', () => {
     expect(seen).toEqual({ server: 'gh', tool: 'lint', input: { strict: true } })
   })
 
-  it('passes the event payload as input when the hook declares none', async () => {
+  it('calls with no arguments when the hook declares no input, per the documented field', async () => {
+    // Claude's `input` field is optional: without it the tool is called with no
+    // arguments, not handed the whole event payload.
     let seenInput: unknown
     setMcpToolCaller(async (_s, _t, input) => {
       seenInput = input
       return { text: '', isError: false }
     })
     await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'lint' }, { hook_event_name: 'PreToolUse', tool_name: 'bash' }, 5000)
-    expect(seenInput).toMatchObject({ tool_name: 'bash' })
+    expect(seenInput).toEqual({})
+  })
+
+  it('substitutes ${path} references from the hook JSON input into string values', async () => {
+    // Claude: "String values support ${path} substitution from the hook's JSON
+    // input, such as ${tool_input.file_path}".
+    let seenInput: unknown
+    setMcpToolCaller(async (_s, _t, input) => {
+      seenInput = input
+      return { text: '', isError: false }
+    })
+    const payload = { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: '/src/a.ts' } }
+    const input = { file_path: '${tool_input.file_path}', label: 'checked ${tool_name}', nested: { p: '${tool_input.file_path}' } }
+    await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'scan', input }, payload, 5000)
+    expect(seenInput).toEqual({ file_path: '/src/a.ts', label: 'checked Edit', nested: { p: '/src/a.ts' } })
+  })
+
+  it('leaves a ${path} that resolves to nothing as literal text', async () => {
+    let seenInput: unknown
+    setMcpToolCaller(async (_s, _t, input) => {
+      seenInput = input
+      return { text: '', isError: false }
+    })
+    await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'gh', tool: 'scan', input: { x: '${no.such.path}' } }, { hook_event_name: 'PreToolUse' }, 5000)
+    expect(seenInput).toEqual({ x: '${no.such.path}' })
   })
 
   it('clears its deadline timer once the call settles instead of pinning the event loop', async () => {
