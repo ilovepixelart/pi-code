@@ -34,6 +34,7 @@ import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, resolveModelAlias, withPreloadedSkills } from './agents.js'
 import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
+import { type AgentWorktree, cleanupAgentWorktree, createAgentWorktree } from './worktree.js'
 
 // Re-exported so the render formatters stay importable from the subagent entry point,
 // where the tests and the tool itself have always reached for them.
@@ -158,6 +159,20 @@ interface RunAgentOptions {
 /** Publishes a child run's start/stop for the hooks extension's SubagentStart/Stop. */
 type SubagentPhaseSink = (phase: 'start' | 'stop', agentType: string, agentId: string) => void
 
+/** Tell the parent where a kept worktree lives: appended to the final assistant
+ * message so it rides the run's normal output; stderr when there is none. */
+function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void {
+  const note = `[isolation: worktree kept at ${worktree.dir} (branch ${worktree.branch}); the agent's changes live there]`
+  for (let i = result.messages.length - 1; i >= 0; i--) {
+    const msg = result.messages[i]
+    if (msg.role === 'assistant') {
+      msg.content.push({ type: 'text', text: note })
+      return
+    }
+  }
+  result.stderr = result.stderr ? `${result.stderr}\n${note}` : note
+}
+
 async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
   const agent = options.agents.find((a) => a.name === options.agentName)
   if (!agent) return runSingleAgentInner(options)
@@ -189,6 +204,26 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   }
 
   const runCwd = cwd ?? defaultCwd
+  // Claude's isolation: worktree gives the child an isolated copy of the repository.
+  // A boundary that cannot be created fails the run: running against the real
+  // checkout would silently drop the isolation the agent declared.
+  let worktree: AgentWorktree | undefined
+  if (agent.isolation === 'worktree') {
+    const created = await createAgentWorktree(runCwd, agent.name)
+    if ('error' in created) {
+      return {
+        agent: agentName,
+        agentSource: agent.source,
+        task,
+        exitCode: 1,
+        messages: [],
+        stderr: `isolation: worktree could not be created: ${created.error}`,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+        step,
+      }
+    }
+    worktree = created
+  }
   // Project/local memory is anchored at the SESSION project (defaultCwd), not the
   // model-supplied runCwd: projectApproved gates the session's repo, so anchoring the
   // store on a different (possibly unapproved) cwd would inject that repo's memory as
@@ -238,7 +273,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     const exitCode = await new Promise<number>((resolve) => {
       const invocation = getPiInvocation(args)
       const proc = spawn(invocation.command, invocation.args, {
-        cwd: runCwd,
+        cwd: worktree?.dir ?? runCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         // Its own group, so an abort reaches grandchildren too: killing only the
@@ -337,6 +372,11 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     if (wasAborted) throw new Error('Subagent was aborted')
     return currentResult
   } finally {
+    // Cleanup runs on abort too: it only removes a pristine worktree, so an
+    // interrupted agent's changes always survive.
+    if (worktree && (await cleanupAgentWorktree(runCwd, worktree)) === 'kept') {
+      appendWorktreeNote(currentResult, worktree)
+    }
     if (tmpPromptPath)
       try {
         fs.unlinkSync(tmpPromptPath)
@@ -430,6 +470,7 @@ export function resumeResultText(id: string, task: string | undefined, onComplet
   }
   if (outcome === 'still-running') return `Background run ${id} is still running; wait for it or cancel it first.`
   if (outcome === 'at-capacity') return `Background run cap reached (${MAX_BACKGROUND_RUNS} concurrent); wait for a run to finish before resuming ${id}.`
+  if (outcome === 'cwd-gone') return `Background run ${id} ran in a working directory that no longer exists (an isolation worktree is cleaned up after an unchanged run); start a new run instead.`
   return `Unknown background run: ${id}.\n\n${backgroundStatusText()}`
 }
 
@@ -708,6 +749,18 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
     return backgroundCapResult(makeDetails)
   }
   const runCwd = params.cwd ?? defaultCwd
+  // The same isolation boundary as the foreground path: no worktree, no run.
+  let worktree: AgentWorktree | undefined
+  if (agent.isolation === 'worktree') {
+    const created = await createAgentWorktree(runCwd, agent.name)
+    if ('error' in created) {
+      return {
+        content: [{ type: 'text', text: `isolation: worktree could not be created for ${agent.name}: ${created.error}` }],
+        details: makeDetails('single')([]),
+      }
+    }
+    worktree = created
+  }
   // Anchor project/local memory at the session project (defaultCwd), which is the one
   // projectApproved gated; see the foreground path for why runCwd must not be used.
   const memorySection = agentMemoryPromptSection(agent, defaultCwd, projectApproved)
@@ -720,13 +773,32 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
   }
   args.push(`Task: ${task}`)
   const invocation = getPiInvocation(args)
-  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: runCwd, promptBody: tmpPrompt ? promptBody : undefined, maxTurns: agent.maxTurns }, (run) => {
+  const id = startBackgroundRun(agent.name, task, { command: invocation.command, args: invocation.args, cwd: worktree?.dir ?? runCwd, promptBody: tmpPrompt ? promptBody : undefined, maxTurns: agent.maxTurns }, (run) => {
     removeTmpPrompt(tmpPrompt)
-    // Both calls throw once the session that started the run is disposed; driveRun
-    // catches for the whole callback, so neither can escape into the child's close
-    // listener and become an uncaughtException.
-    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
-    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    const finish = (): void => {
+      // Both calls throw once the session that started the run is disposed. driveRun's
+      // catch covers the synchronous path, but the worktree branch reaches here from an
+      // async continuation outside it, so the guard must live in finish itself.
+      try {
+        pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
+        pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+      } catch {
+        // Session disposed after the run outlived it; nothing to notify.
+      }
+    }
+    if (!worktree) {
+      finish()
+      return
+    }
+    // Cleanup only removes a pristine worktree; a kept one is reported in the
+    // completion text so the parent knows where the changes live.
+    const keptWorktree = worktree
+    void cleanupAgentWorktree(runCwd, keptWorktree)
+      .then((outcome) => {
+        if (outcome === 'kept') run.output = `${run.output ?? ''}\n[isolation: worktree kept at ${keptWorktree.dir} (branch ${keptWorktree.branch}); the agent's changes live there]`.trim()
+      })
+      .catch(() => {})
+      .finally(finish)
   })
   if (id === null) {
     // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.

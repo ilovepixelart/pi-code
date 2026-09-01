@@ -166,12 +166,16 @@ export function backgroundRun(id: string): BackgroundRun | undefined {
 /** Re-spawn a finished run's session with a new task. The child is started with the
  * same --session-id, so it continues with everything it already saw rather than
  * re-deriving context the parent would have to repeat. */
-export function resumeBackgroundRun(id: string, task: string, onComplete: (run: BackgroundRun) => void): 'resumed' | 'still-running' | 'at-capacity' | 'unknown' {
+export function resumeBackgroundRun(id: string, task: string, onComplete: (run: BackgroundRun) => void): 'resumed' | 'still-running' | 'at-capacity' | 'cwd-gone' | 'unknown' {
   const run = runs.get(id)
   if (!run) return 'unknown'
   if (run.state === 'running' || run.live) return 'still-running'
   // A resume spawns a child like a fresh start does, so it counts against the cap.
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) return 'at-capacity'
+  // A worktree-isolated run's directory is removed once the run ends without
+  // changes; a resume cannot re-enter it, and spawning in a missing cwd would
+  // only produce an opaque ENOENT.
+  if (!fs.existsSync(run.spawn.cwd)) return 'cwd-gone'
   // Persisted so the rebuild happens once: rebuilding per resume leaked one temp
   // prompt dir every follow-up.
   const rebuilt = withRebuiltPrompt(run.spawn)

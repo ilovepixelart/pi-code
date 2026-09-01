@@ -179,6 +179,13 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
   }
   const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
   if (disallowedTools === null) return null
+  const isolation = parseIsolationField(frontmatter.isolation)
+  if (isolation === null) {
+    // isolation is a declared safety boundary: an unrecognized value must reject
+    // the definition rather than run the agent against the real checkout.
+    console.warn(`pi-code-subagent: ignoring agent ${filePath}: isolation value ${JSON.stringify(frontmatter.isolation)} is not supported (only "worktree" is)`)
+    return null
+  }
   return {
     name,
     description,
@@ -190,10 +197,20 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     skills: parseSkillsField(frontmatter.skills),
     memory: parseMemoryField(frontmatter.memory),
     maxTurns: parseMaxTurns(frontmatter.maxTurns),
+    isolation,
     systemPrompt: body,
     source,
     filePath,
   }
+}
+
+/** Claude's `isolation:` field: `worktree` (case-insensitive) runs the child in a
+ * temporary git worktree. Absent is fine (undefined); any other value is null so
+ * the caller rejects the definition instead of silently dropping the boundary. */
+function parseIsolationField(raw: unknown): 'worktree' | undefined | null {
+  if (raw === undefined) return undefined
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'worktree') return 'worktree'
+  return null
 }
 
 /** Claude's `maxTurns`: a positive integer cap on the subagent's agentic turns.
@@ -219,6 +236,8 @@ export interface AgentConfig {
   memory?: AgentMemoryScope
   /** Cap on the child's agentic turns, enforced by killing at the turn boundary. */
   maxTurns?: number
+  /** Claude's `isolation: worktree`: run the child in a temporary git worktree. */
+  isolation?: 'worktree'
   systemPrompt: string
   source: AgentSource
   filePath: string
