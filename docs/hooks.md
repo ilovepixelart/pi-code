@@ -29,7 +29,9 @@ Hook locations: settings files, managed policy settings, plugins, and skill fron
 ## Payloads and decisions
 
 - Payloads use Claude's vocabulary for pi's built-ins: `Bash`/`Edit`/`Write`/`Read`/`Grep`/`Glob` names, the documented input shapes with absolute `file_path`, and the documented Bash/Write response shapes; `updatedInput` is translated back to pi's shape (an incomplete rewrite keeps the original input).
-- Every payload carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`; tool events add `tool_use_id`.
+- Every payload carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`; tool events add `tool_use_id` and PostToolUse/PostToolUseFailure add `duration_ms` (excluding PreToolUse hook and confirm time). PreCompact carries `custom_instructions`, PostCompact `compact_summary`.
+- Stdout follows Claude's shape rule: only output that starts with `{` and ends with `}` is read as JSON; arrays, quoted strings, and numbers are plain text, multi-line independent JSON objects with no output field are plain text, and malformed `{..}`-shaped output surfaces a `hook error` notice instead of becoming context.
+- UserPromptSubmit honors `suppressOriginalPrompt` when context is present (the context replaces the prompt).
 - Claude matcher semantics, including `mcp__server__tool` names; Stop and UserPromptSubmit ignore a stray matcher.
 - Identical handlers collapse across settings files only; a plugin's copy of the same handler stays separate, and http handlers differing only in headers are distinct.
 - The `if` permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`) runs on tool events only; a hook carrying it never runs elsewhere.
@@ -40,6 +42,13 @@ Hook locations: settings files, managed policy settings, plugins, and skill fron
 ## Background hooks
 
 `async`/`asyncRewake` command hooks run in the background on every event: never blocking, no decision, no timeout enforced on `async` while `asyncRewake` keeps its own. An asyncRewake exit 2 wakes the model with the hook's stderr as a new turn; other completions deliver `systemMessage`/`additionalContext` to the model on the next turn; hooks still running at session end are killed.
+
+## Unbridged events and fields
+
+pi has no seam for these; a hook relying on them silently not working would be worse than a documented absence:
+
+- Events: PreModelSwitch (no veto seam on `model_select`), MessageDisplay (no display-replacement seam), UserPromptExpansion, PermissionRequest/PermissionDenied (pi has no permission system), Setup, FileChanged, ConfigChange, CwdChanged, DirectoryAdded, StopFailure, Elicitation events, and Notification types other than `idle_prompt`.
+- Fields: `prompt_id` and Stop's `background_tasks`/`session_crons` (no pi task registry), SessionStart's `initialUserMessage`/`watchPaths`/`sessionTitle` and UserPromptSubmit's `sessionTitle` (no session-rename or file-watch seam), and PostModelSwitch's cost-estimate fields (absent rather than fabricated).
 
 ## Divergences from Claude Code
 

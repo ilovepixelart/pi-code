@@ -200,8 +200,8 @@ const setupExtension = () => {
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
     modelSelect: (to: string, from?: string, source = 'set') => handler('model_select')({ model: { id: to, name: to }, previousModel: from ? { id: from, name: from } : undefined, source }, defaultCtx),
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
-    beforeCompact: (reason: string) => handler('session_before_compact')({ reason }, defaultCtx),
-    compacted: (reason: string) => handler('session_compact')({ reason }, defaultCtx),
+    beforeCompact: (reason: string, customInstructions?: string) => handler('session_before_compact')({ reason, customInstructions }, defaultCtx),
+    compacted: (reason: string, summary?: string) => handler('session_compact')({ reason, ...(summary === undefined ? {} : { compactionEntry: { summary } }) }, defaultCtx),
     shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
     beforeAgentStart: (event: Record<string, unknown> = { systemPrompt: '' }) => handler('before_agent_start')(event),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
@@ -1285,7 +1285,7 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ PreCompact: [{ matcher: 'manual', hooks: [{ command: 'pc' }] }] })
     await ext.beforeCompact('manual')
     expect(commandsRun()).toEqual(['pc'])
-    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'manual' })
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'manual', custom_instructions: '' })
   })
 
   it('does not run PreCompact hooks whose matcher misses the trigger', async () => {
@@ -1298,7 +1298,7 @@ describe('hooks extension notify-style events', () => {
     const ext = await withHooks({ PreCompact: [{ matcher: 'auto', hooks: [{ command: 'pc' }] }] })
     await ext.beforeCompact('threshold')
     expect(commandsRun()).toEqual(['pc'])
-    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'auto' })
+    expect(JSON.parse(recordFor('pc').stdin)).toEqual({ ...COMMON, hook_event_name: 'PreCompact', trigger: 'auto', custom_instructions: '' })
   })
 
   it('runs PostCompact hooks after compaction with the Claude trigger', async () => {
@@ -2310,5 +2310,89 @@ describe('hooks from skill frontmatter', () => {
     await ext.toolCall('bash', {})
 
     expect(commandsRun()).toEqual(['settings-once', 'settings-once'])
+  })
+})
+
+describe('hooks compact and timing fields', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('passes custom_instructions from a manual /compact to PreCompact hooks', async () => {
+    const ext = await withHooks({ PreCompact: [{ hooks: [{ command: 'pre-compact' }] }] })
+    await ext.beforeCompact('manual', 'keep the failing test list')
+
+    expect(JSON.parse(recordFor('pre-compact').stdin)).toMatchObject({ hook_event_name: 'PreCompact', trigger: 'manual', custom_instructions: 'keep the failing test list' })
+  })
+
+  it('sends empty custom_instructions on an automatic compaction', async () => {
+    const ext = await withHooks({ PreCompact: [{ hooks: [{ command: 'pre-compact' }] }] })
+    await ext.beforeCompact('threshold')
+
+    expect(JSON.parse(recordFor('pre-compact').stdin).custom_instructions).toBe('')
+  })
+
+  it('passes the compaction summary to PostCompact hooks as compact_summary', async () => {
+    const ext = await withHooks({ PostCompact: [{ hooks: [{ command: 'post-compact' }] }] })
+    await ext.compacted('auto', 'what happened so far')
+
+    expect(JSON.parse(recordFor('post-compact').stdin)).toMatchObject({ hook_event_name: 'PostCompact', compact_summary: 'what happened so far' })
+  })
+
+  it('reports the tool execution time as duration_ms on PostToolUse', async () => {
+    vi.useFakeTimers()
+    const ext = await withHooks({ PostToolUse: [{ matcher: 'Bash', hooks: [{ command: 'post-timing' }] }] })
+    await ext.toolCall('bash', { command: 'sleep 2' })
+    await vi.advanceTimersByTimeAsync(1234)
+    await ext.toolResult('bash', { input: { command: 'sleep 2' } })
+    await vi.runAllTimersAsync()
+
+    expect(JSON.parse(recordFor('post-timing').stdin).duration_ms).toBe(1234)
+  })
+})
+
+describe('hooks suppressOriginalPrompt', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('replaces the prompt with the hook context when suppressOriginalPrompt is set', async () => {
+    // Claude's UserPromptSubmit suppressOriginalPrompt: the original prompt is
+    // hidden; the hook's context is what reaches the model.
+    script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX ONLY","suppressOriginalPrompt":true}}'], code: 0 })
+    const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'suppress' }] }] })
+
+    const result = (await ext.input('the original secret prompt')) as { action: string; text?: string }
+    expect(result.action).toBe('transform')
+    expect(result.text).toBe('CTX ONLY')
+  })
+
+  it('keeps the prompt when no hook suppresses it', async () => {
+    script('ctx', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX"}}'], code: 0 })
+    const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'ctx' }] }] })
+
+    const result = (await ext.input('keep me')) as { action: string; text?: string }
+    expect(result.text).toBe('CTX\n\nkeep me')
+  })
+})
+
+describe('hook error notices', () => {
+  it('surfaces a hook error notice for malformed JSON output instead of using it as context', async () => {
+    // Claude: when {..}-shaped stdout cannot be parsed, the transcript shows a
+    // hook error notice and the text is not added as context.
+    script('bad-json', { stdout: ['{"decision": nope}'], code: 0 })
+    writeSettings(hoisted.home, 'settings.json', { UserPromptSubmit: [{ hooks: [{ command: 'bad-json' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    const result = (await ext.input('hello')) as { action: string; text?: string }
+    expect(result.action).toBe('continue')
+    expect(ext.notes.some((note) => note.msg.includes('hook error'))).toBe(true)
   })
 })

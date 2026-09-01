@@ -187,6 +187,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
   /** Consecutive Stop-hook blocks with no user progress between them. Reset on user input
    * and on a non-blocking Stop; at the cap the continuation is suppressed and the turn ends. */
   let stopHookBlockCount = 0
+  /** Tool start times per call id, for Claude's duration_ms on PostToolUse: the
+   * clock starts after PreToolUse hooks and any confirm dialog resolve. */
+  const toolStartTimes = new Map<string, number>()
   /** The pending idle_prompt notification: Claude fires it when the turn ended about
    * 60 seconds ago and the user hasn't typed since, so it arms on agent_end and is
    * canceled by input or the next turn. */
@@ -417,13 +420,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
       // additionalContext is delivered alongside the tool result, so stash it for
       // this call's tool_result to append.
       if (decision.context && decision.context.length > 0) pendingToolContext.set(event.toolCallId, decision.context)
+      // Claude's duration_ms excludes PreToolUse hook time, so the clock starts here.
+      toolStartTimes.set(event.toolCallId, Date.now())
       return undefined
     }
     // Claude's "ask": prompt the user and let the call through if they approve.
     // With no UI (headless) the block stands, which is the safe default.
     if (decision.ask && ctx.hasUI) {
       const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.')
-      return approved ? undefined : blockedToolCall(decision.reason)
+      if (!approved) return blockedToolCall(decision.reason)
+      // Claude's duration_ms also excludes time in permission prompts.
+      toolStartTimes.set(event.toolCallId, Date.now())
+      return undefined
     }
     return blockedToolCall(decision.reason)
   })
@@ -451,7 +459,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (commands.length === 0 && pending.length === 0) return
     const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
     const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, textContent(event.content), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
-    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, tool_response: response }
+    const startedAt = toolStartTimes.get(event.toolCallId)
+    toolStartTimes.delete(event.toolCallId)
+    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, tool_response: response, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
@@ -515,8 +525,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return { action: 'handled' }
     }
     // Claude injects a UserPromptSubmit hook's context ahead of the prompt; transform is
-    // pi's seam for rewriting the submitted text.
-    if (decision.context) return { action: 'transform', text: `${decision.context}\n\n${event.text}` }
+    // pi's seam for rewriting the submitted text. With suppressOriginalPrompt the
+    // context replaces the prompt entirely (honored only when context exists, since
+    // an empty submission would be no turn at all).
+    if (decision.context) return { action: 'transform', text: decision.suppress ? decision.context : `${decision.context}\n\n${event.text}` }
     return { action: 'continue' }
   })
 
@@ -609,13 +621,19 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_before_compact', async (event, ctx) => {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), { hook_event_name: 'PreCompact', trigger: trigger.value }, boundRunner(ctx))
+    // Claude's custom_instructions: the /compact arguments on a manual run, empty
+    // on an automatic one; pi carries them on the event directly.
+    const payload = { hook_event_name: 'PreCompact', trigger: trigger.value, custom_instructions: event.customInstructions ?? '' }
+    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
   })
 
   pi.on('session_compact', async (event, ctx) => {
     const trigger = claudeSpelling(PRECOMPACT_TRIGGER, event.reason)
-    const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), { hook_event_name: 'PostCompact', trigger: trigger.value }, boundRunner(ctx))
+    // Claude's compact_summary: the summary that replaced the compacted history.
+    const summary = (event as { compactionEntry?: { summary?: unknown } }).compactionEntry?.summary
+    const payload = { hook_event_name: 'PostCompact', trigger: trigger.value, ...(typeof summary === 'string' ? { compact_summary: summary } : {}) }
+    const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     // Claude also fires SessionStart with source "compact" when the session
     // continues after compaction; its stdout context rides the next agent start,
