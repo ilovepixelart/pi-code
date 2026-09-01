@@ -71,7 +71,7 @@ export function readManagedSettings(file: string = managedSettingsFileOverride ?
   } catch {
     return merged
   }
-  for (const entry of entries.filter((name) => name.endsWith('.json') && !name.startsWith('.')).sort()) {
+  for (const entry of entries.filter((name) => name.endsWith('.json') && !name.startsWith('.')).sort((a, b) => a.localeCompare(b, 'en'))) {
     merged = mergeManagedKey(merged, readOneSettingsFile(path.join(dropInDir, entry))) as Record<string, unknown>
   }
   return merged
