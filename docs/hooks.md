@@ -2,6 +2,8 @@
 
 Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Source: [`extensions/hooks/`](../extensions/hooks) (the module header in `index.ts` is the authoritative contract).
 
+Hook locations: settings files, managed policy settings, plugins, and skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run). Agent-frontmatter hooks are not yet loaded (tracked with the subagent work).
+
 ## Events
 
 - **PreToolUse**: blocks tools, rewrites input via `updatedInput`, injects `additionalContext` beside the eventual tool result.
@@ -43,4 +45,4 @@ Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Sourc
 
 - A timed-out PreToolUse/UserPromptSubmit hook fails closed at a 60s default (Claude: 600s for PreToolUse, 30s for UserPromptSubmit, both non-blocking), since pi has no permission prompt to fall back on. Prompt hooks default to Claude's 30s and agent hooks to 60s; SessionEnd hooks share Claude's 1.5-second budget, raised by a declared per-hook `timeout` up to 60 seconds, so a slow hook cannot stall session exit.
 - Prompt hooks honor the `model` override (resolved against the models this user can run) and append the input JSON to the prompt when `$ARGUMENTS` is absent, as documented.
-- `disableAllHooks` in any scope turns the system off; `/hooks` prints the resolved configuration.
+- `disableAllHooks` is tiered per Claude: the managed level turns everything off; a settings-file value disables non-managed hooks while managed policy hooks keep running. `/hooks` prints the resolved configuration.
