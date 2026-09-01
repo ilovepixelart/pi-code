@@ -2045,3 +2045,36 @@ describe('Claude vocabulary and decision-control conformance', () => {
     expect(commandsRun()).toEqual(['stopped'])
   })
 })
+
+describe('prompt-style decisions on Stop and PostToolUse', () => {
+  const withHooks = async (config: Record<string, unknown>) => {
+    writeSettings(hoisted.home, 'settings.json', config)
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  it('blocks the stop when a hook answers with a permissionDecision deny', async () => {
+    // A type: "prompt"/"agent" hook's reply arrives as stdout in this shape.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'gate' }] }] })
+    script('gate', { stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'tests are red' } })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'tests are red', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('blocks the stop on the documented prompt-hook ok:false schema', async () => {
+    // Claude: prompt hooks respond {"ok": false, "reason": ...}; on Stop the reason
+    // is fed back and the turn continues.
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'gate' }] }] })
+    script('gate', { stdout: [JSON.stringify({ ok: false, reason: 'not done yet' })], code: 0 })
+    await ext.agentEnd()
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'not done yet', display: true }, options: { triggerTurn: true } }])
+  })
+
+  it('feeds an ok:false PostToolUse verdict back as feedback next to the result', async () => {
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'review' }] }] })
+    script('review', { stdout: [JSON.stringify({ ok: false, reason: 'lint failed' })], code: 0 })
+    const patch = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'out' }] })) as { content: Array<{ text?: string }> }
+    expect(patch.content.some((block) => block.text?.includes('lint failed'))).toBe(true)
+  })
+})

@@ -93,7 +93,7 @@ import { repoRoot } from '../internal/project-root.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadPluginHooks, readAllowedHttpHookUrls, readDisableAllHooks } from './config.js'
-import { blockedToolCall, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
+import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, timeoutMs } from './runners.js'
 
@@ -494,8 +494,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
       .filter((result) => !result.timedOut)
       .map((result) => {
         const parsed = tryParseJson(result.stdout)
-        if (result.code === 2) return { block: true, reason: (parsed?.decision === 'block' ? parsed.reason : undefined) ?? (result.stderr.trim() || 'Stop blocked by hook') }
-        if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Stop blocked by hook' }
+        if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
+        // Any JSON blocking spelling counts, including the prompt/agent hook reply
+        // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
+        const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
+        if (verdict) return { block: true, reason: verdict.reason }
         // Claude's non-error continue: additionalContext feeds back and the
         // conversation continues so Claude can act on it. It rides the same
         // continuation path (and the same block cap) so a hook emitting it every

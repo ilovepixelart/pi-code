@@ -19,10 +19,18 @@ export interface HookDecision {
   ask?: boolean
 }
 
-export function tryParseJson(
-  text: string,
-):
-  | { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }; decision?: string; reason?: string; continue?: boolean; stopReason?: string; systemMessage?: string; updatedToolOutput?: unknown; updatedMCPToolOutput?: unknown }
+export function tryParseJson(text: string):
+  | {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown }
+      decision?: string
+      reason?: string
+      continue?: boolean
+      stopReason?: string
+      systemMessage?: string
+      updatedToolOutput?: unknown
+      updatedMCPToolOutput?: unknown
+      ok?: boolean
+    }
   | undefined {
   try {
     return JSON.parse(text)
@@ -36,6 +44,17 @@ function jsonBlockingReason(parsed: ReturnType<typeof tryParseJson>): string | u
   if (parsed?.hookSpecificOutput?.permissionDecision === 'deny') return parsed.hookSpecificOutput.permissionDecisionReason
   if (parsed?.decision === 'block') return parsed.reason
   if (parsed?.continue === false) return parsed.stopReason
+  return undefined
+}
+
+/** A blocking verdict in any of the JSON spellings a hook can answer with: the
+ * command-hook fields, and the prompt/agent reply schemas (`permissionDecision:
+ * "deny"` from pi's prompt-hook system prompt, `ok: false` from Claude's documented
+ * prompt-hook response). Undefined when the body renders no block. */
+export function jsonBlockVerdict(parsed: ReturnType<typeof tryParseJson>, fallback: string): { reason: string } | undefined {
+  if (parsed?.decision === 'block') return { reason: parsed.reason ?? fallback }
+  if (parsed?.hookSpecificOutput?.permissionDecision === 'deny') return { reason: parsed.hookSpecificOutput.permissionDecisionReason ?? fallback }
+  if (parsed?.ok === false) return { reason: parsed.reason ?? fallback }
   return undefined
 }
 
@@ -202,7 +221,12 @@ export function postToolFeedback(result: HookRunResult, eventName: string, isErr
   // A failed tool cannot be blocked, but the hook's stderr is still shown; on
   // success, exit-2 / decision:block feed back as a block notice.
   if (!result.timedOut && result.code === 2) lines.push(`${eventName} hook: ${result.stderr.trim() || (isError ? 'hook reported an error' : 'Blocked by hook')}`)
-  else if (!isError && parsed?.decision === 'block') lines.push(`PostToolUse hook: ${parsed.reason ?? 'Blocked by hook'}`)
+  else if (!isError) {
+    // Any JSON blocking spelling feeds back, including the prompt/agent hook reply
+    // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
+    const verdict = jsonBlockVerdict(parsed, 'Blocked by hook')
+    if (verdict) lines.push(`PostToolUse hook: ${verdict.reason}`)
+  }
   const context = parsed?.hookSpecificOutput?.additionalContext
   if (context) lines.push(context)
   return lines
