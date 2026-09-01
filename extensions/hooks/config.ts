@@ -115,6 +115,25 @@ export function mergeSkillHooks(config: HooksConfig, skillName: string, hooks: u
   mergeHooksJson(config, JSON.stringify({ hooks }), `${skillName} (skill)`, sources, `skill:${skillName}`)
 }
 
+/** Claude's agent-frontmatter hooks, inside the subagent child: the parent passes
+ * them via PI_CODE_AGENT_HOOKS (Stop already converted to SubagentStop), and they
+ * run only while this child runs because they die with the process. Returns the
+ * agent identity for the child's SubagentStop firing, or undefined outside a
+ * subagent or with no hooks passed. */
+export function mergeAgentEnvHooks(config: HooksConfig, sources?: Map<HookMatcher, string>): { agent: string; id?: string } | undefined {
+  if (process.env.PI_CODE_SUBAGENT !== '1') return undefined
+  const raw = process.env.PI_CODE_AGENT_HOOKS
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed) || typeof parsed.agent !== 'string' || !isRecord(parsed.hooks)) return undefined
+    mergeHooksJson(config, JSON.stringify({ hooks: parsed.hooks }), `${parsed.agent} (agent)`, sources, `agent:${parsed.agent}`)
+    return { agent: parsed.agent, ...(typeof parsed.id === 'string' ? { id: parsed.id } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
 /** Claude's `allowedHttpHookUrls` setting: URL patterns http hooks may target, with
  * `*` as a wildcard. Per Claude's documentation: undefined (no source sets the key)
  * means no restrictions, an empty array blocks every http hook, and arrays merge

@@ -3,7 +3,9 @@
 Claude-style subagents with parallel, chain, and background modes. Source: [`extensions/subagent/`](../extensions/subagent) (see also its [README](../extensions/subagent/README.md)).
 
 - Built-in Explore/Plan/general-purpose agents, plus `~/.claude/agents`, `~/.pi/agent/agents`, and project `.claude/agents`/`.pi/agents` (scanned recursively into subfolders), merged once the project is trusted; project wins a name clash. Every `.claude/agents` between the working directory and the repository root is scanned, the definition closest to the working directory winning a same-name clash, as Claude documents.
-- Frontmatter: `tools`/`disallowedTools`, `model` (sonnet/opus/haiku/fable tier aliases or a concrete id), `effort`, `skills` preload, `permissionMode: plan`, `maxTurns`, `memory`, `isolation: worktree`.
+- Frontmatter: `tools`/`disallowedTools`, `model` (sonnet/opus/haiku/fable tier aliases or a concrete id), `effort`, `skills` preload, `permissionMode: plan`, `maxTurns`, `memory`, `isolation: worktree`, `hooks` (scoped to the run, `Stop` converted to `SubagentStop` at the child's own end), `background: true` (stays in the background even on a foreground ask).
+- Plugin agents register under Claude's scoped id `plugin:name` (filename fallback for a missing name); `:` in a non-plugin agent name rejects the file. Explore and Plan spawn with `--no-context-files`, the only agents that skip CLAUDE.md, per Claude.
+- SubagentStart hooks run pre-spawn through a seam so their `additionalContext` lands before the child's first prompt; they cannot block the spawn.
 - The agent body is the child's system prompt (replacing pi's default, as Claude replaces its own). Model order per Claude: frontmatter model, then `CLAUDE_CODE_SUBAGENT_MODEL`, then pi's default.
 - A `maxTurns`-capped run returns its output marked as partial; a capped background run's completion notes it can be resumed by id. A `tools` list where no entry resolves to a tool fails the launch naming the entries instead of running tool-less.
 - SubagentStop hooks receive `last_assistant_message`; `agent_transcript_path` stays absent (a `--no-session` child writes no transcript).

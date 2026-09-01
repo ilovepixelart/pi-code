@@ -157,8 +157,23 @@ function readSkillBody(name: string, skillDirs: string[]): string | undefined {
  * the intent into a read-only toolset unless the file pins tools itself. */
 const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls']
 
+/** The agent's name per Claude's naming rules: a plugin agent registers under the
+ * scoped id `<plugin>:<name>` with the filename standing in for a missing name;
+ * elsewhere the frontmatter name is required and `:` is reserved for plugin ids,
+ * so a file carrying one is not loaded. */
+function agentName(frontmatter: Record<string, unknown>, filePath: string, pluginName?: string): string | null {
+  const declared = typeof frontmatter.name === 'string' ? frontmatter.name.trim() : ''
+  if (pluginName !== undefined) return `${pluginName}:${declared || path.basename(filePath, '.md')}`
+  if (!declared) return null
+  if (declared.includes(':')) {
+    console.warn(`pi-code-subagent: ignoring agent ${filePath}: names cannot contain ":", which is reserved for plugin-scoped identifiers`)
+    return null
+  }
+  return declared
+}
+
 /** Parse one agent markdown file; null when it is not a usable agent definition. */
-function parseAgentFile(content: string, source: AgentSource, filePath: string): AgentConfig | null {
+function parseAgentFile(content: string, source: AgentSource, filePath: string, pluginName?: string): AgentConfig | null {
   let parsed: { frontmatter: Record<string, unknown>; body: string }
   try {
     parsed = parseFrontmatter<Record<string, unknown>>(content)
@@ -166,7 +181,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     return null // malformed YAML must not abort discovery for the whole directory
   }
   const { frontmatter, body } = parsed
-  const name = typeof frontmatter.name === 'string' ? frontmatter.name : ''
+  const name = agentName(frontmatter, filePath, pluginName)
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
   const tools = parseToolsField(frontmatter.tools, true)
@@ -198,6 +213,8 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string):
     memory: parseMemoryField(frontmatter.memory),
     maxTurns: parseMaxTurns(frontmatter.maxTurns),
     isolation,
+    hooks: frontmatter.hooks !== null && typeof frontmatter.hooks === 'object' && !Array.isArray(frontmatter.hooks) ? (frontmatter.hooks as Record<string, unknown>) : undefined,
+    background: frontmatter.background === true ? true : undefined,
     systemPrompt: body,
     source,
     filePath,
@@ -262,6 +279,12 @@ export interface AgentConfig {
   maxTurns?: number
   /** Claude's `isolation: worktree`: run the child in a temporary git worktree. */
   isolation?: 'worktree'
+  /** Claude's frontmatter `hooks`, scoped to this subagent: passed to the child
+   * via env, with Stop converted to SubagentStop (see agentHooksEnv). */
+  hooks?: Record<string, unknown>
+  /** Claude's `background: true`: keep this agent in the background even when
+   * asked to run it in the foreground. */
+  background?: boolean
   systemPrompt: string
   source: AgentSource
   filePath: string
@@ -274,7 +297,7 @@ export interface AgentDiscoveryResult {
 
 /** Claude scans .claude/agents recursively so agents can be organized into
  * subfolders (agents/review/, agents/research/); the walk mirrors that. */
-function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentSource, pluginName?: string): AgentConfig[] {
   const agents: AgentConfig[] = []
 
   let entries: fs.Dirent[]
@@ -287,7 +310,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   for (const entry of entries) {
     const filePath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      agents.push(...loadAgentsFromDir(filePath, source))
+      agents.push(...loadAgentsFromDir(filePath, source, pluginName))
       continue
     }
     if (!entry.name.endsWith('.md')) continue
@@ -300,7 +323,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       continue
     }
 
-    const agent = parseAgentFile(content, source, filePath)
+    const agent = parseAgentFile(content, source, filePath, pluginName)
     if (agent) agents.push(agent)
   }
 
@@ -323,13 +346,14 @@ export type AgentSource = 'user' | 'project' | 'builtin' | 'plugin'
 /** Bundled default agents (Explore, Plan, general-purpose), lowest precedence. */
 const BUILTIN_AGENTS_DIR = path.join(import.meta.dirname, 'agents')
 
-/** Agent directories of every enabled plugin: `agents/` unless the manifest
+/** Agent directories of every enabled plugin, each with its plugin name (Claude
+ * scopes plugin agent ids as `<plugin>:<name>`): `agents/` unless the manifest
  * points elsewhere. Plugins are user-installed, so user scope only decides. */
-function pluginAgentDirs(home: string): string[] {
+function pluginAgentDirs(home: string): Array<{ dir: string; pluginName: string }> {
   return installedPlugins(home).flatMap((plugin) => {
     const declared = plugin.manifest.agents
     const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'agents']
-    return dirs.map((dir) => path.resolve(plugin.root, String(dir)))
+    return dirs.map((dir) => ({ dir: path.resolve(plugin.root, String(dir)), pluginName: plugin.name }))
   })
 }
 
@@ -344,7 +368,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
   // Plugins load after builtins and before the user's own dirs, so a user agent
   // wins a name clash with a plugin's, and ~/.pi/agent/agents wins over ~/.claude.
-  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...pluginAgentDirs(os.homedir()).flatMap((dir) => loadAgentsFromDir(dir, 'plugin')), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
+  const userAgents = scope === 'project' ? [] : [...loadAgentsFromDir(BUILTIN_AGENTS_DIR, 'builtin'), ...pluginAgentDirs(os.homedir()).flatMap((entry) => loadAgentsFromDir(entry.dir, 'plugin', entry.pluginName)), ...loadAgentsFromDir(claudeUserDir, 'user'), ...loadAgentsFromDir(userDir, 'user')]
   // project .claude/agents loads first so project .pi/agents wins on name conflicts
   const projectAgents = scope === 'user' ? [] : [...projectClaudeDirs.flatMap((dir) => loadAgentsFromDir(dir, 'project')), ...(projectPiDir ? loadAgentsFromDir(projectPiDir, 'project') : [])]
 

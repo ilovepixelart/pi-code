@@ -128,11 +128,12 @@ describe('plugin agents', () => {
     writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolkit: true } }))
 
     const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-    const found = discoverAgents(cwd, 'user').agents.find((a) => a.name === 'auditor')
+    // Plugin agents register under Claude's plugin-scoped id, not the bare name.
+    const found = discoverAgents(cwd, 'user').agents.find((a) => a.name === 'toolkit:auditor')
     expect(found?.source).toBe('plugin')
   })
 
-  it('lets a user agent of the same name win over a plugin agent', () => {
+  it('keeps a plugin agent and a same-named user agent as distinct scoped entries', () => {
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'toolkit', '2.0.0')
     mkdirSync(join(root, 'agents'), { recursive: true })
     writeFileSync(join(root, 'agents', 'auditor.md'), agentFile('auditor', 'PLUGIN'))
@@ -141,9 +142,10 @@ describe('plugin agents', () => {
     writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolkit: true } }))
 
     const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-    const found = discoverAgents(cwd, 'user').agents.filter((a) => a.name === 'auditor')
-    expect(found).toHaveLength(1)
-    expect(found[0].systemPrompt.trim()).toBe('USER')
+    // Scoped ids mean a plugin's auditor never clashes with the user's: both exist.
+    const agents = discoverAgents(cwd, 'user').agents
+    expect(agents.find((a) => a.name === 'auditor')?.systemPrompt.trim()).toBe('USER')
+    expect(agents.find((a) => a.name === 'toolkit:auditor')?.systemPrompt.trim()).toBe('PLUGIN')
   })
 })
 
@@ -213,5 +215,46 @@ describe('monorepo agent discovery', () => {
     const agents = discoverAgents(cwd, 'project').agents
     expect(agents.find((a) => a.name === 'deployer')?.description).toBe('root deployer')
     expect(agents.find((a) => a.name === 'shared')?.description).toBe('near shared')
+  })
+})
+
+describe('plugin-scoped agent ids and frontmatter fields', () => {
+  it('names plugin agents with the plugin-scoped identifier, filename as fallback', () => {
+    // Claude: a plugin subagent's agent type is the scoped id such as
+    // my-plugin:reviewer, not the bare frontmatter name.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'toolkit', '2.0.0')
+    mkdirSync(join(root, 'agents'), { recursive: true })
+    writeFileSync(join(root, 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: reviews\n---\nreview things')
+    writeFileSync(join(root, 'agents', 'anon.md'), '---\ndescription: nameless\n---\nwork')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolkit: true } }))
+
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    const names = discoverAgents(cwd, 'user').agents.map((a) => a.name)
+    expect(names).toContain('toolkit:reviewer')
+    expect(names).toContain('toolkit:anon')
+    expect(names).not.toContain('reviewer')
+  })
+
+  it('rejects a non-plugin agent whose name contains a colon, reserved for plugin ids', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'bad.md'), '---\nname: my:agent\ndescription: colon\n---\nwork')
+    expect(discoverAgents(cwd, 'both').agents.find((a) => a.name === 'my:agent')).toBeUndefined()
+  })
+
+  it('parses frontmatter hooks into the agent config', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'guarded.md'), '---\nname: guarded\ndescription: g\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./check.sh\n---\nwork')
+    const agent = discoverAgents(cwd, 'both').agents.find((a) => a.name === 'guarded')
+    expect(agent?.hooks).toEqual({ PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: './check.sh' }] }] })
+  })
+
+  it('parses background: true into the agent config', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'bg.md'), '---\nname: bg\ndescription: b\nbackground: true\n---\nwork')
+    expect(discoverAgents(cwd, 'both').agents.find((a) => a.name === 'bg')?.background).toBe(true)
   })
 })

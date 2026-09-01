@@ -1483,9 +1483,12 @@ describe('hooks subagent lifecycle', () => {
     return { ext, proj }
   }
 
-  it('runs SubagentStart hooks matching the agent type', async () => {
-    const { ext, proj } = await withHooks({ SubagentStart: [{ matcher: 'scout', hooks: [{ command: 'sub-start' }] }] })
-    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-abc' })
+  it('runs SubagentStart hooks matching the agent type through the pre-spawn seam', async () => {
+    // SubagentStart moved off the bus start event onto the pre-spawn seam so its
+    // context can reach the child before its first prompt.
+    const { runSubagentStartHooks } = await import('../extensions/internal/subagent-hooks.ts')
+    const { proj } = await withHooks({ SubagentStart: [{ matcher: 'scout', hooks: [{ command: 'sub-start' }] }] })
+    await runSubagentStartHooks('scout', 'fg-abc')
     expect(commandsRun()).toEqual(['sub-start'])
     expect(JSON.parse(recordFor('sub-start').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStart', agent_type: 'scout', agent_id: 'fg-abc' })
   })
@@ -2402,5 +2405,64 @@ describe('hook error notices', () => {
     const result = (await ext.input('hello')) as { action: string; text?: string }
     expect(result.action).toBe('continue')
     expect(ext.notes.some((note) => note.msg.includes('hook error'))).toBe(true)
+  })
+})
+
+describe('hooks SubagentStart context seam', () => {
+  it('serves SubagentStart hooks through the pre-spawn runner, returning their context', async () => {
+    // Claude: SubagentStart hooks inject additionalContext into the subagent
+    // before its first prompt, so they must run before the child spawns; the
+    // subagent extension calls this seam pre-spawn.
+    const { runSubagentStartHooks } = await import('../extensions/internal/subagent-hooks.ts')
+    script('sub-start', { stdout: ['{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"security rules"}}'], code: 0 })
+    writeSettings(hoisted.home, 'settings.json', { SubagentStart: [{ matcher: 'scout', hooks: [{ command: 'sub-start' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    const contexts = await runSubagentStartHooks('scout', 'fg-1')
+    expect(commandsRun()).toEqual(['sub-start'])
+    expect(contexts).toEqual(['security rules'])
+    expect(JSON.parse(recordFor('sub-start').stdin)).toMatchObject({ hook_event_name: 'SubagentStart', agent_type: 'scout', agent_id: 'fg-1' })
+  })
+
+  it('no longer double-runs SubagentStart from the bus start event', async () => {
+    writeSettings(hoisted.home, 'settings.json', { SubagentStart: [{ hooks: [{ command: 'sub-start' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    await ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-1' })
+    expect(commandsRun()).toEqual([])
+  })
+})
+
+describe('hooks from agent frontmatter in the child', () => {
+  const withAgentHooks = async (hooks: unknown) => {
+    process.env.PI_CODE_SUBAGENT = '1'
+    process.env.PI_CODE_AGENT_HOOKS = JSON.stringify({ agent: 'scout', id: 'fg-9', hooks })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  afterEach(() => {
+    delete process.env.PI_CODE_SUBAGENT
+    delete process.env.PI_CODE_AGENT_HOOKS
+  })
+
+  it('runs agent-frontmatter hooks inside the subagent child', async () => {
+    const ext = await withAgentHooks({ PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'agent-guard' }] }] })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['agent-guard'])
+  })
+
+  it('fires the converted Stop hook as SubagentStop when the child finishes', async () => {
+    // Claude converts a Stop hook in agent frontmatter to SubagentStop, the event
+    // fired when the subagent completes; in the child that is its own agent end.
+    const ext = await withAgentHooks({ SubagentStop: [{ hooks: [{ command: 'agent-done' }] }] })
+    await ext.agentEnd()
+
+    expect(commandsRun()).toEqual(['agent-done'])
+    expect(JSON.parse(recordFor('agent-done').stdin)).toMatchObject({ hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'fg-9' })
   })
 })

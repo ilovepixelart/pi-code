@@ -1888,3 +1888,74 @@ describe('subagent run semantics conformance', () => {
     expect((stop.data as { lastAssistantMessage?: string }).lastAssistantMessage).toBe('the findings')
   })
 })
+
+describe('subagent context and hooks conformance', () => {
+  it('spawns Explore and Plan with --no-context-files, per Claude context skipping', async () => {
+    // Claude: "Explore and Plan are the only subagents that omit CLAUDE.md"; no
+    // field or setting changes which agents skip them.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'Explore', source: 'builtin' })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('found')] })
+    await execute('c1', { agent: 'Explore', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls[0].args).toContain('--no-context-files')
+  })
+
+  it('does not skip context files for other agents', async () => {
+    script('inspect', { stdout: [say('found')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(spawnCalls[0].args).not.toContain('--no-context-files')
+  })
+
+  it('keeps a background: true agent in the background even on a foreground ask', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [{ ...agentConfig(), background: true }], projectAgentsDir: null })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(startBackgroundRunMock).toHaveBeenCalled()
+    expect(text(result)).toContain('background run')
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('injects SubagentStart hook context before the child first prompt', async () => {
+    // Claude: SubagentStart additionalContext is "added to the subagent's context
+    // at the start of its conversation, before its first prompt".
+    const { setSubagentStartHookRunner } = await import('../extensions/internal/subagent-hooks.ts')
+    setSubagentStartHookRunner(async () => ['Follow security guidelines'])
+    try {
+      script('inspect', { stdout: [say('ok')] })
+      await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+      const taskArg = spawnCalls[0].args.at(-1)
+      expect(taskArg).toContain('Follow security guidelines')
+      expect(taskArg).toContain('Task: inspect')
+      expect(taskArg?.indexOf('Follow security guidelines')).toBeLessThan(taskArg?.indexOf('Task: inspect') ?? -1)
+    } finally {
+      setSubagentStartHookRunner(undefined)
+    }
+  })
+
+  it('passes agent frontmatter hooks to the child with Stop converted to SubagentStop', async () => {
+    // Claude: subagent-frontmatter hooks run only while that subagent runs, and a
+    // Stop hook there converts to SubagentStop.
+    discoverAgentsMock.mockReturnValue({
+      agents: [{ ...agentConfig(), hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: './c.sh' }] }], Stop: [{ hooks: [{ command: './done.sh' }] }] } }],
+      projectAgentsDir: null,
+    })
+    script('inspect', { stdout: [say('ok')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const env = (spawnCalls[0].options as { env?: Record<string, string> }).env ?? {}
+    const passed = JSON.parse(env.PI_CODE_AGENT_HOOKS ?? '{}')
+    expect(passed.agent).toBe('scout')
+    expect(passed.hooks.PreToolUse).toBeDefined()
+    expect(passed.hooks.SubagentStop).toEqual([{ hooks: [{ command: './done.sh' }] }])
+    expect(passed.hooks.Stop).toBeUndefined()
+  })
+
+  it('passes no hooks env for an agent without frontmatter hooks', async () => {
+    script('inspect', { stdout: [say('ok')] })
+    await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    const env = (spawnCalls[0].options as { env?: Record<string, string> }).env ?? {}
+    expect(env.PI_CODE_AGENT_HOOKS).toBeUndefined()
+  })
+})
