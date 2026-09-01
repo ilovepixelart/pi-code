@@ -5,7 +5,6 @@
  */
 
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
-import { splitArgs } from '../internal/command-file.js'
 import { capForContext } from '../internal/output-guard.js'
 
 export function formatToolName(server: string, tool: string): string {
