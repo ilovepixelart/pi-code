@@ -52,7 +52,7 @@ import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { findNearestDir, repoRoot } from './internal/project-root.js'
+import { ancestorDirs, findNearestDir, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { createTurnOverride } from './internal/turn-override.js'
 
@@ -120,7 +120,10 @@ function isDirectory(target: string): boolean {
  * the approval walk) and is included only for approved projects. */
 export function commandDirs(cwd: string, home: string, trusted: boolean): string[] {
   const candidates = [path.join(claudeConfigDir(home), 'commands')]
-  if (trusted) candidates.push(findNearestDir(cwd, path.join('.claude', 'commands')) ?? path.join(cwd, '.claude', 'commands'))
+  // Claude scans every .claude/commands between cwd and the repository root, the
+  // nearest winning a name clash: collectCommands lets later directories win, so
+  // the project list goes root-first with the nearest last.
+  if (trusted) candidates.push(...ancestorDirs(cwd, path.join('.claude', 'commands')).reverse())
   const dirs: string[] = []
   for (const dir of candidates) {
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)

@@ -27,7 +27,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { findNearestDir, findNearestFile } from './internal/project-root.js'
+import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 
 export interface OutputStyle {
@@ -85,7 +85,10 @@ function isDirectory(target: string): boolean {
  */
 export function styleDirs(cwd: string, home: string, trusted: boolean): string[] {
   const dirs = [path.join(claudeConfigDir(home), 'output-styles')]
-  if (trusted) dirs.push(findNearestDir(cwd, path.join('.claude', 'output-styles')) ?? path.join(cwd, '.claude', 'output-styles'))
+  // Claude loads every .claude/output-styles between cwd and the repository root,
+  // using the one closest to cwd for a name clash: styleForName is first-match,
+  // so the nearest directory goes first.
+  if (trusted) dirs.push(...ancestorDirs(cwd, path.join('.claude', 'output-styles')))
   return dirs.filter((dir) => isDirectory(dir))
 }
 
