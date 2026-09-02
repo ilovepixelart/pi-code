@@ -1396,6 +1396,33 @@ describe('hooks extension notify-style events', () => {
     expect(ext.notes).toEqual(Array(5).fill({ msg: 'heads up', level: 'warning' }))
   })
 
+  it('blocks compaction when a PreCompact hook exits 2, showing its stderr on a manual run', async () => {
+    // Claude: "Exit with code 2 to block compaction. For a manual /compact, the stderr
+    // message is shown to the user. You can also block by returning JSON with
+    // `"decision": "block"`." pi's seam is the cancel field on the result.
+    writeSettings(hoisted.home, 'settings.json', { PreCompact: [{ hooks: [{ command: 'guard-compact' }] }] })
+    script('guard-compact', { code: 2, stderr: ['not yet, the notes matter'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    const result = await ext.beforeCompact('manual')
+
+    expect(result).toEqual({ cancel: true })
+    expect(ext.notes.at(-1)?.msg).toContain('not yet, the notes matter')
+  })
+
+  it('blocks compaction on a JSON decision and lets an ordinary run through', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreCompact: [{ hooks: [{ command: 'guard-json' }, { command: 'quiet' }] }] })
+    script('guard-json', { stdout: ['{"decision":"block","reason":"summary would drop the plan"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    expect(await ext.beforeCompact('threshold')).toEqual({ cancel: true })
+
+    script('guard-json', { stdout: [''] })
+    expect(await ext.beforeCompact('threshold')).toBeUndefined()
+  })
+
   it('surfaces a SessionStart systemMessage without treating it as context', async () => {
     writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ hooks: [{ command: 'greet' }] }] })
     script('greet', { stdout: [JSON.stringify({ systemMessage: 'welcome' })], code: 0 })

@@ -689,6 +689,17 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const payload = { hook_event_name: 'PreCompact', trigger: trigger.value, custom_instructions: event.customInstructions ?? '' }
     const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude: "Exit with code 2 to block compaction. For a manual /compact, the stderr
+    // message is shown to the user. You can also block by returning JSON with
+    // `decision: block`." pi cancels through the result, and a blocked automatic
+    // compaction is worth a notice too: the context stays full either way.
+    for (const [index, result] of results.entries()) {
+      const parsed = tryParseJson(result.stdout)
+      const blocked = result.code === 2 && !result.timedOut ? { reason: result.stderr.trim() || 'Compaction blocked by hook' } : jsonBlockVerdict(parsed, 'Compaction blocked by hook')
+      if (!blocked) continue
+      ctx.ui.notify(`Compaction blocked by ${matchingCommands(config.PreCompact, trigger.names)[index]?.command ?? 'hook'}: ${blocked.reason}`, 'warning')
+      return { cancel: true }
+    }
   })
 
   pi.on('session_compact', async (event, ctx) => {
