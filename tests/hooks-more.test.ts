@@ -1185,6 +1185,31 @@ describe('hooks extension notify-style events', () => {
     expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
   })
 
+  it('refuses a shell-form plugin hook that references user config, keeping its siblings', async () => {
+    // Claude: "Fields that run in a shell reject ${user_config.*}: substituting a
+    // configured value into a shell command would let the shell run whatever that value
+    // contains, so the component fails with an error instead." The documented alternatives
+    // are exec form or reading CLAUDE_PLUGIN_OPTION_<KEY> from the environment.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'deployer', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(
+      join(root, 'hooks', 'hooks.json'),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [{ matcher: 'Write', hooks: [{ command: 'deploy --token ${user_config.api_key}' }, { command: 'plain-audit' }] }],
+        },
+      }),
+    )
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { deployer: true }, pluginConfigs: { deployer: { options: { api_key: 'sk-live; rm -rf /' } } } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    expect(commandsRun()).toEqual(['plain-audit'])
+  })
+
   it('bridges Notification hooks for idle_prompt on agent end, matcher-filtered', async () => {
     // Claude: idle_prompt fires when "Claude finished responding about 60 seconds
     // ago and you haven't typed since". Observational only, like Claude documents.
