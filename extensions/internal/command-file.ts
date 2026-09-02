@@ -421,7 +421,7 @@ export function discoverCommandFiles(root: string): DiscoveredCommand[] {
   return found
 }
 
-export type CommandExec = (command: string) => Promise<{ stdout: string; stderr: string; code: number }>
+export type CommandExec = (command: string) => Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>
 
 /** PowerShell single-quote escaping: inside a '...' literal the only special
  * characters are the quote delimiters themselves, written doubled. PowerShell's
@@ -563,6 +563,10 @@ export function benignExitOne(command: string, shell: SpanShell = 'bash'): boole
  * documents: the model never sees a half-expanded body. */
 async function runSpan(exec: CommandExec, command: string, pattern: string, shell: SpanShell): Promise<string> {
   const result = await exec(command)
+  // A timeout kill arrives as killed:true with code 0 (a signal death has no exit code),
+  // so the code alone would paste the partial output as a success. Claude kills a span
+  // at the Bash timeout and that failure aborts the invocation.
+  if (result.killed) throw new Error(`Shell command timed out for pattern "${pattern}"`)
   if (result.code !== 0 && !(result.code === 1 && benignExitOne(command, shell))) {
     throw new Error(`Shell command failed for pattern "${pattern}"\n[stderr]\n${(result.stderr || result.stdout).trim()}`)
   }
