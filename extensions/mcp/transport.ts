@@ -16,6 +16,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
+import { resolveShell } from '../internal/shell-resolve.js'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
 
@@ -306,11 +307,17 @@ export async function connectWithRetries(name: string, config: ServerConfig, aut
 }
 
 /** Run a headersHelper command and parse its JSON stdout into headers, under the
- * environment helperEnv built. A failure or a 10s timeout yields no extra headers
- * rather than blocking the connection. */
+ * environment helperEnv built. It runs through the platform shell (/bin/sh; Git Bash
+ * or PowerShell on Windows). A failure, a 10s timeout, or a machine with no shell
+ * yields no extra headers rather than blocking the connection. */
 function runHeadersHelper(command: string, env: NodeJS.ProcessEnv): Promise<Record<string, string>> {
   return new Promise((resolve) => {
-    execFile('/bin/sh', ['-c', command], { timeout: 10_000, env }, (error, stdout) => {
+    const shell = resolveShell(undefined)
+    if (!shell) {
+      resolve({})
+      return
+    }
+    execFile(shell.file, shell.argsFor(command), { timeout: 10_000, env }, (error, stdout) => {
       resolve(error ? {} : parseHelperHeaders(stdout))
     })
   })
