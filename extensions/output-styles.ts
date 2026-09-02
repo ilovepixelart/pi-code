@@ -23,6 +23,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { atomicWriteFile } from './internal/atomic-write.js'
 
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
@@ -173,16 +174,31 @@ export function styleForName(styles: OutputStyle[], name: string | undefined): O
   return name ? styles.find((style) => style.name === name) : undefined
 }
 
-function persistActiveStyle(file: string, name: string): void {
-  let config: Record<string, unknown> = {}
+/** Record the choice in the local settings file, returning a message to show when it
+ * cannot be recorded. The file also carries permissions, hooks and env, so a present but
+ * unparseable one is left alone rather than replaced by the style choice alone. */
+function persistActiveStyle(file: string, name: string): string | undefined {
+  const label = path.basename(file)
+  let raw: string | undefined
   try {
-    config = JSON.parse(fs.readFileSync(file, 'utf-8'))
-  } catch {
-    // start from an empty config when the file is missing or invalid
+    raw = fs.readFileSync(file, 'utf-8')
+  } catch (error) {
+    // Only a missing file means start fresh; anything else is the user's file to keep.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `${label} could not be read; the style applies to this session only`
+  }
+  let config: Record<string, unknown> = {}
+  if (raw !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed !== null && typeof parsed === 'object') config = parsed as Record<string, unknown>
+    } catch {
+      return `${label} is not valid JSON; the style applies to this session only`
+    }
   }
   config.outputStyle = name
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`)
+  atomicWriteFile(file, `${JSON.stringify(config, null, 2)}\n`)
+  return undefined
 }
 
 export default function outputStylesExtension(pi: ExtensionAPI) {
@@ -236,8 +252,8 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
           return
         }
         activeName = picked.name
-        persistActiveStyle(localSettingsPath, picked.name)
-        ctx.ui.notify(`Output style set to ${picked.name} (applies next turn)`, 'info')
+        const failure = persistActiveStyle(localSettingsPath, picked.name)
+        ctx.ui.notify(failure ?? `Output style set to ${picked.name} (applies next turn)`, failure ? 'error' : 'info')
         return
       }
       if (!ctx.hasUI) {
@@ -253,8 +269,8 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
       if (!choice) return
       const picked = styles[labels.indexOf(choice)]
       activeName = picked.name
-      persistActiveStyle(localSettingsPath, picked.name)
-      ctx.ui.notify(`Output style set to ${picked.name} (applies next turn)`, 'info')
+      const failure = persistActiveStyle(localSettingsPath, picked.name)
+      ctx.ui.notify(failure ?? `Output style set to ${picked.name} (applies next turn)`, failure ? 'error' : 'info')
     },
   })
 }

@@ -14,6 +14,7 @@ import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
 import { type ExtensionAPI, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
+import { atomicWriteFile } from './internal/atomic-write.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
@@ -320,14 +321,6 @@ function readIndexQuietly(dir: string): string {
   } catch {
     return ''
   }
-}
-
-/** Write through a temp file and rename onto the target, so a crash mid-write cannot
- * truncate it. The tmp name carries the pid so concurrent processes do not collide. */
-function atomicWriteFile(filePath: string, content: string): void {
-  const tmp = `${filePath}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, content)
-  fs.renameSync(tmp, filePath)
 }
 
 /** Replace the index through a rename so a crash mid-write cannot truncate it. */

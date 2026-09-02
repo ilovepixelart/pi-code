@@ -228,6 +228,35 @@ describe('extension wiring', () => {
     expect(notes.some((n) => n.includes('requires interactive mode'))).toBe(true)
   })
 
+  it('refuses to overwrite a settings file it cannot parse', async () => {
+    // settings.local.json also carries permissions, hooks and env. Starting from an empty
+    // object on a parse failure replaced all of that with the style choice alone.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    const invalid = '{"permissions":{"allow":["Bash(npm test)"]},}'
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), invalid)
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: Array<{ text: string; level: string }> = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: (text: string, level: string) => notes.push({ text, level }), confirm: async () => true, select: async () => undefined },
+    }
+    await handlers.get('session_start')?.({}, ctx)
+
+    await commands.get('output-style')?.handler('proactive', ctx)
+
+    expect(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8')).toBe(invalid)
+    expect(notes.at(-1)?.level).toBe('error')
+    expect(notes.at(-1)?.text).toContain('not valid JSON')
+  })
+
   it('sets a style directly when /output-style is given a name', async () => {
     const cwd = projectWithStyle('Explain', 'Explain everything.')
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
