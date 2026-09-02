@@ -395,7 +395,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
 
       const killGroup = (sig: NodeJS.Signals): void => {
         try {
-          process.kill(-proc.pid!, sig)
+          // A child that never spawned has no pid and no group; the direct kill is all there is.
+          if (proc.pid) process.kill(-proc.pid, sig)
+          else proc.kill(sig)
         } catch {
           try {
             proc.kill(sig)

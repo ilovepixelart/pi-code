@@ -217,38 +217,26 @@ describe('loadUserScope', () => {
 })
 
 describe('mcp adapter helpers', () => {
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
   it('interpolates ${VAR} from the environment', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what interpolateEnv parses
     expect(interpolateEnv('Bearer ${TOKEN}', { TOKEN: 'abc' } as NodeJS.ProcessEnv)).toBe('Bearer abc')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: a set-but-empty variable still expands to empty
     expect(interpolateEnv('${EMPTY}', { EMPTY: '' } as NodeJS.ProcessEnv)).toBe('')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: a default is used when the variable is unset
     expect(interpolateEnv('${MISSING:-fallback}', {} as NodeJS.ProcessEnv)).toBe('fallback')
   })
 
   it('keeps a missing ${VAR} literal and reports it rather than silently emptying', () => {
     const missing: string[] = []
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: exercising the unset-no-default path
     const out = interpolateEnv('Bearer ${TOKEN}', {} as NodeJS.ProcessEnv, (name) => missing.push(name))
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is preserved so the failure is visible, not a blank Bearer
     expect(out).toBe('Bearer ${TOKEN}')
     expect(missing).toEqual(['TOKEN'])
   })
 
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR:-default} syntax Claude's .mcp.json supports
   it('expands ${VAR:-default} to the fallback when unset or empty, like shell :-', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal syntax under test
     expect(interpolateEnv('${MISSING:-fallback}', {} as NodeJS.ProcessEnv)).toBe('fallback')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
     expect(interpolateEnv('${SET:-fallback}', { SET: 'real' } as NodeJS.ProcessEnv)).toBe('real')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
     expect(interpolateEnv('${MISSING:-}', {} as NodeJS.ProcessEnv)).toBe('')
     // Shell :- substitutes on unset OR empty, and this syntax borrows shell's.
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
     expect(interpolateEnv('${EMPTY:-fallback}', { EMPTY: '' } as NodeJS.ProcessEnv)).toBe('fallback')
     // A bare reference to a set-but-empty variable stays empty.
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
     expect(interpolateEnv('${EMPTY}', { EMPTY: '' } as NodeJS.ProcessEnv)).toBe('')
   })
 

@@ -279,7 +279,9 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   run.live = true
   const killGroup = (signal: NodeJS.Signals): void => {
     try {
-      process.kill(-proc.pid!, signal)
+      // A child that never spawned has no pid and no group; the direct kill is all there is.
+      if (proc.pid) process.kill(-proc.pid, signal)
+      else proc.kill(signal)
     } catch {
       try {
         proc.kill(signal)
