@@ -12,6 +12,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { isRecord } from './values.js'
+
 /** The OS managed-settings.json path Claude Code documents per platform. */
 export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json'
@@ -42,16 +44,12 @@ function readOneSettingsFile(file: string): Record<string, unknown> {
   return {}
 }
 
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 /** Claude's managed-settings.d merge rules: a later single value replaces, lists
  * combine with duplicates removed, and nested blocks merge key by key with each
  * key following these same rules. */
 function mergeManagedKey(base: unknown, next: unknown): unknown {
   if (Array.isArray(base) && Array.isArray(next)) return [...new Set([...base, ...next])]
-  if (isRecordValue(base) && isRecordValue(next)) {
+  if (isRecord(base) && isRecord(next)) {
     const merged: Record<string, unknown> = { ...base }
     for (const [key, value] of Object.entries(next)) merged[key] = key in merged ? mergeManagedKey(merged[key], value) : value
     return merged

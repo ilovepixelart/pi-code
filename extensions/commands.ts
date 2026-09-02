@@ -44,7 +44,8 @@ import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { matchesBashRules } from './internal/bash-rules.js'
-import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, type PathRuleTool, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { type DiscoveredCommand, discoverCommandFiles, type ParsedCommand, type PathRuleTool, parseCommandFile, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { type CommandExec, expandDynamicContent, resolvePowershellBinary, spanExec } from './internal/command-spans.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
@@ -55,6 +56,7 @@ import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { createTurnOverride } from './internal/turn-override.js'
+import { errorMessage, isDirectory } from './internal/values.js'
 
 /** Just enough of pi's Model to match and restore; getAvailable returns these. */
 interface ModelLike {
@@ -103,14 +105,6 @@ interface VarContext {
   thinkingLevel?: string
   model?: ModelLike
   modelRegistry?: { getAvailable(): ReadonlyArray<ModelLike> }
-}
-
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory()
-  } catch {
-    return false
-  }
 }
 
 /** Existing `.claude/commands` directories in Claude's precedence order (later
@@ -328,7 +322,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
       // A refused switch leaves the turn on the session model rather than the one the
       // command named, and the reply gives no sign of it, so the refusal is reported.
       void pi.setModel(model as Parameters<typeof pi.setModel>[0]).catch((error: unknown) => {
-        console.warn(`pi-code-commands: could not switch to ${typeof model === 'object' && model !== null && 'id' in model ? String((model as { id: unknown }).id) : String(model)}: ${error instanceof Error ? error.message : String(error)}`)
+        console.warn(`pi-code-commands: could not switch to ${typeof model === 'object' && model !== null && 'id' in model ? String((model as { id: unknown }).id) : String(model)}: ${errorMessage(error)}`)
       })
     },
   })
@@ -455,7 +449,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     } catch (error) {
       // A failed injected command aborts the invocation; the model never sees a
       // half-expanded body. The notify carries Claude's failure message format.
-      ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
+      ctx.ui.notify(errorMessage(error), 'error')
       return
     }
 
@@ -513,7 +507,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
         // An unreadable file must not take down session start, but the command is then
         // absent from /help and unresolvable by the model, which looks like one that was
         // never written.
-        console.warn(`pi-code-commands: ignoring ${command.filePath}: ${error instanceof Error ? error.message : String(error)}`)
+        console.warn(`pi-code-commands: ignoring ${command.filePath}: ${errorMessage(error)}`)
         continue
       }
       discovered.set(command.name, command)

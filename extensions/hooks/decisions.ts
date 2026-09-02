@@ -6,8 +6,9 @@
 
 import type { ToolCallEventResult } from '@earendil-works/pi-coding-agent'
 import type { PathAnchors } from '../internal/path-rules.js'
+import { errorMessage, isRecord } from '../internal/values.js'
 import { claudeToolInput, claudeToolName, piToolInput } from './claude-tools.js'
-import { type HookCommand, type HooksConfig, isRecord } from './config.js'
+import type { HookCommand, HooksConfig } from './config.js'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
 import { type HookRunner, type HookRunResult, timeoutMs } from './runners.js'
 
@@ -63,7 +64,7 @@ export function hookJsonError(text: string): string | undefined {
     JSON.parse(trimmed)
     return undefined
   } catch (error) {
-    parseError = error instanceof Error ? error.message : String(error)
+    parseError = errorMessage(error)
   }
   const lines = trimmed
     .split('\n')

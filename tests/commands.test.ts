@@ -15,8 +15,8 @@ vi.mock('node:os', async (importOriginal) => {
 })
 // The resolver seam: these tests must not depend on pwsh being installed, so the
 // binary lookup is stubbed while everything else in the module stays real.
-vi.mock('../extensions/internal/command-file.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../extensions/internal/command-file.js')>()
+vi.mock('../extensions/internal/command-spans.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../extensions/internal/command-spans.js')>()
   return { ...actual, resolvePowershellBinary: () => hoisted.pwshBinary }
 })
 

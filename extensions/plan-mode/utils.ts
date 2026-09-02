@@ -120,6 +120,37 @@ export interface TodoItem {
   completed: boolean
 }
 
+/** The plan state persisted in a session entry, once each field has been checked.
+ * A field the restore cannot recognize is simply absent, so the caller keeps its
+ * current value. */
+export interface RestoredPlanState {
+  enabled?: boolean
+  todos?: TodoItem[]
+  executing?: boolean
+  savedTools?: string[]
+}
+
+const isTodoItem = (value: unknown): value is TodoItem => {
+  if (value === null || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return typeof item.step === 'number' && typeof item.text === 'string' && typeof item.completed === 'boolean'
+}
+
+/** Read a persisted plan-mode entry, keeping only fields of the expected shape.
+ * The session file is data on disk, and `savedTools` feeds the active tool set: a
+ * string there would be spread character by character into the tool gating, and a
+ * non-array `todos` throws on the first restore that iterates it. */
+export function restoredPlanState(data: unknown): RestoredPlanState {
+  if (data === null || typeof data !== 'object') return {}
+  const raw = data as Record<string, unknown>
+  const state: RestoredPlanState = {}
+  if (typeof raw.enabled === 'boolean') state.enabled = raw.enabled
+  if (typeof raw.executing === 'boolean') state.executing = raw.executing
+  if (Array.isArray(raw.todos) && raw.todos.every(isTodoItem)) state.todos = raw.todos
+  if (Array.isArray(raw.savedTools) && raw.savedTools.every((tool) => typeof tool === 'string')) state.savedTools = raw.savedTools
+  return state
+}
+
 function cleanStepText(text: string): string {
   let cleaned = text
     .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1') // Remove bold/italic

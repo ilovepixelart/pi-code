@@ -1,6 +1,6 @@
 # Custom slash commands
 
-Registers `.claude/commands/**/*.md` as slash commands with Claude's command contract. Source: [`extensions/commands.ts`](../extensions/commands.ts) and [`extensions/internal/command-file.ts`](../extensions/internal/command-file.ts).
+Registers `.claude/commands/**/*.md` as slash commands with Claude's command contract. Source: [`extensions/commands.ts`](../extensions/commands.ts), [`extensions/internal/command-file.ts`](../extensions/internal/command-file.ts) for parsing, and [`extensions/internal/command-spans.ts`](../extensions/internal/command-spans.ts) for the `!` and `@` bodies.
 
 ## Naming and arguments
 

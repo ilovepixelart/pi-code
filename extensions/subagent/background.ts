@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { errorMessage } from '../internal/values.js'
 
 export interface BackgroundRun {
   id: string
@@ -245,7 +246,7 @@ function withRebuiltPrompt(spawnSpec: BackgroundSpawn, agent: string): { args: s
     // prompt text, which would replace the agent persona with a temp path. The child then
     // runs as a plain assistant instead of the agent asked for, and nothing in its output
     // says so, hence the notice.
-    console.warn(`pi-code-subagent: resuming ${agent} without its agent prompt: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(`pi-code-subagent: resuming ${agent} without its agent prompt: ${errorMessage(error)}`)
     return { args: spawnSpec.args.filter((_arg, i) => i !== flag && i !== flag + 1) }
   }
 }

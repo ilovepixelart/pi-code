@@ -5,7 +5,8 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { commandNameFor, discoverCommandFiles, expandDynamicContent, normalizeToolName, parseCommandFile, powershellQuote, resolvePowershellBinary, spanExec, substituteArgs, substituteArgsDetailed, substituteVars } from '../extensions/internal/command-file.ts'
+import { commandNameFor, discoverCommandFiles, normalizeToolName, parseCommandFile, substituteArgs, substituteArgsDetailed, substituteVars } from '../extensions/internal/command-file.ts'
+import { expandDynamicContent, powershellQuote, resolvePowershellBinary, spanExec } from '../extensions/internal/command-spans.ts'
 
 const dirs: string[] = []
 const tempDir = (): string => {
@@ -634,7 +635,7 @@ describe('dollar signs stay literal', () => {
 describe('powershell exit-1 carveout set', () => {
   it('uses the PowerShell carveout set: grep and git diff yes, find and diff no', async () => {
     // Claude: the powershell set "includes grep and git diff but not find or diff".
-    const { benignExitOne } = await import('../extensions/internal/command-file.ts')
+    const { benignExitOne } = await import('../extensions/internal/command-spans.ts')
     expect(benignExitOne('grep foo bar', 'powershell')).toBe(true)
     expect(benignExitOne('git diff HEAD', 'powershell')).toBe(true)
     expect(benignExitOne('find . -name x', 'powershell')).toBe(false)

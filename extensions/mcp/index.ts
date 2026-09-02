@@ -44,6 +44,7 @@ import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
+import { errorMessage } from '../internal/values.js'
 import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
@@ -272,7 +273,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             // streaming, so mid-stream invocations queue as a follow-up turn.
             pi.sendUserMessage(content, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
           } catch (error) {
-            ctx.ui.notify(`${commandName}: ${error instanceof Error ? error.message : String(error)}`, 'error')
+            ctx.ui.notify(`${commandName}: ${errorMessage(error)}`, 'error')
           }
         },
       })
@@ -286,7 +287,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     try {
       registerPrompts(name, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
     } catch (error) {
-      console.warn(`pi-code-mcp: prompt listing failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+      console.warn(`pi-code-mcp: prompt listing failed for ${name}: ${errorMessage(error)}`)
     }
   }
 
@@ -298,7 +299,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         try {
           registerPrompts(name, await withTimeout(listAllPrompts(client), connectTimeoutMs(), `list prompts ${name}`))
         } catch (error) {
-          console.warn(`pi-code-mcp: prompt refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+          console.warn(`pi-code-mcp: prompt refresh failed for ${name}: ${errorMessage(error)}`)
         }
       })
     } catch {
@@ -386,7 +387,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           status.set(name, { state: current?.state ?? 'connected', tools: serverToolCount(name) })
           pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
         } catch (error) {
-          console.warn(`pi-code-mcp: tool refresh failed for ${name}: ${error instanceof Error ? error.message : String(error)}`)
+          console.warn(`pi-code-mcp: tool refresh failed for ${name}: ${errorMessage(error)}`)
         }
       })
     } catch {
@@ -445,7 +446,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             if (!shuttingDown && !serverCallTuning(config).stdio) void reconnectWithBackoff(name, config)
           }
         } catch (error) {
-          status.set(name, { state: `failed: ${error instanceof Error ? error.message : String(error)}`, tools: 0 })
+          status.set(name, { state: `failed: ${errorMessage(error)}`, tools: 0 })
           // Connected but failed after (tool listing hung or errored): left in the
           // map, the client idles its process for the whole session and the
           // duplicate-name guard blocks the name for every later attempt.

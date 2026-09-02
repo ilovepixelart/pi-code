@@ -7,6 +7,7 @@
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { FileOAuthProvider, type OAuthServerConfig, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.js'
+import { errorMessage } from '../internal/values.js'
 import { type AuthUi, connectWithTimeout, isUnauthorized, type MakeTransport, OAuthRequiredError } from './transport.js'
 
 /** Browser logins are human-paced; a connect-sized timeout would cut them off. */
@@ -16,7 +17,7 @@ const OAUTH_FLOW_TIMEOUT_MS = 180_000
  * unchanged so its message is not doubled. */
 function asOAuthRequiredError(name: string, error: unknown): OAuthRequiredError {
   if (error instanceof OAuthRequiredError) return error
-  const detail = error instanceof Error ? error.message : String(error)
+  const detail = errorMessage(error)
   return new OAuthRequiredError(`login for ${name} failed: ${detail}`)
 }
 

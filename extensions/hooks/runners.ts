@@ -11,6 +11,7 @@ import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
 import { completeText } from '../internal/model-complete.js'
 import { resolveShell } from '../internal/shell-resolve.js'
+import { errorMessage } from '../internal/values.js'
 import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
 
 // Claude's defaults vary by type and event (600s for command/http/mcp_tool, 30s
@@ -228,7 +229,7 @@ export async function runHttpHook(hook: { type?: string; command: string; url?: 
     // event fails closed on it, exactly as a command hook that ran out of time does: the
     // hook never answered, whichever transport it used.
     const name = error instanceof Error ? error.name : ''
-    return { code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: name === 'TimeoutError' || name === 'AbortError' }
+    return { code: 1, stdout: '', stderr: errorMessage(error), timedOut: name === 'TimeoutError' || name === 'AbortError' }
   }
 }
 
@@ -262,7 +263,7 @@ function substituteArguments(prompt: string | undefined, payload: unknown): stri
  * produced no verdict and is non-blocking. */
 function abortAwareFailure(signal: AbortSignal, error: unknown): HookRunResult {
   const aborted = signal.aborted || (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
-  return { code: aborted ? TIMEOUT_EXIT_CODE : 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: aborted }
+  return { code: aborted ? TIMEOUT_EXIT_CODE : 1, stdout: '', stderr: errorMessage(error), timedOut: aborted }
 }
 
 export async function runPromptHook(hook: HookCommand, payload: unknown, model: Model<Api> | undefined, timeoutMs: number): Promise<HookRunResult> {
@@ -328,7 +329,7 @@ export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeou
   })
   const call = callMcpTool(hook.server, hook.tool, input)
     .then((result): HookRunResult => ({ code: result.isError ? 1 : 0, stdout: result.text, stderr: '', timedOut: false }))
-    .catch((error): HookRunResult => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: false }))
+    .catch((error): HookRunResult => ({ code: 1, stdout: '', stderr: errorMessage(error), timedOut: false }))
   try {
     return await Promise.race([call, deadline])
   } finally {

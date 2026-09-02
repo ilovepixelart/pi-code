@@ -36,15 +36,11 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+import { isRecord } from './internal/values.js'
 
 /** The `env` object of one settings scope, coerced to string values. A string is kept
  * as-is, a number or boolean becomes its String() form, and anything else (object,

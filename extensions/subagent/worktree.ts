@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { promisify } from 'node:util'
+import { errorMessage } from '../internal/values.js'
 
 const git = async (cwd: string, ...args: string[]): Promise<string> => {
   const { stdout } = await promisify(execFile)('git', args, { cwd })
@@ -61,7 +62,7 @@ export async function createAgentWorktree(repoCwd: string, agentName: string): P
     await git(repoCwd, 'worktree', 'add', '-b', branch, dir, await defaultBranch(repoCwd))
     return { dir, branch, baseSha: await git(dir, 'rev-parse', 'HEAD') }
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
+    return { error: errorMessage(error) }
   }
 }
 

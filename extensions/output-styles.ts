@@ -24,13 +24,13 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.js'
-
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
+import { isDirectory } from './internal/values.js'
 
 export interface OutputStyle {
   name: string
@@ -85,14 +85,6 @@ export function applyStyle(systemPrompt: string, style: OutputStyle): string {
     if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
   }
   return `${systemPrompt}\n\n${styleSection}`
-}
-
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory()
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -159,13 +151,8 @@ export function settingsFiles(cwd: string, home: string, trusted: boolean): stri
 export function readActiveStyleName(files: string[], managed: Record<string, unknown> = readManagedSettings()): string | undefined {
   if (typeof managed.outputStyle === 'string') return managed.outputStyle
   let name: string | undefined
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (typeof settings.outputStyle === 'string') name = settings.outputStyle
-    } catch {
-      // missing or invalid file: skip
-    }
+  for (const settings of readSettingsChain(files)) {
+    if (typeof settings.outputStyle === 'string') name = settings.outputStyle
   }
   return name
 }

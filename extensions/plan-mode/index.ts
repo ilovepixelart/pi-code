@@ -19,7 +19,7 @@ import { Key } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 
 import { PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
-import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, type TodoItem } from './utils.js'
+import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, restoredPlanState, type TodoItem } from './utils.js'
 
 // Tools
 const PLAN_MODE_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete']
@@ -433,14 +433,14 @@ After completing a step, include a [DONE:n] tag in your response.`,
     // rewind past a plan it would resurrect the abandoned plan and its tool restriction.
     const entries = ctx.sessionManager.getBranch()
 
-    // Restore persisted state
-    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean; savedTools?: string[] } } | undefined
+    // Restore persisted state. The entry is JSON on disk, so every field is checked
+    // before it is used: savedTools reaches pi.setActiveTools.
+    const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: unknown } | undefined
+    const restored = restoredPlanState(planModeEntry?.data)
 
-    if (planModeEntry?.data) {
-      planModeEnabled = planModeEntry.data.enabled ?? planModeEnabled
-      todoItems = planModeEntry.data.todos ?? todoItems
-      executionMode = planModeEntry.data.executing ?? executionMode
-    }
+    planModeEnabled = restored.enabled ?? planModeEnabled
+    todoItems = restored.todos ?? todoItems
+    executionMode = restored.executing ?? executionMode
     publishPlanState()
 
     // On resume: re-scan messages after the last "plan-mode-execute" to rebuild
@@ -456,7 +456,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
       // across /reload and cost the session edit and write for good; applying the
       // snapshot when plan mode is off would instead push a stale set over whatever
       // pi has registered since, so it stays scoped to this branch.
-      savedTools = planModeEntry?.data?.savedTools ?? pi.getActiveTools()
+      savedTools = restored.savedTools ?? pi.getActiveTools()
       pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
       // --plan enters plan mode without ever toggling, so nothing has persisted yet
       // and a /reload would find no snapshot to restore from. Record it now, while

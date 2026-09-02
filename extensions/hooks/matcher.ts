@@ -6,6 +6,7 @@
 
 import { matchesBashIfFilter } from '../internal/bash-rules.js'
 import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
+import { errorMessage } from '../internal/values.js'
 import type { HookCommand, HookMatcher } from './config.js'
 
 /** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
@@ -62,7 +63,7 @@ function compileMatcher(matcher: string): CompiledMatcher {
     } catch (error) {
       // The fallback matches the literal text, which almost never matches a tool name, so
       // the hook simply never fires. Say so: the matcher reads as merely wrong otherwise.
-      console.warn(`pi-code-hooks: matcher ${matcher} is not a valid regular expression (${error instanceof Error ? error.message : String(error)}); it will only match a tool of that exact name`)
+      console.warn(`pi-code-hooks: matcher ${matcher} is not a valid regular expression (${errorMessage(error)}); it will only match a tool of that exact name`)
       compiled = { tokens: exactTokens(matcher) }
     }
   }

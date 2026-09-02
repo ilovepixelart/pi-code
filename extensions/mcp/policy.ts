@@ -9,6 +9,7 @@ import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import { managedSettingsFile } from '../internal/managed-settings.js'
 import { findNearestFile } from '../internal/project-root.js'
+import { errorMessage } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
 export interface ProjectServerPolicy {
@@ -151,7 +152,13 @@ export function urlPatternMatches(pattern: string, url: string): boolean {
   return wildcardRegExp(patternParts.path).test(urlParts.path ?? '/')
 }
 
-const configUrl = (config: ServerConfig): string | undefined => (config as { url?: string }).url
+/** A config file is user- or repo-written JSON, so any field can hold any value. Only a
+ * string `url` makes a server remote: a config that carries some other value there is
+ * still gated by its command, and no policy entry is evaluated against a non-string. */
+const configUrl = (config: ServerConfig): string | undefined => {
+  const url = (config as { url?: unknown }).url
+  return typeof url === 'string' ? url : undefined
+}
 const configArgv = (config: ServerConfig): string[] | undefined => {
   const command = (config as { command?: string }).command
   if (typeof command !== 'string') return undefined
@@ -227,7 +234,7 @@ export function loadManagedMcpServers(managedFile: string = managedSettingsFile(
   } catch (error) {
     // Present but corrupt: fail closed to an empty managed set, exactly like an empty map,
     // rather than reopening the user/project/plugin scopes.
-    console.warn(`pi-code-mcp: managed-mcp.json is present but not valid JSON (${file}); failing closed to no MCP servers: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(`pi-code-mcp: managed-mcp.json is present but not valid JSON (${file}); failing closed to no MCP servers: ${errorMessage(error)}`)
     return {}
   }
   if (parsed === null || typeof parsed !== 'object') return {}

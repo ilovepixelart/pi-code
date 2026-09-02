@@ -53,6 +53,21 @@ describe('applyServerPolicy', () => {
     expect(Object.keys(applyServerPolicy(servers, { allowed: names(['a', 'b']), denied: names(['b']) }))).toEqual(['a'])
   })
 
+  // A config file is user- or repo-written JSON, so `url` can be any JSON value. Only a
+  // string is a URL; anything else must leave the server classified by its command, or a
+  // serverCommand allowlist entry stops gating it.
+  it('classifies a stdio server whose url is not a string by its command', () => {
+    const servers = { tool: { command: 'node', args: ['server.js'], url: null } } as never
+    const allowed = [{ serverCommand: ['node', 'other.js'] }]
+    expect(Object.keys(applyServerPolicy(servers, { allowed, denied: [] }))).toEqual([])
+    expect(Object.keys(applyServerPolicy(servers, { allowed: [{ serverCommand: ['node', 'server.js'] }], denied: [] }))).toEqual(['tool'])
+  })
+
+  it('does not crash evaluating a url entry against a server whose url is not a string', () => {
+    const servers = { tool: { command: 'node', args: ['server.js'], url: 7 } } as never
+    expect(Object.keys(applyServerPolicy(servers, { allowed: null, denied: [{ serverUrl: 'https://*' }] }))).toEqual(['tool'])
+  })
+
   // Claude: "A server that matches any denylist entry, by URL, command, or name, is
   // blocked. Nothing overrides a denylist match."
   it('denies a remote server by serverUrl wildcard and keeps a non-matching one', () => {

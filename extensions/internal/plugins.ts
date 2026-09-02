@@ -15,9 +15,9 @@
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-
 import { claudeConfigDir } from './config-dir.js'
 import { readManagedSettings } from './managed-settings.js'
+import { errorMessage } from './values.js'
 
 export interface InstalledPlugin {
   name: string
@@ -43,7 +43,7 @@ function readJson(file: string): Record<string, unknown> {
   } catch (error) {
     // A manifest that does not parse leaves the plugin with no components at all, and
     // settings that do not parse drop the enablement or configuration they carried.
-    console.warn(`pi-code-plugins: ignoring ${file}: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(`pi-code-plugins: ignoring ${file}: ${errorMessage(error)}`)
     return {}
   }
 }

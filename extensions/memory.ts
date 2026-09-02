@@ -20,8 +20,9 @@ import { readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { repoRoot } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
+import { errorMessage } from './internal/values.js'
 
 export const INDEX_FILE = 'MEMORY.md'
 
@@ -152,7 +153,7 @@ export function migrateLegacyStore(cwd: string): void {
     } catch (error) {
       // A failed migration must not take down session start, but the session then has no
       // memories while they sit under the old slug, which reads as having lost them.
-      console.warn(`pi-code-memory: could not move ${legacy} to ${current}: ${error instanceof Error ? error.message : String(error)}; this session starts without those memories`)
+      console.warn(`pi-code-memory: could not move ${legacy} to ${current}: ${errorMessage(error)}; this session starts without those memories`)
     }
     return
   }
@@ -236,7 +237,7 @@ function readMemory(dir: string, name: string): MemoryToolResult {
     // Only a missing file is "no such memory"; anything else (a directory in its place, a
     // permission problem) sends the model hunting for a name that is actually there.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${error instanceof Error ? error.message : String(error)}` }], details: {} }
+      return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${errorMessage(error)}` }], details: {} }
     }
     return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
   }
@@ -257,7 +258,7 @@ async function deleteMemory(dir: string, indexPath: string, name: string): Promi
       return { content: [{ type: 'text', text: `Deleted memory ${name}.` }], details: {} }
     })
   } catch (error) {
-    return { content: [{ type: 'text', text: `Memory delete failed: ${error instanceof Error ? error.message : String(error)}. Nothing was deleted.` }], details: {} }
+    return { content: [{ type: 'text', text: `Memory delete failed: ${errorMessage(error)}. Nothing was deleted.` }], details: {} }
   }
 }
 
@@ -350,15 +351,9 @@ export function memorySettingsFiles(cwd: string, home: string, approved: boolean
  * managed policy settings win over every file, per Claude's settings precedence. */
 export function readMemorySettings(files: string[], managed: Record<string, unknown> = readManagedSettings()): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
   const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } = {}
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (settings === null || typeof settings !== 'object') continue
-      if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
-      if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
-    } catch {
-      // missing or invalid settings file: skip
-    }
+  for (const settings of readSettingsChain(files)) {
+    if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
+    if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
   }
   if ('autoMemoryEnabled' in managed) merged.autoMemoryEnabled = managed.autoMemoryEnabled
   if ('autoMemoryDirectory' in managed) merged.autoMemoryDirectory = managed.autoMemoryDirectory
@@ -478,7 +473,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           // Awaited here, not returned: the catch must see a queued write's rejection.
           return await saveMemory(dir, indexPath, name, params.description, params.content)
         } catch (error) {
-          return { content: [{ type: 'text' as const, text: `Memory save failed: ${error instanceof Error ? error.message : String(error)}. The index was left untouched.` }], details: {} }
+          return { content: [{ type: 'text' as const, text: `Memory save failed: ${errorMessage(error)}. The index was left untouched.` }], details: {} }
         } finally {
           indexCache = null
         }
@@ -520,7 +515,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         try {
           result = setAutoMemoryEnabledSetting(home, next)
         } catch (error) {
-          ctx.ui.notify(`Could not update auto memory: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          ctx.ui.notify(`Could not update auto memory: ${errorMessage(error)}`, 'error')
           return
         }
         if (!result.ok) {

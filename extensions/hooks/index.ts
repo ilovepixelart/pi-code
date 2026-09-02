@@ -109,6 +109,7 @@ import { watchSettingsFiles } from '../internal/settings-watch.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { setSubagentStartHookRunner } from '../internal/subagent-hooks.js'
+import { contentText } from '../internal/values.js'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeAgentEnvHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.js'
 import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
@@ -127,12 +128,7 @@ export function lastAssistantText(messages: ReadonlyArray<{ role: string; conten
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
     if (message.role !== 'assistant') continue
-    if (typeof message.content === 'string') return message.content
-    if (!Array.isArray(message.content)) return ''
-    return message.content
-      .filter((part): part is { type: 'text'; text: string } => typeof part === 'object' && part !== null && (part as { type?: unknown }).type === 'text')
-      .map((part) => part.text)
-      .join('')
+    return contentText(message.content)
   }
   return ''
 }
@@ -155,14 +151,6 @@ async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner:
   // Non-tool events: a hook carrying `if` never runs, as Claude documents.
   const runnable = commands.filter((command) => passesIfFilter(command, undefined))
   return await Promise.all(runnable.map((command) => runner(command, payload, timeoutMs(command))))
-}
-
-/** The text of a result's content blocks, for Claude-shaped tool_response fields. */
-function textContent(content: ReadonlyArray<{ type: string; text?: string }>): string {
-  return content
-    .filter((block) => block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text)
-    .join('\n')
 }
 
 /** pi's lifecycle vocabularies differ from Claude's documented ones. The matcher is
@@ -531,13 +519,13 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names).filter((command) => passesIfFilter(command, target))
     if (commands.length === 0 && pending.length === 0) return
     const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
-    const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, textContent(event.content), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
+    const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, contentText(event.content, '\n'), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
     const startedAt = toolStartTimes.get(event.toolCallId)
     toolStartTimes.delete(event.toolCallId)
     // Claude delivers a failure as top-level fields rather than a tool_response: "error
     // information as top-level fields ... error ... is_interrupt". is_interrupt is false
     // here because pi reports a cancelled tool through the result, not this event.
-    const failure = event.isError ? { error: textContent(event.content), is_interrupt: false } : { tool_response: response }
+    const failure = event.isError ? { error: contentText(event.content, '\n'), is_interrupt: false } : { tool_response: response }
     const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, ...failure, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))

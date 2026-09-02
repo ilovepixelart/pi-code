@@ -23,7 +23,6 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionContext, parseFrontmatter } from '@earendil-works/pi-coding-agent'
-
 import { expandCommand, shellExecutionDisabled } from './commands.js'
 import { runAgent } from './internal/agent-run.js'
 import { parseCommandFile } from './internal/command-file.js'
@@ -32,16 +31,9 @@ import { managedSettingsFile } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.js'
-
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory()
-  } catch {
-    return false
-  }
-}
+import { errorMessage, isDirectory, isRecord } from './internal/values.js'
 
 /** Existing `.claude/skills` directories, user first then project. The project
  * directory is included only for approved projects: pi's loader surfaces every skill's
@@ -136,13 +128,9 @@ export default function skillsExtension(pi: ExtensionAPI) {
  * (a pi-loader surface, noted in docs). */
 function skillOverrideFor(name: string, cwd: string, trusted: boolean): string | undefined {
   let value: string | undefined
-  for (const file of claudeSettingsChain(cwd, os.homedir(), trusted)) {
-    try {
-      const overrides = JSON.parse(fs.readFileSync(file, 'utf-8')).skillOverrides
-      if (overrides !== null && typeof overrides === 'object' && typeof overrides[name] === 'string') value = overrides[name]
-    } catch {
-      // missing or invalid file: skip
-    }
+  for (const settings of readSettingsChain(claudeSettingsChain(cwd, os.homedir(), trusted))) {
+    const overrides = settings.skillOverrides
+    if (isRecord(overrides) && typeof overrides[name] === 'string') value = overrides[name]
   }
   return value
 }
@@ -165,7 +153,7 @@ async function runForkedSkill(name: string, filePath: string, expanded: string, 
     const output = await runAgent({ prompt: expanded, fullTools: true, ...(agentName ? { agent: agentName } : {}) })
     return { action: 'transform', text: `<skill name="${name}" location="${filePath}">\nThe skill ran in a forked subagent (no conversation history shared). Its result:\n\n${output}\n</skill>` }
   } catch (error) {
-    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${error instanceof Error ? error.message : String(error)}\n</skill>` }
+    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${errorMessage(error)}\n</skill>` }
   }
 }
 
