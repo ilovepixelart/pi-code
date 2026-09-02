@@ -13,8 +13,6 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
-import { splitSegments } from './shell-split.js'
-import { type Fence, fenceMarker, stepFence } from './strip-comments.js'
 
 /** The pi file tools a Claude path rule can govern. */
 export type PathRuleTool = 'read' | 'edit' | 'write'
