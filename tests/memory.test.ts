@@ -14,7 +14,7 @@ vi.mock('node:os', async (importOriginal) => {
 // Records every readFileSync path (so the index-cache test can count index reads) and
 // every renameSync (so the atomic-write tests can assert a temp file was renamed onto
 // the target). The builtin namespace is not spyable either, so the module is wrapped like os.
-const fsHoisted = vi.hoisted(() => ({ reads: [] as string[], renames: [] as Array<[string, string]> }))
+const fsHoisted = vi.hoisted(() => ({ reads: [] as string[], renames: [] as Array<[string, string]>, renameError: undefined as string | undefined }))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
@@ -23,6 +23,9 @@ vi.mock('node:fs', async (importOriginal) => {
   }) as typeof actual.readFileSync
   const renameSync = ((...args: Parameters<typeof actual.renameSync>) => {
     fsHoisted.renames.push([String(args[0]), String(args[1])])
+    // A store move can fail for reasons no fixture reproduces portably (a cross-device
+    // rename, a permission problem), so the failure is injected here.
+    if (fsHoisted.renameError) throw new Error(fsHoisted.renameError)
     return actual.renameSync(...args)
   }) as typeof actual.renameSync
   return { ...actual, readFileSync, renameSync }
@@ -446,6 +449,29 @@ describe('memory extension', () => {
 })
 
 describe('migrateLegacyStore', () => {
+  it('reports a store it could not migrate rather than starting empty in silence', () => {
+    // The session then has no memories while they sit under the old slug, which reads as
+    // having lost them.
+    const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    hoisted.home = home
+    const cwd = '/proj/blocked'
+    const legacy = join(home, '.pi', 'agent', 'memory', '-proj-blocked')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'MEMORY.md'), '- [a](a.md): kept\n')
+    fsHoisted.renameError = 'EXDEV: cross-device link not permitted'
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      migrateLegacyStore(cwd)
+
+      expect(existsSync(legacy)).toBe(true)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(legacy))
+    } finally {
+      fsHoisted.renameError = undefined
+      warn.mockRestore()
+    }
+  })
+
   it('renames a pre-digest store to the current slug, once, without clobbering', () => {
     const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
     hoisted.home = home

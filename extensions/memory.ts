@@ -149,8 +149,10 @@ export function migrateLegacyStore(cwd: string): void {
     if (legacy === current || !fs.existsSync(legacy)) continue
     try {
       fs.renameSync(legacy, current)
-    } catch {
-      // A failed migration must not take down session start; the store stays put.
+    } catch (error) {
+      // A failed migration must not take down session start, but the session then has no
+      // memories while they sit under the old slug, which reads as having lost them.
+      console.warn(`pi-code-memory: could not move ${legacy} to ${current}: ${error instanceof Error ? error.message : String(error)}; this session starts without those memories`)
     }
     return
   }
@@ -230,7 +232,12 @@ function readMemory(dir: string, name: string): MemoryToolResult {
   try {
     const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
     return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
-  } catch {
+  } catch (error) {
+    // Only a missing file is "no such memory"; anything else (a directory in its place, a
+    // permission problem) sends the model hunting for a name that is actually there.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${error instanceof Error ? error.message : String(error)}` }], details: {} }
+    }
     return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
   }
 }
