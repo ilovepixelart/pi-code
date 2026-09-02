@@ -72,13 +72,14 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
 import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
-import { sliceBytes } from './internal/output-guard.js'
+import { capForContext, sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
-import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
+import { isGatedFileApproved, isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
+import { fileToolTarget } from './internal/tool-target.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
@@ -138,9 +139,12 @@ export interface ImportBudget {
   files: number
   bytes: number
   dropped: number
+  /** Existing files an @import named that resolve outside the importer's allowed
+   * roots. Collected so the refusal can be reported rather than left silent. */
+  refused: Set<string>
 }
 
-export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
+export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0, refused: new Set() })
 
 /** The `@path` targets of a context file, in document order. Claude Code evaluates
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
@@ -162,16 +166,28 @@ function importTargets(content: string): string[] {
 }
 
 /** Read one `@path` target, or null when it is unresolvable, already seen, outside `allowedRoots`, excluded, or unreadable. */
-function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded?: (realPath: string) => boolean): { real: string; body: string } | null {
+function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded: ((realPath: string) => boolean) | undefined, refused: Set<string>): { real: string; body: string } | null {
   const resolved = path.resolve(fromDir, expandHome(target, home))
+  // Always the path the importing file named, never where a symlink pointed: the
+  // notice would otherwise hand a repo the real name of whatever the link reaches,
+  // which is the disclosure the refusal exists to prevent. An excluded file is not
+  // named either, since exclusion removes it from every other surface too.
+  const refuse = (): null => {
+    if (isExcluded?.(resolved) !== true) refused.add(resolved)
+    return null
+  }
   let real: string
   try {
     real = fs.realpathSync(resolved)
   } catch {
-    return null
+    // Not on disk. Still refused when it points outside, so that whether a path is
+    // reported never depends on whether it exists: a notice that named only the
+    // existing ones would enumerate the filesystem for any repo-controlled file
+    // willing to write one @line per guess.
+    return isUnder(resolved, allowedRoots) ? null : refuse()
   }
   if (seen.has(real)) return null
-  if (!isUnder(real, allowedRoots)) return null
+  if (!isUnder(real, allowedRoots)) return refuse()
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
@@ -182,6 +198,9 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     // Only a consumed file dedupes: marking a blocked or unreadable target seen
     // would let one reader's failure suppress the import for a later, allowed one.
     seen.add(real)
+    // A file another importer already refused is in context after all; the notice
+    // must not claim otherwise.
+    refused.delete(resolved)
     return { real, body }
   } catch {
     return null
@@ -218,7 +237,7 @@ function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: 
       scan.budget.dropped += 1
       continue
     }
-    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded)
+    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded, scan.budget.refused)
     if (!file) continue
     scan.budget.files -= 1
     // The budget is bytes: a string slice counts UTF-16 units and lets CJK text through
@@ -497,6 +516,156 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
   return imported
 }
 
+/** Every context file that could load on demand for a touched directory, shallowest
+ * first, so the deepest instructions are read last as they are at launch. */
+function* nestedCandidates(touchedDir: string, realCwd: string): Generator<{ file: string; dir: string; name: string }> {
+  for (const dir of nestedContextDirs(touchedDir, realCwd)) {
+    for (const name of NESTED_CONTEXT_NAMES) yield { file: path.join(dir, name), dir, name }
+  }
+}
+
+/** Everything the on-demand load needs from the session and the tool call, grouped so
+ * the per-file worker stays a three-argument function. */
+interface NestedLoadContext {
+  home: string
+  cwd: string
+  realCwd: string
+  projectRoot: string
+  excludeGlobs: string[]
+  /** The file whose access triggered the load, for trigger_file_path. */
+  touched: string
+  /** Paths already in the system prompt, so a nested @import does not repeat one. */
+  launchLoaded: string[]
+}
+
+/** One nested context file's block and the instruction loads it should announce, or
+ * nothing to attach: absent, excluded, empty, or reaching outside the project. `read`
+ * reports whether the file was there at all, so a file that exists is only ever
+ * attached once while a missing one can still appear later in the session. */
+function nestedContextBlock(file: string, dir: string, load: NestedLoadContext): { read: boolean; text?: string; events?: InstructionLoadEvent[] } {
+  if (isExcludedPath(file, load.excludeGlobs, load.home)) return { read: false }
+  // The file itself may be a link out of the project, whatever its directory is.
+  const [real] = realRoots([file])
+  if (real === undefined || !isUnder(real, [load.realCwd])) return { read: false }
+  const content = readContextFile(real)
+  if (content === undefined) return { read: false }
+  const body = stripBlockComments(content).trim()
+  if (body.length === 0) return { read: true }
+  // Its own @imports resolve at project roots, on a budget of their own: this load is
+  // outside the launch-time expansion the shared budget covers. The launch-time paths
+  // seed the seen set, so a nested file importing the root CLAUDE.md does not pay for
+  // a body already in the system prompt.
+  const seen = new Set([...load.launchLoaded, real])
+  const imports = collectImports(content, dir, load.home, rootsForImporter(real, load.home, load.cwd), seen, {
+    importer: real,
+    isExcluded: (absPath) => isExcludedPath(absPath, load.excludeGlobs, load.home),
+    budget: createImportBudget(),
+  })
+  return {
+    read: true,
+    text: [instructionsBlock(file, body), ...imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)].join('\n\n'),
+    events: [
+      { file_path: file, memory_type: memoryTypeForPath(file, load.home, load.projectRoot), load_reason: 'nested_traversal', trigger_file_path: load.touched },
+      ...imports.map((entry) => ({
+        file_path: entry.path,
+        memory_type: memoryTypeForPath(entry.path, load.home, load.projectRoot),
+        load_reason: 'include',
+        parent_file_path: file,
+      })),
+    ],
+  }
+}
+
+/** The context files Claude loads on demand rather than at launch, in the order it
+ * reads them within a directory. */
+const NESTED_CONTEXT_NAMES = ['CLAUDE.md', 'CLAUDE.local.md'] as const
+
+/** The directories between a touched file and cwd, nearest cwd first.
+ *
+ * Claude loads CLAUDE.md from cwd and every directory above it at launch, and the
+ * ones below "are included when Claude reads files in those directories"
+ * (memory.md). Only the strictly-below range belongs here; cwd's own file is
+ * already in the prompt. A file outside cwd contributes nothing.
+ */
+function nestedContextDirs(from: string, cwd: string): string[] {
+  const dirs: string[] = []
+  let current = from
+  while (current !== cwd && current !== path.dirname(current)) {
+    dirs.unshift(current)
+    current = path.dirname(current)
+  }
+  // The walk reached the filesystem root without meeting cwd, so the file is outside
+  // it: nothing below cwd to load. A file in cwd itself ends the loop with no dirs.
+  return current === cwd ? dirs : []
+}
+
+/** The context-file names pi prefers over CLAUDE.md in the same directory. Mirrors
+ * pi's own lookup order (init.ts CONTEXT_FILE_CANDIDATES); the sibling search below
+ * keys off what pi actually loaded, so this is only used to recognize those files. */
+const AGENTS_FILE_NAMES = new Set(['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD'])
+
+/** The blocks and instruction loads for one touched directory. `loaded` is the
+ * session's set of already-attached files and is updated in place, so a file that
+ * exists is attached once and a missing one can still appear later. */
+function nestedContextAttachments(touchedDir: string, load: NestedLoadContext, loaded: Set<string>, localsApproved: boolean): { bodies: string[]; events: InstructionLoadEvent[] } {
+  const bodies: string[] = []
+  const events: InstructionLoadEvent[] = []
+  for (const { file, dir, name } of nestedCandidates(touchedDir, load.realCwd)) {
+    if (loaded.has(file)) continue
+    // A CLAUDE.local.md needs a decision, never the "nothing here to gate" shortcut:
+    // the approval walk only looks at or above cwd, so this is the one door it cannot
+    // see (see isGatedFileApproved).
+    if (name === 'CLAUDE.local.md' && !localsApproved) continue
+    const block = nestedContextBlock(file, dir, load)
+    if (block.read) loaded.add(file)
+    if (block.text === undefined) continue
+    bodies.push(block.text)
+    events.push(...(block.events ?? []))
+  }
+  return { bodies, events }
+}
+
+/** The CLAUDE.md files pi passed over.
+ *
+ * Claude Code reads CLAUDE.md and never AGENTS.md, and its documented recipe for a
+ * repository that already has an AGENTS.md is a CLAUDE.md that imports it and adds
+ * Claude-specific instructions below (memory.md, "AGENTS.md"). pi loads one context
+ * file per directory and prefers AGENTS.md, so on exactly that layout the
+ * Claude-specific half never reaches the prompt. Each one found here is loaded like
+ * any other project file: exclude-checked, comment-stripped, imports expanded.
+ *
+ * The `@AGENTS.md` the recipe opens with costs nothing: pi's own file paths already
+ * seed the import seen-set, so the body it names is not injected a second time. */
+function siblingClaudeMdFiles(native: Array<{ path: string; content: string }>): Array<{ path: string; content: string }> {
+  const loaded = new Set(realRoots(native.map((file) => file.path)))
+  const found: Array<{ path: string; content: string }> = []
+  for (const file of native) {
+    if (!AGENTS_FILE_NAMES.has(path.basename(file.path))) continue
+    // CLAUDE.md only: pi also answers to CLAUDE.MD, but Claude Code reads the one
+    // spelling, and on a case-insensitive filesystem looking for both finds the same
+    // file twice under two names.
+    const candidate = path.join(path.dirname(file.path), 'CLAUDE.md')
+    const [real] = realRoots([candidate])
+    if (real !== undefined && loaded.has(real)) continue
+    const content = readContextFile(candidate)
+    if (content === undefined) continue
+    found.push({ path: candidate, content })
+  }
+  return found
+}
+
+/** The CLAUDE.md files pi passed over, appended as project_instructions blocks in the
+ * ./CLAUDE.md slot, ahead of the ./.claude/CLAUDE.md alternate and the locals. */
+function siblingClaudeMdAddition(siblings: Array<{ path: string; content: string }>, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
+  let addition = ''
+  for (const sibling of siblings) {
+    if (sibling.content.trim().length === 0) continue
+    announce({ file_path: sibling.path, memory_type: memoryTypeForPath(sibling.path, home, projectRoot), load_reason: 'session_start' })
+    addition += `\n\n${instructionsBlock(sibling.path, sibling.content.trim())}`
+  }
+  return addition
+}
+
 /** The project-scope ./.claude/CLAUDE.md appended as a project_instructions block,
  * announced as it is added (only when non-empty, matching what reaches the prompt).
  * Claude reads project instructions from ./CLAUDE.md OR ./.claude/CLAUDE.md; pi loads
@@ -535,6 +704,19 @@ function additionalDirsAddition(extras: Array<{ path: string; content: string; d
 /** The `## Imported context (@)` section for every resolved @import, with the
  * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
  * was imported. */
+/** The refusal notice: every existing file an @import named that its importer may not
+ * reach. Claude asks about these through an approval dialog and loads the ones you
+ * allow; pi-code refuses them, and this is what says so. Silence was the real defect:
+ * the importing file looks loaded and its instructions are simply not there. */
+function refusedImportsAddition(refused: Set<string>): string {
+  if (refused.size === 0) return ''
+  const list = [...refused]
+    .sort((a, b) => a.localeCompare(b, 'en'))
+    .map((file) => `- ${file}`)
+    .join('\n')
+  return `\n\n## Imports not loaded (@)\n\nThese files resolve outside what the file importing them may read, so their contents are not in context:\n\n${list}`
+}
+
 function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
   if (imported.length === 0) return ''
   const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')
@@ -613,9 +795,19 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // natively but not this one; repo-controlled, so it is approval-gated like the
   // locals and read once at session start.
   let projectDotClaude: { path: string; content: string } | undefined
+  // Whether a file that is itself the thing to gate may be read. Decided at session
+  // start like the flag below, from the session context, which is where the trust
+  // capability lives; a tool_result context carries no approval state.
+  let gatedFilesApproved = false
   // Whether project settings may contribute claudeMdExcludes; decided at session
   // start with the silent check, so no prompt fires mid-flight.
   let projectApproved = false
+  // Every context file the last turn put in the system prompt, so a nested file's
+  // @import cannot pay for a body that is already there.
+  let launchLoadedPaths: string[] = []
+  // Nested CLAUDE.md/CLAUDE.local.md files already attached this session, so a second
+  // read in the same subtree does not repeat them.
+  const nestedLoaded = new Set<string>()
   // Instruction loads already announced on the shared bus, keyed reason:path.
   // before_agent_start fires every turn, so without this a configured
   // InstructionsLoaded hook would fire once per file per turn.
@@ -660,6 +852,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     memoKey: string,
     native: Array<{ path: string; content: string }>,
     contextFiles: Array<{ path: string; content: string }>,
+    siblings: Array<{ path: string; content: string }>,
     home: string,
     cwd: string,
     excluded: (absPath: string) => boolean,
@@ -672,7 +865,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // files are never re-imported and an excluded file cannot return as an import.
     // The user, project-.claude and managed-file additions join the seed too, so a
     // context file's @import cannot pull any of them in a second time.
-    const ownPaths = [...native, ...localContexts].map((file) => file.path)
+    const ownPaths = [...native, ...localContexts, ...siblings].map((file) => file.path)
     if (userContext !== undefined) ownPaths.push(userContext.path)
     if (projectDotClaude !== undefined) ownPaths.push(projectDotClaude.path)
     ownPaths.push(managedClaudeMdPath())
@@ -749,6 +942,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     }
     // Read after the local-context flow so an approval it just recorded is honored.
     projectApproved = isProjectApprovedSilently(ctx)
+    gatedFilesApproved = isGatedFileApproved(ctx)
   })
 
   pi.on('before_agent_start', async (event) => {
@@ -792,33 +986,75 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
 
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
 
+    // Repo-controlled text, so gated on the same approval as the locals and the
+    // ./.claude/CLAUDE.md; read here rather than at session start because only the
+    // turn's contextFiles say which file pi actually chose per directory.
+    const keptSiblings = (projectApproved ? siblingClaudeMdFiles(native) : []).filter((sibling) => !excluded(sibling.path)).map((sibling) => ({ path: sibling.path, content: stripBlockComments(sibling.content) }))
+
     // ./.claude/CLAUDE.md, deduped against pi's native context so that if pi ever
     // loads it too there is no double block, then exclude-checked and comment-stripped
     // like the rest. Its @imports resolve at project roots (rootsForImporter).
     const nativeReal = new Set(realRoots(native.map((file) => file.path)))
     const [dotReal] = projectDotClaude !== undefined ? realRoots([projectDotClaude.path]) : []
-    const keptProjectDotClaude = projectDotClaude !== undefined && !(dotReal !== undefined && nativeReal.has(dotReal)) && !excluded(projectDotClaude.path) ? { path: projectDotClaude.path, content: stripBlockComments(projectDotClaude.content) } : undefined
+    const siblingReal = new Set(realRoots(keptSiblings.map((sibling) => sibling.path)))
+    const keptProjectDotClaude = projectDotClaude !== undefined && !(dotReal !== undefined && (nativeReal.has(dotReal) || siblingReal.has(dotReal))) && !excluded(projectDotClaude.path) ? { path: projectDotClaude.path, content: stripBlockComments(projectDotClaude.content) } : undefined
 
     // The user CLAUDE.md and ./.claude/CLAUDE.md join the import-expansion set so their
     // @imports resolve (each at roots scoped to it, via rootsForImporter); their own
     // bodies are placed separately, so expansion only surfaces what they import.
-    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
+    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...keptSiblings, ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
 
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
     const memoKey = buildImportMemoKey({ cwd, home, projectApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
 
-    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, home, cwd, excluded)
+    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, keptSiblings, home, cwd, excluded)
+    launchLoadedPaths = realRoots([...contextFiles.map((file) => file.path), ...imported.map((entry) => entry.path)])
 
     // Project memory precedes local memory, so the ./.claude/CLAUDE.md block leads the
     // additions, ahead of the CLAUDE.local.md bodies.
-    let addition = projectContextAddition(keptProjectDotClaude, home, projectRoot, announce)
+    let addition = siblingClaudeMdAddition(keptSiblings, home, projectRoot, announce)
+    addition += projectContextAddition(keptProjectDotClaude, home, projectRoot, announce)
     addition += localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)
     addition += importedAddition(imported, budget, home, projectRoot, announce)
+    addition += refusedImportsAddition(budget.refused)
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }
+  })
+
+  // Claude's nested traversal: CLAUDE.md and CLAUDE.local.md below the working
+  // directory are not loaded at launch but "are included when Claude reads files in
+  // those subdirectories" (memory.md). pi's loader stops at cwd, so the whole
+  // below-cwd range is missing; this attaches each one to the tool result that
+  // touched its directory, which is the same seam claude-rules uses for a scoped
+  // rule. Once per file per session, ordered shallowest first so the deepest
+  // instructions are read last, matching the launch-time ordering.
+  pi.on('tool_result', async (event, ctx) => {
+    const rel = fileToolTarget(event)
+    if (rel === undefined) return
+    // Repo-controlled text, gated like every other project file this extension adds.
+    if (!projectApproved) return
+    // Realpath both sides: the walk below is lexical, so a symlinked subdirectory
+    // would otherwise carry it straight out of the project.
+    const [realCwd = ctx.cwd] = realRoots([ctx.cwd])
+    const touched = path.resolve(ctx.cwd, rel)
+    // The directory, not the file: a write creates its target, and a read of a path
+    // that has since moved should still contribute what its directory holds.
+    const [touchedDir] = realRoots([path.dirname(touched)])
+    if (touchedDir === undefined) return
+
+    const home = os.homedir()
+    const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
+    const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, home, projectApproved), readManagedSettings())
+    const load: NestedLoadContext = { home, cwd: ctx.cwd, realCwd, projectRoot, excludeGlobs, touched, launchLoaded: launchLoadedPaths }
+    const { bodies, events } = nestedContextAttachments(touchedDir, load, nestedLoaded, gatedFilesApproved)
+    for (const loaded of events) announce(loaded)
+    if (bodies.length === 0) return
+    // Capped like every other tool output: one read in a deep subtree must not be
+    // able to spend the context window on memory files.
+    return { content: [...event.content, { type: 'text' as const, text: capForContext(bodies.join('\n\n')) }] }
   })
 }

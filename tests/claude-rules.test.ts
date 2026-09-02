@@ -149,6 +149,17 @@ describe('extension wiring', () => {
 
   const injectedTexts = (result: unknown): string[] => ((result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []).map((block) => block.text ?? '')
 
+  it('attaches on the file_path spelling of the tool input as well as path', async () => {
+    // pi's edit and write tools accept file_path as an alias; a model that uses it
+    // would otherwise edit the file the rule governs and never see the rule.
+    const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+
+    const edited = await handlers.get('tool_result')?.({ toolName: 'edit', input: { file_path: 'db/schema.sql' }, content: [{ type: 'text', text: 'FILE BODY' }], isError: false }, { cwd })
+    expect(injectedTexts(edited).join('\n')).toContain('Use parameterized queries.')
+  })
+
   it('attaches a scoped project rule when a matching file is touched, once per session', async () => {
     const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
     const handlers = wire()
