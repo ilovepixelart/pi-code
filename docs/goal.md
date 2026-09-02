@@ -10,7 +10,7 @@ Claude Code's `/goal`: a completion condition the session keeps working toward w
 
 A `◎ goal <elapsed>` status appears in the footer while a goal is active.
 
-Headless, `pi -p "/goal <condition>"` runs the loop to completion in one invocation: the command holds the process open until the goal resolves or pauses. Use `--mode json` to watch each turn and verdict as they happen; the default text output prints nothing until the run ends.
+Headless, `pi -p "/goal <condition>"` runs the loop to completion in one invocation: the command holds the process open until the goal resolves or pauses, and every goal message (refusals, verdict warnings, status) is also printed to stderr since there is no notification surface. Use `--mode json` to watch each turn and verdict as they happen; the default text output prints nothing until the run ends.
 
 ## How evaluation works
 
@@ -26,7 +26,7 @@ Guards, each mirroring Claude's documented behavior:
 
 - **Block cap**: the Stop hooks' consecutive-block cap (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`, default 8, `0` disables) also bounds a goal. That many not-met verdicts in a row on turns that ran no tool pause the loop with a warning; the goal stays set and evaluation resumes after the next user prompt. A tool-using turn or a user prompt resets the count.
 - **Background work**: a turn that ends while a subagent is still running is not evaluated; the next turn that ends with none running is. A check-in turn is injected once the wait reaches `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` (30 by default, `0` turns check-ins off), listing the running subagents and asking the model to check on them; later check-ins wait twice as long each, up to four times the first interval, and at most three are started while idle between user prompts (a check-in that comes due mid-turn is delivered when that turn ends).
-- **Interrupts and errors**: a turn the user interrupted or that failed on an error is not evaluated. Once the run settles, an error you have to fix clears the goal with `Goal cleared after an unrecoverable error (<kind>)`: authentication, exhausted credits, a context overflow, or an unavailable model. Rate limits, overloads, and network errors leave the goal set.
+- **Interrupts and errors**: a turn the user interrupted or that failed on an error is not evaluated, and an interrupt during the evaluation cancels it with the goal left set. Once the run settles, an error you have to fix clears the goal with `Goal cleared after an unrecoverable error (<kind>)`: authentication, exhausted credits, a context overflow, or an unavailable model. Rate limits, overloads, and network errors leave the goal set.
 - **Evaluator failures**: no model, a provider error, a timeout (30 seconds), or an unreadable verdict end the turn with a warning and leave the goal set.
 
 ## Persistence

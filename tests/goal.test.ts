@@ -41,6 +41,7 @@ interface SetupOptions {
   model?: unknown
   idle?: boolean
   hasUI?: boolean
+  signal?: AbortSignal
   trusted?: boolean
   branch?: unknown[]
   available?: Array<{ id: string; name?: string }>
@@ -74,6 +75,7 @@ function setup(opts: SetupOptions = {}) {
   const ctx = {
     cwd: tempDir('goal-proj-'),
     hasUI: opts.hasUI ?? true,
+    signal: opts.signal,
     isIdle: () => idle,
     waitForIdle: () => {
       idleWaits += 1
@@ -263,6 +265,19 @@ describe('/goal command', () => {
     expect(settings.lastNote().msg).toMatch(/hooks are restricted/)
   })
 
+  it('prints a headless refusal to stderr, where notify has no surface', async () => {
+    const written: string[] = []
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk))
+      return true
+    })
+    const t = setup({ trusted: false, hasUI: false })
+    await t.goal('lint is clean')
+    expect(written).toEqual(['/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again.\n'])
+    await t.goal()
+    expect(written[1]).toBe(`${NO_GOAL_TEXT}\n`)
+  })
+
   it('is unavailable in an untrusted workspace, saying why', async () => {
     const t = setup({ trusted: false })
     await t.goal('lint is clean')
@@ -366,27 +381,73 @@ describe('goal evaluation', () => {
     expect(t.lastNote().msg).toContain('2.7k tokens')
   })
 
-  it('leaves the goal set and warns when the evaluator errors or answers unreadably', async () => {
-    const erroring = setup()
-    await erroring.goal('done')
+  it('leaves the goal set and warns when the evaluator errors', async () => {
+    const t = setup()
+    await t.goal('done')
     setCompleteBackend(async () => {
       throw new Error('provider down')
     })
-    await erroring.agentEnd()
-    expect(erroring.continuations()).toEqual([])
-    expect(erroring.lastNote()).toEqual({ msg: 'Goal evaluator error: provider down. The goal stays set; the next turn is evaluated again.', level: 'warning' })
-    await erroring.goal()
-    expect(erroring.lastNote().msg).toContain('Goal active: done (not yet evaluated)')
-
-    const garbled = setup()
-    await garbled.goal('done')
-    answer('I think it is probably fine')
-    await garbled.agentEnd()
-    expect(garbled.continuations()).toEqual([])
-    expect(garbled.lastNote().msg).toMatch(/^Goal evaluator error: unreadable verdict: I think it is probably fine/)
+    await t.agentEnd()
+    expect(t.continuations()).toEqual([])
+    expect(t.lastNote()).toEqual({ msg: 'Goal evaluator error: provider down. The goal stays set; the next turn is evaluated again.', level: 'warning' })
+    await t.goal()
+    expect(t.lastNote().msg).toContain('Goal active: done (not yet evaluated)')
   })
 
-  it('also prints a warning to stderr when headless, where notify has no surface', async () => {
+  it('treats a reply that is neither JSON nor a yes/no as an evaluator error', async () => {
+    const t = setup()
+    await t.goal('done')
+    answer('I think it is probably fine')
+    await t.agentEnd()
+    expect(t.continuations()).toEqual([])
+    expect(t.lastNote().msg).toMatch(/^Goal evaluator error: unreadable verdict: I think it is probably fine/)
+  })
+
+  it('cancels the evaluation silently when the user interrupts the run during it', async () => {
+    const controller = new AbortController()
+    const t = setup({ signal: controller.signal })
+    await t.goal('done')
+    let callSignal: AbortSignal | undefined
+    // A provider that ignores the abort and still returns a verdict afterwards.
+    const late = { role: 'assistant', content: [{ type: 'text', text: '{"ok": false, "reason": "late"}' }], usage: {}, stopReason: 'stop' }
+    setCompleteBackend((_model, _context, options) => {
+      callSignal = options.signal
+      return new Promise((resolve) => {
+        if (options.signal?.aborted) resolve(late)
+        else options.signal?.addEventListener('abort', () => resolve(late))
+      }) as never
+    })
+    const pending = t.agentEnd()
+    controller.abort()
+    await pending
+    // The evaluator call carries the run signal, so Esc reaches the provider too.
+    expect(callSignal?.aborted).toBe(true)
+    expect(t.continuations()).toEqual([])
+    expect(t.notes.some((n) => n.level === 'warning')).toBe(false)
+    await t.goal()
+    expect(t.lastNote().msg).toContain('Goal active: done (not yet evaluated)')
+  })
+
+  it('does not report an abort-rejected evaluator call as an error', async () => {
+    const controller = new AbortController()
+    const t = setup({ signal: controller.signal })
+    await t.goal('done')
+    setCompleteBackend(
+      (_model, _context, options) =>
+        new Promise((_r, reject) => {
+          const fail = () => reject(new Error('aborted'))
+          if (options.signal?.aborted) fail()
+          else options.signal?.addEventListener('abort', fail)
+        }) as never,
+    )
+    const pending = t.agentEnd()
+    controller.abort()
+    await pending
+    expect(t.notes.some((n) => n.level === 'warning')).toBe(false)
+    expect(t.continuations()).toEqual([])
+  })
+
+  it('also prints its messages to stderr when headless, where notify has no surface', async () => {
     const written: string[] = []
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
       written.push(String(chunk))
@@ -400,13 +461,13 @@ describe('goal evaluation', () => {
       throw new Error('provider down')
     })
     await headless.agentEnd()
-    expect(written).toEqual(['Goal evaluator error: provider down. The goal stays set; the next turn is evaluated again.\n'])
+    expect(written).toEqual(['Goal set: done\n', 'Goal evaluator error: provider down. The goal stays set; the next turn is evaluated again.\n'])
     expect(headless.lastNote().level).toBe('warning')
 
     const tui = setup({ hasUI: true })
     await tui.goal('done')
     await tui.agentEnd()
-    expect(written).toHaveLength(1)
+    expect(written).toHaveLength(2)
   })
 
   it('warns and keeps the goal when no model is available to evaluate on', async () => {
@@ -430,12 +491,15 @@ describe('goal evaluation', () => {
     notMet('x')
     await t.agentEnd()
     expect(calls[0].model.id).toBe('claude-haiku-4-5')
+  })
 
+  it('falls back to the session model when ANTHROPIC_DEFAULT_HAIKU_MODEL matches nothing', async () => {
     process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'nonexistent'
-    const fallback = setup({ available: [{ id: 'claude-sonnet-5' }] })
-    await fallback.goal('done')
-    await fallback.agentEnd()
-    expect(calls[1].model.id).toBe('session-model')
+    const t = setup({ available: [{ id: 'claude-sonnet-5' }] })
+    await t.goal('done')
+    notMet('x')
+    await t.agentEnd()
+    expect(calls[0].model.id).toBe('session-model')
   })
 
   it('does not evaluate a turn the user interrupted', async () => {
@@ -586,13 +650,18 @@ describe('goal background work', () => {
     expect(t.continuations()).toHaveLength(1)
   })
 
-  it('injects a check-in turn after 30 minutes of deferral, doubling the wait up to four times', async () => {
+  /** A goal whose turn just ended with `run-1` still running, on fake timers. */
+  const deferred = async () => {
     vi.useFakeTimers()
     const t = setup()
     await t.goal('done')
     t.subagent('start', 'run-1', 'Explore')
     await t.agentEnd()
-    expect(t.sent).toHaveLength(1)
+    return t
+  }
+
+  it('injects a check-in turn once background work has kept the goal waiting for 30 minutes', async () => {
+    const t = await deferred()
     await vi.advanceTimersByTimeAsync(29 * 60_000)
     expect(t.sent).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(60_000)
@@ -601,19 +670,39 @@ describe('goal background work', () => {
     expect(t.sent[1].message.content).toContain('deferred for 30 min')
     expect(t.sent[1].message.content).toContain('- run-1 · subagent Explore')
     expect(t.sent[1].options).toEqual({ triggerTurn: true })
-    // The check-in turn ends with the work still running: the next wait doubles.
+  })
+
+  it('doubles the wait after each check-in whose turn ends with the work still running', async () => {
+    const t = await deferred()
+    await vi.advanceTimersByTimeAsync(30 * 60_000)
     await t.agentEnd()
     await vi.advanceTimersByTimeAsync(59 * 60_000)
     expect(t.sent).toHaveLength(2)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(t.sent).toHaveLength(3)
     expect(t.sent[2].message.content).toContain('deferred for 90 min')
+  })
+
+  it('says idle check-ins are paused on the third one and starts no fourth while idle', async () => {
+    const t = await deferred()
+    await vi.advanceTimersByTimeAsync(30 * 60_000)
+    await t.agentEnd()
+    await vi.advanceTimersByTimeAsync(60 * 60_000)
     await t.agentEnd()
     await vi.advanceTimersByTimeAsync(120 * 60_000)
     expect(t.sent).toHaveLength(4)
     expect(t.sent[3].message.content).toContain('Idle check-ins are paused until your next message')
-    // Three idle check-ins between prompts is the cap; the fourth waits for a turn end.
     await t.agentEnd()
+    await vi.advanceTimersByTimeAsync(120 * 60_000)
+    expect(t.sent).toHaveLength(4)
+  })
+
+  it('delivers a check-in past the idle cap at the next turn end instead', async () => {
+    const t = await deferred()
+    for (const minutes of [30, 60, 120]) {
+      await vi.advanceTimersByTimeAsync(minutes * 60_000)
+      await t.agentEnd()
+    }
     await vi.advanceTimersByTimeAsync(120 * 60_000)
     expect(t.sent).toHaveLength(4)
     await t.agentEnd()

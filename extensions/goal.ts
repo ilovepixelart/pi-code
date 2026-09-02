@@ -20,7 +20,8 @@
  *   injected once the wait reaches CLAUDE_CODE_GOAL_CHECKIN_MINUTES (30, doubling up to
  *   four times the first interval, at most three idle check-ins between user prompts;
  *   0 turns check-ins off).
- * - A turn ended by the user (Esc) or by an error is not evaluated. An unrecoverable
+ * - A turn ended by the user (Esc) or by an error is not evaluated, and an Esc during
+ *   the evaluation cancels it with the goal left set. An unrecoverable
  *   error (authentication, credits, context overflow, model unavailable) clears the goal
  *   with a warning once the run settles; a transient one leaves it set.
  * - The active goal persists as a session entry and is restored on resume or reload with
@@ -220,11 +221,11 @@ export default function goalExtension(pi: ExtensionAPI) {
     }
   }
 
-  /** A warning the user must see: headless runs have no notify surface, and a goal
-   * that stops there without a reason would look like a hang, so it also goes to stderr
-   * (where Claude's -p mode prints its goal warnings). */
-  function warn(ctx: ExtensionContext, text: string): void {
-    ctx.ui.notify(text, 'warning')
+  /** A line for the user. Headless runs have no notify surface, and a refusal or a
+   * loop that stops there without a word would look like a hang, so it also goes to
+   * stderr (where Claude's -p mode prints its goal messages). */
+  function tell(ctx: ExtensionContext, text: string, level: 'info' | 'warning' | 'error'): void {
+    ctx.ui.notify(text, level)
     if (!ctx.hasUI) process.stderr.write(`${text}\n`)
   }
 
@@ -300,7 +301,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     showIndicator(ctx)
     if (noProgressStreak >= cap) {
       noProgressStreak = 0
-      warn(ctx, `Goal paused after ${cap} turns in a row without tool use; it stays set and evaluation resumes after your next prompt.`)
+      tell(ctx, `Goal paused after ${cap} turns in a row without tool use; it stays set and evaluation resumes after your next prompt.`, 'warning')
       return
     }
     const summary = currentSummary(ctx)
@@ -310,9 +311,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 
   async function askEvaluator(ctx: ExtensionContext, active: ActiveGoal, model: NonNullable<ExtensionContext['model']>): Promise<GoalVerdict> {
     const transcript = renderTranscript(branchMessages(ctx), transcriptBudget(model))
+    // Esc during the evaluation aborts the run's signal; the call must die with it, or
+    // a late verdict would queue the next goal turn into a run the user just stopped.
+    const deadline = AbortSignal.timeout(EVALUATOR_TIMEOUT_MS)
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline
     // Claude runs its evaluator with thinking disabled: the verdict is mechanical.
     // completeText requests no thinking level, which is the same for pi.
-    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: EVALUATOR_MAX_TOKENS, signal: AbortSignal.timeout(EVALUATOR_TIMEOUT_MS) })
+    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: EVALUATOR_MAX_TOKENS, signal })
     active.evaluatorTokens += usageTokens(usage as TokenUsage | undefined)
     const verdict = parseVerdict(text)
     if (!verdict) throw new Error(`unreadable verdict: ${text.slice(0, 200)}`)
@@ -325,19 +330,21 @@ export default function goalExtension(pi: ExtensionAPI) {
     const startedGeneration = generation
     const model = evaluatorModel(ctx)
     if (!model) {
-      warn(ctx, 'Goal evaluator has no model to run on; the goal stays set.')
+      tell(ctx, 'Goal evaluator has no model to run on; the goal stays set.', 'warning')
       return
     }
     let verdict: GoalVerdict
     try {
       verdict = await askEvaluator(ctx, active, model)
     } catch (error) {
+      // A user interrupt is not an evaluator failure: the goal stays, nothing to say.
+      if (ctx.signal?.aborted) return
       // No verdict is a hook error in Claude's terms: the turn ends and the goal stays.
-      if (generation === startedGeneration) warn(ctx, `Goal evaluator error: ${error instanceof Error ? error.message : String(error)}. The goal stays set; the next turn is evaluated again.`)
+      if (generation === startedGeneration) tell(ctx, `Goal evaluator error: ${error instanceof Error ? error.message : String(error)}. The goal stays set; the next turn is evaluated again.`, 'warning')
       return
     }
-    // Cleared or replaced during the await: this verdict belongs to a goal that is gone.
-    if (generation !== startedGeneration) return
+    // Interrupted, cleared, or replaced during the await: this verdict must not act.
+    if (ctx.signal?.aborted || generation !== startedGeneration) return
     active.iterations += 1
     active.lastReason = verdict.reason
     if (verdict.ok) finish(ctx, 'achieved', verdict.reason)
@@ -397,29 +404,29 @@ export default function goalExtension(pi: ExtensionAPI) {
       sessionCtx = ctx
       const condition = args.trim()
       if (condition === '') {
-        ctx.ui.notify(statusText(ctx), 'info')
+        tell(ctx, statusText(ctx), 'info')
         return
       }
       if (isClearAlias(condition)) {
         const cleared = endGoal(ctx, 'cleared')
-        if (cleared === undefined) ctx.ui.notify('No goal set', 'info')
+        if (cleared === undefined) tell(ctx, 'No goal set', 'info')
         else send(`Goal cleared: ${cleared}`, { triggerTurn: false })
         return
       }
       if (condition.length > GOAL_CONDITION_MAX_CHARS) {
-        ctx.ui.notify(`Goal condition is limited to ${GOAL_CONDITION_MAX_CHARS} characters (got ${condition.length})`, 'error')
+        tell(ctx, `Goal condition is limited to ${GOAL_CONDITION_MAX_CHARS} characters (got ${condition.length})`, 'error')
         return
       }
       const blocked = goalUnavailable(ctx)
       if (blocked) {
-        ctx.ui.notify(blocked, 'error')
+        tell(ctx, blocked, 'error')
         return
       }
       // A new goal replaces the current one, as Claude documents; the entry written here
       // is the state a resume restores.
       activate(ctx, condition)
       pi.appendEntry(GOAL_ENTRY, { state: 'active', condition } satisfies GoalEntry)
-      ctx.ui.notify(`Goal set: ${condition}`, 'info')
+      tell(ctx, `Goal set: ${condition}`, 'info')
       // Setting a goal starts a turn immediately with the condition as the directive; a
       // send during streaming queues it as a follow-up turn.
       send(kickoffPrompt(condition), ctx.isIdle() ? { triggerTurn: true } : { triggerTurn: true, deliverAs: 'followUp' })
@@ -456,7 +463,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (entry?.state !== 'active') return
     // Claude restores a still-active goal on resume with its counters reset.
     activate(ctx, entry.condition)
-    ctx.ui.notify(`Goal restored: ${entry.condition}`, 'info')
+    tell(ctx, `Goal restored: ${entry.condition}`, 'info')
   })
 
   pi.on('session_shutdown', () => {
@@ -510,6 +517,6 @@ export default function goalExtension(pi: ExtensionAPI) {
     endGoal(ctx, 'cleared')
     const text = `Goal cleared after an unrecoverable error (${kind}): "${message}". Run /goal again to continue.`
     send(text, { triggerTurn: false })
-    warn(ctx, text)
+    tell(ctx, text, 'warning')
   })
 }
