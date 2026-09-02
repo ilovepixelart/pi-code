@@ -1054,8 +1054,8 @@ describe('session_shutdown background runs', () => {
 
 describe('viewer commands', () => {
   it('registers /tasks and /agents with descriptions', () => {
-    expect(command('tasks').description).toBeTruthy()
-    expect(command('agents').description).toBeTruthy()
+    expect(command('tasks').description).toBe('Show background subagent runs')
+    expect(command('agents').description).toBe('List discovered subagents and where they come from')
   })
 
   it('/tasks notes the empty registry without running anything', async () => {

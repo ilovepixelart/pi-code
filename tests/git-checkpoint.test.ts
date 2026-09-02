@@ -327,7 +327,10 @@ describe('pruneCheckpointRepos', () => {
     pruneCheckpointRepos(root, CHECKPOINT_RETENTION_DAYS, live)
     expect(existsSync(live)).toBe(true)
 
-    expect(() => pruneCheckpointRepos(join(root, 'absent'), CHECKPOINT_RETENTION_DAYS)).not.toThrow()
+    // A missing root is nothing to sweep, and nothing to create either.
+    const absent = join(root, 'absent')
+    pruneCheckpointRepos(absent, CHECKPOINT_RETENTION_DAYS)
+    expect(existsSync(absent)).toBe(false)
     rmSync(root, { recursive: true, force: true })
   })
 })

@@ -334,7 +334,17 @@ describe('runInteractiveOAuth failure typing', () => {
   })
 
   it('returns the client when the retry connects clean (authorized between attempts)', async () => {
-    await expect(flow()).resolves.toBeDefined()
+    let attempts = 0
+    const connected = await flow({
+      connect: async (attempt) => {
+        attempts = attempt
+      },
+    })
+
+    // The flow hands back the client it connected, not a wrapper, and connects exactly
+    // once after the authorization: a second connect would be a second login prompt.
+    expect(typeof (connected as { close: unknown }).close).toBe('function')
+    expect(attempts).toBe(1)
   })
 })
 
