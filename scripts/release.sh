@@ -77,6 +77,19 @@ wait_npm() {
   done
 }
 
+# gh pr create can time out on the response after the PR exists server-side (the
+# 1.0.50 chain died with an empty BUMP_PR while #207 was open), so a failed create is
+# followed by a lookup by head branch. The old `| grep -o` also swallowed the create's
+# exit code, the pipe trap every other gate here avoids.
+create_bump_pr() {
+  local version=$1 url
+  url=$(gh pr create --title "Release $version" --body "Version bump to $version.") && {
+    echo "${url##*/}"
+    return 0
+  }
+  gh pr list --head "release/$version" --json number -q '.[0].number' | grep -E '^[0-9]+$'
+}
+
 BRANCH=$(gh pr view "$PR" --json headRefName -q .headRefName) \
   && git checkout "$BRANCH" && git pull \
   && wait_ci "$BRANCH" && gate "$PR" \
@@ -88,7 +101,7 @@ BRANCH=$(gh pr view "$PR" --json headRefName -q .headRefName) \
   && git add package.json package-lock.json \
   && git commit -m "Release $VERSION" \
   && git push origin "HEAD:release/$VERSION" \
-  && BUMP_PR=$(gh pr create --title "Release $VERSION" --body "Version bump to $VERSION." | grep -o '[0-9]*$') \
+  && BUMP_PR=$(create_bump_pr "$VERSION") \
   && wait_ci "release/$VERSION" && gate "$BUMP_PR" \
   && gh pr merge "$BUMP_PR" --squash --delete-branch \
   && git checkout main && git pull \
