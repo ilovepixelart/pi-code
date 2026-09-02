@@ -2336,6 +2336,23 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('absent')
   })
 
+  it('leaves ${VAR} in a project helper for the stripped shell, not the parent environment', async () => {
+    // The stripping only works if the expansion happens inside the helper's own shell:
+    // interpolating the command text first reads the parent environment, which is exactly
+    // the set the helper must not see. Claude expands ${VAR} in command, args, env, url
+    // and headers, not in the helper command.
+    setEnv('PROBE_HELPER_TOKEN', 'leaked-secret')
+    withTools([{ name: 'go' }])
+    const helper = 'printf \'{"X-T":"%s"}\' "${PROBE_HELPER_TOKEN}"'
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+    await harness.sessionStart(true)
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-T']).toBe('')
+  })
+
   it('keeps credential variables for a user-scope helper, which the user wrote', async () => {
     setEnv('MY_USER_TOKEN', 'mine')
     withTools([{ name: 'go' }])
