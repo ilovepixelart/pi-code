@@ -29,6 +29,7 @@ import { type CompiledGlob, compileGlobs, matchesCompiledGlobs } from './interna
 import { isProjectApproved } from './internal/project-approval.js'
 import { findNearestDir } from './internal/project-root.js'
 import { stripBlockComments } from './internal/strip-comments.js'
+import { fileToolTarget } from './internal/tool-target.js'
 
 export interface Frontmatter {
   paths: string[]
@@ -341,12 +342,8 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   // read or edited rather than inlining it upfront.
   pi.on('tool_result', async (event, ctx) => {
     if (attachTargets.length === 0) return
-    if (event.isError) return
-    if (event.toolName !== 'read' && event.toolName !== 'edit' && event.toolName !== 'write') return
-    const input = event.input as { path?: unknown; file_path?: unknown } | undefined
-    // pi's edit and write tools accept file_path as an alias for path.
-    const rel = typeof input?.path === 'string' ? input.path : input?.file_path
-    if (typeof rel !== 'string' || rel.length === 0) return
+    const rel = fileToolTarget(event)
+    if (rel === undefined) return
     // Realpath both sides (roots canonicalise at session_start): a tool reporting
     // the resolved real path in a symlinked checkout must still match.
     const abs = realpathOr(path.resolve(ctx.cwd, rel))
