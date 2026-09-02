@@ -1964,6 +1964,18 @@ describe('hook spawn failures', () => {
     expect(decision.context).toBe('')
   })
 
+  it('fails closed on a timed-out UserPromptSubmit hook, like PreToolUse does', async () => {
+    // A gate that delivered no verdict must not read as an allow; the timeout
+    // direction was only pinned for PreToolUse.
+    const runner: HookRunner = async () => ({ code: 0, stdout: '', stderr: '', timedOut: true })
+    const config = { UserPromptSubmit: [{ hooks: [{ command: 'audit.sh' }] }] }
+    const decision = await runUserPromptSubmit(config, 'hello', runner)
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('timed out')
+    expect(decision.reason).toContain('audit.sh')
+    expect(decision.context).toBe('')
+  })
+
   it('blocks the tool end to end when the hook process errors before spawning', async () => {
     writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] })
     script('guard', { error: new Error('spawn /bin/sh ENOENT') })
