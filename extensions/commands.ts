@@ -174,10 +174,19 @@ export function shellExecutionDisabled(cwd: string, home: string, trusted: boole
   if (readManagedSettings().disableSkillShellExecution === true) return true
   const files = claudeSettingsChain(cwd, home, trusted)
   return files.some((file) => {
+    let raw: string
     try {
-      return (JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>).disableSkillShellExecution === true
+      raw = fs.readFileSync(file, 'utf-8')
     } catch {
-      return false // missing or invalid file: not a policy statement
+      return false // no such file: genuinely not a policy statement
+    }
+    try {
+      return (JSON.parse(raw) as Record<string, unknown>).disableSkillShellExecution === true
+    } catch {
+      // Present but unreadable: the user may believe this file disables skill shells, so
+      // say so rather than silently leaving them enabled.
+      console.warn(`pi-code: ignoring ${file}: not valid JSON; skill shell execution stays as the other settings leave it`)
+      return false
     }
   })
 }

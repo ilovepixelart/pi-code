@@ -390,12 +390,11 @@ describe('extension wiring', () => {
     expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
   })
 
-  // POSIX-only: chmod 0o000 does not revoke read access on Windows, so the rule stays readable there.
-  it.skipIf(process.platform === 'win32')('skips an unreadable global rule instead of failing the session', async () => {
+  it('skips an unreadable global rule instead of failing the session', async () => {
+    // A directory where a rule file is expected: the read fails on every platform, unlike
+    // chmod 0o000, which Windows ignores.
     const rulesDir = join(hoisted.home, '.claude', 'rules')
-    mkdirSync(rulesDir, { recursive: true })
-    writeFileSync(join(rulesDir, 'locked.md'), 'Secret rule.')
-    chmodSync(join(rulesDir, 'locked.md'), 0o000)
+    mkdirSync(join(rulesDir, 'locked.md'), { recursive: true })
     writeFileSync(join(rulesDir, 'open.md'), 'Readable rule.')
 
     const prompt = await sessionPrompt(globalCtx())

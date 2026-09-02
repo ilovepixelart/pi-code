@@ -620,6 +620,10 @@ describe('plan mode call-time enforcement', () => {
   })
 })
 
+/** The execution-context text a before_agent_start injection carries, or undefined when
+ * the handler injected nothing (execution has ended). */
+const executionContext = (result: unknown): string | undefined => (result as { message?: { customType?: string; content?: string } } | undefined)?.message?.content
+
 describe('execution mode stall exit', () => {
   it('ends execution after two runs without step progress, listing what is left', async () => {
     const s = setup()
@@ -629,11 +633,14 @@ describe('execution mode stall exit', () => {
 
     await s.emit('turn_end', { message: assistant('finished [DONE:1]') })
     await s.emit('agent_end', { messages: [] })
-    expect(await s.emit('before_agent_start')).toBeDefined()
+    // The injection is what keeps execution going, so assert what it says: the step just
+    // marked done is gone from it and the remaining one is named.
+    expect(executionContext(await s.emit('before_agent_start'))).toContain('2. Second step')
+    expect(executionContext(await s.emit('before_agent_start'))).not.toContain('1. First step')
 
     await s.emit('turn_end', { message: assistant('did more work, forgot the marker') })
     await s.emit('agent_end', { messages: [] })
-    expect(await s.emit('before_agent_start')).toBeDefined()
+    expect(executionContext(await s.emit('before_agent_start'))).toContain('2. Second step')
 
     await s.emit('turn_end', { message: assistant('answered an unrelated question') })
     await s.emit('agent_end', { messages: [] })

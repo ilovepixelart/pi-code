@@ -210,7 +210,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
     // Written on every start, so repos that predate the sidecar pick it up too.
     rememberWorkTree(shadowDir, ctx.cwd)
-    await mirrorLocalExcludes(ctx.cwd)
+    await mirrorLocalExcludes(ctx)
   }
 
   /** git reads ignore rules from the tree's .gitignore files, the user's global excludes,
@@ -219,7 +219,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * would be snapshotted and restored. Mirror it into the shadow on every start; the
    * global excludes stay untouched (core.excludesFile is single-valued, so pointing it
    * at the repo file would replace them). */
-  async function mirrorLocalExcludes(cwd: string): Promise<void> {
+  async function mirrorLocalExcludes(ctx: ExtensionContext): Promise<void> {
+    const cwd = ctx.cwd
     if (!shadowDir) return
     // Resolved through git so a linked worktree maps to its common dir; outside a repo
     // git exits 128 and there is nothing to mirror.
@@ -233,8 +234,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       } else {
         fs.rmSync(target, { force: true })
       }
-    } catch {
-      // A failed mirror only means local excludes are not honored this session.
+    } catch (error) {
+      // Without the mirror, files the user excluded locally are snapshotted into the
+      // checkpoint store and restored by /rewind, so this is not a silent fallback.
+      ctx.ui.notify(`Checkpoints cannot honor this repository's .git/info/exclude: ${error instanceof Error ? error.message : String(error)}`, 'warning')
     }
   }
 

@@ -583,10 +583,18 @@ describe('startBackgroundRun', () => {
   it('survives a pipe error on the child stdout', async () => {
     // EventEmitter rethrows an 'error' with no listener, and this stream belongs to a
     // detached child, so the throw exits pi exactly as an unguarded completion would.
-    const { startBackgroundRun } = await loadBackground()
-    startBackgroundRun('scout', 'survey', invocation, () => {})
+    const { startBackgroundRun, backgroundRun } = await loadBackground()
+    let finished: { state: string } | undefined
+    const id = startBackgroundRun('scout', 'survey', invocation, (run) => {
+      finished = { state: run.state }
+    }) as string
 
-    expect(() => spawned.children[0].stdout.emit('error', new Error('EPIPE'))).not.toThrow()
+    spawned.children[0].stdout.emit('error', new Error('EPIPE'))
+
+    // The run is untouched by the broken pipe and still completes on close.
+    expect(backgroundRun(id)?.state).toBe('running')
+    spawned.children[0].emit('close', 0)
+    expect(finished).toEqual({ state: 'done' })
   })
 
   it('returns a bg- prefixed id built from a uuid prefix', async () => {

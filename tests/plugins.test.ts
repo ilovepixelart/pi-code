@@ -64,6 +64,24 @@ describe('pluginComponentPath', () => {
   })
 })
 
+describe('substitutePluginVars escaping', () => {
+  it('escapes a backslash-bearing plugin root so the hooks JSON still parses', () => {
+    // The real case is a Windows root such as C:\Users\me\1.0.0\uv: substituted verbatim
+    // into raw JSON it injects invalid escape sequences, the parse throws, and every hook
+    // the plugin declared silently vanishes. The caller passes a JSON escaper for exactly
+    // this, and the rule is testable on any platform, unlike a directory whose name
+    // contains a backslash, which Windows cannot create.
+    const jsonEscape = (value: string): string => JSON.stringify(value).slice(1, -1)
+    const root = String.raw`C:\Users\me\1.0.0\uv`
+    const raw = JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } })
+
+    const substituted = substitutePluginVars(raw, { name: 'fmt', root, dataDir: '/d', manifest: {} }, jsonEscape)
+
+    const parsed = JSON.parse(substituted) as { hooks: { PostToolUse: Array<{ hooks: Array<{ command: string }> }> } }
+    expect(parsed.hooks.PostToolUse[0].hooks[0].command).toBe(`${root}/scripts/format.sh`)
+  })
+})
+
 describe('installedPlugins', () => {
   it('loads an enabled cached plugin with its root and data dir', () => {
     const h = home()

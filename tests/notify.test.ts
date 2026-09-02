@@ -8,7 +8,21 @@ import notifyExtension, { AWAY_AFTER_MS, isAway, resolveNotifChannel } from '../
 
 // The channel is read from the mocked home's ~/.claude/settings.json; default '' falls
 // back to the real home, which no test with an empty home relies on (they skip session_start).
-const hoisted = vi.hoisted(() => ({ home: '' }))
+const hoisted = vi.hoisted(() => ({ home: '', execCalls: [] as Array<{ file: string; args: string[] }> }))
+
+// The Windows toast shells out; record the invocation so a test can assert what it runs
+// rather than only that the promise settled.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    execFile: (file: string, args: string[], callback?: (error: Error | null) => void) => {
+      hoisted.execCalls.push({ file, args })
+      callback?.(null)
+      return undefined as never
+    },
+  }
+})
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()
   return { ...actual, homedir: () => hoisted.home || actual.homedir() }
@@ -80,11 +94,19 @@ describe('notify', () => {
     expect(writes).toEqual([])
   })
 
-  it('takes the Windows path without crashing when WT_SESSION is set', async () => {
-    // powershell.exe spawn fails on non-Windows, but the callback swallows the error.
+  it('sends the toast through PowerShell by absolute path when WT_SESSION is set', async () => {
+    // powershell.exe spawn fails on non-Windows, and the callback swallows that, so the
+    // observable part is the invocation itself: an absolute System32 path, never a PATH
+    // lookup, carrying the notification text.
     process.stdout.isTTY = true
     process.env.WT_SESSION = 'x'
-    await expect(drive().agentEnd()).resolves.toBeUndefined()
+    hoisted.execCalls.length = 0
+
+    await drive().agentEnd()
+
+    const call = hoisted.execCalls.at(-1)
+    expect(call?.file).toMatch(/System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/)
+    expect(call?.args.join(' ')).toContain('Windows.UI.Notifications')
   })
 
   it('stays silent for a quick turn right after the user submitted (they are present)', async () => {

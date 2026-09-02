@@ -72,8 +72,9 @@ describe('resolveGitBash', () => {
     expect(resolveGitBash({ PATH: cwd }, cwd, [])).toBeUndefined()
   })
 
-  // Real-host oracle: the windows-latest runners install Git for Windows in the default
-  // location, which is the first rule after the override.
+  // The Windows half of the default-install rule, whose POSIX half is the injected-roots
+  // test above: this asserts the real lookup on a host that actually has Git for Windows,
+  // which the runners do.
   it.skipIf(process.platform !== 'win32')('finds Git for Windows in its default install directory on this host', () => {
     expect(resolveGitBash({ PATH: '' }, tempDir())).toMatch(/\\Git\\bin\\bash\.exe$/)
   })

@@ -26,7 +26,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 const { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } = await import('../extensions/internal/mcp-oauth.ts')
 
 let savedAgentDir: string | undefined
-beforeEach(() => {
+beforeEach(async () => {
+  // Module state: without this a pending login from one test would queue the next.
+  const { resetOAuthQueue } = await import('../extensions/mcp/oauth-flow.ts')
+  resetOAuthQueue()
   savedAgentDir = process.env.PI_CODING_AGENT_DIR
   process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'oauth-agent-'))
 })
@@ -334,7 +337,17 @@ describe('runInteractiveOAuth failure typing', () => {
   })
 
   it('returns the client when the retry connects clean (authorized between attempts)', async () => {
-    await expect(flow()).resolves.toBeDefined()
+    let attempts = 0
+    const connected = await flow({
+      connect: async (attempt) => {
+        attempts = attempt
+      },
+    })
+
+    // The flow hands back the client it connected, not a wrapper, and connects exactly
+    // once after the authorization: a second connect would be a second login prompt.
+    expect(typeof (connected as { close: unknown }).close).toBe('function')
+    expect(attempts).toBe(1)
   })
 })
 

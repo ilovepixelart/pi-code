@@ -108,19 +108,21 @@ describe('stopHookBlockCap', () => {
 })
 
 describe('runHookCommand exec form (real shell)', () => {
-  // POSIX-only: spawns the real /bin/echo binary, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('spawns the executable directly with no shell, so metacharacters in args stay literal', async () => {
-    // Through /bin/sh these would be command-substituted or split; exec-form passes
-    // each arg through untouched.
-    const result = await runHookCommand('/bin/echo', {}, 5000, undefined, ['$(whoami)', 'a;b', '$HOME'])
+  // node is the one executable every platform running this suite is guaranteed to have,
+  // so the exec form is exercised on Windows too.
+  const ECHO_ARGV = ['-e', 'process.stdout.write(process.argv.slice(1).join(" ") + "\\n")']
+
+  it('spawns the executable directly with no shell, so metacharacters in args stay literal', async () => {
+    // Through a shell these would be command-substituted or split; exec form passes each
+    // arg through untouched.
+    const result = await runHookCommand(process.execPath, {}, 5000, undefined, [...ECHO_ARGV, '$(whoami)', 'a;b', '$HOME'])
     expect(result.code).toBe(0)
     expect(result.stdout).toBe('$(whoami) a;b $HOME\n')
   })
 
-  // POSIX-only: spawns the real /bin/echo binary, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('delivers the payload on stdin and substitutes $ARGUMENTS per arg from the payload', async () => {
+  it('delivers the payload on stdin and substitutes $ARGUMENTS per arg from the payload', async () => {
     const payload = { k: 'v' }
-    const result = await runHookCommand('/bin/echo', payload, 5000, undefined, ['$ARGUMENTS'])
+    const result = await runHookCommand(process.execPath, payload, 5000, undefined, [...ECHO_ARGV, '$ARGUMENTS'])
     expect(result.stdout).toBe(`${JSON.stringify(payload)}\n`)
   })
 })
@@ -618,8 +620,9 @@ describe('runHookCommand (real shell)', () => {
 })
 
 describe('runHookCommand timeout (real shell)', () => {
-  // POSIX-only: runHookCommand's shell path spawns /bin/sh, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('resolves at the timeout when a grandchild of the shell holds the stdio pipes open', async () => {
+  // Runs everywhere now: the shell path resolves Git Bash on Windows, where this script is
+  // valid and killTree ends the tree with taskkill.
+  it('resolves at the timeout when a grandchild of the shell holds the stdio pipes open', async () => {
     // The shell forks for a compound command, so killing only the direct child leaves
     // `sleep` holding stdout/stderr and `close` never fires.
     const started = Date.now()
@@ -629,7 +632,9 @@ describe('runHookCommand timeout (real shell)', () => {
     expect(result.timedOut).toBe(true)
   })
 
-  // POSIX-only: /bin/sh process groups and negative-pid kill(0) probes are POSIX semantics.
+  // The POSIX half of the tree kill: process groups and negative-pid kill(0) probes have
+  // no Windows equivalent, so the win32 arm is covered by its own test over the spawn
+  // recorder ("ends the whole process tree with taskkill" in hooks-more).
   it.skipIf(process.platform === 'win32')('kills the shell descendants rather than leaving them running past the timeout', async () => {
     const dir = tempDir()
     const flag = join(dir, 'grandchild-survived')
