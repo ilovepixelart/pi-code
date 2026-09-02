@@ -18,9 +18,19 @@ Delegate tasks to specialized subagents with isolated context windows.
 ```
 subagent/
 ├── README.md            # This file
-├── index.ts             # The extension (entry point)
-├── agents.ts            # Agent discovery logic
+├── index.ts             # The extension: tool schema, dispatch, session hooks
+├── agents.ts            # Agent discovery and frontmatter
+├── child.ts             # How a child is configured before it is spawned
+├── run.ts               # Spawning one child and parsing its event stream
+├── modes.ts             # Single, parallel, chain, background, and the project-agent gate
 ├── background.ts        # Background run registry and spawning
+├── worktree.ts          # isolation: worktree setup and teardown
+├── params.ts            # The tool schema and the types derived from it
+├── types.ts             # Result shapes shared by the tool and its renderers
+├── concurrency.ts       # Parallel-run caps and the bounded worker pool
+├── registry-text.ts     # Text for /tasks, /agents and completion notices
+├── render.ts            # Transcript formatting shared with the parent
+├── render-result.ts     # How a call and its results are drawn
 ├── agents/              # Bundled builtin agents, always available (lowest precedence)
 │   ├── explore.md       # Explore: fast read-only codebase exploration
 │   ├── plan.md          # Plan: read-only implementation planning

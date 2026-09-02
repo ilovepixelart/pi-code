@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
 import { claudeSettingsChain, readSettingsChain } from '../internal/settings-chain.js'
-import { errorMessage } from '../internal/values.js'
+import { errorMessage, isRecord } from '../internal/values.js'
 
 export interface HookCommand {
   type?: string
@@ -67,10 +67,6 @@ export function isBackgroundHook(hook: HookCommand): boolean {
   return (hook.type === undefined || hook.type === 'command') && (hook.async === true || hook.asyncRewake === true)
 }
 export type HooksConfig = Record<string, HookMatcher[]>
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /** Settings files to read, newest-winning. Project files load only when trusted, each
  * the nearest of its name at or above cwd (bounded at the repository root, matching

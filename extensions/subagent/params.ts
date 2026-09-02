@@ -54,5 +54,3 @@ export type MakeDetails = (mode: SubagentMode) => (results: SingleResult[]) => S
 export type SubagentParamsStatic = Static<typeof SubagentParams>
 export type ChainStepParam = Static<typeof ChainItem>
 export type TaskItemParam = Static<typeof TaskItem>
-
-/** The completion notice a background run sends when it finishes. */

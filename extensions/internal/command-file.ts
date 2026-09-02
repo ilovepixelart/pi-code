@@ -2,9 +2,13 @@
  * Parsing and discovery for Claude Code slash-command files.
  *
  * pi's own prompt-template loader reads only `description` and `argument-hint`
- * from one flat directory, so the rest of Claude's command contract (namespaced
- * subdirectories, `allowed-tools`, `model`, `!` bash blocks, `@file` refs) lives
- * here and is applied by commands.ts when it registers each command itself.
+ * from one flat directory, so the rest of Claude's command contract lives here and is
+ * applied by commands.ts when it registers each command itself: namespaced
+ * subdirectories, `allowed-tools`, `model`, and the argument substitutions.
+ *
+ * Running what a body carries, the `!` bash blocks and `@file` references, is the other
+ * half and lives in command-spans.ts; skills.ts and the subagent loader import this file
+ * alone and never pull a shell resolver in.
  *
  * Docs: https://code.claude.com/docs/en/slash-commands.md
  */

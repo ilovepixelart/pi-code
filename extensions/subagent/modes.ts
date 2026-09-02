@@ -39,6 +39,7 @@ export function projectAgentGate(projectAgentCount: number, trusted: boolean, ha
   return trusted ? 'allow' : 'refuse'
 }
 
+/** Everything a mode handler needs from the surrounding execute() call. */
 export interface ModeContext {
   agents: AgentConfig[]
   defaultCwd: string

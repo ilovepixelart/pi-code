@@ -103,5 +103,3 @@ export function agentsListText(agents: ReadonlyArray<Pick<AgentConfig, 'name' | 
   }
   return `${sections.join('\n')}\n\n${AGENTS_DIR_HINT}`
 }
-
-/** Everything a mode handler needs from the surrounding execute() call. */
