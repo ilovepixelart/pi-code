@@ -33,6 +33,8 @@ const CLAUDE_SHAPED = [
   path.join('.claude', 'rules'),
   path.join('.claude', 'skills'),
   path.join('.claude', 'commands'),
+  // Injected into the prompt verbatim, and context-imports treats it as approval-gated.
+  path.join('.claude', 'CLAUDE.md'),
   'CLAUDE.local.md',
   '.mcp.json',
   path.join('.pi', 'mcp.json'),
