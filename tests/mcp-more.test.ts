@@ -2379,6 +2379,27 @@ describe('mcp headersHelper environment', () => {
     expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
   })
 
+  it('connects with static headers alone when the machine has no shell for the helper', async () => {
+    // The Windows fallback of last resort: no Git Bash and no PowerShell. The helper
+    // cannot run, and the documented behaviour is to connect with what is configured
+    // rather than to fail the server.
+    withTools([{ name: 'go' }])
+    const emptyPath = mkdtempSync(join(tmpdir(), 'no-shell-'))
+    tempDirs.push(emptyPath)
+    setEnv('PATH', emptyPath)
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    try {
+      await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headers: { 'X-Static': 'kept' }, headersHelper: String.raw`printf '{"X-Helper":"ran"}'` } } })
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+    }
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-Static']).toBe('kept')
+    expect(headers['X-Helper']).toBeUndefined()
+  })
+
   it('does not run a project helper until the project is trusted, connecting with static headers alone', async () => {
     // A repository's helper is a command the user has not reviewed. Consent to the server
     // (enabledMcpjsonServers) is not consent to run its command in an untrusted folder.
