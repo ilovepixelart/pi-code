@@ -164,7 +164,7 @@ describe('extension wiring', () => {
     writeFileSync(join(cwd, '.claude', 'rules', 'middle.md'), 'MIDDLE RULE')
 
     const prompt = await sessionPrompt(approvedCtx(cwd))
-    const positions = ['alpha', 'middle', 'zeta'].map((name) => prompt.indexOf(`${name}.md`))
+    const positions = ['ALPHA RULE', 'MIDDLE RULE', 'ZETA RULE'].map((marker) => prompt.indexOf(marker))
     expect(positions.every((at) => at >= 0)).toBe(true)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
   })
