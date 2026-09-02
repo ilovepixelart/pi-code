@@ -13,7 +13,7 @@
 
 Claude Code experience for the [pi](https://pi.dev) coding agent, in one package. Point pi at a project that already has a `.claude/` directory and it reads your existing config: rules, commands, skills, hooks, output styles, MCP servers, and agents. It also adds the Claude Code features pi lacks: a todo overlay, checkpoints, memory, web search, subagents, and goals.
 
-What a repository ships is treated as untrusted until you approve it: project MCP servers, hooks, agents, rules, output styles, commands and skills load only once you say yes.
+What a repository ships is treated as untrusted until you approve it: project MCP servers, hooks, agents, rules, output styles, commands and skills load only once you say yes. A headless run (`pi -p`) cannot ask, so an undecided project loads none of them there, which is stricter than Claude, where a headless run uses them without showing the dialog.
 
 ![pi-code demo](demos/hero.gif)
 
@@ -45,7 +45,7 @@ Each topic links to its own doc with the full contract and any divergences from 
 - **[MCP servers](docs/mcp.md)** — every Claude config scope, all four transports, OAuth, managed policy, timeouts, prompts, and resources.
 - **[Custom slash commands](docs/commands.md)** — `.claude/commands` with arguments, bash spans, `@file` inlining, frontmatter, and model invocation.
 - **[Skills](docs/skills.md)** — `.claude/skills` discovery plus the same dynamic content commands get.
-- **[Subagents / Task](docs/subagents.md)** — built-in and custom agents, background runs, per-agent memory, worktree isolation.
+- **[Subagents](docs/subagents.md)** — built-in and custom agents, background runs, per-agent memory, worktree isolation.
 - **[CLAUDE.md, @imports, and rules](docs/claude-md.md)** — the context files and path-scoped rules pi does not load natively.
 - **[Settings `env`](docs/settings-env.md)** — env blocks from every settings scope, exported with Claude's precedence.
 - **[Output styles](docs/output-styles.md)** — replace semantics, bundled built-ins, `/output-style`.

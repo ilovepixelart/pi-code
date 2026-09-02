@@ -24,4 +24,4 @@ Registers `.claude/commands/**/*.md` as slash commands with Claude's command con
 
 ## Model invocation
 
-The model can run a command itself through the `SlashCommand` tool (Claude's `SlashCommand` in `allowed-tools`). Project commands are gated on approval.
+The model can run a command itself through the `slash_command` tool, which pi-code registers and reports as `SlashCommand`. Claude has since folded this into its `Skill` tool, so an `allowed-tools: Skill` entry matches nothing here while `SlashCommand` still does. Project commands are gated on approval.
