@@ -377,7 +377,14 @@ export function substituteArgsDetailed(body: string, args: string, names: string
       return all || argsDefault
     }
     if (shorthandIdx !== undefined) return fill(parts[Number(shorthandIdx)], token)
-    if (name !== undefined) return fill(parts[names.indexOf(name)], '')
+    if (name !== undefined) {
+      // Claude: "A named placeholder counts even when its position has no argument,
+      // because it expands to an empty string", unlike an indexed one, which stays
+      // literal and does not count. Otherwise a skill using named arguments still got
+      // the ARGUMENTS: block appended.
+      consumed = true
+      return fill(parts[names.indexOf(name)], '')
+    }
     consumed = true
     return all // $ARGUMENTS or $@
   })
