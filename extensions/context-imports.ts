@@ -78,7 +78,7 @@ import { isProjectApproved, isProjectApprovedSilently } from './internal/project
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
-import { fenceMarker, stripBlockComments } from './internal/strip-comments.js'
+import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
@@ -146,16 +146,14 @@ export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
   const targets: string[] = []
-  // A fence only closes with the character that opened it: a backtick-fenced
-  // example may legitimately contain tilde-fence lines, and vice versa.
-  let fence: string | null = null
+  // CommonMark fences: closed only by the same character in a run at least as long
+  // as the opener, so a backtick example may hold tilde lines or shorter fences.
+  let fence: Fence | null = null
   for (const line of content.split('\n')) {
-    const marker = fenceMarker(line.trimStart())
-    if (marker !== null && (fence === null || fence === marker)) {
-      fence = fence === null ? marker : null
-      continue
-    }
-    if (fence !== null) continue
+    const trimmed = line.trimStart()
+    const step = stepFence(fence, trimmed, fenceMarker(trimmed))
+    fence = step.fence
+    if (step.fenced) continue
     // Backreference so a multi-backtick span (``literal `@x` backticks``) strips whole.
     const withoutSpans = line.replace(/(`+)[^`]*?\1/g, '')
     for (const match of withoutSpans.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])

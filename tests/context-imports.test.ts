@@ -287,6 +287,15 @@ describe('collectImports', () => {
     expect(budget.bytes).toBe(1)
   })
 
+  it('keeps a fence open across a shorter same-character fence line', () => {
+    // CommonMark: a closer must be at least as long as its opener, so the classic
+    // three-backtick block quoted inside a four-backtick one is content.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'a.md'), '````\n```\n@b.md\n````')
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('@a.md', dir, dir, [dir], new Set()).map((f) => f.body)).toEqual(['````\n```\n@b.md\n````'])
+  })
+
   it('is cycle-safe', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'a.md'), '@b.md')

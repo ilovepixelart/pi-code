@@ -11,7 +11,7 @@
  * fenced code block (backtick or tilde).
  */
 
-/** The fence a line opens or closes, if any; mirrors context-imports. */
+/** The fence a line opens or closes, if any. */
 export function fenceMarker(lineStart: string): string | null {
   if (lineStart.startsWith('```')) return '`'
   if (lineStart.startsWith('~~~')) return '~'
@@ -29,14 +29,14 @@ function fenceLength(lineStart: string, marker: string): number {
 // is at least as long as the opener, so both are tracked: a shorter same-char
 // fence line (the classic 3-backtick block quoted inside a 4-backtick one) is
 // content, not a closer.
-interface Fence {
+export interface Fence {
   marker: string
   length: number
 }
 
 /** The fence state after a line, plus whether the line is fenced code (opener,
  * body, or closer) and so emitted verbatim rather than scanned for comments. */
-function stepFence(fence: Fence | null, trimmed: string, marker: string | null): { fence: Fence | null; fenced: boolean } {
+export function stepFence(fence: Fence | null, trimmed: string, marker: string | null): { fence: Fence | null; fenced: boolean } {
   if (marker !== null && fence === null) {
     return { fence: { marker, length: fenceLength(trimmed, marker) }, fenced: true }
   }

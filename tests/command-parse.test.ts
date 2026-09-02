@@ -537,6 +537,27 @@ describe('expandDynamicContent', () => {
     const out = await expandDynamicContent('```\n@notes.md\n```', cwd, exec)
     expect(out).not.toContain('FILE_BODY')
   })
+
+  it('ignores an @ref inside an indented fence', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'notes.md'), 'FILE_BODY')
+    const out = await expandDynamicContent('  ```\n@notes.md\n  ```', cwd, exec)
+    expect(out).not.toContain('FILE_BODY')
+  })
+
+  it('keeps a backtick fence open across a tilde fence line', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'notes.md'), 'FILE_BODY')
+    const out = await expandDynamicContent('```\n~~~\n@notes.md\n```', cwd, exec)
+    expect(out).not.toContain('FILE_BODY')
+  })
+
+  it('closes a fence only with a run at least as long as its opener', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'notes.md'), 'FILE_BODY')
+    const out = await expandDynamicContent('````\n```\n@notes.md\n````', cwd, exec)
+    expect(out).not.toContain('FILE_BODY')
+  })
 })
 
 describe('dollar signs stay literal', () => {
