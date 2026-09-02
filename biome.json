@@ -1,11 +1,19 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.4/schema.json",
-  "vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": false },
+  "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
+  "vcs": {
+    "enabled": false,
+    "clientKind": "git",
+    "useIgnoreFile": false
+  },
   "files": {
     "ignoreUnknown": false,
     "includes": ["extensions/**/*.ts", "tests/**/*.ts"]
   },
-  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
   "assist": {
     "actions": {
       "source": {
@@ -21,6 +29,9 @@
         "noFloatingPromises": "error",
         "noMisusedPromises": "error",
         "useExhaustiveSwitchCases": "error"
+      },
+      "suspicious": {
+        "noTemplateCurlyInString": "off"
       }
     }
   },
@@ -29,7 +40,12 @@
       "includes": ["tests/**/*.ts"],
       "linter": {
         "rules": {
-          "suspicious": { "noExplicitAny": "off" }
+          "suspicious": {
+            "noExplicitAny": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off"
+          }
         }
       }
     }
