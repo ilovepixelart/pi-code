@@ -131,7 +131,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   function registerTools(name: string, config: ServerConfig, tools: McpToolInfo[]): number {
     let count = 0
     for (const tool of tools) {
-      const toolName = formatToolName(name, tool.name)
+      // A plugin server's registry key carries its plugin: scope; its tools keep the bare
+      // server name, as their Claude alias does.
+      const toolName = formatToolName(config.baseName ?? name, tool.name)
       const owner = registered.get(toolName)
       if (owner === name) continue // already registered for this server: a refresh re-listing it
       if (RESERVED_NAMES.has(toolName) || owner !== undefined) {
