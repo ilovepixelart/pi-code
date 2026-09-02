@@ -29,7 +29,7 @@ import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { isDirectory } from './internal/values.js'
 
 export interface OutputStyle {
@@ -151,13 +151,8 @@ export function settingsFiles(cwd: string, home: string, trusted: boolean): stri
 export function readActiveStyleName(files: string[], managed: Record<string, unknown> = readManagedSettings()): string | undefined {
   if (typeof managed.outputStyle === 'string') return managed.outputStyle
   let name: string | undefined
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (typeof settings.outputStyle === 'string') name = settings.outputStyle
-    } catch {
-      // missing or invalid file: skip
-    }
+  for (const settings of readSettingsChain(files)) {
+    if (typeof settings.outputStyle === 'string') name = settings.outputStyle
   }
   return name
 }

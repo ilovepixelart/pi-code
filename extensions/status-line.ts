@@ -36,6 +36,7 @@ import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { readSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
 
@@ -178,14 +179,7 @@ export function readStatusLineConfig(files: string[], managed: Record<string, un
   if (managedConfig) return managedConfig
   if (managed.allowManagedHooksOnly === true) return undefined
   let found: StatusLineConfig | undefined
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      found = parseStatusLineEntry(settings.statusLine) ?? found
-    } catch {
-      // missing or invalid file: skip
-    }
-  }
+  for (const settings of readSettingsChain(files)) found = parseStatusLineEntry(settings.statusLine) ?? found
   return found
 }
 

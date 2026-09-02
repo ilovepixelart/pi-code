@@ -8,7 +8,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
-import { claudeSettingsChain } from '../internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from '../internal/settings-chain.js'
 import { errorMessage } from '../internal/values.js'
 
 export interface HookCommand {
@@ -93,13 +93,8 @@ export function readDisableAllHooks(files: string[], managed: Record<string, unk
  * disableAllHooks cannot disable hooks configured through managed policy settings,
  * so the caller keeps managed hooks running when only this half is set. */
 export function readSettingsDisableAllHooks(files: string[]): boolean {
-  for (const file of files) {
-    try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (isRecord(parsed) && parsed.disableAllHooks === true) return true
-    } catch {
-      // missing or invalid file: skip
-    }
+  for (const settings of readSettingsChain(files)) {
+    if (settings.disableAllHooks === true) return true
   }
   return false
 }
@@ -153,14 +148,7 @@ export function readAllowedHttpHookUrls(files: string[], managed: Record<string,
     found = [...(found ?? []), ...value.filter((entry): entry is string => typeof entry === 'string')]
   }
   collect(managed.allowedHttpHookUrls)
-  for (const file of files) {
-    try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (isRecord(parsed)) collect(parsed.allowedHttpHookUrls)
-    } catch {
-      // missing or invalid file: skip
-    }
-  }
+  for (const settings of readSettingsChain(files)) collect(settings.allowedHttpHookUrls)
   return found
 }
 

@@ -76,7 +76,7 @@ import { sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
 
@@ -406,15 +406,7 @@ export function readClaudeMdExcludes(files: string[], managed: Record<string, un
       if (typeof entry === 'string' && entry.trim().length > 0) globs.push(entry)
     }
   }
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (settings === null || typeof settings !== 'object') continue
-      collect((settings as Record<string, unknown>).claudeMdExcludes)
-    } catch {
-      // missing or invalid settings file: skip
-    }
-  }
+  for (const settings of readSettingsChain(files)) collect(settings.claudeMdExcludes)
   collect(managed.claudeMdExcludes)
   return globs
 }

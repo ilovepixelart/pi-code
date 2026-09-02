@@ -7,9 +7,11 @@
  * and the skill-shell policy all resolve their files through this one chain.
  */
 
+import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { claudeConfigDir } from './config-dir.js'
 import { repoRoot } from './project-root.js'
+import { isRecord } from './values.js'
 
 /** The user settings.json, then (only when `includeProject`) the project files by
  * Claude's placement rules: the shared `.claude/settings.json` is read from the
@@ -27,4 +29,21 @@ export function claudeSettingsChain(cwd: string, home: string, includeProject: b
   if (localDir !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
   files.push(path.join(localDir, '.claude', 'settings.local.json'))
   return files
+}
+
+/** Every readable settings object in the chain, in order, so the last one a caller
+ * sees for a key is the one that wins. A file that is missing, unparseable, or not a
+ * JSON object is skipped: a corrupt settings.json must not end the chain, or the
+ * user-level values behind it would silently vanish along with it. Lazy, so a caller
+ * that stops early does not read the rest. */
+export function* readSettingsChain(files: readonly string[]): Generator<Record<string, unknown>> {
+  for (const file of files) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    } catch {
+      continue
+    }
+    if (isRecord(parsed)) yield parsed
+  }
 }

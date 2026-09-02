@@ -20,7 +20,7 @@ import { readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { repoRoot } from './internal/project-root.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
 import { errorMessage } from './internal/values.js'
 
@@ -351,15 +351,9 @@ export function memorySettingsFiles(cwd: string, home: string, approved: boolean
  * managed policy settings win over every file, per Claude's settings precedence. */
 export function readMemorySettings(files: string[], managed: Record<string, unknown> = readManagedSettings()): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
   const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } = {}
-  for (const file of files) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      if (settings === null || typeof settings !== 'object') continue
-      if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
-      if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
-    } catch {
-      // missing or invalid settings file: skip
-    }
+  for (const settings of readSettingsChain(files)) {
+    if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
+    if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
   }
   if ('autoMemoryEnabled' in managed) merged.autoMemoryEnabled = managed.autoMemoryEnabled
   if ('autoMemoryDirectory' in managed) merged.autoMemoryDirectory = managed.autoMemoryDirectory
