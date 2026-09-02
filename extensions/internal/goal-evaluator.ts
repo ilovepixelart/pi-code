@@ -147,7 +147,8 @@ export function renderTranscript(messages: readonly unknown[], budgetChars: numb
     const rendered = renderMessage(message)
     if (rendered !== undefined) blocks.push(truncate(rendered, BLOCK_MAX_CHARS))
   }
-  if (blocks.length === 0) return ''
+  const newest = blocks.at(-1)
+  if (newest === undefined) return ''
   const separator = '\n\n'
   const kept: string[] = []
   let used = 0
@@ -160,7 +161,7 @@ export function renderTranscript(messages: readonly unknown[], budgetChars: numb
     kept.unshift(blocks[i])
     used += cost
   }
-  if (kept.length === 0) return blocks[blocks.length - 1].slice(0, budgetChars)
+  if (kept.length === 0) return newest.slice(0, budgetChars)
   return kept.join(separator)
 }
 
