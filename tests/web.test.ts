@@ -71,6 +71,25 @@ describe('web helpers', () => {
     expect(decodeEntities('&lt;x&gt;')).toBe('<x>')
   })
 
+  it('cannot reassemble a tag from nested brackets', () => {
+    // A regex strip removes the inner <b> and leaves <script> behind.
+    expect(stripTags('<scr<b>ipt>alert(1)</script>x')).not.toContain('<script')
+    expect(stripTags('<scr<b>ipt>alert(1)</script>x')).toBe('ipt>alert(1)x')
+  })
+
+  it('keeps a lone < with no closing > as text', () => {
+    expect(stripTags('1 < 2 and <b>3</b>')).toBe('1 < 2 and 3')
+    expect(stripTags('a <b')).toBe('a <b')
+  })
+
+  it('strips a page of nested tag openers in one pass', () => {
+    expect(stripTags(`${'<a<b'.repeat(100_000)}>`)).toBe('')
+  })
+
+  it('leaves a < that opens no tag alone, as the HTML tokenizer does', () => {
+    expect(stripTags('x <3 y <<b>z</b>')).toBe('x <3 y <z')
+  })
+
   it('classifies private and internal addresses for the SSRF guard', () => {
     for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fe80::1', 'fd00::1', 'fc00::1', '::ffff:127.0.0.1', 'not-an-ip']) {
       expect(isPrivateAddress(ip), ip).toBe(true)
@@ -88,6 +107,12 @@ describe('web helpers', () => {
     for (const ip of ['2606:4700:4700::1111', '2001:4860:4860::8888']) {
       expect(isPrivateAddress(ip), ip).toBe(false)
     }
+  })
+
+  it('does not leave a script tag behind when brackets nest inside one', () => {
+    const md = htmlToMarkdown('<p>see</p><scr<b>ipt>alert(1)</script><p>done</p>')
+    expect(md).not.toContain('<script')
+    expect(md).toContain('done')
   })
 
   it('converts html to markdown, dropping script and style bodies', () => {

@@ -175,6 +175,18 @@ describe('stripNonLoaded', () => {
     expect(stripped).toContain('# Memory index')
     expect(stripped).toContain('- [a](a.md): first')
   })
+
+  it('cannot reassemble a comment from a comment nested inside another', () => {
+    // A single regex pass removes the inner comment and leaves <!--- y --> behind.
+    const stripped = stripNonLoaded('<!-<!-- x -->-- zzz -->\n# Memory index\n')
+    expect(stripped).not.toContain('<!--')
+    expect(stripped).not.toContain('zzz')
+    expect(stripped).toBe('# Memory index\n')
+  })
+
+  it('keeps an unterminated comment opener as text', () => {
+    expect(stripNonLoaded('# Memory index\n<!-- open')).toBe('# Memory index\n<!-- open')
+  })
 })
 
 describe('autoMemoryEnabled', () => {
