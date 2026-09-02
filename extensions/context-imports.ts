@@ -893,13 +893,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // set) is rebuilt for next turn.
   const resolveImports = (
     memoKey: string,
-    native: Array<{ path: string; content: string }>,
-    contextFiles: Array<{ path: string; content: string }>,
-    siblings: Array<{ path: string; content: string }>,
-    home: string,
-    cwd: string,
-    excluded: (absPath: string) => boolean,
-    externalApproved: boolean,
+    files: { native: Array<{ path: string; content: string }>; context: Array<{ path: string; content: string }>; siblings: Array<{ path: string; content: string }> },
+    run: { home: string; cwd: string; excluded: (absPath: string) => boolean; externalApproved: boolean },
   ): { extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] } => {
     if (importMemo?.key === memoKey && memoIsFresh(importMemo)) {
       const { extras, budget, imported } = importMemo
@@ -909,7 +904,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // files are never re-imported and an excluded file cannot return as an import.
     // The user, project-.claude and managed-file additions join the seed too, so a
     // context file's @import cannot pull any of them in a second time.
-    const ownPaths = [...native, ...localContexts, ...siblings].map((file) => file.path)
+    const ownPaths = [...files.native, ...localContexts, ...files.siblings].map((file) => file.path)
     if (userContext !== undefined) ownPaths.push(userContext.path)
     if (projectDotClaude !== undefined) ownPaths.push(projectDotClaude.path)
     ownPaths.push(managedClaudeMdPath())
@@ -918,14 +913,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // Claude's --add-dir memory loading, env-gated. The files join the seen set
     // before import expansion so an @import cannot pull one in twice, and they get
     // the same exclude and comment-strip treatment as native context files.
-    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
-    const extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
+    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), run.home, run.cwd) : []
+    const extras = additionalDirExtras(addDirs, seenSet, run.excluded, projectApproved)
 
     // One budget for the whole run, so N context files cannot each spend a full one.
     // Exclusion applies inside the recursion: an excluded @import is skipped before
     // it is read, so its transitive imports never load and it spends no budget.
     const budget = createImportBudget()
-    const imported = expandImports(contextFiles, extras, { home, cwd, seen: seenSet, excluded, budget, externalApproved })
+    const imported = expandImports(files.context, extras, { ...run, seen: seenSet, budget })
 
     // Revalidation set: every file the expansion read, plus each add-dir itself
     // (a directory's mtime moves when a memory file is added or removed there).
@@ -988,6 +983,26 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     projectApproved = isProjectApprovedSilently(ctx)
     gatedFilesApproved = isGatedFileApproved(ctx)
   })
+
+  /** The launch-time expansion, asking about what it refuses for leaving the project
+   * when this project has not been asked yet.
+   *
+   * Claude asks once per project and remembers the answer either way. The list is what
+   * this very expansion refused, so it names exactly the files the answer governs, and
+   * on approval the expansion is simply redone with the wider roots. */
+  const expandAskingAboutExternals = async (
+    cwd: string,
+    ctx: ExtensionContext | undefined,
+    expandWith: (externalApproved: boolean) => { extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] },
+  ): Promise<{ extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] }> => {
+    const key = externalImportKey(cwd)
+    const decided = externalImportDecision(key)
+    const result = expandWith(decided === true)
+    if (decided !== null || result.budget.refused.size === 0 || ctx?.hasUI !== true) return result
+    const approved = await askExternalImports(ctx, key, result.budget.refused)
+    rememberExternalImportDecision(key, approved)
+    return approved ? expandWith(true) : result
+  }
 
   pi.on('before_agent_start', async (event, ctx) => {
     const home = os.homedir()
@@ -1053,21 +1068,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
     const expandWith = (externalApproved: boolean) => {
       const memoKey = buildImportMemoKey({ cwd, home, projectApproved, externalApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
-      return resolveImports(memoKey, native, contextFiles, keptSiblings, home, cwd, excluded, externalApproved)
+      return resolveImports(memoKey, { native, context: contextFiles, siblings: keptSiblings }, { home, cwd, excluded, externalApproved })
     }
 
     // Claude's external-import dialog. Asked from the refusals the expansion just
     // produced, so the files named are exactly the files the answer governs, and asked
     // here rather than at session start because only this event knows which context
     // files pi actually loaded. Once per project: the answer is remembered either way.
-    const externalKey = externalImportKey(cwd)
-    const decided = externalImportDecision(externalKey)
-    let { extras, budget, imported } = expandWith(decided === true)
-    if (decided === null && budget.refused.size > 0 && ctx?.hasUI === true) {
-      const approved = await askExternalImports(ctx, externalKey, budget.refused)
-      rememberExternalImportDecision(externalKey, approved)
-      if (approved) ({ extras, budget, imported } = expandWith(true))
-    }
+    const { extras, budget, imported } = await expandAskingAboutExternals(cwd, ctx, expandWith)
     launchLoadedPaths = realRoots([...contextFiles.map((file) => file.path), ...imported.map((entry) => entry.path)])
 
     // Project memory precedes local memory, so the ./.claude/CLAUDE.md block leads the
