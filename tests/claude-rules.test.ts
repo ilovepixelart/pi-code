@@ -267,7 +267,8 @@ describe('extension wiring', () => {
   it('surfaces a project rule with its path scope once the project is approved', async () => {
     const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
     const prompt = await sessionPrompt({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
-    expect(prompt).toContain('- .claude/rules/testing.md — applies when working on: **/*.test.ts')
+    // The pointer base is path.relative(cwd, rulesDir), so it carries the platform separator.
+    expect(prompt).toContain(`- ${join('.claude', 'rules')}/testing.md — applies when working on: **/*.test.ts`)
     // Scoped rules attach when matching files are touched, so the body stays on disk.
     expect(prompt).not.toContain('Tests must be deterministic.')
   })
@@ -367,7 +368,8 @@ describe('extension wiring', () => {
     expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
   })
 
-  it('skips an unreadable global rule instead of failing the session', async () => {
+  // POSIX-only: chmod 0o000 does not revoke read access on Windows, so the rule stays readable there.
+  it.skipIf(process.platform === 'win32')('skips an unreadable global rule instead of failing the session', async () => {
     const rulesDir = join(hoisted.home, '.claude', 'rules')
     mkdirSync(rulesDir, { recursive: true })
     writeFileSync(join(rulesDir, 'locked.md'), 'Secret rule.')

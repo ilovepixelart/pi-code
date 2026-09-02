@@ -21,12 +21,12 @@ describe('claudeConfigDir', () => {
 
   it('honors an absolute CLAUDE_CONFIG_DIR', () => {
     process.env.CLAUDE_CONFIG_DIR = '/opt/claude-config'
-    expect(claudeConfigDir(HOME)).toBe('/opt/claude-config')
+    expect(claudeConfigDir(HOME)).toBe(path.resolve('/opt/claude-config'))
   })
 
   it('expands a leading ~ against home', () => {
     process.env.CLAUDE_CONFIG_DIR = '~/nested/cfg'
-    expect(claudeConfigDir(HOME)).toBe(path.join(HOME, 'nested', 'cfg'))
+    expect(claudeConfigDir(HOME)).toBe(path.resolve(path.join(HOME, 'nested', 'cfg')))
   })
 
   it('resolves a relative CLAUDE_CONFIG_DIR to an absolute path', () => {
@@ -50,7 +50,7 @@ describe('config-dir sweep', () => {
   it('a swept consumer (hookFiles) resolves the user settings under CLAUDE_CONFIG_DIR', () => {
     process.env.CLAUDE_CONFIG_DIR = '/opt/claude-config'
     const [userSettings] = hookFiles('/some/proj', HOME, false)
-    expect(userSettings).toBe(path.join('/opt/claude-config', 'settings.json'))
+    expect(userSettings).toBe(path.join(path.resolve('/opt/claude-config'), 'settings.json'))
   })
 })
 

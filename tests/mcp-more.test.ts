@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -865,7 +866,10 @@ describe('interactive OAuth serialization', () => {
     const started = harness.sessionStart()
 
     // Both silent connects 401 in parallel and both reach the interactive stage, but
-    // only the first login's confirm has fired; the second is queued behind it.
+    // only the first login's confirm has fired; the second is queued behind it. Wait
+    // for the first confirm (the connect flow crosses real fs I/O, so a single tick
+    // is not enough on slow runners), then give the queued one a turn to (wrongly) fire.
+    await waitFor(() => confirmCount >= 1)
     await new Promise((resolve) => setImmediate(resolve))
     expect(confirmCount).toBe(1)
 
@@ -2278,12 +2282,13 @@ describe('mcp stdio session context', () => {
     expect(handler).toBeDefined()
     const result = handler?.({ method: 'roots/list' }) as { roots: Array<{ uri: string }> }
     expect(result.roots).toHaveLength(1)
-    expect(result.roots[0].uri).toBe(`file://${harness.cwd}`)
+    expect(result.roots[0].uri).toBe(pathToFileURL(harness.cwd).href)
   })
 })
 
 describe('mcp headersHelper environment', () => {
-  it('passes the server name and a credential-redacted url to the helper', async () => {
+  // POSIX-only: production runs the headersHelper through /bin/sh -c, and these helpers are sh scripts.
+  it.skipIf(process.platform === 'win32')('passes the server name and a credential-redacted url to the helper', async () => {
     // Claude sets CLAUDE_CODE_MCP_SERVER_NAME and CLAUDE_CODE_MCP_SERVER_URL when
     // executing the helper; a url part expanded from a credential-named variable
     // reaches the helper as REDACTED while the transport gets the real value.
@@ -2298,7 +2303,8 @@ describe('mcp headersHelper environment', () => {
     expect(String(hoisted.transports[0].url)).toBe('https://api.example/sekret/mcp')
   })
 
-  it('strips credential-named variables from a project server helper environment', async () => {
+  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
+  it.skipIf(process.platform === 'win32')('strips credential-named variables from a project server helper environment', async () => {
     // A helper a repository supplies runs without credential variables such as
     // ANTHROPIC_API_KEY: any name with TOKEN/SECRET/PASSWORD/KEY/AUTH in it.
     setEnv('MY_PROJ_TOKEN', 'leak')
@@ -2313,7 +2319,8 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('absent')
   })
 
-  it('keeps credential variables for a user-scope helper, which the user wrote', async () => {
+  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
+  it.skipIf(process.platform === 'win32')('keeps credential variables for a user-scope helper, which the user wrote', async () => {
     setEnv('MY_USER_TOKEN', 'mine')
     withTools([{ name: 'go' }])
     const helper = `echo "{\\"X-T\\":\\"\${MY_USER_TOKEN-absent}\\"}"`
@@ -2323,7 +2330,8 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('mine')
   })
 
-  it('gives a plugin server helper CLAUDE_PLUGIN_ROOT and the credential stripping', async () => {
+  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
+  it.skipIf(process.platform === 'win32')('gives a plugin server helper CLAUDE_PLUGIN_ROOT and the credential stripping', async () => {
     setEnv('MY_PLUGIN_TOKEN', 'leak')
     withTools([{ name: 'go' }])
     const helper = `echo "{\\"X-R\\":\\"$CLAUDE_PLUGIN_ROOT\\",\\"X-T\\":\\"\${MY_PLUGIN_TOKEN-absent}\\"}"`
@@ -2359,7 +2367,8 @@ describe('mcp configured authorization', () => {
     expect(line.startsWith('locked: failed: ')).toBe(true)
   })
 
-  it('fails a 401 server whose helper supplied Authorization instead of starting OAuth', async () => {
+  // POSIX-only: the premise (helper output supplies Authorization) needs the /bin/sh helper to run.
+  it.skipIf(process.platform === 'win32')('fails a 401 server whose helper supplied Authorization instead of starting OAuth', async () => {
     withTools([{ name: 'go' }])
     hoisted.control.connect = async () => {
       throw Object.assign(new Error('denied'), { code: 401 })

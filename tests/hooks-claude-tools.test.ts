@@ -22,12 +22,12 @@ describe('claudeToolInput', () => {
   })
 
   it('makes file paths absolute, expanding ~, as Claude documents', () => {
-    expect(claudeToolInput('write', { path: 'src/a.ts', content: 'x' }, '/proj')).toEqual({ file_path: '/proj/src/a.ts', content: 'x' })
+    expect(claudeToolInput('write', { path: 'src/a.ts', content: 'x' }, '/proj')).toEqual({ file_path: path.resolve('/proj', 'src/a.ts'), content: 'x' })
     expect(claudeToolInput('read', { path: '~/notes.md' }, '/proj')).toEqual({ file_path: path.join(os.homedir(), 'notes.md') })
   })
 
   it('maps a single pi edit to the documented Edit fields', () => {
-    expect(claudeToolInput('edit', { path: '/p/a.ts', edits: [{ oldText: 'x', newText: 'y' }] }, '/proj')).toEqual({ file_path: '/p/a.ts', old_string: 'x', new_string: 'y', replace_all: false })
+    expect(claudeToolInput('edit', { path: '/p/a.ts', edits: [{ oldText: 'x', newText: 'y' }] }, '/proj')).toEqual({ file_path: path.resolve('/p/a.ts'), old_string: 'x', new_string: 'y', replace_all: false })
   })
 
   it('carries a multi-entry edits array alongside the first documented fields', () => {
@@ -35,7 +35,7 @@ describe('claudeToolInput', () => {
       { oldText: 'a', newText: 'b' },
       { oldText: 'c', newText: 'd' },
     ]
-    expect(claudeToolInput('edit', { path: '/p/a.ts', edits }, '/proj')).toEqual({ file_path: '/p/a.ts', old_string: 'a', new_string: 'b', replace_all: false, edits })
+    expect(claudeToolInput('edit', { path: '/p/a.ts', edits }, '/proj')).toEqual({ file_path: path.resolve('/p/a.ts'), old_string: 'a', new_string: 'b', replace_all: false, edits })
   })
 
   it('maps grep ignoreCase to the documented -i flag', () => {
@@ -43,7 +43,7 @@ describe('claudeToolInput', () => {
   })
 
   it('maps pi find input to the documented Glob fields, resolving the path', () => {
-    expect(claudeToolInput('find', { pattern: '*.ts', path: 'src' }, '/proj')).toEqual({ pattern: '*.ts', path: '/proj/src' })
+    expect(claudeToolInput('find', { pattern: '*.ts', path: 'src' }, '/proj')).toEqual({ pattern: '*.ts', path: path.resolve('/proj', 'src') })
     expect(claudeToolInput('find', { pattern: '*.ts' }, '/proj')).toEqual({ pattern: '*.ts' })
   })
 })
@@ -74,7 +74,7 @@ describe('piToolInput', () => {
 describe('claudeToolResponse', () => {
   it('reports the documented Bash and Write shapes and leaves other tools untranslated', () => {
     expect(claudeToolResponse('bash', { command: 'ls' }, 'out', false, '/proj')).toEqual({ stdout: 'out', stderr: '', interrupted: false, isImage: false })
-    expect(claudeToolResponse('write', { path: 'a.ts', content: 'x' }, '', false, '/proj')).toEqual({ filePath: '/proj/a.ts', success: true })
+    expect(claudeToolResponse('write', { path: 'a.ts', content: 'x' }, '', false, '/proj')).toEqual({ filePath: path.resolve('/proj', 'a.ts'), success: true })
     expect(claudeToolResponse('read', { path: 'a.ts' }, 'text', false, '/proj')).toBeUndefined()
   })
 })

@@ -218,6 +218,11 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
 /** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
  * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
  * hook can name its bundled scripts by real path. */
+/** The substitution here lands inside raw JSON, so values must arrive escaped:
+ * an unescaped Windows root injected \U-style sequences, the parse threw, and
+ * every hook the plugin declared silently vanished. */
+const jsonEscape = (value: string): string => JSON.stringify(value).slice(1, -1)
+
 export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks
@@ -225,12 +230,12 @@ export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[],
     // numeric event keys), so it falls through to the default path rather than
     // silently registering nothing.
     if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin), `${plugin.name} (plugin.json)`, sources, `plugin:${plugin.name}`)
+      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin, jsonEscape), `${plugin.name} (plugin.json)`, sources, `plugin:${plugin.name}`)
       continue
     }
     const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
     try {
-      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin), file, sources, `plugin:${plugin.name}`)
+      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`)
     } catch {
       // a plugin without hooks contributes nothing
     }

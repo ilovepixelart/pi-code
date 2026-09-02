@@ -54,8 +54,11 @@ describe('FileOAuthProvider', () => {
     const entries = readdirSync(storeDir)
     expect(entries).toHaveLength(1)
     expect(entries[0]).not.toContain('..')
-    const mode = statSync(join(storeDir, entries[0])).mode & 0o777
-    expect(mode).toBe(0o600)
+    // POSIX-only: Windows has no 0o600 file mode; stat reports a synthetic 0o666 there.
+    if (process.platform !== 'win32') {
+      const mode = statSync(join(storeDir, entries[0])).mode & 0o777
+      expect(mode).toBe(0o600)
+    }
   })
 
   it('describes itself as a public PKCE client with the bound port as redirect uri', () => {

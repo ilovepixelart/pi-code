@@ -180,7 +180,8 @@ describe('memory index robustness', () => {
     expect(index).toContain('- [beta](beta.md): second of a pair')
   })
 
-  it('refuses to delete while the index is unreadable, keeping the memory file', async () => {
+  // POSIX-only: chmod 0o000 does not revoke read access on Windows, so the index stays readable there.
+  it.skipIf(process.platform === 'win32')('refuses to delete while the index is unreadable, keeping the memory file', async () => {
     const { handlers, tool, cwd, dir } = setup()
     await start(handlers, cwd)
     await tool.execute('1', { action: 'save', name: 'keep', description: 'to survive', content: 'body' })

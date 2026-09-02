@@ -28,12 +28,7 @@ jobs:
       # One red leg must not hide another platform's result.
       fail-fast: false
       matrix:
-        # windows-latest joins once the suite is Windows-clean: the first live
-        # run surfaced 18 failing files (path-separator expectations, a real
-        # shadow-git autocrlf defect, POSIX mode assertions), tracked as its
-        # own register item rather than a blanket skip that would hollow the
-        # leg into a check that cannot fail.
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest]
         node-version: [22.x, 24.x]
     steps:
       - name: Checkout

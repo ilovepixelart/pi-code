@@ -1,7 +1,7 @@
 import type { EventEmitter as Emitter } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1096,6 +1096,27 @@ describe('hooks extension notify-style events', () => {
     expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
   })
 
+  // The fixture needs a directory whose NAME contains a backslash, which POSIX
+  // permits and Windows cannot create (backslash is the separator there); on
+  // Windows every real plugin root exercises the same escaping naturally.
+  it.skipIf(process.platform === 'win32')('substitutes a backslash-bearing plugin root without corrupting the hooks JSON', async () => {
+    // A Windows root (C:\Users\...) textually substituted into raw JSON injects
+    // invalid escape sequences; the parse then threw and the catch silently
+    // dropped every hook the plugin declared. Backslashes are legal in POSIX
+    // directory names, so the corruption reproduces on any platform.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt2', String.raw`1.0.0\uv`)
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { fmt2: true } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
+  })
+
   it('bridges Notification hooks for idle_prompt on agent end, matcher-filtered', async () => {
     // Claude: idle_prompt fires when "Claude finished responding about 60 seconds
     // ago and you haven't typed since". Observational only, like Claude documents.
@@ -2003,7 +2024,7 @@ describe('Claude vocabulary and decision-control conformance', () => {
     await ext.toolCall('edit', { path: 'src/a.ts', edits: [{ oldText: 'x', newText: 'y' }] })
     const stdin = JSON.parse(recordFor('guard').stdin)
     expect(stdin.tool_name).toBe('Edit')
-    expect(stdin.tool_input.file_path).toBe('/proj/src/a.ts')
+    expect(stdin.tool_input.file_path).toBe(resolve('/proj', 'src/a.ts'))
     expect(stdin.tool_input.old_string).toBe('x')
     expect(stdin.tool_input.new_string).toBe('y')
   })

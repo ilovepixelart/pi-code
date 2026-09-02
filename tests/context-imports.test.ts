@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -72,7 +72,7 @@ afterEach(() => {
 describe('expandHome', () => {
   it('expands ~ and ~/ but leaves other paths alone', () => {
     expect(expandHome('~', '/home/x')).toBe('/home/x')
-    expect(expandHome('~/a.md', '/home/x')).toBe('/home/x/a.md')
+    expect(expandHome('~/a.md', '/home/x')).toBe(join('/home/x', 'a.md'))
     expect(expandHome('rel.md', '/home/x')).toBe('rel.md')
   })
 })
@@ -853,7 +853,7 @@ describe('additionalDirContextFiles', () => {
 
 describe('parseAdditionalDirs', () => {
   it('splits a comma-separated --add-dir value, expanding ~ and resolving relative paths against cwd', () => {
-    expect(parseAdditionalDirs('/abs/a, rel/b,~/c', '/home/u', '/cwd')).toEqual(['/abs/a', '/cwd/rel/b', '/home/u/c'])
+    expect(parseAdditionalDirs('/abs/a, rel/b,~/c', '/home/u', '/cwd')).toEqual([resolve('/abs/a'), resolve('/cwd/rel/b'), resolve('/home/u/c')])
   })
 
   it('returns nothing for a missing, boolean, or empty flag value', () => {
