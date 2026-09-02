@@ -22,12 +22,10 @@ describe('substitutePluginVars user_config', () => {
   const plugin = { name: 'p', root: '/r', dataDir: '/d', manifest: {}, userConfig: { token: 'secret-x', region: 'eu' } }
 
   it('substitutes ${user_config.KEY} alongside the plugin path vars', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
     expect(substitutePluginVars('${CLAUDE_PLUGIN_ROOT}/bin --token ${user_config.token} --region ${user_config.region}', plugin as never)).toBe('/r/bin --token secret-x --region eu')
   })
 
   it('replaces an unknown user_config key with an empty string', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
     expect(substitutePluginVars('x=${user_config.missing}', plugin as never)).toBe('x=')
   })
 })

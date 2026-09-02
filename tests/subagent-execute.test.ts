@@ -1258,7 +1258,7 @@ describe('chain mode', () => {
       { agent: 'scout', task: 'use: {previous}' },
     ]
     script('a', { stdout: [say(huge)] })
-    const result = await execute('c1', { chain }, undefined, undefined, trustedCtx)
+    await execute('c1', { chain }, undefined, undefined, trustedCtx)
 
     const secondArg = piArgs(spawnCalls[1]).at(-1) as string
     expect(secondArg.length).toBeLessThan(60_000)
