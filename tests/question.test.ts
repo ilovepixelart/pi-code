@@ -253,6 +253,10 @@ describe('question renderCall', () => {
   it('omits the option line when options is not an array', () => {
     expect(lines(setup().renderCall({ question: 'Pick one' }, theme))).toEqual(['question Pick one'])
   })
+
+  it('shows the header truncated to the same 12 characters as the dialog', () => {
+    expect(lines(setup().renderCall({ question: 'Pick one', header: 'A'.repeat(30) }, theme))).toEqual([`question [${'A'.repeat(12)}] Pick one`])
+  })
 })
 
 describe('question renderResult', () => {
