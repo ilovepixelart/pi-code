@@ -31,6 +31,41 @@ wait_ci() {
   until gh run list --branch "$branch" --json headSha,status -q '.[] | select(.headSha=="'"$(git rev-parse HEAD)"'") | .status' | grep -q completed; do sleep 20; done
 }
 
+# Wait for the publish run CREATED AFTER the given UTC timestamp and require it
+# to succeed. The old latest-run poll could latch onto the previous release's
+# completed run (a delayed release event is a documented real occurrence) and
+# spun forever when the new run failed; this binds to the new run and bounds
+# both waits so a dead publish surfaces as a red release, not a hang.
+wait_publish() {
+  local since=$1
+  local deadline=$((SECONDS + 1800))
+  local conclusion=""
+  while [ -z "$conclusion" ]; do
+    if ((SECONDS >= deadline)); then
+      echo "publish run did not complete within 30m (started after $since)" >&2
+      return 1
+    fi
+    conclusion=$(gh run list --workflow=publish.yaml --json createdAt,status,conclusion -q '[.[] | select(.createdAt >= "'"$since"'") | select(.status=="completed")][0].conclusion' 2>/dev/null)
+    [ -n "$conclusion" ] || sleep 30
+  done
+  if [ "$conclusion" != "success" ]; then
+    echo "publish run concluded: $conclusion" >&2
+    return 1
+  fi
+}
+
+wait_npm() {
+  local version=$1
+  local deadline=$((SECONDS + 900))
+  until [ "$(npm view pi-code version 2>/dev/null)" = "$version" ]; do
+    if ((SECONDS >= deadline)); then
+      echo "npm still does not serve $version 15m after a successful publish run" >&2
+      return 1
+    fi
+    sleep 30
+  done
+}
+
 BRANCH=$(gh pr view "$PR" --json headRefName -q .headRefName) \
   && git checkout "$BRANCH" && git pull \
   && wait_ci "$BRANCH" && gate "$PR" \
@@ -46,7 +81,8 @@ BRANCH=$(gh pr view "$PR" --json headRefName -q .headRefName) \
   && wait_ci "release/$VERSION" && gate "$BUMP_PR" \
   && gh pr merge "$BUMP_PR" --squash --delete-branch \
   && git checkout main && git pull \
+  && RELEASE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
   && gh release create "v$VERSION" --target main --title "$VERSION" --notes "$NOTES" \
-  && until gh run list --workflow=publish.yaml --limit 1 --json status,conclusion -q '.[0] | select(.status=="completed") | .conclusion' | grep -q success; do sleep 30; done \
-  && until [ "$(npm view pi-code version 2>/dev/null)" = "$VERSION" ]; do sleep 30; done \
+  && wait_publish "$RELEASE_AT" \
+  && wait_npm "$VERSION" \
   && echo "RELEASED-$VERSION"
