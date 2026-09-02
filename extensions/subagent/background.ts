@@ -67,7 +67,7 @@ export const MAX_FINISHED_RUNS = 20
 /** Grace between the cancel SIGTERM and the SIGKILL that ends a child ignoring it. */
 const CANCEL_KILL_GRACE_MS = 5000
 
-/** Bytes of stderr kept per run, enough for the boot error without buffering logs. */
+/** Characters of stderr kept per run, enough for the boot error without buffering logs. */
 const STDERR_TAIL_CHARS = 2048
 
 export function activeBackgroundRuns(): number {
