@@ -650,6 +650,20 @@ export const AGENT_HOOK_SYSTEM = [
 
 /** A throwaway agent config for one agent-hook run: read-only inspection tools, the
  * hook's model (a fast default when unset), and the decision-returning system prompt. */
+/** The agent a context: fork skill runs as when it names none: full toolset, no
+ * extra system prompt (the child keeps pi's default), the skill content as the
+ * task. */
+function forkAgent(request: Pick<AgentRunRequest, 'model' | 'systemPrompt'>): AgentConfig {
+  return {
+    name: 'fork',
+    description: 'forked skill run',
+    systemPrompt: request.systemPrompt ?? '',
+    ...(request.model ? { model: request.model } : {}),
+    source: 'builtin',
+    filePath: '',
+  }
+}
+
 export function buildHookAgent(request: Pick<AgentRunRequest, 'model' | 'systemPrompt'>): AgentConfig {
   return {
     name: 'agent-hook',
@@ -1467,7 +1481,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // A subagent session must not spawn further agents; agent hooks inside one are
       // skipped (the seam rejection is non-blocking in runAgentHook).
       if (process.env.PI_CODE_SUBAGENT) throw new Error('agent hooks do not run inside a subagent')
-      const agent = buildHookAgent(request)
+      // A context: fork skill names its agent, or runs with the full toolset;
+      // agent hooks keep the read-only hook shape.
+      const named = request.agent ? discoverAgents(hookCwd, 'both').agents.find((a) => a.name === request.agent) : undefined
+      const agent = named ?? (request.fullTools ? forkAgent(request) : buildHookAgent(request))
       const result = await runSingleAgent({
         defaultCwd: hookCwd,
         agents: [agent],

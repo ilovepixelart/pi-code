@@ -221,3 +221,68 @@ describe('skill frontmatter hooks publication', () => {
     expect(emitted).toEqual([])
   })
 })
+
+describe('context: fork and skillOverrides', () => {
+  it('runs a context: fork skill through the subagent seam and returns its result', async () => {
+    // Claude: "Add context: fork ... The skill content becomes the prompt that
+    // drives the subagent"; `agent` picks the subagent type.
+    const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+    const requests: unknown[] = []
+    setAgentRunner(async (request) => {
+      requests.push(request)
+      return 'FORK RESULT'
+    })
+    try {
+      const cwd = tempDir('cs-proj-')
+      hoisted.home = tempDir('cs-home-')
+      mkdirSync(join(hoisted.home, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: d\ncontext: fork\nagent: reviewer\n---\nDeploy $ARGUMENTS now.')
+      const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+      skillsExt({ on: (name: string, fn: never) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: '', code: 0 }) } as never)
+      const result = (await handlers.get('input')?.({ text: '/skill:deploy prod', source: 'interactive' }, { cwd })) as { action: string; text?: string }
+
+      expect(result.action).toBe('transform')
+      expect(result.text).toContain('FORK RESULT')
+      const request = requests[0] as { prompt: string; agent?: string }
+      expect(request.prompt).toContain('Deploy prod now.')
+      expect(request.agent).toBe('reviewer')
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
+  it('refuses a skill set to off in skillOverrides', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'quiet'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'quiet', 'SKILL.md'), '---\nname: quiet\ndescription: q\n---\nBody')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ skillOverrides: { quiet: 'off' } }))
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const notes: string[] = []
+    skillsExt({ on: (name: string, fn: never) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: '', code: 0 }) } as never)
+    const result = (await handlers.get('input')?.({ text: '/skill:quiet', source: 'interactive' }, { cwd, hasUI: true, ui: { notify: (m: string) => notes.push(m) } })) as { action: string } | undefined
+
+    expect(result?.action).toBe('handled')
+    expect(notes.some((n) => n.includes('skillOverrides'))).toBe(true)
+  })
+
+  it('discovers enterprise skills beside the managed settings file, winning a name clash', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const managedDir = tempDir('cs-managed-')
+    setManagedSettingsPath(join(managedDir, 'managed-settings.json'))
+    try {
+      const cwd = tempDir('cs-proj-')
+      hoisted.home = tempDir('cs-home-')
+      mkdirSync(join(managedDir, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(managedDir, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: e\n---\nENTERPRISE BODY')
+      mkdirSync(join(hoisted.home, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: p\n---\nPERSONAL BODY')
+
+      const dirs = skillDirs(cwd, hoisted.home, true)
+      expect(dirs[0]).toBe(join(managedDir, '.claude', 'skills'))
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  })
+})

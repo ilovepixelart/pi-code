@@ -25,11 +25,14 @@ import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionContext, parseFrontmatter } from '@earendil-works/pi-coding-agent'
 
 import { expandCommand, shellExecutionDisabled } from './commands.js'
+import { runAgent } from './internal/agent-run.js'
 import { parseCommandFile } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { managedSettingsFile } from './internal/managed-settings.js'
 import { installedPlugins } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.js'
 
 function isDirectory(target: string): boolean {
@@ -45,7 +48,10 @@ function isDirectory(target: string): boolean {
  * name and description to the model, so an untrusted repository would otherwise get
  * text into the prompt without the user ever agreeing to load its config. */
 export function skillDirs(cwd: string, home: string, trusted: boolean): string[] {
-  const candidates = [path.join(claudeConfigDir(home), 'skills')]
+  // Claude's precedence: enterprise (the skills directory beside the managed
+  // settings file) overrides personal, and personal overrides project; discovery
+  // here is first-match, so higher precedence goes first.
+  const candidates = [path.join(path.dirname(managedSettingsFile()), '.claude', 'skills'), path.join(claudeConfigDir(home), 'skills')]
   // Enabled plugins contribute their skills directories. pi's loader names a
   // skill by its directory, so a plugin skill registers without Claude's
   // /plugin: prefix; a rename-free approximation, disclosed in the README.
@@ -125,11 +131,49 @@ export default function skillsExtension(pi: ExtensionAPI) {
   })
 }
 
+/** Claude's `skillOverrides` value for one skill from the settings chain, later
+ * files winning: "off" hides the skill entirely, "name-only" trims its listing
+ * (a pi-loader surface, noted in docs). */
+function skillOverrideFor(name: string, cwd: string, trusted: boolean): string | undefined {
+  let value: string | undefined
+  for (const file of claudeSettingsChain(cwd, os.homedir(), trusted)) {
+    try {
+      const overrides = JSON.parse(fs.readFileSync(file, 'utf-8')).skillOverrides
+      if (overrides !== null && typeof overrides === 'object' && typeof overrides[name] === 'string') value = overrides[name]
+    } catch {
+      // missing or invalid file: skip
+    }
+  }
+  return value
+}
+
+/** Claude's skillOverrides "off": the skill is hidden and does not run; the
+ * invocation is swallowed with a notice. Undefined lets the invocation proceed. */
+function refusedByOverride(name: string, ctx: ExtensionContext, trusted: boolean): { action: 'handled' } | undefined {
+  if (skillOverrideFor(name, ctx.cwd, trusted) !== 'off') return undefined
+  if (ctx.hasUI) ctx.ui.notify(`Skill "${name}" is turned off by skillOverrides in settings.`, 'info')
+  return { action: 'handled' }
+}
+
+/** Claude's context: fork run: the expanded skill content becomes the prompt that
+ * drives a subagent, without the conversation history. Divergence: Claude
+ * backgrounds the fork by default; pi-code waits for the result in the invoking
+ * turn (Claude's background: false behavior, which is also what Claude itself
+ * does in -p and SDK runs). */
+async function runForkedSkill(name: string, filePath: string, expanded: string, agentName: string | undefined): Promise<{ action: 'transform'; text: string }> {
+  try {
+    const output = await runAgent({ prompt: expanded, fullTools: true, ...(agentName ? { agent: agentName } : {}) })
+    return { action: 'transform', text: `<skill name="${name}" location="${filePath}">\nThe skill ran in a forked subagent (no conversation history shared). Its result:\n\n${output}\n</skill>` }
+  } catch (error) {
+    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${error instanceof Error ? error.message : String(error)}\n</skill>` }
+  }
+}
+
 /** A `/skill:name args` invocation into its expanded skill block, or undefined to
  * pass the input through to pi untouched. The expanded body is wrapped in pi's
  * skill-block format so downstream behavior (the baseDir note for relative
  * references) matches an untouched invocation. */
-async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | undefined> {
+async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
   const text = rawText.trimStart()
   if (!text.startsWith('/skill:')) return
   const space = text.indexOf(' ')
@@ -139,6 +183,8 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const trusted = isProjectApprovedSilently(ctx)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
   if (!found) return
+  const refused = refusedByOverride(name, ctx, trusted)
+  if (refused) return refused
   let parsed: ReturnType<typeof parseCommandFile>
   let content: string
   try {
@@ -153,10 +199,14 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   // Claude registers hooks a skill's frontmatter declares when the skill is
   // invoked, for the rest of the session; the hooks extension owns running them,
   // so the declaration is announced over the shared bus.
-  const declaredHooks = parseFrontmatter<Record<string, unknown>>(content).frontmatter.hooks
+  const frontmatter = parseFrontmatter<Record<string, unknown>>(content).frontmatter
+  const declaredHooks = frontmatter.hooks
   if (declaredHooks !== null && typeof declaredHooks === 'object' && !Array.isArray(declaredHooks)) {
     pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })
   }
   const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
+    return runForkedSkill(name, found.filePath, expanded, typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined)
+  }
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
 }

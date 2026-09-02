@@ -16,6 +16,12 @@ export interface AgentRunRequest {
   model?: string
   /** Optional extra system prompt (Claude's experimental `systemPrompt` field). */
   systemPrompt?: string
+  /** A discovered agent to run as (Claude's `agent` field on context: fork
+   * skills); unknown names fall back per fullTools. */
+  agent?: string
+  /** Run with the full toolset instead of the read-only hook shape, for
+   * context: fork skills. */
+  fullTools?: boolean
   /** Aborts the run at the hook's deadline. */
   signal?: AbortSignal
 }
