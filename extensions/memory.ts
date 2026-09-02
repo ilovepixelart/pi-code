@@ -80,6 +80,9 @@ export function resolveMemoryDir(cwd: string, override?: string): string {
 export function autoMemoryEnabled(setting: unknown, env: NodeJS.ProcessEnv): boolean {
   const disable = (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? '').trim().toLowerCase()
   if (disable === '1' || disable === 'true') return false
+  // Claude: "Set to 0 to force auto memory on even when --bare mode or
+  // autoMemoryEnabled: false would otherwise disable it."
+  if (disable === '0' || disable === 'false') return true
   return setting !== false
 }
 
