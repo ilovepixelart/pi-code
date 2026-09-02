@@ -13,7 +13,7 @@ import type { Usage } from '@earendil-works/pi-ai'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { htmlToMarkdown } from './internal/html-markdown.js'
+import { htmlToMarkdown, removeTags } from './internal/html-markdown.js'
 import { completeText } from './internal/model-complete.js'
 import { capForContext } from './internal/output-guard.js'
 import { httpFetch } from './internal/web-transport.js'
@@ -40,11 +40,7 @@ export function decodeEntities(text: string): string {
 }
 
 export function stripTags(html: string): string {
-  // [^<>] rather than [^>]: excluding `<` bounds a failed match at the next tag start
-  // instead of rescanning to end of input, which is what makes the strip linear.
-  return decodeEntities(html.replace(/<[^<>]*>/g, ''))
-    .replace(/\s+/g, ' ')
-    .trim()
+  return decodeEntities(removeTags(html)).replace(/\s+/g, ' ').trim()
 }
 
 /** Resolve DuckDuckGo's redirect links (/l/?uddg=<encoded>) to the target URL. */

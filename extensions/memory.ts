@@ -98,11 +98,36 @@ export function stampModified(content: string, iso: string): string {
   return `---\n${body}modified: ${iso}\n---${rest}`
 }
 
+/** Length of the line break `text` starts with: CRLF, LF, or none. */
+function leadingLineBreak(text: string): number {
+  if (text.startsWith('\r\n')) return 2
+  return text.startsWith('\n') ? 1 : 0
+}
+
+/** Drop every `<!-- ... -->` (and the line break after it) in one pass. A regex strip
+ * can rebuild a comment from one nested in another: `<!-<!-- x -->-- y -->` loses the
+ * inner comment and becomes `<!--- y -->`. After a removal the scan resumes three
+ * characters back, so a comment assembled across the cut is removed too; an opener
+ * that never closes stays as text. */
+function removeComments(text: string): string {
+  let out = text
+  let cursor = 0
+  while (cursor < out.length) {
+    const open = out.indexOf('<!--', cursor)
+    const close = open === -1 ? -1 : out.indexOf('-->', open + 4)
+    if (close === -1) return out
+    const tail = out.slice(close + 3)
+    out = out.slice(0, open) + tail.slice(leadingLineBreak(tail))
+    cursor = Math.max(0, open - 3)
+  }
+  return out
+}
+
 /** The index content that actually loads: YAML frontmatter and block-level HTML
  * comments are stripped, so they neither show in the prompt nor count toward the
  * 200-line / 25KB read limits, matching Claude Code. */
 export function stripNonLoaded(text: string): string {
-  return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').replace(/<!--[\s\S]*?-->\r?\n?/g, '')
+  return removeComments(text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, ''))
 }
 
 /** Move a store written under an older slug to the current one, once. Two earlier
