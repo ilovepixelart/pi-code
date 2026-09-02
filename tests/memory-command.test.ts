@@ -19,6 +19,7 @@ describe('memory command', () => {
     savedHome = process.env.HOME
     home = mkdtempSync(join(tmpdir(), 'mem-home-'))
     process.env.HOME = home
+    process.env.USERPROFILE = home // os.homedir() reads USERPROFILE on Windows; global setup restores it
     savedDisable = process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
     delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
     // Config-dir tests set this explicitly; clear it so the rest resolve to ~/.claude.

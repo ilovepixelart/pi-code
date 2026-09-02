@@ -19,7 +19,9 @@ describe('memory tool actions', () => {
   })
 
   function setup() {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    const winHome = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    process.env.HOME = winHome
+    process.env.USERPROFILE = winHome // os.homedir() reads USERPROFILE on Windows; global setup restores it
     const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
     const handlers = new Map<string, Handler>()
     let tool: Tool | undefined
@@ -98,7 +100,9 @@ describe('memory index robustness', () => {
   })
 
   function setup() {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    const winHome = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    process.env.HOME = winHome
+    process.env.USERPROFILE = winHome // os.homedir() reads USERPROFILE on Windows; global setup restores it
     const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
     const handlers = new Map<string, Handler>()
     let tool: Tool | undefined
@@ -200,7 +204,9 @@ describe('memory index overflow, per the documented write-and-error rule', () =>
   })
 
   function setup() {
-    process.env.HOME = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    const winHome = mkdtempSync(join(tmpdir(), 'mem-home-'))
+    process.env.HOME = winHome
+    process.env.USERPROFILE = winHome // os.homedir() reads USERPROFILE on Windows; global setup restores it
     const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
     const handlers = new Map<string, Handler>()
     let tool: Tool | undefined
