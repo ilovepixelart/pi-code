@@ -200,7 +200,10 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
   let parsed: { hooks?: HooksConfig }
   try {
     parsed = JSON.parse(raw)
-  } catch {
+  } catch (error) {
+    // Every hook this source declares is now absent, a policy hook among them, so the
+    // failure is named rather than left to look like a file with no hooks in it.
+    console.warn(`pi-code-hooks: ignoring the hooks in ${source}: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
   for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {

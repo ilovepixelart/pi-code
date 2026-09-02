@@ -1151,6 +1151,24 @@ describe('hooks extension notify-style events', () => {
     return ext
   }
 
+  it('reports a settings file whose hooks cannot be parsed instead of dropping them silently', async () => {
+    // Every hook the file declares vanishes on a parse failure, including a policy hook
+    // the user believes is gating their tools, so the failure has to be visible.
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), '{"hooks": {"PreToolUse": [{"hooks": [{"command": "guard"}]}]},}')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+      await ext.toolCall('bash', {})
+
+      expect(commandsRun()).toEqual([])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('settings.json'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('runs an enabled plugin hook with its plugin root substituted', async () => {
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt', '1.0.0')
     mkdirSync(join(root, 'hooks'), { recursive: true })
