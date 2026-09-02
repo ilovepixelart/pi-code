@@ -85,6 +85,12 @@ export function resolveGitBash(env: Record<string, string | undefined> = process
  * reads it as an undefined variable, which Claude only warns about). */
 export const toPowershellPlaceholders = (command: string): string => command.replace(/\$\{(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA)\}/g, (_match, name: string) => `\${env:${name}}`)
 
+/** The bash for an injected command span: /bin/sh off Windows, Git Bash on Windows
+ * (undefined when it is not installed). */
+export function bashBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): string | undefined {
+  return platform === 'win32' ? resolveGitBash(env, cwd) : '/bin/sh'
+}
+
 const bashShell = (file: string): ResolvedShell => ({ kind: 'bash', file, argsFor: (command) => ['-c', command] })
 
 const powershellShell = (file: string): ResolvedShell => ({
@@ -106,9 +112,8 @@ export function resolveShell(preferred: string | undefined, platform: string = p
     const powershell = resolvePowershellBinary(platform, env)
     if (powershell) return powershellShell(powershell)
   }
-  if (platform !== 'win32') return bashShell('/bin/sh')
-  const gitBash = resolveGitBash(env, cwd)
-  if (gitBash) return bashShell(gitBash)
+  const bash = bashBinary(platform, env, cwd)
+  if (bash) return bashShell(bash)
   const powershell = resolvePowershellBinary(platform, env)
   return powershell ? powershellShell(powershell) : undefined
 }
