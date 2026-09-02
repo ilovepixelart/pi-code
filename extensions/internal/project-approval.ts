@@ -131,6 +131,20 @@ export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'is
   return deps.savedDecision(ctx.cwd) === true
 }
 
+/**
+ * The approval decision for a file that is itself the thing to gate.
+ *
+ * The silent check short-circuits to approved when the repository holds no
+ * Claude-shaped config, meaning there is nothing here pi-code would act on. That is
+ * wrong for a file the CLAUDE_SHAPED walk cannot see: the walk only looks at or above
+ * cwd, so a CLAUDE.local.md in a subdirectory would come in through the one door the
+ * gate does not cover. Forcing the shaped answer makes such a file need a real
+ * decision, never the shortcut.
+ */
+export function isGatedFileApproved(ctx: Pick<ApprovalContext, 'cwd' | 'isProjectTrusted'> & { ui?: ApprovalContext['ui'] }, deps: ApprovalDeps = defaultDeps): boolean {
+  return isProjectApprovedSilently(ctx, { ...deps, hasClaudeShaped: () => true })
+}
+
 export async function isProjectApproved(ctx: ApprovalContext, deps: ApprovalDeps = defaultDeps): Promise<boolean> {
   if (runtimeLacksProjectTrust(ctx)) return false // pi predates project-trust support
   if (ctx.isProjectTrusted?.() !== true) return false // pi declined trust for this project

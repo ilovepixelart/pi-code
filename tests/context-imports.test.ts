@@ -1325,6 +1325,88 @@ describe('imports refused for resolving outside the project', () => {
     expect(prompt).not.toContain('SHARED ONLY')
   })
 
+  // The notice must not become a filesystem oracle. A repo-controlled CLAUDE.md can
+  // name any absolute path it likes; if only the existing ones came back, that file
+  // would enumerate the machine one @line at a time, straight into the model's context.
+  it('reports an external target that does not exist exactly like one that does', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    const present = join(outside, 'here.md')
+    const absent = join(outside, 'not-here.md')
+    writeFileSync(present, 'PRESENT BODY')
+    const body = `@${present}\n@${absent}`
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, body)
+    const native = [{ path: claudeMd, content: body }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain(`\n- ${present}`)
+    expect(prompt).toContain(`\n- ${absent}`)
+  })
+
+  it('names the path the importing file wrote, never where a symlink pointed', async () => {
+    // Reporting the resolved target would hand a repo the real name of whatever the
+    // link reaches, which is the same disclosure the refusal exists to prevent.
+    const cwd = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'client-acme-notes.md'), 'SECRET BODY')
+    const link = join(cwd, 'link.md')
+    symlinkSync(join(outside, 'client-acme-notes.md'), link)
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, '@link.md')
+    const native = [{ path: claudeMd, content: '@link.md' }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain(`\n- ${link}`)
+    expect(prompt).not.toContain('client-acme-notes.md')
+    expect(prompt).not.toContain('SECRET BODY')
+  })
+
+  it('does not list a file another context file legitimately imported', async () => {
+    // The worktree recipe: the project CLAUDE.md may not reach ~/.claude, but the user
+    // CLAUDE.md may, and it imports the same file. Saying it is "not in context" while
+    // its body sits above in the same prompt is simply false.
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const shared = join(hoisted.home, '.claude', 'shared.md')
+    writeFileSync(shared, 'SHARED BODY')
+    writeFileSync(join(hoisted.home, '.claude', 'CLAUDE.md'), '@shared.md')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, `@${shared}`)
+    const native = [{ path: claudeMd, content: `@${shared}` }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('SHARED BODY')
+    expect(prompt).not.toContain('## Imports not loaded (@)')
+  })
+
+  it('does not name a file claudeMdExcludes already removed', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    const secret = join(outside, 'excluded.md')
+    writeFileSync(secret, 'EXCLUDED BODY')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: ['**/excluded.md'] }))
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, `@${secret}`)
+    const native = [{ path: claudeMd, content: `@${secret}` }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).not.toContain('## Imports not loaded (@)')
+  })
+
   it('says nothing when every import resolved', async () => {
     const cwd = tempDir()
     writeFileSync(join(cwd, 'style.md'), 'STYLE BODY')
@@ -1430,6 +1512,11 @@ describe('subdirectory context files load on demand', () => {
 
   it('attaches a subdirectory CLAUDE.local.md after the CLAUDE.md beside it', async () => {
     const cwd = tempDir()
+    // A nested CLAUDE.local.md needs a recorded approval, not the "nothing here to
+    // gate" shortcut, so the project carries Claude-shaped config and a root local
+    // file: together they make session_start ask, and the answer is stored.
+    writeAt(join(cwd, '.claude'), 'settings.json', '{}')
+    writeFileSync(join(cwd, 'CLAUDE.local.md'), 'ROOT LOCAL NOTES')
     writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
     const local = writeAt(join(cwd, 'src'), 'CLAUDE.local.md', 'SRC LOCAL NOTES')
 
@@ -1454,6 +1541,34 @@ describe('subdirectory context files load on demand', () => {
     expect(texts(result).join('\n')).toContain('SRC STYLE BODY')
   })
 
+  it('still attaches when the session was started through a symlinked path', async () => {
+    // A symlinked checkout reports real paths from the file tools while cwd is the
+    // link; comparing the two unresolved turns the whole feature off silently.
+    const real = tempDir()
+    writeAt(join(real, 'src'), 'CLAUDE.md', 'SRC RULES')
+    const linkParent = tempDir()
+    const cwd = join(linkParent, 'project')
+    symlinkSync(real, cwd)
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('SRC RULES')
+  })
+
+  it('attaches through a symlinked directory that stays inside the project', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+    symlinkSync(join(cwd, 'src'), join(cwd, 'alias'))
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('alias', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('SRC RULES')
+  })
+
   it('attaches nothing for a file outside the working directory', async () => {
     const cwd = tempDir()
     const outside = tempDir()
@@ -1464,6 +1579,91 @@ describe('subdirectory context files load on demand', () => {
     const result = await wired.handlers.get('tool_result')?.(readResult(join(outside, 'a.ts')), { cwd })
 
     expect(texts(result).join('\n')).not.toContain('OUTSIDE RULES')
+  })
+
+  // A repo commits what it likes, symlinks included. The launch-time import path
+  // realpaths and confines for exactly this reason; the on-demand path must too.
+  it('does not attach a context file that is a symlink out of the project', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'id_rsa'), 'PRIVATE KEY MATERIAL')
+    mkdirSync(join(cwd, 'src'), { recursive: true })
+    symlinkSync(join(outside, 'id_rsa'), join(cwd, 'src', 'CLAUDE.md'))
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('PRIVATE KEY MATERIAL')
+  })
+
+  it('does not follow a symlinked subdirectory out of the project', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    writeAt(outside, 'CLAUDE.md', 'OUTSIDE TREE RULES')
+    symlinkSync(outside, join(cwd, 'vendor'))
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('vendor', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('OUTSIDE TREE RULES')
+  })
+
+  it('caps what one tool result can carry, like every other tool output', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'HEAD RULES\n'.padEnd(300_000, 'x'))
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('HEAD RULES')
+    expect(texts(result).join('\n').length).toBeLessThan(120_000)
+  })
+
+  it('does not re-attach a file already in the system prompt', async () => {
+    // The repo-root CLAUDE.md is loaded at launch; a nested file importing it would
+    // otherwise pay for the whole body a second time on every subtree read.
+    const cwd = tempDir()
+    const root = writeAt(cwd, 'CLAUDE.md', 'ROOT RULES')
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES\n@../CLAUDE.md')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    await wired.handlers.get('before_agent_start')?.({ systemPrompt: assembledPrompt([{ path: root, content: 'ROOT RULES' }]), systemPromptOptions: { cwd, contextFiles: [{ path: root, content: 'ROOT RULES' }] } }, {})
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('SRC RULES')
+    expect(texts(result).join('\n')).not.toContain('ROOT RULES')
+  })
+
+  it('withholds a nested CLAUDE.local.md the approval walk never sees', async () => {
+    // hasClaudeShapedConfig only looks for CLAUDE.local.md at or above cwd, so a repo
+    // whose only Claude artifact is one in a subdirectory reads as nothing to gate.
+    // That must not be the way in for the one file class approval exists to withhold.
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'package.json'), '{}')
+    writeAt(join(cwd, 'src'), 'CLAUDE.local.md', 'UNTRUSTED LOCAL NOTES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, hasUI: false, ui: { notify: () => {} } })
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('UNTRUSTED LOCAL NOTES')
+  })
+
+  it('attaches for the file_path spelling of the tool input as well as path', async () => {
+    // pi's edit and write tools accept file_path as an alias; a model that uses it
+    // would otherwise get a successful edit and no memory.
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.({ toolName: 'edit', input: { file_path: join('src', 'a.ts') }, content: [{ type: 'text', text: 'FILE BODY' }], isError: false }, { cwd })
+
+    expect(texts(result).join('\n')).toContain('SRC RULES')
   })
 
   it('attaches nothing when the project is not approved', async () => {
@@ -1616,6 +1816,27 @@ describe('CLAUDE.md beside an AGENTS.md pi loaded instead', () => {
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt.match(/SIBLING BODY/g)).toHaveLength(1)
+  })
+
+  it('does not emit a second block when the sibling is also the .claude/CLAUDE.md', async () => {
+    // Running inside a .claude directory that holds both files: the sibling search and
+    // the ./.claude/CLAUDE.md alternate resolve to the same file.
+    const repo = tempDir()
+    // A root marker, so the ./.claude/CLAUDE.md search walks up out of cwd and the
+    // approval flow records a decision.
+    writeFileSync(join(repo, 'package.json'), '{}')
+    const cwd = join(repo, '.claude')
+    mkdirSync(cwd, { recursive: true })
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(join(cwd, 'CLAUDE.md'), 'DOUBLE BLOCK RULES')
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt.match(/DOUBLE BLOCK RULES/g)).toHaveLength(1)
   })
 
   it('does not load the sibling CLAUDE.md when the project is not approved', async () => {
