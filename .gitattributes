@@ -1,0 +1,3 @@
+# Windows runners default to autocrlf, which turns every checkout line ending
+# into CRLF and fails the biome format check tree-wide before any test runs.
+* text=auto eol=lf

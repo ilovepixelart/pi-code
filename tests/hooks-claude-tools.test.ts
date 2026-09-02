@@ -1,4 +1,5 @@
 import * as os from 'node:os'
+import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolInput, piToolOutput } from '../extensions/hooks/claude-tools.ts'
@@ -22,7 +23,7 @@ describe('claudeToolInput', () => {
 
   it('makes file paths absolute, expanding ~, as Claude documents', () => {
     expect(claudeToolInput('write', { path: 'src/a.ts', content: 'x' }, '/proj')).toEqual({ file_path: '/proj/src/a.ts', content: 'x' })
-    expect(claudeToolInput('read', { path: '~/notes.md' }, '/proj')).toEqual({ file_path: `${os.homedir()}/notes.md` })
+    expect(claudeToolInput('read', { path: '~/notes.md' }, '/proj')).toEqual({ file_path: path.join(os.homedir(), 'notes.md') })
   })
 
   it('maps a single pi edit to the documented Edit fields', () => {
