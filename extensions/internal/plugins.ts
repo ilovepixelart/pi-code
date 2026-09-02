@@ -239,10 +239,13 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
 }
 
 /** The two plugin path variables, textually substituted into plugin-shipped
- * config (hook commands, MCP server definitions, command bodies). */
-export function substitutePluginVars(value: string, plugin: InstalledPlugin): string {
+ * config (hook commands, MCP server definitions, command bodies). A caller
+ * substituting into text that is still raw JSON must pass an escapeValue that
+ * JSON-escapes: a Windows root (C:\Users\...) inserted verbatim injects invalid
+ * escape sequences and the subsequent parse throws. */
+export function substitutePluginVars(value: string, plugin: InstalledPlugin, escapeValue: (substituted: string) => string = (substituted) => substituted): string {
   return value
-    .replaceAll('${CLAUDE_PLUGIN_ROOT}', plugin.root)
-    .replaceAll('${CLAUDE_PLUGIN_DATA}', plugin.dataDir)
-    .replace(/\$\{user_config\.(\w+)\}/g, (_, key: string) => plugin.userConfig?.[key] ?? '')
+    .replaceAll('${CLAUDE_PLUGIN_ROOT}', escapeValue(plugin.root))
+    .replaceAll('${CLAUDE_PLUGIN_DATA}', escapeValue(plugin.dataDir))
+    .replace(/\$\{user_config\.(\w+)\}/g, (_, key: string) => escapeValue(plugin.userConfig?.[key] ?? ''))
 }

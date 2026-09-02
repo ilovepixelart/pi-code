@@ -230,14 +230,24 @@ export function matchesCompiledGlobs(relPath: string, globs: CompiledGlob[]): bo
 
 /** Whether the accessed file matches at least one rule. No rules means no match:
  * a granted-but-scoped tool with an empty scope set stays blocked, never open. */
+/** Both comparison sides in posix form. On Windows, resolve stamps the drive on
+ * the target while join-built rules stay drive-less, and backslash separators
+ * collide with glob syntax, so unnormalized rules could never match. */
+const toPosix = (target: string): string => {
+  const withSlashes = target.split(path.sep).join('/')
+  // The drive letter goes (case-insensitively) so rule and target agree even
+  // when only one side carries C:.
+  return withSlashes.replace(/^[A-Za-z]:\//, '/')
+}
+
 export function matchesPathRules(filePath: string, rules: string[], anchors: PathAnchors): boolean {
-  const target = path.resolve(anchors.cwd, filePath)
+  const target = toPosix(path.resolve(anchors.cwd, filePath))
   return rules.some((rule) => {
     const trimmed = rule.trim()
     // An empty specifier (`Read()`) matches nothing, so the tool stays blocked
     // rather than falling open, mirroring `Bash()`.
     if (trimmed === '') return false
-    const resolved = resolveRule(trimmed, anchors)
+    const resolved = toPosix(resolveRule(trimmed, anchors))
     return new RegExp(`^${globToRegExpSource(resolved)}$`).test(target)
   })
 }
