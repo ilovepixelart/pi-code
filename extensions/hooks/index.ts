@@ -187,6 +187,25 @@ const IDLE_PROMPT_DELAY_MS = 60_000
  * Claude Code restores on resume. */
 const MODEL_SELECT_SOURCE: Record<string, string> = { set: 'command', cycle: 'picker', restore: 'resume' }
 
+/** One Stop hook result read as a verdict. Claude: `continue` "takes precedence over any
+ * event-specific decision fields", and stopReason is the message shown when it is false,
+ * so a hook asking to stop wins over its own block whatever exit code carried it. Any
+ * blocking spelling counts, including the prompt and agent hook reply schemas, and a
+ * non-error additionalContext feeds back the same way so the block cap still bounds it. */
+function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: boolean; reason: string } {
+  const parsed = tryParseJson(result.stdout)
+  if (parsed?.continue === false) {
+    if (parsed.stopReason) stopMessages.push(String(parsed.stopReason))
+    return { block: false, reason: '' }
+  }
+  if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
+  const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
+  if (verdict) return { block: true, reason: verdict.reason }
+  const context = parsed?.hookSpecificOutput?.additionalContext
+  if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
+  return { block: false, reason: '' }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -654,28 +673,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const stopMessages: string[] = []
     const block = results
       .filter((result) => !result.timedOut)
-      .map((result) => {
-        const parsed = tryParseJson(result.stdout)
-        // Claude: continue "takes precedence over any event-specific decision fields", and
-        // stopReason is the message shown when it is false. A hook that asks to stop wins
-        // over its own block, whatever exit code carried it.
-        if (parsed?.continue === false) {
-          if (parsed.stopReason) stopMessages.push(String(parsed.stopReason))
-          return { block: false, reason: '' }
-        }
-        if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
-        // Any JSON blocking spelling counts, including the prompt/agent hook reply
-        // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
-        const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
-        if (verdict) return { block: true, reason: verdict.reason }
-        // Claude's non-error continue: additionalContext feeds back and the
-        // conversation continues so Claude can act on it. It rides the same
-        // continuation path (and the same block cap) so a hook emitting it every
-        // firing cannot loop the turn forever.
-        const context = parsed?.hookSpecificOutput?.additionalContext
-        if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
-        return { block: false, reason: '' }
-      })
+      .map((result) => stopVerdict(result, stopMessages))
       .find((verdict) => verdict.block)
     for (const message of stopMessages) ctx.ui.notify(message, 'warning')
     if (!block) {

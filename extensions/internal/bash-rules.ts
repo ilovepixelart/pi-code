@@ -31,7 +31,7 @@ function matchesRule(segment: string, rule: string): boolean {
 }
 
 /** Leading `VAR=value` assignments, which Claude strips before matching an `if` pattern. */
-const LEADING_ASSIGNMENTS = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/
+const LEADING_ASSIGNMENTS = /^(?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/
 
 /** The bodies of `$(...)`, `` `...` ``, `<(...)` and `>(...)`, which run commands of their own. */
 function substitutionBodies(command: string): string[] {
