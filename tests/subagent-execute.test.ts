@@ -1870,6 +1870,25 @@ describe('subagent run semantics conformance', () => {
     }
   })
 
+  it('leaves the built-in Explore and Plan agents on their own model when CLAUDE_CODE_SUBAGENT_MODEL is set', async () => {
+    // Claude: "Setting CLAUDE_CODE_SUBAGENT_MODEL by itself doesn't change the model the
+    // built-in Explore and Plan subagents run on."
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
+    try {
+      discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'Explore', source: 'builtin' }), agentConfig({ name: 'scout', source: 'user' })], projectAgentsDir: null })
+      script('look', { stdout: [say('done')] })
+
+      await execute('c1', { agent: 'Explore', task: 'look' }, undefined, undefined, trustedCtx)
+      expect(spawnCalls[0].args).not.toContain('--model')
+
+      await execute('c2', { agent: 'scout', task: 'look' }, undefined, undefined, trustedCtx)
+      const args = spawnCalls[1].args
+      expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-4-5')
+    } finally {
+      delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
+    }
+  })
+
   it('lets the agent frontmatter model outrank CLAUDE_CODE_SUBAGENT_MODEL', async () => {
     process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
     try {
