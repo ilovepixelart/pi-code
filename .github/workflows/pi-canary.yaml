@@ -1,0 +1,40 @@
+name: pi canary
+
+# The pi peer range is open-ended (>=0.79.1) while npm ci pins CI to the
+# lockfile snapshot, so a new pi release can break users before any check runs
+# against it. This job tries the latest pi packages weekly and on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Check against latest pi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Upgrade pi packages to latest
+        run: npm install --no-save --ignore-scripts @earendil-works/pi-agent-core@latest @earendil-works/pi-ai@latest @earendil-works/pi-coding-agent@latest @earendil-works/pi-tui@latest
+
+      - name: Report the versions under test
+        run: npm ls @earendil-works/pi-coding-agent @earendil-works/pi-ai || true
+
+      - name: Check
+        run: npm run check
