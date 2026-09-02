@@ -140,6 +140,21 @@ describe('mcpAllowDeny', () => {
     expect(denied).toEqual([{ serverName: 'filesystem' }, { serverCommand: ['npx', '-y', 'evil'] }])
   })
 
+  it('reports a policy file it cannot parse instead of reading it as no policy', () => {
+    // A deny list that fails to parse leaves every server allowed, so the user has to
+    // hear about it; a file that simply does not exist is genuinely no policy.
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-scope-')), 'settings.json')
+    writeFileSync(file, '{"deniedMcpServers": ["secrets"],}')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { denied } = mcpAllowDeny([file], join(mkdtempSync(join(tmpdir(), 'mcp-none-')), 'absent.json'))
+      expect(denied).toEqual([])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('settings.json'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('tolerates bare-string entries and drops malformed ones', () => {
     const file = writeManaged({ allowedMcpServers: ['a', { serverName: 'b' }, { name: 'c' }, 5] })
     expect(mcpAllowDeny([], file).allowed).toEqual([{ serverName: 'a' }, { serverName: 'b' }])

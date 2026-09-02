@@ -97,11 +97,19 @@ function parsePolicyEntry(entry: unknown): McpPolicyEntry | undefined {
  * honored scope sets the key; an empty list is an explicit lockdown (deny all). */
 export function mcpAllowDeny(scopeFiles: string[] = [], managedFile: string = managedSettingsFile()): McpPolicy {
   const read = (file: string): Record<string, unknown> => {
+    let raw: string
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      raw = fs.readFileSync(file, 'utf-8')
+    } catch {
+      return {} // no such file: genuinely no policy
+    }
+    try {
+      const parsed = JSON.parse(raw)
       return parsed && typeof parsed === 'object' ? parsed : {}
     } catch {
-      // Missing or invalid file contributes no policy.
+      // Present but unreadable: its allow and deny lists are not in force, and a deny list
+      // silently dropped leaves every server allowed.
+      console.warn(`pi-code-mcp: ignoring ${file}: not valid JSON; its MCP allow and deny lists are not applied`)
       return {}
     }
   }

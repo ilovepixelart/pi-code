@@ -1181,6 +1181,21 @@ describe('disableSkillShellExecution', () => {
     expect(shellExecutionDisabled(tempDir(), hoisted.home, false)).toBe(true)
   })
 
+  it('reports a settings file it cannot parse instead of reading it as no policy', () => {
+    // A missing file is genuinely no policy; one that exists but does not parse is a
+    // guard the user believes is in force. Silence there disables it invisibly.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'settings.json'), '{"disableSkillShellExecution": true,}')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      shellExecutionDisabled(cwd, hoisted.home, true)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('settings.json'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('cannot be re-enabled by a lower layer once the user disabled it', () => {
     // Fail closed: a trusted repository's `false` must not lift the user's policy.
     const cwd = tempDir()
