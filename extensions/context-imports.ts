@@ -72,6 +72,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
 import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
+import { sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
@@ -222,8 +223,10 @@ function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: 
     const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded)
     if (!file) continue
     scan.budget.files -= 1
-    const kept = file.body.slice(0, scan.budget.bytes)
-    scan.budget.bytes -= kept.length
+    // The budget is bytes: a string slice counts UTF-16 units and lets CJK text through
+    // at three times the budget without ever reaching the truncation marker.
+    const kept = sliceBytes(file.body, scan.budget.bytes)
+    scan.budget.bytes -= Buffer.byteLength(kept)
     const body = kept.length < file.body.length ? `${kept.trim()}\n${IMPORT_TRUNCATED_MARKER}` : kept.trim()
     // Comments are stripped before the scan for further imports, so a
     // commented-out @import stays dead at every depth, matching the top level
