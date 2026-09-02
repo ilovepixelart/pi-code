@@ -200,7 +200,10 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   const rebuilt = withRebuiltPrompt(run.spawn)
   run.spawn = { ...run.spawn, args: rebuilt.args }
   if (rebuilt.dir) run.rebuiltPromptDir = rebuilt.dir
-  const args = rebuilt.args.map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
+  // The task prompt is always the final argument: both spawn paths push it last and the
+  // invocation helper only prepends. Matching a 'Task: ' prefix missed it whenever
+  // SubagentStart hooks placed their context ahead of it, so the resume re-ran the old task.
+  const args = rebuilt.args.map((arg, index) => (index === rebuilt.args.length - 1 ? `Task: ${task}` : arg))
   run.state = 'running'
   run.task = task
   run.output = undefined
