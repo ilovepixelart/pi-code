@@ -19,7 +19,7 @@ Registers `.claude/commands/**/*.md` as slash commands with Claude's command con
 - `allowed-tools` (space- or comma-separated, or a YAML list) with `Bash(...)` and `Read`/`Edit`/`Write` path scopes enforced at call time (gitignore anchors, Edit governs writes). Divergence: pi has no permission system, so this restricts the turn's tool set instead of pre-approving calls.
 - `disallowed-tools`, `argument-hint`.
 - `model`: switches the session model for the command's turn, restored after; `effort`: raises reasoning for the turn, restored after.
-- `shell: powershell`: injected spans run through PowerShell when a `pwsh` binary is present, else `/bin/sh`.
+- Injected spans run through `/bin/sh`; on Windows through Git Bash, else PowerShell (a `shell: bash` skill fails before any command runs when Git Bash is missing, as Claude documents). `shell: powershell`: PowerShell when one is installed, else the bash path.
 - `when_to_use` steers model invocation; `disable-model-invocation` opts a file out; `user-invocable: false` hides a command from the menu while still exposing it to the model.
 
 ## Model invocation

@@ -433,26 +433,9 @@ export function powershellQuote(value: string): string {
   return value.replaceAll(/['‘’‚‛]/g, '$&$&')
 }
 
-/** The PowerShell names worth trying: pwsh everywhere it installs, plus the
- * Windows spellings on win32, where powershell.exe ships with the OS. */
-const powershellCandidates = (platform: string): string[] => (platform === 'win32' ? ['pwsh', 'pwsh.exe', 'powershell.exe'] : ['pwsh'])
+import { bashBinary } from './shell-resolve.js'
 
-/** First PowerShell binary found on PATH, or undefined when none is installed. */
-export function resolvePowershellBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env): string | undefined {
-  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
-  for (const candidate of powershellCandidates(platform)) {
-    for (const dir of dirs) {
-      const full = path.join(dir, candidate)
-      try {
-        fs.accessSync(full, fs.constants.X_OK)
-        if (fs.statSync(full).isFile()) return full
-      } catch {
-        // not here; keep looking
-      }
-    }
-  }
-  return undefined
-}
+export { resolvePowershellBinary } from './shell-resolve.js'
 
 export interface SpanExec {
   command: string
@@ -464,42 +447,55 @@ export interface SpanExec {
   mergeStreams?: boolean
 }
 
+/** The sh invocation for a span: CLAUDE_PROJECT_DIR and CLAUDECODE=1 exported in-script
+ * (pi.exec takes no env; CLAUDECODE marks every subprocess Claude spawns), stderr merged
+ * with 2>&1. The group opens with a `:` null command: `{ }` around an empty or
+ * comment-only span is a hard sh syntax error (exit 2) that aborted the whole
+ * invocation, and `:` keeps such a span the harmless no-op it was on HEAD while the
+ * group still merges stderr for real spans. */
+function shSpan(binary: string, projectDir: string, script: string): SpanExec {
+  const quoted = projectDir.replaceAll("'", String.raw`'\''`)
+  return { command: binary, args: ['-c', `export CLAUDE_PROJECT_DIR='${quoted}'\nexport CLAUDECODE=1\n{ :\n${script}\n} 2>&1`] }
+}
+
+/** The PowerShell invocation for a span. No in-script 2>&1: under pwsh 7 it does not
+ * merge a native command's stderr on a script block, so mergeStreams has the caller
+ * append it. The trailing exit forwards a failed native command's code, which pwsh
+ * -Command otherwise swallows (the process exited 0 and a failure never aborted the
+ * invocation). An empty or cmdlet-only span leaves $LASTEXITCODE unset and exits 0.
+ * Residual gap vs sh: a failing cmdlet sets no exit code, so it cannot abort; its
+ * error text still reaches the model through the merged stderr. */
+function powershellSpan(binary: string, projectDir: string, script: string): SpanExec {
+  const preamble = `$ErrorActionPreference='Continue'\n$env:CLAUDE_PROJECT_DIR='${powershellQuote(projectDir)}'\n$env:CLAUDECODE='1'`
+  return { command: binary, args: ['-NoProfile', '-NonInteractive', '-Command', `${preamble}\n& {\n${script}\n}\nexit $LASTEXITCODE`], mergeStreams: true }
+}
+
 /**
- * The exec invocation for one injected span, honoring the `shell:` frontmatter.
- * The default (absent or `bash`) runs through /bin/sh; `powershell` resolves a
- * PowerShell binary and runs the span with -Command, falling back to /bin/sh when
- * none is installed so the command still works, per Claude's shell matrix. Both
- * paths export CLAUDE_PROJECT_DIR (each shell's own quoting) and merge stderr
- * into stdout, as the Bash tool does when it runs these for Claude: the sh script
- * in-line with 2>&1, the pwsh path via mergeStreams in the caller.
+ * The exec invocation for one injected span, honoring the `shell:` frontmatter per
+ * Claude's shell matrix (skills.md). `powershell` runs through a PowerShell binary when
+ * one resolves. Otherwise the span runs through bash: /bin/sh off Windows, Git Bash on
+ * Windows. Without Git Bash, a skill that declared `shell: bash` fails before any
+ * command runs ("requires bash"), an undeclared one falls to PowerShell, and with
+ * neither shell the invocation fails. Both paths export CLAUDE_PROJECT_DIR (each
+ * shell's own quoting) and merge stderr into stdout, as the Bash tool does when it
+ * runs these for Claude: the sh script in-line with 2>&1, the pwsh path via
+ * mergeStreams in the caller.
  *
- * The resolver is a parameter rather than a default so the caller passes its own
- * imported binding, which keeps the lookup mockable in tests.
+ * The resolvers are parameters so a caller (or test) controls the lookups: the
+ * PowerShell one is passed as an imported binding, the bash one defaults to the
+ * platform rule.
  */
-export function spanExec(shell: string | undefined, projectDir: string, script: string, resolveBinary: () => string | undefined): SpanExec {
+export function spanExec(shell: string | undefined, projectDir: string, script: string, resolveBinary: () => string | undefined, resolveBash: () => string | undefined = bashBinary): SpanExec {
   if (shell === 'powershell') {
     const binary = resolveBinary()
-    if (binary !== undefined) {
-      // CLAUDECODE=1 marks every subprocess Claude spawns; pi.exec takes no env, so
-      // it is exported in the script alongside CLAUDE_PROJECT_DIR.
-      const preamble = `$ErrorActionPreference='Continue'\n$env:CLAUDE_PROJECT_DIR='${powershellQuote(projectDir)}'\n$env:CLAUDECODE='1'`
-      // No in-script 2>&1: under pwsh 7 it does not merge a native command's
-      // stderr on a script block, so mergeStreams has the caller append it. The
-      // trailing exit forwards a failed native command's code, which pwsh
-      // -Command otherwise swallows (the process exited 0 and a failure never
-      // aborted the invocation). An empty or cmdlet-only span leaves
-      // $LASTEXITCODE unset and exits 0. Residual gap vs sh: a failing cmdlet
-      // sets no exit code, so it cannot abort; its error text still reaches the
-      // model through the merged stderr.
-      return { command: binary, args: ['-NoProfile', '-NonInteractive', '-Command', `${preamble}\n& {\n${script}\n}\nexit $LASTEXITCODE`], mergeStreams: true }
-    }
+    if (binary !== undefined) return powershellSpan(binary, projectDir, script)
   }
-  const quoted = projectDir.replaceAll("'", String.raw`'\''`)
-  // The group opens with a `:` null command: `{ }` around an empty or
-  // comment-only span is a hard sh syntax error (exit 2) that aborted the whole
-  // invocation, and `:` keeps such a span the harmless no-op it was on HEAD
-  // while the group still merges stderr for real spans.
-  return { command: '/bin/sh', args: ['-c', `export CLAUDE_PROJECT_DIR='${quoted}'\nexport CLAUDECODE=1\n{ :\n${script}\n} 2>&1`] }
+  const bash = resolveBash()
+  if (bash !== undefined) return shSpan(bash, projectDir, script)
+  if (shell === 'bash') throw new Error('shell: bash requires Git Bash, which was not found (install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH)')
+  const binary = resolveBinary()
+  if (binary !== undefined) return powershellSpan(binary, projectDir, script)
+  throw new Error('no shell found for the injected commands: install Git for Windows or PowerShell')
 }
 
 interface FenceBlock {

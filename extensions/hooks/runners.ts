@@ -5,10 +5,12 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process'
+import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
 import { completeText } from '../internal/model-complete.js'
+import { resolveShell } from '../internal/shell-resolve.js'
 import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
 
 // Claude's defaults vary by type and event (600s for command/http/mcp_tool, 30s
@@ -41,7 +43,7 @@ export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number
  * `args` array it becomes the exec path: `command` is spawned directly with those args.
  * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
  * still running at session end can be reaped (Claude kills async hooks at teardown). */
-export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[], onChild?: (kill: () => void) => void) => Promise<HookRunResult>
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[], onChild?: (kill: () => void) => void, shell?: string) => Promise<HookRunResult>
 
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
@@ -80,6 +82,15 @@ const TIMEOUT_EXIT_CODE = 124
  * direct child alone leaves a grandchild alive holding stdout/stderr.
  */
 function killTree(child: ChildProcess): void {
+  if (process.platform === 'win32') {
+    // Windows has no process groups: taskkill /T ends the shell's whole tree. By
+    // absolute path, so a writable PATH entry cannot stand in for it. If taskkill itself
+    // cannot start, the direct kill is all that is left.
+    const taskkill = path.join(process.env.SystemRoot ?? String.raw`C:\Windows`, 'System32', 'taskkill.exe')
+    if (child.pid) spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
+    else child.kill('SIGKILL')
+    return
+  }
   try {
     // Negative pid targets the whole process group, which `detached` gave the shell.
     if (child.pid) {
@@ -92,11 +103,19 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args, onChild) =>
+/** The shell invocation for a shell-form command, or undefined when this machine has no
+ * shell for it (Windows with neither Git Bash nor PowerShell). */
+function shellInvocation(command: string, shell: string | undefined): { file: string; spawnArgs: string[] } | undefined {
+  const resolved = resolveShell(shell)
+  return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
+}
+
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args, onChild, shell) =>
   new Promise((resolve) => {
-    // Absolute path so the shell can't be resolved through an attacker-controlled PATH.
-    // `detached` makes the shell its own process group leader so the timeout can kill
-    // the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
+    // /bin/sh by absolute path off Windows, so the shell can't be resolved through an
+    // attacker-controlled PATH; on Windows the resolver follows Claude's documented Git
+    // Bash lookup. `detached` makes the shell its own process group leader so the
+    // timeout can kill the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
     // reference project files regardless of the shell's cwd. CLAUDECODE=1 marks every
     // subprocess Claude spawns, so it is set on the child unconditionally.
     // CLAUDE_CODE_CHILD_SESSION marks per-call children (hook and status line
@@ -110,11 +129,18 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, p
     // An exec-form hook (an `args` array) spawns the executable directly with those args
     // and no shell, so shell metacharacters in the args arrive literally; $ARGUMENTS in
     // each arg is replaced with the event JSON by a replacer function (so $$/$& in the
-    // payload survive verbatim). Without args it stays the shell path. Both share the
+    // payload survive verbatim). Without args the command string goes to the platform's
+    // shell, or to PowerShell when the hook says `shell: "powershell"`. Both share the
     // same detached process group, so killTree reaches the descendants either way.
-    const file = Array.isArray(args) ? command : '/bin/sh'
-    const spawnArgs = Array.isArray(args) ? args.map((arg) => substituteArguments(arg, payload)) : ['-c', command]
-    const child = spawn(file, spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env })
+    const target = Array.isArray(args) ? { file: command, spawnArgs: args.map((arg) => substituteArguments(arg, payload)) } : shellInvocation(command, shell)
+    if (!target) {
+      // Marked like a spawn failure so a gated event fails closed rather than reading as an allow.
+      resolve({ code: 0, stdout: '', stderr: 'no shell found: install Git for Windows or PowerShell', timedOut: false, spawnFailed: true })
+      return
+    }
+    // On Windows `detached` means DETACHED_PROCESS, which gives a console child its own
+    // window; windowsHide keeps every hook invisible (a no-op elsewhere).
+    const child = spawn(target.file, target.spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env })
     onChild?.(() => killTree(child))
     let stdout = ''
     let stderr = ''

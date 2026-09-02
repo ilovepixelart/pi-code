@@ -24,6 +24,8 @@ interface Behavior {
   error?: Error
   stdinError?: Error
   hang?: boolean
+  /** A pid for the fake child; far above any real pid so a group kill can only fail. */
+  pid?: number
 }
 
 interface SpawnRecord {
@@ -59,6 +61,7 @@ vi.mock('node:child_process', async (importOriginal) => {
       hoisted.calls.push(record)
 
       const child = new EventEmitter() as Emitter & Record<string, unknown>
+      if (behavior.pid !== undefined) child.pid = behavior.pid
       // Real streams, so setEncoding decodes multi-byte characters split across chunks
       // exactly as it does in production.
       child.stdout = new PassThrough()
@@ -218,10 +221,12 @@ const setupExtension = () => {
 }
 
 describe('runHookCommand process wiring', () => {
-  it('runs the command through /bin/sh by absolute path, streams piped and detached into its own group', async () => {
+  it('runs the command through the platform shell by absolute path, streams piped and detached into its own group', async () => {
     await runHookCommand('guard.sh', {}, 5000)
     const record = recordFor('guard.sh')
-    expect(record.file).toBe('/bin/sh')
+    // /bin/sh off Windows; on the Windows runners Git for Windows is installed, so Git Bash.
+    if (process.platform === 'win32') expect(record.file).toMatch(/\\Git\\bin\\bash\.exe$/)
+    else expect(record.file).toBe('/bin/sh')
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
     // the grandchildren a compound command forks. Claude marks every subprocess it
@@ -230,7 +235,7 @@ describe('runHookCommand process wiring', () => {
     const expectedEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
     if (process.stdout.columns) expectedEnv.COLUMNS = String(process.stdout.columns)
     if (process.stdout.rows) expectedEnv.LINES = String(process.stdout.rows)
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: expectedEnv })
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env: expectedEnv })
   })
 
   it('marks the hook child with CLAUDECODE=1 even when the parent env lacks it', async () => {
@@ -330,6 +335,69 @@ describe('runHookCommand exec form', () => {
     await vi.advanceTimersByTimeAsync(1000)
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.killSignals).toEqual(['SIGKILL'])
+  })
+})
+
+describe('runHookCommand shell selection', () => {
+  // A PowerShell on PATH is enough for the resolver; the spawn mock never runs it.
+  const pwshOnPath = (): string => {
+    const bin = tempDir('pwsh-')
+    const pwsh = join(bin, 'pwsh')
+    writeFileSync(pwsh, '#!/bin/sh\n', { mode: 0o755 })
+    process.env.PATH = bin
+    return pwsh
+  }
+
+  it('runs a shell: powershell hook through the PowerShell on PATH with the documented argv', async () => {
+    const pwsh = pwshOnPath()
+    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, '/proj', undefined, undefined, 'powershell')
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe(pwsh)
+    expect(record.args).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo ${env:CLAUDE_PROJECT_DIR}\nexit $LASTEXITCODE'])
+  })
+
+  it('ignores shell for an exec-form hook, which spawns its executable directly', async () => {
+    pwshOnPath()
+    await runHookCommand('/bin/echo', {}, 5000, undefined, ['x'], undefined, 'powershell')
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe('/bin/echo')
+    expect(record.args).toEqual(['x'])
+  })
+
+  it('hides the console window a detached child would otherwise open on Windows', async () => {
+    await runHookCommand('true', {}, 5000)
+    expect(recordFor('true').options as { detached?: boolean; windowsHide?: boolean }).toMatchObject({ detached: true, windowsHide: true })
+  })
+
+  it('ends the whole process tree with taskkill on Windows, where process groups do not exist', async () => {
+    // A fake Git install so the Windows resolution finds a bash; the spawn mock runs nothing.
+    const root = tempDir('gitbash-')
+    mkdirSync(join(root, 'cmd'), { recursive: true })
+    mkdirSync(join(root, 'bin'), { recursive: true })
+    writeFileSync(join(root, 'cmd', 'git.exe'), 'MZ')
+    writeFileSync(join(root, 'bin', 'bash.exe'), 'MZ')
+    process.env.PATH = join(root, 'cmd')
+    script('slow-win', { hang: true, pid: 2_000_000_000 })
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    try {
+      await runHookCommand('slow-win', {}, 20)
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+    }
+    // By absolute path under SystemRoot, never a PATH lookup a writable directory could hijack.
+    const taskkill = hoisted.calls.find((call) => /System32[\\/]taskkill\.exe$/.test(call.file))
+    expect(taskkill?.args).toEqual(['/pid', '2000000000', '/T', '/F'])
+    expect(recordFor('slow-win').killSignals).toEqual([])
+  })
+
+  it('passes the shell field of a settings hook through to the runner', async () => {
+    const pwsh = pwshOnPath()
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'startup', hooks: [{ command: 'home-session', shell: 'powershell' }] }] })
+    await setupExtension().sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe(pwsh)
+    expect(record.args[3]).toContain('home-session')
   })
 })
 

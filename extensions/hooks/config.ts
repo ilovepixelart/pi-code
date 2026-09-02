@@ -16,6 +16,10 @@ export interface HookCommand {
   /** exec-form: spawn `command` directly with these args and no shell (shell-form when
    * absent). $ARGUMENTS in each arg is replaced with the event JSON. */
   args?: string[]
+  /** Claude's `shell`: "bash" (the default) or "powershell". The default is /bin/sh off
+   * Windows; on Windows Git Bash, then PowerShell when Git Bash is absent. Ignored when
+   * `args` is set. */
+  shell?: string
   timeout?: number
   /** Claude's background contract, honored on `type: "command"` hooks only: `async` runs
    * without blocking its event and with no timeout enforced; `asyncRewake` also runs in

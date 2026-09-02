@@ -293,13 +293,14 @@ describe('powershellQuote', () => {
 describe('spanExec', () => {
   const found = () => '/usr/local/bin/pwsh'
   const missing = () => undefined
+  const sh = () => '/bin/sh'
   const runSh = (script: string) => {
     const run = spanExec(undefined, '/proj', script, missing)
     return spawnSync(run.command, run.args, { encoding: 'utf8' })
   }
 
   it('runs the default shell through /bin/sh with the project dir exported and stderr merged', () => {
-    const run = spanExec(undefined, '/proj', 'git status', found)
+    const run = spanExec(undefined, '/proj', 'git status', found, sh)
     expect(run.command).toBe('/bin/sh')
     expect(run.args[0]).toBe('-c')
     expect(run.args[1]).toContain("export CLAUDE_PROJECT_DIR='/proj'")
@@ -312,7 +313,7 @@ describe('spanExec', () => {
   })
 
   // POSIX-only: this spawns the constructed /bin/sh invocation, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('runs an empty or comment-only span as a no-op, not an sh syntax error', () => {
+  it('runs an empty or comment-only span as a no-op, not an sh syntax error', () => {
     // `{ }` around an empty span is a hard sh syntax error (exit 2), which
     // aborted the whole invocation; the group opens with a `:` null command so
     // these degenerate spans stay harmless while real ones keep the merge.
@@ -324,8 +325,7 @@ describe('spanExec', () => {
     }
   })
 
-  // POSIX-only: this spawns the constructed /bin/sh invocation, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('keeps a real span exit code and its stderr merge on the sh path', () => {
+  it('keeps a real span exit code and its stderr merge on the sh path', () => {
     const result = runSh('echo out; echo err >&2; exit 3')
     expect(result.status).toBe(3)
     expect(result.stdout).toBe('out\nerr\n')
@@ -333,7 +333,7 @@ describe('spanExec', () => {
   })
 
   it('keeps shell: bash on the sh path even when pwsh is installed', () => {
-    expect(spanExec('bash', '/proj', 'x', found).command).toBe('/bin/sh')
+    expect(spanExec('bash', '/proj', 'x', found, sh).command).toBe('/bin/sh')
   })
 
   it('runs shell: powershell through the resolved binary with -Command', () => {
@@ -367,8 +367,30 @@ describe('spanExec', () => {
     expect(run.args[3]).not.toContain('2>&1')
   })
 
+  // Oracle: skills.md shell matrix. Spans run through bash (/bin/sh, or Git Bash on
+  // Windows); without Git Bash a skill that declared `shell: bash` fails before any
+  // command runs, an undeclared one runs through PowerShell, and with neither shell
+  // the invocation fails.
+  it('runs the default arm through the resolved bash binary', () => {
+    const run = spanExec(undefined, '/proj', 'x', missing, () => 'C:/Git/bin/bash.exe')
+    expect(run.command).toBe('C:/Git/bin/bash.exe')
+    expect(run.args[0]).toBe('-c')
+  })
+
+  it('falls back to PowerShell when no bash exists and the skill did not ask for bash', () => {
+    expect(spanExec(undefined, '/proj', 'x', found, missing).command).toBe('/usr/local/bin/pwsh')
+  })
+
+  it('fails a shell: bash skill before any command runs when Git Bash is missing', () => {
+    expect(() => spanExec('bash', '/proj', 'x', found, missing)).toThrow(/requires Git Bash/)
+  })
+
+  it('fails when neither bash nor PowerShell exists', () => {
+    expect(() => spanExec(undefined, '/proj', 'x', missing, missing)).toThrow(/no shell/)
+  })
+
   it('falls back to /bin/sh when no PowerShell binary resolves', () => {
-    const run = spanExec('powershell', '/proj', 'Get-ChildItem', missing)
+    const run = spanExec('powershell', '/proj', 'Get-ChildItem', missing, sh)
     expect(run.command).toBe('/bin/sh')
     expect(run.args[0]).toBe('-c')
     expect(run.args[1]).toContain('Get-ChildItem')

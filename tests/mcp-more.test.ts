@@ -2287,8 +2287,7 @@ describe('mcp stdio session context', () => {
 })
 
 describe('mcp headersHelper environment', () => {
-  // POSIX-only: production runs the headersHelper through /bin/sh -c, and these helpers are sh scripts.
-  it.skipIf(process.platform === 'win32')('passes the server name and a credential-redacted url to the helper', async () => {
+  it('passes the server name and a credential-redacted url to the helper', async () => {
     // Claude sets CLAUDE_CODE_MCP_SERVER_NAME and CLAUDE_CODE_MCP_SERVER_URL when
     // executing the helper; a url part expanded from a credential-named variable
     // reaches the helper as REDACTED while the transport gets the real value.
@@ -2303,8 +2302,32 @@ describe('mcp headersHelper environment', () => {
     expect(String(hoisted.transports[0].url)).toBe('https://api.example/sekret/mcp')
   })
 
-  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
-  it.skipIf(process.platform === 'win32')('strips credential-named variables from a project server helper environment', async () => {
+  // Off Windows only: a real Windows host resolves its Git install ahead of the PATH shim,
+  // and there the un-skipped helper tests above run through the real Git Bash.
+  it.skipIf(process.platform === 'win32')('runs the helper through Git Bash on Windows', async () => {
+    // A Git for Windows layout on PATH whose bash.exe is a shim: on this host it marks
+    // the environment and hands the command to /bin/sh, so the header says which shell ran.
+    const root = mkdtempSync(join(tmpdir(), 'mcp-gitbash-'))
+    tempDirs.push(root)
+    mkdirSync(join(root, 'cmd'), { recursive: true })
+    mkdirSync(join(root, 'bin'), { recursive: true })
+    writeFileSync(join(root, 'cmd', 'git.exe'), 'MZ')
+    writeFileSync(join(root, 'bin', 'bash.exe'), '#!/bin/sh\nPI_CODE_TEST_SHELL=git-bash exec /bin/sh "$@"\n', { mode: 0o755 })
+    setEnv('PATH', `${join(root, 'cmd')}:${process.env.PATH ?? ''}`)
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    try {
+      withTools([{ name: 'go' }])
+      await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headersHelper: 'echo "{\\"X-Shell\\":\\"${PI_CODE_TEST_SHELL-sh}\\"}"' } } })
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+    }
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-Shell']).toBe('git-bash')
+  })
+
+  it('strips credential-named variables from a project server helper environment', async () => {
     // A helper a repository supplies runs without credential variables such as
     // ANTHROPIC_API_KEY: any name with TOKEN/SECRET/PASSWORD/KEY/AUTH in it.
     setEnv('MY_PROJ_TOKEN', 'leak')
@@ -2319,8 +2342,7 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('absent')
   })
 
-  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
-  it.skipIf(process.platform === 'win32')('keeps credential variables for a user-scope helper, which the user wrote', async () => {
+  it('keeps credential variables for a user-scope helper, which the user wrote', async () => {
     setEnv('MY_USER_TOKEN', 'mine')
     withTools([{ name: 'go' }])
     const helper = `echo "{\\"X-T\\":\\"\${MY_USER_TOKEN-absent}\\"}"`
@@ -2330,8 +2352,7 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('mine')
   })
 
-  // POSIX-only: production runs the headersHelper through /bin/sh -c, and this helper is an sh script.
-  it.skipIf(process.platform === 'win32')('gives a plugin server helper CLAUDE_PLUGIN_ROOT and the credential stripping', async () => {
+  it('gives a plugin server helper CLAUDE_PLUGIN_ROOT and the credential stripping', async () => {
     setEnv('MY_PLUGIN_TOKEN', 'leak')
     withTools([{ name: 'go' }])
     const helper = `echo "{\\"X-R\\":\\"$CLAUDE_PLUGIN_ROOT\\",\\"X-T\\":\\"\${MY_PLUGIN_TOKEN-absent}\\"}"`
@@ -2367,8 +2388,7 @@ describe('mcp configured authorization', () => {
     expect(line.startsWith('locked: failed: ')).toBe(true)
   })
 
-  // POSIX-only: the premise (helper output supplies Authorization) needs the /bin/sh helper to run.
-  it.skipIf(process.platform === 'win32')('fails a 401 server whose helper supplied Authorization instead of starting OAuth', async () => {
+  it('fails a 401 server whose helper supplied Authorization instead of starting OAuth', async () => {
     withTools([{ name: 'go' }])
     hoisted.control.connect = async () => {
       throw Object.assign(new Error('denied'), { code: 401 })

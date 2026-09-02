@@ -19,7 +19,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 
 ## Hook types
 
-- `type: "command"` (default): runs via `sh -c` with the event JSON on stdin, or exec form (`command` as an argv array, no shell); executes with `CLAUDECODE=1` and `CLAUDE_PROJECT_DIR` set.
+- `type: "command"` (default): runs the command string through a shell (`sh -c`; on Windows Git Bash, or PowerShell when Git Bash is absent; `shell: "powershell"` forces PowerShell and rewrites `${CLAUDE_*}` placeholders to `${env:NAME}`) with the event JSON on stdin, or exec form (`command` as an argv array, no shell); executes with `CLAUDECODE=1` and `CLAUDE_PROJECT_DIR` set.
 - `type: "http"`: POSTs the payload; a 2xx JSON body renders the decision, everything else is non-blocking per Claude's contract. Targets are gated by `allowedHttpHookUrls` (union of managed and settings scopes; unset allows all, `[]` blocks every http hook).
 - `type: "prompt"`: evaluates in-process against the session model.
 - `type: "mcp_tool"`: calls a connected server's tool. String values in `input` support `${path}` substitution from the hook's JSON input (`${tool_input.file_path}`); without `input` the tool is called with no arguments.
