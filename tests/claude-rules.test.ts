@@ -41,6 +41,22 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter('---\npaths: ["a.ts", "b.ts"]\n---\nbody').paths).toEqual(['a.ts', 'b.ts'])
   })
 
+  it('keeps a brace group whole when splitting an inline list', () => {
+    // Claude's rules support brace expansion in paths, so the comma inside {ts,tsx} is
+    // part of one pattern. Splitting on it produced two patterns that match nothing and
+    // the rule silently stopped attaching to anything.
+    expect(parseFrontmatter('---\npaths: ["src/**/*.{ts,tsx}", "lib/**"]\n---\nbody').paths).toEqual(['src/**/*.{ts,tsx}', 'lib/**'])
+    // Unquoted too: YAML does not require quotes, and the braces are what delimits the group.
+    expect(parseFrontmatter('---\npaths: [src/**/*.{ts,tsx}, lib/**]\n---\nbody').paths).toEqual(['src/**/*.{ts,tsx}', 'lib/**'])
+  })
+
+  it('parses an inline list spread over several lines', () => {
+    // A list written across lines read as an empty paths value, which makes a scoped rule
+    // unscoped: it was injected into every session instead of the files it names.
+    const md = '---\npaths: [\n  "src/**",\n  "docs/**"\n]\n---\nbody'
+    expect(parseFrontmatter(md).paths).toEqual(['src/**', 'docs/**'])
+  })
+
   it('parses a comma-separated inline paths value', () => {
     expect(parseFrontmatter('---\npaths: a.ts, b.ts\n---\nbody').paths).toEqual(['a.ts', 'b.ts'])
   })
