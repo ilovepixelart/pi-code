@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "extensions/*.ts",
+    "extensions/*/index.ts",
+    "tests/**/*.test.ts",
+    "scripts/lib/wire-probe.ts"
+  ],
+  "project": [
+    "extensions/**/*.ts",
+    "tests/**/*.ts"
+  ],
+  "ignoreExportsUsedInFile": true
+}

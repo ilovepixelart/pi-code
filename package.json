@@ -41,8 +41,9 @@
     "biome:fix": "npx --no-install @biomejs/biome check --write .",
     "type:check": "tsc --noEmit",
     "test": "vitest run --coverage",
-    "check": "npm run biome && npm run type:check && npm run test",
-    "prepublishOnly": "npm run check"
+    "check": "npm run biome && npm run type:check && npm run knip && npm run test",
+    "prepublishOnly": "npm run check",
+    "knip": "npx --no-install knip"
   },
   "engines": {
     "node": ">=22.19"

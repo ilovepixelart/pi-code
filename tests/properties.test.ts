@@ -19,7 +19,7 @@ describe('substituteArgs properties', () => {
   const token = fc.stringMatching(/^[!#-&(-~]{1,20}$/).filter((s) => !s.includes("'") && !s.includes('"'))
 
   it('returns an argument byte-for-byte through $0, metacharacters included', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(token, (arg) => {
         expect(substituteArgs('$0', arg)).toBe(arg)
       }),
@@ -28,7 +28,7 @@ describe('substituteArgs properties', () => {
   })
 
   it('never re-expands placeholder text arriving inside an argument (one pass)', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(token, (arg) => {
         const carrying = `${arg}$ARGUMENTS`
         expect(substituteArgs('$ARGUMENTS', carrying)).toBe(carrying)
@@ -43,7 +43,7 @@ describe('path-rules properties', () => {
   const seg = fc.stringMatching(/^[a-z0-9]{1,6}$/)
 
   it('brace expansion is equivalent to the union of its alternatives', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(seg, seg, seg, seg, (x, y, pre, post) => {
         const target = `${pre}${x}${post}.md`
         const braced = matchesPathRules(target, [`${pre}{${x},${y}}${post}.md`], anchors)
@@ -55,7 +55,7 @@ describe('path-rules properties', () => {
   })
 
   it('compiles any printable pattern without throwing, to a constructible regex', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(fc.stringMatching(/^[ -~]{0,30}$/), (pattern) => {
         const source = globToRegExpSource(pattern)
         expect(() => new RegExp(source)).not.toThrow()
@@ -71,7 +71,7 @@ describe('interpolateEnv properties', () => {
   const value = fc.stringMatching(/^[ -~]{0,25}$/)
 
   it('returns the environment value verbatim, whatever it contains', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(value, (v) => {
         expect(interpolateEnv('${X}', { X: v })).toBe(v)
       }),
@@ -80,7 +80,7 @@ describe('interpolateEnv properties', () => {
   })
 
   it('honors the shell :- contract: unset OR empty falls back to the default', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(fc.stringMatching(/^[ -|~]{0,20}$/), (fallback) => {
         expect(interpolateEnv(`\${X:-${fallback}}`, {})).toBe(fallback)
         expect(interpolateEnv(`\${X:-${fallback}}`, { X: '' })).toBe(fallback)
@@ -95,7 +95,7 @@ describe('hook matcher properties', () => {
   const fold = (value: string): string => value.toLowerCase().replaceAll('-', '_')
 
   it('an exact list matches exactly its members, case- and dash-folded, cache or not', () => {
-    fc.assert(
+    void fc.assert(
       fc.property(fc.array(name, { minLength: 1, maxLength: 5 }), name, fc.constantFrom(', ', '|'), (members, candidate, sep) => {
         const matcher = members.join(sep)
         const config = [{ matcher, hooks: [{ command: 'x' }] }]
@@ -105,7 +105,11 @@ describe('hook matcher properties', () => {
         // generator: every member must match its own case-flipped, dash-to-
         // underscore variant (random draws almost never produce near-miss pairs,
         // which let a fold mutant survive the differential alone).
-        const variant = members[0].replaceAll('-', '_').split('').map((ch, i) => (i % 2 ? ch.toUpperCase() : ch.toLowerCase())).join('')
+        const variant = members[0]
+          .replaceAll('-', '_')
+          .split('')
+          .map((ch, i) => (i % 2 ? ch.toUpperCase() : ch.toLowerCase()))
+          .join('')
         expect(matchingCommands(config, variant).length > 0).toBe(true)
         // Cache transparency: a cold cache answers identically.
         resetMatcherCache()
