@@ -13,7 +13,10 @@
  * registered first, so vitest runs it after every file-local afterEach.
  */
 
-import { afterEach, beforeEach } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { afterAll, afterEach, beforeEach } from 'vitest'
 
 const HOST_LEAK_VARS = [
   'CLAUDECODE',
@@ -38,6 +41,20 @@ function quarantine(): void {
 }
 
 quarantine()
+
+// Every temp fixture in the suite goes through os.tmpdir(), which resolves from
+// TMPDIR (TEMP/TMP on Windows). Pointing it at a per-file root at setup load,
+// before any test module runs, funnels every mkdtempSync in the file under one
+// directory that afterAll removes wholesale, so no fixture can outlive its file
+// regardless of whether the test cleans up.
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-code-tests-'))
+process.env.TMPDIR = tmpRoot
+process.env.TEMP = tmpRoot
+process.env.TMP = tmpRoot
+
+afterAll(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true })
+})
 
 let snapshot: NodeJS.ProcessEnv
 
