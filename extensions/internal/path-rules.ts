@@ -169,6 +169,11 @@ export function globToRegExpSource(pattern: string): string {
 
 /** A rule resolved to an absolute glob per its anchor form. */
 function resolveRule(rule: string, anchors: PathAnchors): string {
+  // A ${CLAUDE_*}-substituted rule arrives already absolute in the platform's
+  // own spelling; on Windows that starts with a drive letter (bare, or behind
+  // the / that substitutePathRule prefixes to mark absoluteness), which the
+  // POSIX anchor forms below would misread and bury under an anchor.
+  if (/^\/?[A-Za-z]:[\\/]/.test(rule)) return rule.replace(/^\//, '')
   if (rule.startsWith('//')) return rule.slice(1)
   if (rule.startsWith('~/')) return path.join(anchors.home, rule.slice(2))
   if (rule.startsWith('/')) return path.join(anchors.projectRoot, rule.slice(1))
@@ -237,7 +242,7 @@ const toPosix = (target: string): string => {
   const withSlashes = target.split(path.sep).join('/')
   // The drive letter goes (case-insensitively) so rule and target agree even
   // when only one side carries C:.
-  return withSlashes.replace(/^[A-Za-z]:\//, '/')
+  return withSlashes.replace(/^\/?[A-Za-z]:\//, '/')
 }
 
 export function matchesPathRules(filePath: string, rules: string[], anchors: PathAnchors): boolean {

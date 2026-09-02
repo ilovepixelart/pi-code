@@ -712,7 +712,9 @@ describe('resume from a different working directory', () => {
 })
 
 describe('shadow repo init failure', () => {
-  it('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
+  // chmod 0o555 does not make a directory unwritable on Windows, so the failure
+  // this test simulates cannot be produced there.
+  it.skipIf(process.platform === 'win32')('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
     const t = setup()
     chmodSync(hoisted.home, 0o555)
     try {

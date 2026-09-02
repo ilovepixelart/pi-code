@@ -1096,7 +1096,10 @@ describe('hooks extension notify-style events', () => {
     expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
   })
 
-  it('substitutes a backslash-bearing plugin root without corrupting the hooks JSON', async () => {
+  // The fixture needs a directory whose NAME contains a backslash, which POSIX
+  // permits and Windows cannot create (backslash is the separator there); on
+  // Windows every real plugin root exercises the same escaping naturally.
+  it.skipIf(process.platform === 'win32')('substitutes a backslash-bearing plugin root without corrupting the hooks JSON', async () => {
     // A Windows root (C:\Users\...) textually substituted into raw JSON injects
     // invalid escape sequences; the parse then threw and the catch silently
     // dropped every hook the plugin declared. Backslashes are legal in POSIX
