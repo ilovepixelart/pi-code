@@ -147,7 +147,19 @@ function surfaceHookFailures(commands: HookCommand[], results: HookRunResult[], 
     // Claude shows a `<hook> hook error` notice when {..}-shaped stdout cannot be
     // read as JSON output (exit 2 still blocks and reads its own channels).
     const jsonError = result.code === 2 ? undefined : hookJsonError(result.stdout)
-    if (jsonError !== undefined) notify(`${commands[i].command} hook error: ${jsonError}`)
+    if (jsonError !== undefined) {
+      notify(`${commands[i].command} hook error: ${jsonError}`)
+      continue
+    }
+    // A non-zero exit that is neither a block (2) nor a timeout, with nothing parseable
+    // on stdout, is Claude's non-blocking error: the action proceeds and the notice
+    // carries the first line of stderr. Without it a mistyped path in settings.json
+    // leaves a policy hook silently disabled, since the shell exits 127 and says so only
+    // on stderr. A spawn failure is reported above and skipped here.
+    if (!result.spawnFailed && !result.timedOut && result.code !== 0 && result.code !== 2) {
+      const firstLine = result.stderr.trim().split('\n')[0]
+      notify(`${commands[i].command} hook error: Failed with non-blocking status code: ${firstLine || result.code}`)
+    }
   }
 }
 
