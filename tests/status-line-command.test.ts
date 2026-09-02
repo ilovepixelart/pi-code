@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
 
-const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, fsReads: [] as string[], kills: [] as number[] }))
+const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, settingsChanged: undefined as (() => void) | undefined, fsReads: [] as string[], kills: [] as number[] }))
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>()
@@ -24,6 +24,17 @@ vi.mock('node:fs', async (importOriginal) => {
   }
   return { ...actual, readFileSync: readFileSync as typeof actual.readFileSync }
 })
+
+// The watcher polls on a real interval; capturing its callback lets a test drive a
+// settings change deterministically under fake timers.
+vi.mock('../extensions/internal/settings-watch.js', () => ({
+  watchSettingsFiles: (_files: string[], reload: () => void) => {
+    hoisted.settingsChanged = reload
+    return () => {
+      hoisted.settingsChanged = undefined
+    }
+  },
+}))
 
 vi.mock('../extensions/hooks/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../extensions/hooks/index.js')>()
@@ -116,6 +127,27 @@ const setup = (cwd: string) => {
 }
 
 describe('statusLine command contract', () => {
+  it('arms the refresh interval when the setting is added mid-session', async () => {
+    // Claude re-runs the script when the statusLine settings change mid-session. The
+    // interval was armed once at session start, so adding or changing refreshInterval had
+    // no effect until the next session.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs).toHaveLength(1)
+
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', refreshInterval: 1 } })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+    const afterReload = hoisted.runs.length
+    await vi.advanceTimersByTimeAsync(1400)
+
+    expect(hoisted.runs.length).toBeGreaterThan(afterReload)
+  })
+
   it('runs the configured command with the session payload and shows its first line, padded', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', padding: 1 } })

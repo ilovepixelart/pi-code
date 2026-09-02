@@ -534,6 +534,22 @@ describe('interpretHookResult', () => {
 })
 
 describe('runPreToolUse', () => {
+  it('reports a hook that exits non-zero with no JSON to show for it', async () => {
+    // Claude: with plain-text or empty stdout a non-zero exit "is a non-blocking error
+    // ... the transcript shows a `<hook name> hook error` notice followed by the first
+    // line of stderr, prefixed with `Failed with non-blocking status code:`", and it
+    // singles out the typo case: "a mistyped path in settings.json leaves the gate
+    // silently disabled".
+    const notices: string[] = []
+    const runner: HookRunner = async () => ({ code: 127, stdout: '', stderr: '/bin/sh: /typo/guard.sh: No such file or directory\nmore detail', timedOut: false })
+
+    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: '/typo/guard.sh' }] }] }, 'bash', {}, runner, undefined, (message) => notices.push(message))
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('Failed with non-blocking status code: /bin/sh: /typo/guard.sh: No such file or directory')
+    expect(notices[0]).not.toContain('more detail')
+  })
+
   const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard.sh' }] }] }
 
   it('blocks the tool when a matching hook returns a blocking result', async () => {

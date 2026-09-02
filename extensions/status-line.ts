@@ -457,14 +457,20 @@ export default function statusLine(pi: ExtensionAPI) {
     // Claude's disableAllHooks also turns off the custom statusLine command; the
     // built-in segment still renders as the fallback.
     config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
-    if (config?.refreshInterval) {
-      refreshTimer = setInterval(() => scheduleRefresh(), config.refreshInterval * 1000)
+    // Re-armed rather than armed once: a refreshInterval added or changed mid-session
+    // had no effect until the next session, though Claude applies a settings change as
+    // soon as the file is saved.
+    const armRefresh = (): void => {
+      clearInterval(refreshTimer)
+      refreshTimer = config?.refreshInterval ? setInterval(() => scheduleRefresh(), config.refreshInterval * 1000) : undefined
     }
+    armRefresh()
     // Claude re-runs the script when the statusLine settings change mid-session; a
     // command change re-resolves and re-runs.
     disposeSettingsWatch()
     disposeSettingsWatch = watchSettingsFiles(files, () => {
       config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
+      armRefresh()
       scheduleRefresh()
     })
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))

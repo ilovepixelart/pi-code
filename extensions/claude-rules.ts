@@ -39,12 +39,47 @@ function unquote(value: string): string {
   return value.replace(/^["']|["']$/g, '')
 }
 
+/** Split a YAML flow sequence on its top-level commas. A comma inside a brace group
+ * (`*.{ts,tsx}`, which Claude expands) or inside quotes belongs to its entry, so
+ * splitting on every comma produced patterns that match nothing. */
 function splitInline(value: string): string[] {
-  return value
-    .replace(/^\[|\]$/g, '')
-    .split(',')
-    .map((entry) => unquote(entry.trim()))
-    .filter(Boolean)
+  const entries: string[] = []
+  let current = ''
+  let depth = 0
+  let quote: string | undefined
+  for (const char of value.replace(/^\[/, '').replace(/\]$/, '')) {
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      current += char
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      current += char
+      continue
+    }
+    if (char === '{') depth++
+    else if (char === '}') depth = Math.max(0, depth - 1)
+    else if (char === ',' && depth === 0) {
+      entries.push(current)
+      current = ''
+      continue
+    }
+    current += char
+  }
+  entries.push(current)
+  return entries.map((entry) => unquote(entry.trim())).filter(Boolean)
+}
+
+/** A flow sequence that opens on the `paths:` line and closes on a later one, joined
+ * back into a single value. An unterminated list runs to the end of the frontmatter. */
+function joinFlowSequence(lines: string[], index: number, opening: string): string {
+  let joined = opening
+  for (let i = index + 1; i < lines.length; i++) {
+    joined += ` ${lines[i].trim()}`
+    if (lines[i].includes(']')) break
+  }
+  return joined
 }
 
 function parsePaths(frontmatter: string): string[] {
@@ -52,7 +87,7 @@ function parsePaths(frontmatter: string): string[] {
   const index = lines.findIndex((line) => /^\s*paths\s*:/.test(line))
   if (index === -1) return []
   const inline = lines[index].replace(/^\s*paths\s*:/, '').trim()
-  if (inline) return splitInline(inline)
+  if (inline) return splitInline(inline.startsWith('[') && !inline.includes(']') ? joinFlowSequence(lines, index, inline) : inline)
   const items: string[] = []
   // Matched with string ops rather than a regex: the equivalent pattern needs two
   // adjacent whitespace quantifiers, which backtracks super-linearly on long lines.

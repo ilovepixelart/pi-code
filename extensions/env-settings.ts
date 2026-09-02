@@ -40,7 +40,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
-import { findNearestFile } from './internal/project-root.js'
+import { claudeSettingsChain } from './internal/settings-chain.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -137,12 +137,14 @@ export function sanitizeProjectEnv(env: Record<string, string>, warn: (key: stri
   return kept
 }
 
-/** The project scope's env: .claude/settings.json with settings.local.json overlaid,
- * each the nearest of its name at or above cwd (matching the hooks settings chain). */
-function projectEnv(cwd: string): Record<string, string> {
-  const base = envFromSettings(readSettingsFile(findNearestFile(cwd, path.join('.claude', 'settings.json')) ?? path.join(cwd, '.claude', 'settings.json')))
-  const local = envFromSettings(readSettingsFile(findNearestFile(cwd, path.join('.claude', 'settings.local.json')) ?? path.join(cwd, '.claude', 'settings.local.json')))
-  return sanitizeProjectEnv({ ...base, ...local })
+/** The project scope's env, resolved through the shared settings chain so placement
+ * matches every other consumer: the shared settings.json comes from the session's own
+ * directory and never an ancestor, settings.local.json from the repository root. Later
+ * files win. */
+function projectEnv(cwd: string, home: string): Record<string, string> {
+  const merged: Record<string, string> = {}
+  for (const file of claudeSettingsChain(cwd, home, true).slice(1)) Object.assign(merged, envFromSettings(readSettingsFile(file)))
+  return sanitizeProjectEnv(merged)
 }
 
 export default function envSettingsExtension(pi: ExtensionAPI) {
@@ -157,6 +159,6 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
   apply(os.homedir(), {})
 
   pi.on('session_start', async (_event, ctx: ExtensionContext) => {
-    apply(os.homedir(), isProjectApprovedSilently(ctx) ? projectEnv(ctx.cwd) : {})
+    apply(os.homedir(), isProjectApprovedSilently(ctx) ? projectEnv(ctx.cwd, os.homedir()) : {})
   })
 }

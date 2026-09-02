@@ -6,15 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Record spawn so openBrowser's per-platform launch can be asserted without opening a browser.
 // importOriginal keeps the rest of child_process intact for any other consumer in the graph.
-const spawnMock = vi.hoisted(() => ({ calls: [] as Array<{ command: string; args: string[] }>, throwOnCall: false }))
+const spawnMock = vi.hoisted(() => ({ calls: [] as Array<{ command: string; args: string[] }>, throwOnCall: false, emitErrorOnCall: false }))
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
+  const { EventEmitter } = await import('node:events')
   return {
     ...actual,
     spawn: (command: string, args: string[]) => {
       spawnMock.calls.push({ command, args })
       if (spawnMock.throwOnCall) throw new Error('spawn failed')
-      return { unref: () => {} }
+      const child = Object.assign(new EventEmitter(), { unref: () => {} })
+      // A launcher that is missing reports it here, one tick after spawn returns.
+      if (spawnMock.emitErrorOnCall) setTimeout(() => child.emit('error', new Error('spawn xdg-open ENOENT')), 0)
+      return child
     },
   }
 })
@@ -210,6 +214,7 @@ describe('openBrowser', () => {
     setPlatform(realPlatform)
     spawnMock.calls.length = 0
     spawnMock.throwOnCall = false
+    spawnMock.emitErrorOnCall = false
   })
 
   it('selects the launch command and args per platform', () => {
@@ -225,6 +230,27 @@ describe('openBrowser', () => {
       openBrowser(url)
       expect(spawnMock.calls).toEqual([{ command, args }])
     }
+  })
+
+  it('keeps a launcher that fails after spawn from taking the process down', async () => {
+    // A child that cannot start, as in a container with no xdg-open, reports it
+    // asynchronously through an 'error' event. With no listener node raises that as an
+    // uncaughtException, and pi exits from what is only a best-effort browser launch.
+    setPlatform('linux')
+    spawnMock.emitErrorOnCall = true
+    const uncaught: unknown[] = []
+    const capture = (error: unknown): void => {
+      uncaught.push(error)
+    }
+    process.on('uncaughtException', capture)
+    try {
+      openBrowser('https://auth.example/authorize')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    } finally {
+      process.off('uncaughtException', capture)
+    }
+
+    expect(uncaught).toEqual([])
   })
 
   it('swallows a spawn failure so the notified url stays the only fallback', () => {

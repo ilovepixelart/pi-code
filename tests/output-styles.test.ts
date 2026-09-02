@@ -90,6 +90,22 @@ describe('styleDirs', () => {
   })
 })
 
+it('lets the directory nearest the working directory win a name clash', () => {
+  // Claude: "When more than one of these nested directories defines a style with the
+  // same name, Claude Code uses the one closest to the working directory."
+  const repo = tempDir()
+  mkdirSync(join(repo, '.git'))
+  const sub = join(repo, 'pkg')
+  mkdirSync(join(repo, '.claude', 'output-styles'), { recursive: true })
+  mkdirSync(join(sub, '.claude', 'output-styles'), { recursive: true })
+  writeFileSync(join(repo, '.claude', 'output-styles', 'shared.md'), '---\nname: Shared\n---\nROOT BODY')
+  writeFileSync(join(sub, '.claude', 'output-styles', 'shared.md'), '---\nname: Shared\n---\nNEAREST BODY')
+
+  const resolved = styleForName(loadStyles(styleDirs(sub, tempDir(), true)), 'Shared')
+
+  expect(resolved?.body).toContain('NEAREST BODY')
+})
+
 describe('pluginStyleDirs', () => {
   // Lay down one enabled cached plugin with an optional manifest, as installedPlugins reads it.
   const installPlugin = (home: string, name: string, manifest: Record<string, unknown> = {}): string => {
@@ -226,6 +242,35 @@ describe('extension wiring', () => {
 
     await commands.get('output-style')?.handler('', { ...base, hasUI: false })
     expect(notes.some((n) => n.includes('requires interactive mode'))).toBe(true)
+  })
+
+  it('refuses to overwrite a settings file it cannot parse', async () => {
+    // settings.local.json also carries permissions, hooks and env. Starting from an empty
+    // object on a parse failure replaced all of that with the style choice alone.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    const invalid = '{"permissions":{"allow":["Bash(npm test)"]},}'
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), invalid)
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    const notes: Array<{ text: string; level: string }> = []
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const ctx = {
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: { notify: (text: string, level: string) => notes.push({ text, level }), confirm: async () => true, select: async () => undefined },
+    }
+    await handlers.get('session_start')?.({}, ctx)
+
+    await commands.get('output-style')?.handler('proactive', ctx)
+
+    expect(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8')).toBe(invalid)
+    expect(notes.at(-1)?.level).toBe('error')
+    expect(notes.at(-1)?.text).toContain('not valid JSON')
   })
 
   it('sets a style directly when /output-style is given a name', async () => {

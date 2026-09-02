@@ -25,6 +25,7 @@ const cancelAllBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 const resumeBackgroundRunMock = vi.hoisted(() => vi.fn())
 const activeBackgroundRunsMock = vi.hoisted(() => vi.fn(() => 0))
 const backgroundRunMock = vi.hoisted(() => vi.fn())
+const allBackgroundRunsMock = vi.hoisted(() => vi.fn((): unknown[] => []))
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
 vi.mock('../extensions/subagent/agents.js', async (importOriginal) => ({
@@ -39,6 +40,7 @@ vi.mock('../extensions/subagent/background.js', () => ({
   startBackgroundRun: startBackgroundRunMock,
   activeBackgroundRuns: activeBackgroundRunsMock,
   backgroundRun: backgroundRunMock,
+  allBackgroundRuns: allBackgroundRunsMock,
   MAX_BACKGROUND_RUNS: 8,
 }))
 
@@ -238,6 +240,8 @@ beforeEach(() => {
   resumeBackgroundRunMock.mockReset()
   activeBackgroundRunsMock.mockReturnValue(0)
   backgroundRunMock.mockReset()
+  allBackgroundRunsMock.mockReset()
+  allBackgroundRunsMock.mockReturnValue([])
   sendMessageMock.mockClear()
   notifyMock.mockClear()
   emittedEvents.length = 0
@@ -781,13 +785,15 @@ describe('runSingleAgent process handling', () => {
     expect(results(result)[0].stderr).toBe('warn: deprecated flag')
   })
 
-  it('treats a spawn error as exit code 1', async () => {
+  it('treats a spawn error as exit code 1 and reports what failed', async () => {
     script('inspect', { fail: true })
 
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(results(result)[0].exitCode).toBe(1)
-    expect(text(result)).toBe('Agent failed: (no output)')
+    // The spawn error is the only diagnostic a child that never started leaves; without it
+    // the model and the user get "(no output)" and nothing to act on.
+    expect(text(result)).toBe('Agent failed: spawn ENOENT')
   })
 
   it('maps a null exit code to zero', async () => {
@@ -927,7 +933,7 @@ describe('backgroundCompletionText diagnostics', () => {
 
 describe('tasksStatusText', () => {
   it('notes when there are no background runs', () => {
-    expect(tasksStatusText([])).toBe('No background subagent runs in this session.')
+    expect(tasksStatusText([])).toBe('No background subagent runs.')
   })
 
   it('lists each run with id, agent, state, turns and a short output tail', () => {
@@ -1055,14 +1061,27 @@ describe('viewer commands', () => {
   it('/tasks notes the empty registry without running anything', async () => {
     await command('tasks').handler('', commandCtx())
 
-    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs in this session.', 'info')
+    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs.', 'info')
     expect(spawnMock).not.toHaveBeenCalled()
   })
 
-  it('/tasks lists runs started in this session, resolved against the live registry', async () => {
+  it('/tasks lists a run from the registry that this instance never started', async () => {
+    // pi re-invokes every extension factory per session while the run registry is module
+    // state that outlives the switch, so after /new the fresh instance must still list the
+    // runs the shutdown just warned were active.
+    allBackgroundRunsMock.mockReturnValue([{ id: 'bg-99999999', agent: 'scout', task: 'from an earlier session', state: 'running', turns: 1 }])
+
+    await command('tasks').handler('', commandCtx())
+
+    const out = notifyMock.mock.calls[0][0] as string
+    expect(out).toContain('bg-99999999 scout: running')
+    expect(out).toContain('from an earlier session')
+  })
+
+  it('/tasks renders a run with its state, turns, task and output', async () => {
     startBackgroundRunMock.mockReturnValue('bg-11111111')
     await execute('c1', { background: true, agent: 'scout', task: 'audit the API surface' }, undefined, undefined, trustedCtx)
-    backgroundRunMock.mockImplementation((id: string) => (id === 'bg-11111111' ? { id, agent: 'scout', task: 'audit the API surface', state: 'done', turns: 3, output: 'All clear.' } : undefined))
+    allBackgroundRunsMock.mockReturnValue([{ id: 'bg-11111111', agent: 'scout', task: 'audit the API surface', state: 'done', turns: 3, output: 'All clear.' }])
 
     await command('tasks').handler('', commandCtx())
 
@@ -1071,13 +1090,13 @@ describe('viewer commands', () => {
     expect(out).toContain('All clear.')
   })
 
-  it('/tasks drops runs the registry has evicted', async () => {
+  it('/tasks says so when the registry has evicted every run', async () => {
     await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
-    backgroundRunMock.mockReturnValue(undefined)
+    allBackgroundRunsMock.mockReturnValue([])
 
     await command('tasks').handler('', commandCtx())
 
-    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs in this session.', 'info')
+    expect(notifyMock).toHaveBeenCalledWith('No background subagent runs.', 'info')
   })
 
   it('/agents lists the discovered agents for an approved project', async () => {

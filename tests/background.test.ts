@@ -193,6 +193,19 @@ describe('background run lifecycle', () => {
     for (const child of live) child.emit('close', 0)
   })
 
+  it('replaces the task on a resume even when start-hook context precedes it', () => {
+    // SubagentStart hooks put their context ahead of the prompt, so the argument reads
+    // "<context>\n\nTask: <task>". Matching a "Task: " prefix missed that shape and the
+    // resumed child re-ran the original task while the notice claimed the new one.
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--mode', 'json', 'HOOK CONTEXT\n\nTask: one'] }), () => {})
+    children.at(-1)?.emit('close', 0)
+
+    expect(resumeBackgroundRun(id ?? '', 'two', () => {})).toBe('resumed')
+
+    const args = spawnMock.mock.calls.at(-1)?.[1] as string[]
+    expect(args.at(-1)).toBe('Task: two')
+  })
+
   it('reports zero turns when a resume fails to spawn', () => {
     const id = startBackgroundRun('scout', 'one', spec(), () => {})
     children.at(-1)!.stdout.emit('data', assistantTurn('turn one'))
