@@ -18,6 +18,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { claudeConfigDir } from './internal/config-dir.js'
 
 const CUSTOM_TYPE = 'git-checkpoint'
 /** Sidecar inside the bare shadow repo recording the work tree it snapshots. */
@@ -36,6 +37,21 @@ interface Checkpoint {
  * full snapshots of every non-ignored file, so unbounded retention grows under $HOME
  * for the life of the machine. */
 export const CHECKPOINT_RETENTION_DAYS = 30
+
+/** The retention period in effect: Claude keeps checkpoints for 30 days and says to
+ * "change the period with cleanupPeriodDays". Read from the user scope, which is where a
+ * setting about the user's own disk belongs; a non-positive or unreadable value keeps the
+ * default rather than sweeping everything away. */
+export function checkpointRetentionDays(home: string = os.homedir()): number {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8'))
+    const declared = (parsed as { cleanupPeriodDays?: unknown }).cleanupPeriodDays
+    if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) return declared
+  } catch {
+    // No user settings, or unreadable: the default period stands.
+  }
+  return CHECKPOINT_RETENTION_DAYS
+}
 
 /** Claude keeps the 100 most recent checkpoints per session. Older ones drop off the
  * rewind list; their commits stay in the shadow repo until the retention sweep. */
@@ -179,7 +195,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       shadowDir = path.join(checkpointsRoot, `${sessionSlug(sessionFile)}-${cwdSlug(ctx.cwd)}`)
       ctx.ui.notify(`Checkpoints for this session were recorded in ${recorded}; starting fresh checkpoints for ${ctx.cwd} (earlier ones are not restorable here)`, 'warning')
     }
-    pruneCheckpointRepos(checkpointsRoot, CHECKPOINT_RETENTION_DAYS, shadowDir)
+    pruneCheckpointRepos(checkpointsRoot, checkpointRetentionDays(os.homedir()), shadowDir)
     const check = await pi.exec('git', ['--git-dir', shadowDir, 'rev-parse', '--git-dir'], { cwd: ctx.cwd })
     if (check.code !== 0) {
       const init = await pi.exec('git', ['init', '--bare', '-b', 'main', shadowDir], { cwd: ctx.cwd })

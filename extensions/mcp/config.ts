@@ -21,6 +21,10 @@ export interface StdioServerConfig {
   timeout?: number
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
+  /** The server name as its manifest declares it, without the plugin: scope the registry
+   * key carries. pi-side tool names derive from this, so a plugin server contributes
+   * <server>_<tool> the way a user server does. */
+  baseName?: string
   /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
   pluginRoot?: string
   /** Loaded from the project scope, whose helpers run credential-stripped. */
@@ -42,6 +46,10 @@ export interface HttpServerConfig {
   timeout?: number
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
+  /** The server name as its manifest declares it, without the plugin: scope the registry
+   * key carries. pi-side tool names derive from this, so a plugin server contributes
+   * <server>_<tool> the way a user server does. */
+  baseName?: string
   /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
   pluginRoot?: string
   /** Loaded from the project scope, whose helpers run credential-stripped. */
@@ -213,7 +221,11 @@ export function loadPluginServers(plugins: InstalledPlugin[], projectDir?: strin
   for (const plugin of plugins) {
     for (const [name, config] of Object.entries(rawPluginServerEntries(plugin))) {
       const substituted = substitutedPluginServer(plugin, name, config, projectDir)
-      if (substituted) servers[name] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__`, pluginRoot: plugin.root }
+      // Claude: "The server itself registers under the scoped name
+      // plugin:<plugin-name>:<server-name>", which is what an mcp_tool hook names and what
+      // keeps a same-named user server from replacing a plugin's. The tool alias keeps its
+      // own flat spelling, mcp__plugin_<plugin>_<server>__<tool>.
+      if (substituted) servers[`plugin:${plugin.name}:${name}`] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__`, baseName: name, pluginRoot: plugin.root }
     }
   }
   return servers

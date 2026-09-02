@@ -284,12 +284,33 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   }
 }
 
+/** Transport-level failure codes worth another attempt. */
+const TRANSIENT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'])
+
+/** Every `code` reachable from an error: its own, those of its `cause` chain, and those
+ * of an AggregateError's members. fetch reports a refused connection as a bare
+ * `TypeError: fetch failed` whose cause carries ECONNREFUSED, so the text says nothing. */
+function errorCodes(error: unknown, seen = new Set<unknown>()): string[] {
+  if (error === null || typeof error !== 'object' || seen.has(error)) return []
+  seen.add(error)
+  const codes: string[] = []
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string') codes.push(code)
+  const inner = (error as { errors?: unknown }).errors
+  if (Array.isArray(inner)) for (const one of inner) codes.push(...errorCodes(one, seen))
+  codes.push(...errorCodes((error as { cause?: unknown }).cause, seen))
+  return codes
+}
+
 /** Whether a connect failure is worth retrying: a 5xx response, a refused or reset
- * connection, or a timeout. Auth and not-found errors need a configuration change. */
-function isTransientConnectError(error: unknown): boolean {
+ * connection, or a timeout, per Claude's "a 5xx response, a connection refused, or a
+ * timeout ... retries up to three times". Auth and not-found errors need a configuration
+ * change instead. Exported for the test that pins the shape node actually throws. */
+export function isTransientConnectError(error: unknown): boolean {
   if (isUnauthorized(error)) return false
-  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
-  if (typeof code === 'number') return code >= 500
+  const status = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (typeof status === 'number') return status >= 500
+  if (errorCodes(error).some((code) => TRANSIENT_CODES.has(code))) return true
   return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|timed out after/.test(String(error))
 }
 

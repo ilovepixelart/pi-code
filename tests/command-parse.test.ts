@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { commandNameFor, discoverCommandFiles, expandDynamicContent, normalizeToolName, parseCommandFile, powershellQuote, resolvePowershellBinary, spanExec, substituteArgs, substituteVars } from '../extensions/internal/command-file.ts'
+import { commandNameFor, discoverCommandFiles, expandDynamicContent, normalizeToolName, parseCommandFile, powershellQuote, resolvePowershellBinary, spanExec, substituteArgs, substituteArgsDetailed, substituteVars } from '../extensions/internal/command-file.ts'
 
 const dirs: string[] = []
 const tempDir = (): string => {
@@ -579,6 +579,19 @@ describe('expandDynamicContent', () => {
     writeFileSync(join(cwd, 'notes.md'), 'FILE_BODY')
     const out = await expandDynamicContent('````\n```\n@notes.md\n````', cwd, exec)
     expect(out).not.toContain('FILE_BODY')
+  })
+})
+
+describe('argument consumption', () => {
+  it('counts a named placeholder as receiving an argument even when its position is empty', () => {
+    // Claude: "An indexed placeholder with no argument at its position stays as literal
+    // text and doesn't count as receiving one. A named placeholder counts even when its
+    // position has no argument, because it expands to an empty string." Without that, a
+    // skill using named arguments got its ARGUMENTS: block appended anyway.
+    expect(substituteArgsDetailed('Work on $branch.', 'main extra', ['branch'])).toEqual({ text: 'Work on main.', consumed: true })
+    expect(substituteArgsDetailed('Work on $branch.', '', ['branch'])).toEqual({ text: 'Work on .', consumed: true })
+    // The indexed form keeps the opposite rule.
+    expect(substituteArgsDetailed('Work on $2.', 'one', [])).toEqual({ text: 'Work on $2.', consumed: false })
   })
 })
 

@@ -80,6 +80,9 @@ export function resolveMemoryDir(cwd: string, override?: string): string {
 export function autoMemoryEnabled(setting: unknown, env: NodeJS.ProcessEnv): boolean {
   const disable = (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? '').trim().toLowerCase()
   if (disable === '1' || disable === 'true') return false
+  // Claude: "Set to 0 to force auto memory on even when --bare mode or
+  // autoMemoryEnabled: false would otherwise disable it."
+  if (disable === '0' || disable === 'false') return true
   return setting !== false
 }
 
@@ -536,7 +539,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
         `  Auto memory: ${isEnabled ? 'on' : 'off'}`,
         `  Store:       ${store}`,
         `  Index:       ${path.join(store, INDEX_FILE)}`,
-        `  User memory (CLAUDE.md):    ${path.join(home, '.claude', 'CLAUDE.md')}`,
+        // The loader reads it from the configured directory, so CLAUDE_CONFIG_DIR moves it.
+        `  User memory (CLAUDE.md):    ${path.join(claudeConfigDir(home), 'CLAUDE.md')}`,
         `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
         // Claude's /memory lists every documented location, including files that
         // do not exist yet.

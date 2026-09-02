@@ -190,6 +190,14 @@ describe('stripNonLoaded', () => {
 })
 
 describe('autoMemoryEnabled', () => {
+  it('forces auto memory on when the variable is set to 0', () => {
+    // env-vars: "Set to 0 to force auto memory on even when --bare mode or
+    // autoMemoryEnabled: false would otherwise disable it." Only 1 disables.
+    expect(autoMemoryEnabled(false, { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' })).toBe(true)
+    expect(autoMemoryEnabled(undefined, { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' })).toBe(true)
+    expect(autoMemoryEnabled(true, { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' })).toBe(false)
+  })
+
   it('defaults to enabled and disables on a false setting or the env var', () => {
     expect(autoMemoryEnabled(undefined, {} as NodeJS.ProcessEnv)).toBe(true)
     expect(autoMemoryEnabled(true, {} as NodeJS.ProcessEnv)).toBe(true)

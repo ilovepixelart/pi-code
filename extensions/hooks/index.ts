@@ -96,6 +96,7 @@
 
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { claudeEffortLevel } from '../internal/effort.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
@@ -186,6 +187,25 @@ const IDLE_PROMPT_DELAY_MS = 60_000
  * Claude Code restores on resume. */
 const MODEL_SELECT_SOURCE: Record<string, string> = { set: 'command', cycle: 'picker', restore: 'resume' }
 
+/** One Stop hook result read as a verdict. Claude: `continue` "takes precedence over any
+ * event-specific decision fields", and stopReason is the message shown when it is false,
+ * so a hook asking to stop wins over its own block whatever exit code carried it. Any
+ * blocking spelling counts, including the prompt and agent hook reply schemas, and a
+ * non-error additionalContext feeds back the same way so the block cap still bounds it. */
+function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: boolean; reason: string } {
+  const parsed = tryParseJson(result.stdout)
+  if (parsed?.continue === false) {
+    if (parsed.stopReason) stopMessages.push(String(parsed.stopReason))
+    return { block: false, reason: '' }
+  }
+  if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
+  const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
+  if (verdict) return { block: true, reason: verdict.reason }
+  const context = parsed?.hookSpecificOutput?.additionalContext
+  if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
+  return { block: false, reason: '' }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -228,7 +248,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
     const transcript = ctx.sessionManager.getSessionFile()
     if (transcript) common.transcript_path = transcript
-    if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
+    // Claude vocabulary only: pi's minimal maps to low and off carries no effort.
+    const effort = claudeEffortLevel(ctx.thinkingLevel)
+    if (effort) common.effort = { level: effort }
     return common
   }
   /** Claude's prompt-hook `model` override, resolved against the models this user
@@ -512,7 +534,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, textContent(event.content), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
     const startedAt = toolStartTimes.get(event.toolCallId)
     toolStartTimes.delete(event.toolCallId)
-    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, tool_response: response, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
+    // Claude delivers a failure as top-level fields rather than a tool_response: "error
+    // information as top-level fields ... error ... is_interrupt". is_interrupt is false
+    // here because pi reports a cancelled tool through the result, not this event.
+    const failure = event.isError ? { error: textContent(event.content), is_interrupt: false } : { tool_response: response }
+    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, ...failure, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
@@ -576,10 +602,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return { action: 'handled' }
     }
     // Claude injects a UserPromptSubmit hook's context ahead of the prompt; transform is
-    // pi's seam for rewriting the submitted text. With suppressOriginalPrompt the
-    // context replaces the prompt entirely (honored only when context exists, since
-    // an empty submission would be no turn at all).
-    if (decision.context) return { action: 'transform', text: decision.suppress ? decision.context : `${decision.context}\n\n${event.text}` }
+    // pi's seam for rewriting the submitted text. The prompt itself always survives:
+    // "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+    // alongside it". suppressOriginalPrompt scopes to the block message, which never
+    // carries the prompt here, so it needs nothing of its own.
+    if (decision.context) return { action: 'transform', text: `${decision.context}\n\n${event.text}` }
     return { action: 'continue' }
   })
 
@@ -593,12 +620,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // handler on a UI dialog, which would starve the Stop hook and idle notification
   // until the user answers it. agent_end can fire slightly early before a rare
   // automatic retry or compaction; that is the better tradeoff.
-  pi.on('agent_end', async (event, ctx) => {
-    // Claude's Notification event, for the one type pi can honestly source: the
-    // agent finished and is waiting for input. Per Claude, idle_prompt fires when
-    // the turn ended about 60 seconds ago and the user hasn't typed since, so it
-    // arms here and input or the next turn cancels it. Observational only; exit
-    // codes and JSON output are ignored, as Claude documents for this event.
+  /** Claude's Notification event, for the one type pi can honestly source: the agent
+   * finished and is waiting for input. idle_prompt fires when the turn ended about 60
+   * seconds ago and the user has not typed since, so it arms here and input or the next
+   * turn cancels it. Observational only; exit codes and JSON output are ignored. */
+  const armIdlePrompt = (ctx: ExtensionContext): void => {
     cancelIdlePrompt()
     const notifyCommands = matchingCommands(config.Notification, ['idle_prompt'])
     if (notifyCommands.length > 0) {
@@ -608,6 +634,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
       }, IDLE_PROMPT_DELAY_MS)
       idlePromptTimer.unref?.()
     }
+  }
+  pi.on('agent_end', async (event, ctx) => {
+    armIdlePrompt(ctx)
 
     // In a subagent child, the agent-frontmatter Stop hooks were converted to
     // SubagentStop and fire here, at the child's own end, notify-style; before the
@@ -643,24 +672,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const run = boundRunner(ctx)
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    const stopMessages: string[] = []
     const block = results
       .filter((result) => !result.timedOut)
-      .map((result) => {
-        const parsed = tryParseJson(result.stdout)
-        if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
-        // Any JSON blocking spelling counts, including the prompt/agent hook reply
-        // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
-        const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
-        if (verdict) return { block: true, reason: verdict.reason }
-        // Claude's non-error continue: additionalContext feeds back and the
-        // conversation continues so Claude can act on it. It rides the same
-        // continuation path (and the same block cap) so a hook emitting it every
-        // firing cannot loop the turn forever.
-        const context = parsed?.hookSpecificOutput?.additionalContext
-        if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
-        return { block: false, reason: '' }
-      })
+      .map((result) => stopVerdict(result, stopMessages))
       .find((verdict) => verdict.block)
+    for (const message of stopMessages) ctx.ui.notify(message, 'warning')
     if (!block) {
       // A non-blocking Stop breaks the streak: the next block starts a fresh count.
       stopHookActive = false
@@ -689,6 +706,17 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const payload = { hook_event_name: 'PreCompact', trigger: trigger.value, custom_instructions: event.customInstructions ?? '' }
     const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude: "Exit with code 2 to block compaction. For a manual /compact, the stderr
+    // message is shown to the user. You can also block by returning JSON with
+    // `decision: block`." pi cancels through the result, and a blocked automatic
+    // compaction is worth a notice too: the context stays full either way.
+    for (const [index, result] of results.entries()) {
+      const parsed = tryParseJson(result.stdout)
+      const blocked = result.code === 2 && !result.timedOut ? { reason: result.stderr.trim() || 'Compaction blocked by hook' } : jsonBlockVerdict(parsed, 'Compaction blocked by hook')
+      if (!blocked) continue
+      ctx.ui.notify(`Compaction blocked by ${matchingCommands(config.PreCompact, trigger.names)[index]?.command ?? 'hook'}: ${blocked.reason}`, 'warning')
+      return { cancel: true }
+    }
   })
 
   pi.on('session_compact', async (event, ctx) => {

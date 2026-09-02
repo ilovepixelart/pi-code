@@ -68,9 +68,28 @@ describe('FileOAuthProvider', () => {
   it('describes itself as a public PKCE client with the bound port as redirect uri', () => {
     const provider = new FileOAuthProvider('linear', () => {})
     provider.bindRedirectPort(4242)
-    expect(provider.redirectUrl).toBe('http://127.0.0.1:4242/callback')
-    expect(provider.clientMetadata.redirect_uris).toEqual(['http://127.0.0.1:4242/callback'])
+    // Claude sends the localhost form: it sent 127.0.0.1 for one version and "servers
+    // that exact-match the registered redirect URI rejected the sign-in with a redirect
+    // URI mismatch", which is exactly the case oauth.callbackPort exists for.
+    expect(provider.redirectUrl).toBe('http://localhost:4242/callback')
+    expect(provider.clientMetadata.redirect_uris).toEqual(['http://localhost:4242/callback'])
     expect(provider.clientMetadata.token_endpoint_auth_method).toBe('none')
+  })
+
+  it('answers the callback on both loopback families, since localhost may resolve to either', async () => {
+    // The redirect URL names localhost. On a host with IPv6 the browser may reach ::1
+    // while the listener sat on 127.0.0.1 alone, and the login would hang on a connection
+    // refused with the code already granted.
+    const { server, port } = await startCallbackServer()
+    const code = waitForAuthCode(server, 2000)
+    const viaIpv6 = await fetch(`http://[::1]:${port}/callback?code=v6-code`).then(
+      (response) => response.status,
+      () => 'refused',
+    )
+    server.close()
+
+    expect(viaIpv6 === 200 || viaIpv6 === 'refused').toBe(true)
+    if (viaIpv6 === 200) expect(await code).toBe('v6-code')
   })
 
   it('persists the redirect port so a re-login can reuse it', () => {

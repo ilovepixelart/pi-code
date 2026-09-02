@@ -121,8 +121,11 @@ export class FileOAuthProvider implements OAuthClientProvider {
     }
   }
 
+  /** The localhost spelling, which is what a server with a pre-registered redirect URI
+   * expects: Claude sent the 127.0.0.1 form for one version and "servers that exact-match
+   * the registered redirect URI rejected the sign-in with a redirect URI mismatch". */
   get redirectUrl(): string {
-    return `http://127.0.0.1:${this.port}/callback`
+    return `http://localhost:${this.port}/callback`
   }
 
   get clientMetadata(): OAuthClientMetadata {
@@ -193,13 +196,24 @@ export class FileOAuthProvider implements OAuthClientProvider {
  * taken, an ephemeral port is used. */
 export async function startCallbackServer(preferredPort?: number): Promise<{ server: http.Server; port: number }> {
   const server = http.createServer()
-  const listen = (port: number): Promise<void> => new Promise((resolve, reject) => server.listen(port, '127.0.0.1', resolve).once('error', reject))
+  const listen = (port: number, host: string): Promise<void> => new Promise((resolve, reject) => server.listen(port, host, resolve).once('error', reject))
   try {
-    await listen(preferredPort ?? 0)
+    await listen(preferredPort ?? 0, '127.0.0.1')
   } catch {
-    await listen(0)
+    await listen(0, '127.0.0.1')
   }
-  return { server, port: (server.address() as { port: number }).port }
+  const port = (server.address() as { port: number }).port
+  // The redirect names localhost, which resolves to ::1 first on a host with IPv6, so a
+  // second listener answers there too. Best effort: where it cannot bind, the IPv4
+  // listener above still answers every browser that resolves localhost to 127.0.0.1.
+  const ipv6 = http.createServer()
+  ipv6.on('error', () => {})
+  await new Promise<void>((resolve) => {
+    ipv6.listen(port, '::1', () => resolve()).once('error', () => resolve())
+  })
+  server.on('close', () => ipv6.close())
+  ipv6.on('request', (request, response) => server.emit('request', request, response))
+  return { server, port }
 }
 
 export function waitForAuthCode(server: http.Server, timeoutMs: number, expectedState?: string): Promise<string> {

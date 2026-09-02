@@ -1041,8 +1041,9 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })
     expect(commandsRun()).toEqual(['failed'])
-    // A failed call keeps pi's response shape (the error details are the payload).
-    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
+    // Claude: the failure arrives "as top-level fields", error plus is_interrupt, rather
+    // than as a tool_response.
+    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't1', error: 'boom', is_interrupt: false })
   })
 
   it('does not run PostToolUseFailure hooks on a successful execution', async () => {
@@ -1394,6 +1395,33 @@ describe('hooks extension notify-style events', () => {
     await ext.agentEnd()
     await ext.beforeCompact('manual')
     expect(ext.notes).toEqual(Array(5).fill({ msg: 'heads up', level: 'warning' }))
+  })
+
+  it('blocks compaction when a PreCompact hook exits 2, showing its stderr on a manual run', async () => {
+    // Claude: "Exit with code 2 to block compaction. For a manual /compact, the stderr
+    // message is shown to the user. You can also block by returning JSON with
+    // `"decision": "block"`." pi's seam is the cancel field on the result.
+    writeSettings(hoisted.home, 'settings.json', { PreCompact: [{ hooks: [{ command: 'guard-compact' }] }] })
+    script('guard-compact', { code: 2, stderr: ['not yet, the notes matter'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    const result = await ext.beforeCompact('manual')
+
+    expect(result).toEqual({ cancel: true })
+    expect(ext.notes.at(-1)?.msg).toContain('not yet, the notes matter')
+  })
+
+  it('blocks compaction on a JSON decision and lets an ordinary run through', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreCompact: [{ hooks: [{ command: 'guard-json' }, { command: 'quiet' }] }] })
+    script('guard-json', { stdout: ['{"decision":"block","reason":"summary would drop the plan"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    expect(await ext.beforeCompact('threshold')).toEqual({ cancel: true })
+
+    script('guard-json', { stdout: [''] })
+    expect(await ext.beforeCompact('threshold')).toBeUndefined()
   })
 
   it('surfaces a SessionStart systemMessage without treating it as context', async () => {
@@ -2519,15 +2547,54 @@ describe('hooks suppressOriginalPrompt', () => {
     return ext
   }
 
-  it('replaces the prompt with the hook context when suppressOriginalPrompt is set', async () => {
-    // Claude's UserPromptSubmit suppressOriginalPrompt: the original prompt is
-    // hidden; the hook's context is what reaches the model.
-    script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX ONLY","suppressOriginalPrompt":true}}'], code: 0 })
+  it('honors continue:false over a Stop hook decision, showing its stopReason', async () => {
+    // Claude: continue "takes precedence over any event-specific decision fields", and
+    // stopReason is the "message shown to the user when continue is false". A hook that
+    // sets both was continuing the turn on the strength of the field it overrides.
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'halt' }] }] })
+    script('halt', { stdout: ['{"decision":"block","reason":"keep going","continue":false,"stopReason":"budget spent"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    await ext.agentEnd([{ role: 'assistant', content: 'done' }])
+
+    expect(ext.sent).toEqual([])
+    expect(ext.notes.at(-1)?.msg).toContain('budget spent')
+  })
+
+  it('reports effort in Claude vocabulary, omitting it when thinking is off', async () => {
+    // Claude's effort levels are low, medium, high, xhigh and max. pi adds minimal and
+    // off, which a hook keying on the documented set cannot read.
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'effort-probe' }] }] })
+
+    await ext.toolCall('bash', { command: 'x' }, 't1', { thinkingLevel: 'minimal' })
+    expect(JSON.parse(recordFor('effort-probe').stdin).effort).toEqual({ level: 'low' })
+
+    hoisted.calls.length = 0
+    await ext.toolCall('bash', { command: 'x' }, 't1', { thinkingLevel: 'off' })
+    expect(JSON.parse(recordFor('effort-probe').stdin).effort).toBeUndefined()
+  })
+
+  it('keeps the prompt when a non-blocking hook sets suppressOriginalPrompt', async () => {
+    // Claude scopes the field to a block: "If true when decision is block, omits the
+    // original prompt text from the block message shown to the user", and separately
+    // "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+    // alongside it". Treating it as a replacement dropped what the user actually typed.
+    script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX","suppressOriginalPrompt":true}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'suppress' }] }] })
 
-    const result = (await ext.input('the original secret prompt')) as { action: string; text?: string }
+    const result = (await ext.input('the original prompt')) as { action: string; text?: string }
     expect(result.action).toBe('transform')
-    expect(result.text).toBe('CTX ONLY')
+    expect(result.text).toBe('CTX\n\nthe original prompt')
+  })
+
+  it('never echoes the prompt in a block message, which is what the field asks for', async () => {
+    script('deny', { stdout: ['{"decision":"block","reason":"no secrets in prompts","hookSpecificOutput":{"suppressOriginalPrompt":true}}'], code: 0 })
+    const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'deny' }] }] })
+
+    expect(await ext.input('my api key is sk-live-123')).toEqual({ action: 'handled' })
+    expect(ext.notes.at(-1)?.msg).toBe('no secrets in prompts')
+    expect(ext.notes.at(-1)?.msg).not.toContain('sk-live-123')
   })
 
   it('keeps the prompt when no hook suppresses it', async () => {

@@ -764,7 +764,7 @@ export function setKnownMcpAliases(aliases: ReadonlyArray<{ pi: string; claude: 
 /** pi's built-in ToolName union (core/tools/index.d.ts; the package's export map
  * does not expose allToolNames, so this mirrors it) plus the tools pi-code's own
  * extensions register in a child. Claude's capitalized spellings fold onto these. */
-const CHILD_TOOL_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'web_fetch', 'web_search', 'list_mcp_resources', 'read_mcp_resource'])
+const CHILD_TOOL_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'web_fetch', 'web_search', 'list_mcp_resources', 'read_mcp_resource', 'todo', 'question', 'memory', 'slash_command', 'plan_mode_complete'])
 
 /** Claude: when no entry in a `tools` list resolves to a tool, the subagent fails
  * to launch with an error naming the entries, instead of running tool-less. */
@@ -785,7 +785,12 @@ function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): string[] 
   // order (invocation model, frontmatter model, this variable, the session model).
   // pi reads a thinking level from the model pattern's :suffix when a model is
   // pinned, and from --thinking otherwise.
-  const model = agent.model ?? aliasModel ?? process.env.CLAUDE_CODE_SUBAGENT_MODEL
+  // Claude exempts the two built-ins from the environment variable: "Setting
+  // CLAUDE_CODE_SUBAGENT_MODEL by itself doesn't change the model the built-in Explore and
+  // Plan subagents run on." A model they name themselves, or one the invocation names,
+  // still applies.
+  const exemptFromEnvModel = agent.source === 'builtin' && (agent.name === 'Explore' || agent.name === 'Plan')
+  const model = agent.model ?? aliasModel ?? (exemptFromEnvModel ? undefined : process.env.CLAUDE_CODE_SUBAGENT_MODEL)
   if (model) args.push('--model', agent.effort ? `${model}:${agent.effort}` : model)
   else if (agent.effort) args.push('--thinking', agent.effort)
   // Claude's mcp__<server> / mcp__* patterns expand against the parent's MCP roster;

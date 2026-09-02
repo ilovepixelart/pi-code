@@ -1856,6 +1856,20 @@ describe('subagent run semantics conformance', () => {
     expect(spawnCalls[0].args).not.toContain('--append-system-prompt')
   })
 
+  it('launches an agent whose tools list names only pi-code tools', async () => {
+    // The child runs pi with pi-code loaded, so todo, question, memory, slash_command and
+    // plan_mode_complete exist there. Leaving them out of the known set turned an agent
+    // scoped to them into a launch failure claiming it had no tools at all.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ tools: ['todo', 'question'] })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('done')] })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).not.toContain('zero tools')
+    const args = spawnCalls[0].args
+    expect(args[args.indexOf('--tools') + 1]).toBe('todo,question')
+  })
+
   it('honors CLAUDE_CODE_SUBAGENT_MODEL when nothing else assigns a model', async () => {
     // Claude's model order: invocation model, frontmatter model, then this
     // environment variable, then the main conversation's model.
@@ -1864,6 +1878,25 @@ describe('subagent run semantics conformance', () => {
       script('inspect', { stdout: [say('done')] })
       await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
       const args = spawnCalls[0].args
+      expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-4-5')
+    } finally {
+      delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
+    }
+  })
+
+  it('leaves the built-in Explore and Plan agents on their own model when CLAUDE_CODE_SUBAGENT_MODEL is set', async () => {
+    // Claude: "Setting CLAUDE_CODE_SUBAGENT_MODEL by itself doesn't change the model the
+    // built-in Explore and Plan subagents run on."
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-4-5'
+    try {
+      discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'Explore', source: 'builtin' }), agentConfig({ name: 'scout', source: 'user' })], projectAgentsDir: null })
+      script('look', { stdout: [say('done')] })
+
+      await execute('c1', { agent: 'Explore', task: 'look' }, undefined, undefined, trustedCtx)
+      expect(spawnCalls[0].args).not.toContain('--model')
+
+      await execute('c2', { agent: 'scout', task: 'look' }, undefined, undefined, trustedCtx)
+      const args = spawnCalls[1].args
       expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-4-5')
     } finally {
       delete process.env.CLAUDE_CODE_SUBAGENT_MODEL

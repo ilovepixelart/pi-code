@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, capCheckpoints, MAX_CHECKPOINTS_PER_SESSION, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
+import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, capCheckpoints, checkpointRetentionDays, MAX_CHECKPOINTS_PER_SESSION, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
 
 type Handler = (event: any, ctx: any) => Promise<unknown>
 
@@ -92,6 +92,20 @@ async function checkpointOneTurn(t: Harness, turnIndex = 0): Promise<void> {
 }
 
 const rewindLabel = (data: { createdAt: string; prompt: string }) => `1. ${new Date(data.createdAt).toLocaleTimeString()}  ${data.prompt}`
+
+describe('checkpoint retention', () => {
+  it('reads the retention period from cleanupPeriodDays', () => {
+    // Claude: checkpoints are deleted with sessions after 30 days, and you "change the
+    // period with cleanupPeriodDays". The constant was the only value pi-code used.
+    const home = mkdtempSync(join(tmpdir(), 'gcs-cfg-home-'))
+    tempDirs.push(home)
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ cleanupPeriodDays: 7 }))
+
+    expect(checkpointRetentionDays(home)).toBe(7)
+    expect(checkpointRetentionDays(mkdtempSync(join(tmpdir(), 'gcs-empty-home-')))).toBe(CHECKPOINT_RETENTION_DAYS)
+  })
+})
 
 describe('sessionSlug', () => {
   it('slugs session file names and falls back to an ephemeral id', () => {

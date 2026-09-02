@@ -439,8 +439,8 @@ describe('plugin server substitution safety', () => {
   it('substitutes ${CLAUDE_PROJECT_DIR} in plugin server config, as Claude documents', async () => {
     const { loadPluginServers } = await import('../extensions/mcp/index.ts')
     const servers = loadPluginServers([plugin({ db: { command: '${CLAUDE_PROJECT_DIR}/bin/server', args: ['--root', '${CLAUDE_PROJECT_DIR}'] } }) as never], '/work/repo')
-    expect((servers.db as { command: string }).command).toBe('/work/repo/bin/server')
-    expect((servers.db as { args: string[] }).args).toEqual(['--root', '/work/repo'])
+    expect((servers['plugin:toolbox:db'] as { command: string }).command).toBe('/work/repo/bin/server')
+    expect((servers['plugin:toolbox:db'] as { args: string[] }).args).toEqual(['--root', '/work/repo'])
   })
 
   it('rejects a plugin server whose headersHelper references ${user_config.*} instead of substituting into a shell command', async () => {
@@ -451,7 +451,7 @@ describe('plugin server substitution safety', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const servers = loadPluginServers([plugin({ api: { type: 'http', url: 'https://api.example.com', headersHelper: 'auth-helper --token ${user_config.TOKEN}' } }) as never], '/work/repo')
-      expect(servers.api).toBeUndefined()
+      expect(servers['plugin:toolbox:api']).toBeUndefined()
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('user_config'))
     } finally {
       warn.mockRestore()
@@ -461,7 +461,7 @@ describe('plugin server substitution safety', () => {
   it('still substitutes user_config outside headersHelper and plugin path vars inside it', async () => {
     const { loadPluginServers } = await import('../extensions/mcp/index.ts')
     const servers = loadPluginServers([plugin({ api: { type: 'http', url: 'https://api.example.com', headers: { Authorization: 'Bearer ${user_config.TOKEN}' }, headersHelper: '${CLAUDE_PLUGIN_ROOT}/helper.sh' } }) as never], '/work/repo')
-    const api = servers.api as { headers: Record<string, string>; headersHelper: string }
+    const api = servers['plugin:toolbox:api'] as { headers: Record<string, string>; headersHelper: string }
     expect(api.headers.Authorization).toBe('Bearer sekrit')
     expect(api.headersHelper).toMatch(/\/helper\.sh$/)
     expect(api.headersHelper).not.toContain('${CLAUDE_PLUGIN_ROOT}')
@@ -475,12 +475,25 @@ describe('plugin server substitution safety', () => {
     expect(isUnauthorized(Object.assign(new Error('gone'), { code: 404 }))).toBe(false)
   })
 
+  it('keys a plugin server under its scoped name while the tool alias stays flat', async () => {
+    // Claude: "The server itself registers under the scoped name
+    // plugin:<plugin-name>:<server-name> ... Use that name where a configured server name
+    // is expected, such as an mcp_tool hook's server field", while the tool it exposes is
+    // mcp__plugin_<plugin>_<server>__<tool>. Keying by the bare name also let a
+    // same-named user server drop the plugin's entirely.
+    const { loadPluginServers } = await import('../extensions/mcp/index.ts')
+    const servers = loadPluginServers([plugin({ 'database-tools': { type: 'http', url: 'https://db.example.com' } }) as never], '/work/repo')
+
+    expect(Object.keys(servers)).toEqual(['plugin:toolbox:database-tools'])
+    expect((servers['plugin:toolbox:database-tools'] as { aliasPrefix?: string }).aliasPrefix).toBe('mcp__plugin_toolbox_database-tools__')
+  })
+
   it('records the plugin root on plugin server configs for the helper environment', async () => {
     // Claude sets CLAUDE_PLUGIN_ROOT when a plugin provides the server's headersHelper.
     const { loadPluginServers } = await import('../extensions/mcp/index.ts')
     const declared = plugin({ api: { type: 'http', url: 'https://api.example.com' } }) as { root: string }
     const servers = loadPluginServers([declared as never], '/work/repo')
-    expect((servers.api as { pluginRoot?: string }).pluginRoot).toBe(declared.root)
+    expect((servers['plugin:toolbox:api'] as { pluginRoot?: string }).pluginRoot).toBe(declared.root)
   })
 
   it('keeps hyphens in the tool alias prefix, folding only characters outside A-Za-z0-9_-', async () => {
@@ -489,7 +502,7 @@ describe('plugin server substitution safety', () => {
     const { loadPluginServers } = await import('../extensions/mcp/index.ts')
     const withName = { ...(plugin({ 'db-tools': { command: 'srv' } }) as { name: string }), name: 'my-plugin' }
     const servers = loadPluginServers([withName as never], '/work/repo')
-    expect((servers['db-tools'] as { aliasPrefix: string }).aliasPrefix).toBe('mcp__plugin_my-plugin_db-tools__')
+    expect((servers['plugin:my-plugin:db-tools'] as { aliasPrefix: string }).aliasPrefix).toBe('mcp__plugin_my-plugin_db-tools__')
   })
 
   it('loads a manifest mcpServers array as a list of config file paths, merging all of them', async () => {
@@ -501,8 +514,8 @@ describe('plugin server substitution safety', () => {
     writeFileSync(join(base.root, 'b.json'), JSON.stringify({ mcpServers: { beta: { command: 'b-srv' } } }))
     base.manifest = { mcpServers: ['./a.json', './b.json'] }
     const servers = loadPluginServers([base as never], '/work/repo')
-    expect((servers.alpha as { command: string }).command).toBe('a-srv')
-    expect((servers.beta as { command: string }).command).toBe('b-srv')
+    expect((servers['plugin:toolbox:alpha'] as { command: string }).command).toBe('a-srv')
+    expect((servers['plugin:toolbox:beta'] as { command: string }).command).toBe('b-srv')
   })
 })
 

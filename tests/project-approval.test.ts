@@ -47,6 +47,16 @@ describe('pi does not consider claude-shaped config trust-requiring', () => {
     expect(hasClaudeShapedConfig(cwd)).toBe(true)
   })
 
+  it('counts a .claude/CLAUDE.md as project config', () => {
+    // Its body is injected verbatim into the prompt, and context-imports gates it on
+    // approval, so a repository whose only Claude config is that file must be asked
+    // about rather than silently approved.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'CLAUDE.md'), '# project rules')
+    expect(hasClaudeShapedConfig(cwd)).toBe(true)
+  })
+
   it('does consider .pi/settings.json trust-requiring', () => {
     const cwd = tempDir()
     write(cwd, join('.pi', 'settings.json'))
