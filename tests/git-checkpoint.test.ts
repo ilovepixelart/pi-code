@@ -138,6 +138,23 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(listed).not.toContain('secret.txt')
   })
 
+  it('warns when the local excludes cannot be mirrored into the shadow', async () => {
+    // Without the mirror, files the user excluded locally (secrets, scratch) are
+    // snapshotted into the checkpoint store and restored by /rewind. That is exactly the
+    // case worth a word, so it is not silently undone.
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    const shadow = join(hoisted.home, '.pi', 'agent', 'checkpoints', 'session-test.jsonl')
+    // A file where the mirror wants a directory: the copy cannot land.
+    rmSync(join(shadow, 'info'), { recursive: true, force: true })
+    writeFileSync(join(shadow, 'info'), 'not a directory')
+    writeFileSync(join(t.repo, '.git', 'info', 'exclude'), 'secret.txt\n')
+
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+
+    expect(t.notifications.some((n) => n.includes('exclude'))).toBe(true)
+  })
+
   it('captures the tree even when the user global config forces commit signing', async () => {
     // A global commit.gpgsign=true (with no usable gpg) would fail the shadow commit;
     // the snapshot must isolate itself from the user config and still record the change.
