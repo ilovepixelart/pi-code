@@ -119,6 +119,21 @@ describe('memory index robustness', () => {
 
   const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, ui: { notify: () => {} } })
 
+  it('distinguishes a memory that cannot be read from one that does not exist', async () => {
+    // "No memory named x" sends the model hunting for a different name. A read that failed
+    // for another reason, a directory in its place or a permission problem, is a different
+    // situation, and the reply now says which one happened.
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    mkdirSync(join(dir, 'blocked.md'), { recursive: true })
+
+    const absent = (await tool.execute('1', { action: 'read', name: 'absent' })).content[0].text
+    const blocked = (await tool.execute('2', { action: 'read', name: 'blocked' })).content[0].text
+
+    expect(absent).toBe('No memory named absent.')
+    expect(blocked).toContain('could not be read')
+  })
+
   it('refuses to save while the index is unreadable instead of clobbering it', async () => {
     const { handlers, tool, cwd, dir } = setup()
     await start(handlers, cwd)

@@ -31,10 +31,19 @@ export interface InstalledPlugin {
 }
 
 function readJson(file: string): Record<string, unknown> {
+  let raw: string
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
-    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+    raw = fs.readFileSync(file, 'utf-8')
   } catch {
+    return {} // no such file: nothing to read, and most callers expect that
+  }
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+  } catch (error) {
+    // A manifest that does not parse leaves the plugin with no components at all, and
+    // settings that do not parse drop the enablement or configuration they carried.
+    console.warn(`pi-code-plugins: ignoring ${file}: ${error instanceof Error ? error.message : String(error)}`)
     return {}
   }
 }

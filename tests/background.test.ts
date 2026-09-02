@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -274,6 +274,40 @@ describe('background run lifecycle', () => {
     cancelAllBackgroundRuns()
 
     expect(existsSync(promptDir)).toBe(false)
+  })
+
+  it('reports a resume that cannot rebuild the agent prompt', () => {
+    // Dropping --system-prompt is the safe fallback, but it means the resumed child runs
+    // as a plain assistant instead of the agent the user asked for. That difference is
+    // invisible in the output, so it is stated.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/gone/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+      children.at(-1)?.emit('close', 0)
+
+      // Only the rebuild is blocked: a temp dir cannot be created under a file. The run's
+      // own working directory stays valid, or the resume would refuse for that instead.
+      const blocked = join(tmpdir(), `pi-blocked-${process.pid}`)
+      writeFileSync(blocked, 'not a directory')
+      // os.tmpdir() reads TMPDIR on POSIX and TEMP or TMP on Windows, so all three move.
+      const tempVars = ['TMPDIR', 'TEMP', 'TMP'] as const
+      const saved = tempVars.map((name) => [name, process.env[name]] as const)
+      for (const name of tempVars) process.env[name] = join(blocked, 'nested')
+      try {
+        expect(resumeBackgroundRun(id ?? '', 'two', () => {})).toBe('resumed')
+      } finally {
+        for (const [name, value] of saved) {
+          if (value === undefined) delete process.env[name]
+          else process.env[name] = value
+        }
+      }
+
+      const args = spawnMock.mock.calls.at(-1)?.[1] as string[]
+      expect(args).not.toContain('--system-prompt')
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('scout'))
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('rebuilds the prompt file once and reuses it across resumes', () => {

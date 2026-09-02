@@ -303,12 +303,19 @@ describe('discoverAgents', () => {
     expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find'])
   })
 
-  it('skips a file with malformed YAML frontmatter instead of aborting discovery', () => {
+  it('skips a file with malformed YAML frontmatter instead of aborting discovery, and says which', () => {
     mkdirSync(piUserDir, { recursive: true })
     writeFileSync(join(piUserDir, 'broken-yaml.md'), '---\nname: [unclosed\ndescription: d\n---\nprompt')
     writeAgent(piUserDir, 'fine2.md', { name: 'fine2', description: 'ok' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine2'])
+    try {
+      expect(names(discoverAgents(cwd, 'user').agents)).toEqual(['fine2'])
+      // Silence here reads as "I never wrote that agent" rather than "it is broken".
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('broken-yaml.md'))
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('skips an agent whose tools field is unusable instead of aborting discovery', () => {
