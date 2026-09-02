@@ -509,20 +509,33 @@ function additionalDirExtras(addDirs: string[], seenSet: Set<string>, excluded: 
   return extras
 }
 
+/** The parts of one launch-time expansion that every file shares: where it runs, what
+ * has already been read, the budget they all draw on, and whether this project's
+ * external imports were approved. */
+interface ExpansionContext {
+  home: string
+  cwd: string
+  seen: Set<string>
+  excluded: (absPath: string) => boolean
+  budget: ImportBudget
+  externalApproved: boolean
+}
+
 /** Resolve every context and additional-dir file's @imports through the one shared
  * budget, each with roots scoped to the importing file so a project file never
- * reaches user config. */
-function expandImports(contextFiles: Array<{ path: string; content: string }>, extras: Array<{ path: string; content: string; dir: string }>, home: string, cwd: string, seenSet: Set<string>, excluded: (absPath: string) => boolean, budget: ImportBudget, externalApproved: boolean): ImportedFile[] {
+ * reaches user config unless the project's external imports were approved. */
+function expandImports(contextFiles: Array<{ path: string; content: string }>, extras: Array<{ path: string; content: string; dir: string }>, run: ExpansionContext): ImportedFile[] {
   const imported: ImportedFile[] = []
+  const options = { budget: run.budget, isExcluded: run.excluded }
   for (const file of contextFiles) {
-    const allowedRoots = rootsForImporter(file.path, home, cwd, externalApproved)
-    imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, { budget, importer: file.path, isExcluded: excluded }))
+    const allowedRoots = rootsForImporter(file.path, run.home, run.cwd, run.externalApproved)
+    imported.push(...collectImports(file.content, path.dirname(file.path), run.home, allowedRoots, run.seen, { ...options, importer: file.path }))
   }
   for (const extra of extras) {
     // The additional dir itself is an allowed root, so its files' relative imports
     // resolve even from .claude/rules two levels down.
-    const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, home, cwd)]
-    imported.push(...collectImports(extra.content, path.dirname(extra.path), home, allowedRoots, seenSet, { budget, importer: extra.path, isExcluded: excluded }))
+    const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, run.home, run.cwd)]
+    imported.push(...collectImports(extra.content, path.dirname(extra.path), run.home, allowedRoots, run.seen, { ...options, importer: extra.path }))
   }
   return imported
 }
@@ -912,7 +925,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // Exclusion applies inside the recursion: an excluded @import is skipped before
     // it is read, so its transitive imports never load and it spends no budget.
     const budget = createImportBudget()
-    const imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget, externalImportsApproved)
+    const imported = expandImports(contextFiles, extras, { home, cwd, seen: seenSet, excluded, budget, externalApproved: externalImportsApproved })
 
     // Revalidation set: every file the expansion read, plus each add-dir itself
     // (a directory's mtime moves when a memory file is added or removed there).
@@ -949,7 +962,9 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     if (targets.length === 0) return false
     // A run with no one to ask has not been given consent.
     if (!ctx.hasUI) return false
-    const approved = await ctx.ui.confirm('Load imports from outside this project?', `${root}\n\nIts context files import these files from outside the project:\n\n${targets.map((file) => `  ${file}`).join('\n')}\n\nThey will be read into every session's context. Only allow this for repositories you trust.`)
+    const listed = targets.map((file) => `  ${file}`).join('\n')
+    const body = `${root}\n\nIts context files import these files from outside the project:\n\n${listed}\n\nThey will be read into every session's context. Only allow this for repositories you trust.`
+    const approved = await ctx.ui.confirm('Load imports from outside this project?', body)
     rememberExternalImportDecision(root, approved)
     return approved
   }
