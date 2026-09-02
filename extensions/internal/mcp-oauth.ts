@@ -39,10 +39,26 @@ export interface OAuthServerConfig {
   authServerMetadataUrl?: string
 }
 
+/** The origin a sign-in belongs to, so the same server name at a different endpoint gets
+ * its own store. An unparseable url falls back to its raw text rather than to nothing. */
+function endpointKey(endpoint: string | undefined): string {
+  if (!endpoint) return ''
+  try {
+    return new URL(endpoint).origin
+  } catch {
+    return endpoint
+  }
+}
+
 /** A server name is config-controlled text; the digest keeps hostile names inside
- * the store directory and distinct names from colliding after sanitization. */
-function storeFileFor(serverName: string): string {
-  const digest = crypto.createHash('sha256').update(serverName).digest('hex').slice(0, 8)
+ * the store directory and distinct names from colliding after sanitization. The endpoint
+ * rides the digest so a second project reusing a name cannot read the first one's tokens. */
+function storeFileFor(serverName: string, endpoint?: string): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${serverName}\n${endpointKey(endpoint)}`)
+    .digest('hex')
+    .slice(0, 8)
   // Collapse disallowed runs to a single hyphen, then strip leading and trailing
   // hyphens by index. The old /^-+|-+$/g trim rescanned on every hyphen of a long run
   // (its trailing-anchored branch backtracks per start position), which is quadratic.
@@ -66,8 +82,8 @@ export class FileOAuthProvider implements OAuthClientProvider {
   // page cannot inject an authorization code into this login (RFC 8252 8.9).
   private readonly loginState = crypto.randomBytes(16).toString('hex')
 
-  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void, oauth?: OAuthServerConfig) {
-    this.storePath = storeFileFor(serverName)
+  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void, oauth?: OAuthServerConfig, endpoint?: string) {
+    this.storePath = storeFileFor(serverName, endpoint)
     this.onRedirect = onRedirect
     this.oauth = oauth
     try {

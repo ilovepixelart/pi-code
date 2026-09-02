@@ -367,7 +367,7 @@ async function connectHttpFamily(name: string, config: { url: string; oauth?: OA
   // dynamic registration, keeping it bound to the real callback port. A
   // pre-configured client (oauth.clientId) rides the silent provider too, so its
   // stored tokens refresh with the configured credentials.
-  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth)
+  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth, config.url)
   try {
     const client = newClient()
     await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)
