@@ -568,3 +568,16 @@ describe('dollar signs stay literal', () => {
     expect(out).toBe('Example:\n```\n!`git status`\n```\nNow really: CLEAN')
   })
 })
+
+describe('powershell exit-1 carveout set', () => {
+  it('uses the PowerShell carveout set: grep and git diff yes, find and diff no', async () => {
+    // Claude: the powershell set "includes grep and git diff but not find or diff".
+    const { benignExitOne } = await import('../extensions/internal/command-file.ts')
+    expect(benignExitOne('grep foo bar', 'powershell')).toBe(true)
+    expect(benignExitOne('git diff HEAD', 'powershell')).toBe(true)
+    expect(benignExitOne('find . -name x', 'powershell')).toBe(false)
+    expect(benignExitOne('diff a b', 'powershell')).toBe(false)
+    // The default bash set keeps find and diff.
+    expect(benignExitOne('find . -name x')).toBe(true)
+  })
+})

@@ -236,7 +236,7 @@ export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, a
           return { stdout, stderr: result.stderr, code: result.code }
         }
       : async () => ({ stdout: SHELL_DISABLED_PLACEHOLDER, stderr: '', code: 0 })
-  let expanded = await expandDynamicContent(withVars, ctx.cwd, exec)
+  let expanded = await expandDynamicContent(withVars, ctx.cwd, exec, parsed.shell === 'powershell' ? 'powershell' : 'bash')
 
   // Claude appends the raw arguments when the command never read them, so what
   // the user typed still reaches the model.

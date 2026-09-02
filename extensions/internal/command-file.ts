@@ -49,7 +49,7 @@ export interface ParsedCommand {
 }
 
 export interface DiscoveredCommand {
-  /** Claude's namespaced name: a nested file is `dir:name`, a plugin's is `plugin:name`. */
+  /** Claude names a command by its file name alone; a plugin's is `plugin:name`. */
   name: string
   filePath: string
   /** Set for plugin commands, carrying the ${CLAUDE_PLUGIN_*} and ${user_config.*} substitution sources. */
@@ -539,16 +539,21 @@ function fencedRanges(body: string): Array<[number, number]> {
 }
 
 /** Exit 1 is a normal result for Claude's documented search and comparison commands
- * (no matches, files differ); exit 2 and up fails even for these. */
+ * (no matches, files differ); exit 2 and up fails even for these. The PowerShell
+ * shell uses a different set, which "includes grep and git diff but not find or
+ * diff" (test/[ are bash builtins and do not apply there either). */
 const EXIT_ONE_OK = new Set(['grep', 'rg', 'egrep', 'fgrep', 'find', 'diff', 'test', '['])
+const EXIT_ONE_OK_POWERSHELL = new Set(['grep', 'rg', 'egrep', 'fgrep'])
 
-const isCarveoutSegment = (segment: string): boolean => {
+export type SpanShell = 'bash' | 'powershell'
+
+const isCarveoutSegment = (segment: string, shell: SpanShell): boolean => {
   const words = segment.trim().split(/\s+/)
   if (words[0] === 'git') return words[1] === 'diff' || words[1] === 'grep'
-  return EXIT_ONE_OK.has(words[0])
+  return (shell === 'powershell' ? EXIT_ONE_OK_POWERSHELL : EXIT_ONE_OK).has(words[0])
 }
 
-function benignExitOne(command: string): boolean {
+export function benignExitOne(command: string, shell: SpanShell = 'bash'): boolean {
   const segments = splitSegments(command)
   if (segments.length === 0) return false
   // A `&&`/`||` chain can short-circuit, so an earlier segment's exit 1 becomes the
@@ -557,15 +562,15 @@ function benignExitOne(command: string): boolean {
   // the exit benign whichever ran last. Without short-circuit operators the exit is
   // the last segment's (a `|` pipeline exits with its final command, `;`/newline with
   // the last statement), so the last segment decides.
-  if (/&&|\|\|/.test(command)) return segments.every(isCarveoutSegment)
-  return isCarveoutSegment(segments.at(-1) ?? '')
+  if (/&&|\|\|/.test(command)) return segments.every((segment) => isCarveoutSegment(segment, shell))
+  return isCarveoutSegment(segments.at(-1) ?? '', shell)
 }
 
 /** Run one injected span. A failure aborts the whole invocation, as Claude
  * documents: the model never sees a half-expanded body. */
-async function runSpan(exec: CommandExec, command: string, pattern: string): Promise<string> {
+async function runSpan(exec: CommandExec, command: string, pattern: string, shell: SpanShell): Promise<string> {
   const result = await exec(command)
-  if (result.code !== 0 && !(result.code === 1 && benignExitOne(command))) {
+  if (result.code !== 0 && !(result.code === 1 && benignExitOne(command, shell))) {
     throw new Error(`Shell command failed for pattern "${pattern}"\n[stderr]\n${(result.stderr || result.stdout).trim()}`)
   }
   return result.stdout.trimEnd()
@@ -608,7 +613,7 @@ interface DynamicSpan {
  * never re-scanned for further placeholders. Re-scanning was both a parity break
  * (Claude expands once) and a command-injection path: output of a `` ```! `` block
  * such as a commit message could smuggle its own `` !`cmd` `` for a later pass. */
-export async function expandDynamicContent(body: string, cwd: string, exec: CommandExec): Promise<string> {
+export async function expandDynamicContent(body: string, cwd: string, exec: CommandExec, shell: SpanShell = 'bash'): Promise<string> {
   const blocks = fenceBlocks(body)
   const protectedRanges = blocks.filter((block) => !block.exec).map((block): [number, number] => [block.start, block.end])
   const execRanges = blocks.filter((block) => block.exec).map((block): [number, number] => [block.start, block.end])
@@ -618,14 +623,14 @@ export async function expandDynamicContent(body: string, cwd: string, exec: Comm
 
   const spans: DynamicSpan[] = []
   for (const block of blocks) {
-    if (block.exec) spans.push({ start: block.start, end: block.end, run: () => runSpan(exec, block.content, '```!') })
+    if (block.exec) spans.push({ start: block.start, end: block.end, run: () => runSpan(exec, block.content, '```!', shell) })
   }
   // `!` counts only at the start of a line or after whitespace; `KEY=!`cmd`` is literal.
   const bashPattern = /(^|\s)!`([^`]+)`/g
   for (let m = bashPattern.exec(body); m !== null; m = bashPattern.exec(body)) {
     if (literal(m.index)) continue
     const [span, lead, command] = m
-    spans.push({ start: m.index, end: m.index + span.length, run: async () => lead + (await runSpan(exec, command, `!\`${command}\``)) })
+    spans.push({ start: m.index, end: m.index + span.length, run: async () => lead + (await runSpan(exec, command, `!\`${command}\``, shell)) })
   }
   const atPattern = /(^|\s)@(\S+)/g
   for (let m = atPattern.exec(body); m !== null; m = atPattern.exec(body)) {
