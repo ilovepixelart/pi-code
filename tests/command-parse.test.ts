@@ -249,6 +249,10 @@ describe('substituteArgs', () => {
     expect(substituteArgs('first: $0, second: $1', 'a b')).toBe('first: a, second: b')
     expect(substituteArgs('indexed: $ARGUMENTS[1]', 'a b')).toBe('indexed: b')
     expect(substituteArgs('missing: ${2:-none}', 'a')).toBe('missing: none')
+    // The default forms both ways: the present value wins, the default fills.
+    expect(substituteArgs('have: ${1:-none}', 'a b')).toBe('have: b')
+    expect(substituteArgs('all: ${ARGUMENTS:-nothing given}', '')).toBe('all: nothing given')
+    expect(substituteArgs('all: ${ARGUMENTS:-nothing given}', 'x y')).toBe('all: x y')
     // Claude leaves an indexed placeholder with no matching argument in place unchanged.
     expect(substituteArgs('bare: $3', 'a')).toBe('bare: $3')
     expect(substituteArgs('bare: $ARGUMENTS[3]', 'a')).toBe('bare: $ARGUMENTS[3]')
