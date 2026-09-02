@@ -282,6 +282,29 @@ describe('agent hook runner', () => {
     expect(spawnCalls[0].promptFile?.content).toContain('permissionDecision')
   })
 
+  it('resolves a named agent within user scope until the project is approved', async () => {
+    // The tool path narrows to 'user' on an unapproved project (agentScope, below); a
+    // context: fork skill naming an agent must not become the way a repo-controlled agent
+    // definition runs anyway, since project agents win a name clash.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'reviewer' })], projectAgentsDir: null })
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => false, modelRegistry: { getAvailable: () => [] } })
+    script('look', { stdout: [say('done')], exitCode: 0 })
+
+    await runAgent({ prompt: 'look', agent: 'reviewer' })
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'user')
+  })
+
+  it('resolves a named agent across both scopes once the project is approved', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'reviewer' })], projectAgentsDir: null })
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    script('look', { stdout: [say('done')], exitCode: 0 })
+
+    await runAgent({ prompt: 'look', agent: 'reviewer' })
+
+    expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'both')
+  })
+
   it('refuses to run inside a subagent session', async () => {
     await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
     const saved = process.env.PI_CODE_SUBAGENT
