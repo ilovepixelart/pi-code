@@ -37,8 +37,8 @@
     ]
   },
   "scripts": {
-    "biome": "npx @biomejs/biome check",
-    "biome:fix": "npx @biomejs/biome check --write .",
+    "biome": "npx --no-install @biomejs/biome check",
+    "biome:fix": "npx --no-install @biomejs/biome check --write .",
     "type:check": "tsc --noEmit",
     "test": "vitest run --coverage",
     "check": "npm run biome && npm run type:check && npm run test",
