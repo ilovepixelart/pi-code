@@ -154,6 +154,21 @@ describe('extension wiring', () => {
     expect(failed).toBeUndefined()
   })
 
+  it('injects rules in pinned-locale name order, not filesystem readdir order', async () => {
+    // Raw readdir order is filesystem-dependent (hash order on ext4); the prompt
+    // must be reproducible across machines. Created deliberately out of order.
+    const cwd = mkdtempSync(join(tmpdir(), 'rules-'))
+    mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'rules', 'zeta.md'), 'ZETA RULE')
+    writeFileSync(join(cwd, '.claude', 'rules', 'alpha.md'), 'ALPHA RULE')
+    writeFileSync(join(cwd, '.claude', 'rules', 'middle.md'), 'MIDDLE RULE')
+
+    const prompt = await sessionPrompt(approvedCtx(cwd))
+    const positions = ['alpha', 'middle', 'zeta'].map((name) => prompt.indexOf(`${name}.md`))
+    expect(positions.every((at) => at >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
   it('expands a brace glob in a scoped rule when matching a touched file', async () => {
     const cwd = projectWithRule('---\npaths:\n  - "src/{a,b}/**"\n---\nMind the shared modules.')
     const handlers = wire()

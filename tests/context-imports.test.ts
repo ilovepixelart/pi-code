@@ -831,6 +831,17 @@ describe('additionalDirContextFiles', () => {
     ])
   })
 
+  it('sorts rule names with pinned en collation regardless of host locale', () => {
+    // Czech collation orders ch after h; the default collator follows the host
+    // locale, so unpinned sorting reorders prompt content per machine.
+    const dir = tempDir()
+    mkdirSync(join(dir, '.claude', 'rules'), { recursive: true })
+    writeFileSync(join(dir, '.claude', 'rules', 'h.md'), 'H')
+    writeFileSync(join(dir, '.claude', 'rules', 'ci.md'), 'CI')
+    writeFileSync(join(dir, '.claude', 'rules', 'ch.md'), 'CH')
+    expect(additionalDirContextFiles(dir, false).map((file) => file.content)).toEqual(['CH', 'CI', 'H'])
+  })
+
   it('skips missing files and withholds CLAUDE.local.md when not approved', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'CLAUDE.md'), 'ROOT')
