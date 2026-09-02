@@ -177,8 +177,11 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   let parsed: { frontmatter: Record<string, unknown>; body: string }
   try {
     parsed = parseFrontmatter<Record<string, unknown>>(content)
-  } catch {
-    return null // malformed YAML must not abort discovery for the whole directory
+  } catch (error) {
+    // Malformed YAML must not abort discovery for the whole directory, but a silent drop
+    // reads as "that agent does not exist", so it is named like the other rejections here.
+    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${error instanceof Error ? error.message : String(error)})`)
+    return null
   }
   const { frontmatter, body } = parsed
   const name = agentName(frontmatter, filePath, pluginName)
