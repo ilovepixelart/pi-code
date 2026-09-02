@@ -262,11 +262,15 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     runNeedsSnapshot = true
     await ensureShadow(ctx)
     checkpoints.clear()
+    const stored: Checkpoint[] = []
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== 'custom' || entry.customType !== CUSTOM_TYPE) continue
       const checkpoint = entry.data as Checkpoint | undefined
-      if (checkpoint?.entryId) checkpoints.set(checkpoint.entryId, checkpoint)
+      if (checkpoint?.entryId) stored.push(checkpoint)
     }
+    // The same cap the append path enforces: a resumed long session must not
+    // rebuild a rewind list beyond the per-session limit.
+    for (const checkpoint of capCheckpoints(stored)) checkpoints.set(checkpoint.entryId, checkpoint)
   })
 
   // A new agent loop starts a run: the next turn_start snapshots the pre-run tree.

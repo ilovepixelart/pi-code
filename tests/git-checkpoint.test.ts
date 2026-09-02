@@ -319,4 +319,35 @@ describe('capCheckpoints', () => {
     const few = [entry(1), entry(2)]
     expect(capCheckpoints(few)).toEqual(few)
   })
+
+  it('caps the rewind list rebuilt on session resume, newest kept', async () => {
+    // The turn_end path trims as it appends, but the resume rebuild loaded every
+    // stored entry uncapped, so a long resumed session exceeded the limit until
+    // its next checkpoint landed.
+    const t = setup()
+    const entries = Array.from({ length: MAX_CHECKPOINTS_PER_SESSION + 5 }, (_, i) => ({
+      type: 'custom',
+      customType: 'git-checkpoint',
+      data: { entryId: `user${String(i).padStart(4, '0')}`, ref: '1'.repeat(40), prompt: `p${String(i).padStart(3, '0')}`, createdAt: new Date().toISOString() },
+    }))
+    await t.handlers.get('session_start')?.({ reason: 'resume' }, t.makeCtx(entries, [], []))
+
+    let seen: string[] = []
+    const base = t.makeCtx(entries, [], []) as { ui: Record<string, unknown> }
+    const ctx = {
+      ...base,
+      ui: {
+        ...base.ui,
+        select: async (_title: string, labels: string[]) => {
+          seen = labels
+          return undefined
+        },
+      },
+    }
+    await t.commands.get('rewind')?.handler('', ctx)
+
+    expect(seen).toHaveLength(MAX_CHECKPOINTS_PER_SESSION)
+    expect(seen[0]).toContain('p104') // newest first in the picker
+    expect(seen.some((label) => label.includes('p004'))).toBe(false) // oldest five dropped
+  })
 })

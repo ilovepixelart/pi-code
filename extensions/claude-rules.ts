@@ -121,6 +121,10 @@ function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>
   } catch {
     return results // a missing or unreadable directory must not take down session start
   }
+  // Raw readdir order is filesystem-dependent (hash order on ext4, sorted on
+  // APFS), so unsorted iteration injects rules into the prompt in a different
+  // order per machine. Pinned-locale sort makes the prompt reproducible.
+  entries.sort((a, b) => a.name.localeCompare(b.name, 'en'))
   for (const entry of entries) {
     const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name
     const fullPath = path.join(dir, entry.name)

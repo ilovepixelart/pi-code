@@ -6,7 +6,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
-import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
+import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
 
 // The agent-memory tests read settings and stores under the home directory; point
 // homedir at a throwaway dir so the developer's real ~/.claude cannot influence them.
@@ -2013,5 +2013,43 @@ describe('execute dispatch: resume and cancel arms', () => {
     cancelBackgroundRunMock.mockReturnValue('unknown')
     backgroundStatusTextMock.mockReturnValue('(no background runs)')
     expect(text(await execute('c1', { cancel: 'bg-9' }, undefined, undefined, trustedCtx))).toContain('Unknown background run: bg-9')
+  })
+})
+
+describe('getPiInvocation packaging fallbacks', () => {
+  // The fallbacks fire only in packaged distributions, invisible to CI unless
+  // the inputs are faked; a regression breaks subagent spawning only for users
+  // of the compiled binary.
+  const withProcess = (script: string | undefined, execPath: string, fn: () => void): void => {
+    const savedArgv = process.argv[1]
+    const savedExec = process.execPath
+    if (script === undefined) process.argv.splice(1, 1)
+    else process.argv[1] = script
+    process.execPath = execPath
+    try {
+      fn()
+    } finally {
+      if (script === undefined) process.argv.splice(1, 0, savedArgv)
+      else process.argv[1] = savedArgv
+      process.execPath = savedExec
+    }
+  }
+
+  it('reruns the current script through the current runtime when it exists on disk', () => {
+    withProcess(__filename, '/usr/bin/node-x', () => {
+      expect(getPiInvocation(['--mode', 'json'])).toEqual({ command: '/usr/bin/node-x', args: [__filename, '--mode', 'json'] })
+    })
+  })
+
+  it('invokes the compiled binary directly when the script is a bun virtual path', () => {
+    withProcess('/$bunfs/root/cli.js', '/opt/pi-binary', () => {
+      expect(getPiInvocation(['--mode', 'json'])).toEqual({ command: '/opt/pi-binary', args: ['--mode', 'json'] })
+    })
+  })
+
+  it('falls back to pi on PATH when only a generic runtime is left', () => {
+    withProcess('/nonexistent/script-gone.js', '/usr/local/bin/node', () => {
+      expect(getPiInvocation(['-p', 'task'])).toEqual({ command: 'pi', args: ['-p', 'task'] })
+    })
   })
 })

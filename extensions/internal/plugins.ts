@@ -12,6 +12,7 @@
  * ~/.claude/plugins/data/<id>, id being the qualified name folded to dashes.
  */
 
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -49,9 +50,33 @@ function listDirs(dir: string): string[] {
   }
 }
 
-/** Version directories sort numerically segment-wise, so 1.10.0 beats 1.9.0. */
+/** One version string split for comparison: optional v prefix dropped, numeric
+ * base segments, and whatever follows a dash as the prerelease tag. */
+function parseVersion(version: string): { base: number[]; pre: string | undefined } {
+  const stripped = version.replace(/^v/i, '')
+  const dash = stripped.indexOf('-')
+  const base = (dash === -1 ? stripped : stripped.slice(0, dash)).split('.').map((segment) => Number.parseInt(segment, 10) || 0)
+  return { base, pre: dash === -1 ? undefined : stripped.slice(dash + 1) }
+}
+
+/** Semver ordering to the depth plugin cache dirs need: 1.10.0 beats 1.9.0,
+ * 10.0.0 beats v2.0.0, and a release outranks its own prerelease (a plain
+ * string sort got both of the latter wrong). */
+function compareVersions(a: string, b: string): number {
+  const left = parseVersion(a)
+  const right = parseVersion(b)
+  for (let i = 0; i < Math.max(left.base.length, right.base.length); i++) {
+    const diff = (left.base[i] ?? 0) - (right.base[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  if (left.pre === right.pre) return 0
+  if (left.pre === undefined) return 1
+  if (right.pre === undefined) return -1
+  return left.pre.localeCompare(right.pre, 'en', { numeric: true })
+}
+
 function newestVersion(versions: string[]): string | undefined {
-  return [...versions].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })).at(-1)
+  return [...versions].sort(compareVersions).at(-1)
 }
 
 /** The enablement map, later files winning per key, as settings scopes merge. */
@@ -101,7 +126,8 @@ export function resetInstalledPluginsCache(): void {
   pluginCache.clear()
 }
 
-/** mtime plus size, so a same-instant rewrite with different content still differs. */
+/** mtime plus size; cheap, but blind to a same-size rewrite within one
+ * timestamp tick, so only directory-tree entries use it. */
 function statToken(target: string): string {
   try {
     const stat = fs.statSync(target)
@@ -111,15 +137,25 @@ function statToken(target: string): string {
   }
 }
 
+/** Content hash for the small settings files: a same-size rewrite within one
+ * mtime tick (the settings-watch flake class) must still invalidate the cache. */
+function contentToken(target: string): string {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex')
+  } catch {
+    return 'missing'
+  }
+}
+
 /**
- * A cheap change signature for one home's plugin config: the settings files' stat
- * tokens plus the cache tree's directory names and mtimes down through each plugin's
+ * A cheap change signature for one home's plugin config: the settings files'
+ * content hashes plus the cache tree's directory names and mtimes down through each plugin's
  * version directories, and the stat token of the resolved (newest) version's manifest
  * so an in-place edit of it invalidates the cache. Costs a few stats where the full
  * walk reads and parses the settings and every manifest.
  */
 function pluginFingerprint(cacheDir: string, settingsFiles: string[]): string {
-  const parts = settingsFiles.map(statToken)
+  const parts = settingsFiles.map(contentToken)
   for (const marketplace of listDirs(cacheDir)) {
     const marketplaceDir = path.join(cacheDir, marketplace)
     parts.push(`${marketplace}:${statToken(marketplaceDir)}`)

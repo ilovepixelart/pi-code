@@ -299,7 +299,9 @@ export function additionalDirContextFiles(dir: string, includeLocal: boolean): A
     const names = fs
       .readdirSync(rulesDir)
       .filter((name) => name.endsWith('.md'))
-      .sort((a, b) => a.localeCompare(b))
+      // Pinned locale: the default collator follows the host locale, which
+      // reorders names like ch/ci/h and makes prompt content machine-dependent.
+      .sort((a, b) => a.localeCompare(b, 'en'))
     candidates.push(...names.map((name) => path.join(rulesDir, name)))
   } catch {
     // no rules directory in this additional dir

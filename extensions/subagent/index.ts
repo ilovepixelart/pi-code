@@ -105,7 +105,9 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
   return { dir: tmpDir, filePath }
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+/** Exported as a test seam: the fallbacks only fire in packaged distributions
+ * (bun single-file, compiled binary), which no CI run reaches naturally. */
+export function getPiInvocation(args: string[]): { command: string; args: string[] } {
   const currentScript = process.argv[1]
   const isBunVirtualScript = currentScript?.startsWith('/$bunfs/root/')
   if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
