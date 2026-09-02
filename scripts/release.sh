@@ -20,15 +20,26 @@ NOTES=${3:?release notes}
 
 gate() {
   local pr=$1
-  gh pr checks "$pr" > /dev/null \
-    && python3 ~/.claude/scripts/sonar-findings.py "$REPO_KEY" "$pr" \
+  # gh pr checks exits 8 while any check is still pending (it caused three
+  # releases to abort at this line with no message); poll on 8, fail on 1.
+  until gh pr checks "$pr" > /dev/null; do
+    local rc=$?
+    [ "$rc" -eq 8 ] || return "$rc"
+    sleep 20
+  done
+  python3 ~/.claude/scripts/sonar-findings.py "$REPO_KEY" "$pr" \
     && [ "$(curl -s "https://sonarcloud.io/api/qualitygates/project_status?projectKey=$REPO_KEY&pullRequest=$pr" | python3 -c 'import json,sys; print(json.load(sys.stdin)["projectStatus"]["status"])')" = "OK" ] \
     && echo "GATE-OK-$pr"
 }
 
 wait_ci() {
   local branch=$1
-  until gh run list --branch "$branch" --json headSha,status -q '.[] | select(.headSha=="'"$(git rev-parse HEAD)"'") | .status' | grep -q completed; do sleep 20; done
+  local sha
+  sha=$(git rev-parse HEAD)
+  # Every run for this commit must be complete: the old any-run check returned
+  # as soon as CodeQL finished while the PR check (and its smoke job) still ran.
+  until [ -n "$(gh run list --branch "$branch" --json headSha,status -q '.[] | select(.headSha=="'"$sha"'") | .status')" ] \
+    && ! gh run list --branch "$branch" --json headSha,status -q '.[] | select(.headSha=="'"$sha"'") | .status' | grep -qv completed; do sleep 20; done
 }
 
 # Wait for the publish run CREATED AFTER the given UTC timestamp and require it

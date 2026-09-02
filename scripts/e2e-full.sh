@@ -18,14 +18,19 @@ ok() { PASS=$((PASS + 1)); print -P "%F{green}PASS%f $1" }
 bad() { FAIL=$((FAIL + 1)); print -P "%F{red}FAIL%f $1" }
 warn() { WARN=$((WARN + 1)); print -P "%F{yellow}WARN%f $1" }
 
+# Two depths: capture() is the CURRENT screen, for state checks (badges,
+# status segments) where scrollback would resurrect stale frames; capture_all()
+# adds scrollback, for marker searches where a verbose reply can scroll a
+# marker past the visible rows between 2s polls.
 capture() { tmux capture-pane -t "$SESSION" -p }
+capture_all() { tmux capture-pane -t "$SESSION" -p -S -200 }
 send() { tmux send-keys -t "$SESSION" "$@" }
 type_prompt() { tmux send-keys -t "$SESSION" -l "$1"; tmux send-keys -t "$SESSION" Enter }
 
-wait_for() { # wait_for <regex> <timeout-seconds>
+wait_for() { # wait_for <regex> <timeout-seconds>: appearance searches include scrollback
   local deadline=$(($(date +%s) + $2))
   while (($(date +%s) < deadline)); do
-    if capture | grep -qE "$1"; then return 0; fi
+    if capture_all | grep -qE "$1"; then return 0; fi
     sleep 2
   done
   return 1
@@ -40,9 +45,30 @@ wait_file() { # wait_file <path> <timeout-seconds>
   return 1
 }
 
+wait_for_absent() { # wait_for_absent <regex> <timeout-seconds>: poll until the pane no longer matches
+  local deadline=$(($(date +%s) + $2))
+  while (($(date +%s) < deadline)); do
+    capture | grep -qE "$1" || return 0
+    sleep 2
+  done
+  return 1
+}
+
 # --- Fixture: a project exercising every .claude surface ------------------------------
 FX=$(mktemp -d)
 FX=$(cd "$FX" && pwd -P)
+
+# Installed before anything else exists so an abort at any point cleans up. zsh
+# runs no EXIT trap on an untrapped INT/TERM, and a Ctrl-C mid-model-turn would
+# otherwise leave a live pi burning the account plus both temp trees; the signal
+# traps clean up and re-raise so the exit status stays signal-shaped.
+cleanup() {
+  tmux kill-session -t "$SESSION" 2>/dev/null
+  rm -rf ${FAKEHOME:+"$FAKEHOME"} "$FX"
+}
+trap cleanup EXIT
+trap 'cleanup; trap - INT; kill -INT $$' INT
+trap 'cleanup; trap - TERM; kill -TERM $$' TERM
 git -C "$FX" init -qb main
 git -C "$FX" -c user.name=e2e -c user.email=e2e@local commit -q --allow-empty -m init
 mkdir -p "$FX/.claude/rules" "$FX/.claude/commands" "$FX/.claude/skills/greet" "$FX/.claude/output-styles" "$FX/.claude/agents" "$FX/notes"
@@ -56,6 +82,7 @@ printf -- '---\nname: Pirate\ndescription: e2e style\nkeep-coding-instructions: 
 printf '{"outputStyle": "Pirate"}\n' > "$FX/.claude/settings.local.json"
 cat > "$FX/.claude/settings.json" <<'EOF'
 {
+  "env": { "E2E_ENV_MARKER": "ENVWIRE_ABC" },
   "hooks": {
     "SessionStart": [{ "hooks": [{ "command": "touch .e2e-session-start" }] }],
     "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "command": "if grep -q FORBIDDEN_MARKER; then echo BLOCKED_BY_E2E_HOOK >&2; exit 2; fi" }] }]
@@ -65,7 +92,10 @@ EOF
 printf 'Project context for the e2e run.\n\n@notes/extra.md\n' > "$FX/CLAUDE.md"
 printf 'The codeword is ZANZIBAR.\n' > "$FX/notes/extra.md"
 printf 'PERSONAL LOCAL NOTE MARKER\n' > "$FX/CLAUDE.local.md"
-printf -- '---\nname: echoer\ndescription: Replies with a requested marker word\n---\nWhen given a task asking for a marker word, reply with exactly that word and nothing else.\n' > "$FX/.claude/agents/echoer.md"
+# The marker lives ONLY in the agent body, never in the typed prompt: the prompt
+# echoes into the pane as the rendered user message, so a prompt-carried marker
+# would green the check before (and regardless of whether) the child pi ran.
+printf -- '---\nname: echoer\ndescription: Replies with its fixed marker word\n---\nWhatever the task says, reply with exactly the word SUBAGENT_OK and nothing else.\n' > "$FX/.claude/agents/echoer.md"
 printf 'ORIGINAL\n' > "$FX/data.txt"
 printf 'node_modules\n' > "$FX/.gitignore"
 ln -s "$REPO/node_modules" "$FX/node_modules"
@@ -123,32 +153,24 @@ done
 # A wire probe records the exact provider payload of each request, giving the context
 # checks a deterministic oracle: what the model was actually sent, not what it recalls.
 WIRE="$FAKEHOME/wire.json"
-cat > "$FAKEHOME/wire-probe.ts" <<'EOF'
-import * as fs from 'node:fs'
-export default function wireProbe(pi: { on: (event: string, handler: (event: unknown) => void) => void }) {
-  pi.on('before_provider_request', (event) => {
-    const target = process.env.PI_E2E_WIRE
-    if (target) fs.writeFileSync(target, JSON.stringify(event))
-  })
-}
-EOF
+# The committed probe (also used by the headless smoke) appends one JSON line
+# per request, so a later request cannot clobber the payload under test.
+cp "$REPO/scripts/lib/wire-probe.ts" "$FAKEHOME/wire-probe.ts"
+# Allowlist, not denylist: only the model-selection keys ride in from the real
+# settings. Copying everything minus a strip list let any other developer key (a
+# global statusLine, hooks, timeout tuning) shape the "isolated" run; a fresh
+# home also means no stale lastChangelogVersion, so no changelog wall over boot.
 python3 - "$HOME/.pi/agent/settings.json" "$FAKEHOME/.pi/agent/settings.json" "$REPO" "$FAKEHOME/wire-probe.ts" <<'PY'
 import json, sys
 src, dst, repo, probe = sys.argv[1:5]
 try:
-    settings = json.load(open(src))
+    real = json.load(open(src))
 except Exception:
-    settings = {}
+    real = {}
+settings = {key: real[key] for key in ("defaultModel", "defaultProvider") if key in real}
 settings["packages"] = [repo]
 settings["defaultThinkingLevel"] = "low"
 settings["extensions"] = [probe]
-# lastChangelogVersion rides in from the developer's real global settings; a stale value
-# (e.g. an install several releases back) makes pi paint the full "What's New" changelog
-# wall over the boot screen, burying the banners these checks grep for. Dropping it lets
-# pi treat the throwaway home as a fresh install: it records the current version silently
-# and shows no changelog.
-for key in ("skills", "prompts", "lastChangelogVersion"):
-    settings.pop(key, None)
 json.dump(settings, open(dst, "w"))
 PY
 
@@ -175,14 +197,15 @@ if [ -z "$PI_VERSION" ] || ! is-at-least 0.79.1 "$PI_VERSION"; then
 fi
 
 say "fixture: $FX"
-cleanup() {
-  tmux kill-session -t "$SESSION" 2>/dev/null
-  rm -rf "$FAKEHOME" "$FX"
-}
-trap cleanup EXIT
 
+# The tmux server keeps its own environment: an inherited PI_CODING_AGENT_DIR or
+# CLAUDE_CONFIG_DIR would point pi inside the "isolated" home at the real config
+# (the scripted trust-approve would then write the real trust store), and PATH
+# drift could boot a different pi than the one the guards above validated.
+PI_BIN=$(command -v pi)
+BOOT_CMD="env -u PI_CODING_AGENT_DIR -u CLAUDE_CONFIG_DIR HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 $PI_BIN"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "$BOOT_CMD"
 
 # --- Deterministic checks -------------------------------------------------------------
 if wait_for 'Trust this project\?' 30; then
@@ -194,18 +217,27 @@ fi
 
 # pi 0.81 flushes the resource block only after session_start handlers complete,
 # which serial MCP connect timeouts can push well past an eager window.
-if wait_for '\[Extensions\]' 120 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
+# Two independent greps, not a fixed -A window: the extension block grows with
+# every added extension and a clipped window false-FAILs at exactly the count
+# that pushes an entry out of it.
+if wait_for '\[Extensions\]' 120 && capture_all | grep -q 'todo.ts'; then
   ok "boot: extensions loaded"
 else
   bad "boot: extensions missing"
 fi
 
 # Known pi TUI interaction: on a fast boot pi drops all but the last session_start
-# notify() banner (reproduced with only this checkout loaded). The features are asserted
-# on substance elsewhere: rules by the unit suite, MCP by the tool-call turn below.
+# notify() banner (reproduced with only this checkout loaded). One consistent rule:
+# every individual banner is a warn (which banner survives is ordering luck; the
+# old scheme hard-failed output-style only because it happened to be last), and
+# ONE bad check requires that at least one banner rendered at all, so a
+# regression silencing the whole notify path cannot hide behind the warns.
+# Features are asserted on substance elsewhere: rules/imports on the wire, MCP by
+# the /mcp turn, memory by the on-disk file.
 if wait_for 'Rules loaded: global (yes|no), project 1' 20; then ok "rules: project rule counted"; else warn "rules: banner not rendered (known pi TUI interaction)"; fi
-if wait_for 'Output style: Pirate' 15; then ok "output-style: active style announced"; else bad "output-style: no banner"; fi
+if wait_for 'Output style: Pirate' 15; then ok "output-style: active style announced"; else warn "output-style: banner not rendered (known pi TUI interaction)"; fi
 if wait_for 'MCP: ' 30; then ok "mcp: connect summary banner"; else warn "mcp: summary banner not rendered (known pi TUI interaction)"; fi
+if capture_all | grep -qE 'Rules loaded: |Output style: |MCP: '; then ok "boot: at least one session-start banner rendered"; else bad "boot: notify path rendered no banner at all"; fi
 if wait_file "$FX/.e2e-session-start" 10; then ok "hooks: SessionStart hook ran"; else bad "hooks: SessionStart marker missing"; fi
 if capture | grep -q '○ ready'; then ok "statusline: ready segment"; else bad "statusline: no ready segment"; fi
 
@@ -219,8 +251,7 @@ sleep 1
 send "/plan" Enter
 if wait_for '⏸ plan' 15; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
 send "/plan" Enter
-sleep 2
-if capture | grep -q '⏸ plan'; then bad "plan-mode: badge stuck"; else ok "plan-mode: badge off"; fi
+if wait_for_absent '⏸ plan' 20; then ok "plan-mode: badge off"; else bad "plan-mode: badge stuck"; fi
 
 send "/rewind" Enter
 if wait_for 'No checkpoints recorded yet' 15; then ok "checkpoint: empty-session notice"; else bad "checkpoint: no empty notice"; fi
@@ -231,10 +262,28 @@ if wait_for 'No checkpoints recorded yet' 15; then ok "checkpoint: empty-session
 send "/hooks" Enter
 if wait_for 'PreToolUse:' 15 && capture | grep -q 'FORBIDDEN_MARKER'; then ok "hooks: /hooks viewer shows the PreToolUse guard"; else bad "hooks: /hooks viewer missing the guard"; fi
 
+# The fixture ships a project agent, so /agents must list it with its file path.
+send "/agents" Enter
+if wait_for 'echoer - ' 15; then ok "agents: /agents lists the project agent"; else bad "agents: echoer missing from the listing"; fi
+
 # --- Model turns ----------------------------------------------------------------------
 type_prompt "/hello"
 if wait_for 'HELLO_MARKER' 200; then ok "commands: /hello template drove the turn"; else bad "commands: no HELLO_MARKER"; fi
 if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusline: no turn segment"; fi
+
+# After a completed turn /context has usage to report.
+send "/context" Enter
+if wait_for 'Context usage' 15; then ok "context: /context renders usage"; else bad "context: no usage output"; fi
+
+# /init sends its analysis prompt as a user message; the deterministic part is
+# that prompt reaching the conversation, and the session is provably idle here
+# (the /hello turn completed), so it renders immediately rather than queueing
+# as a follow-up. Escape cancels the model turn so the suite does not pay for
+# a full codebase analysis.
+send "/init" Enter
+if wait_for 'analyze this codebase' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
+send Escape
+sleep 2
 
 # The wire dump written during the /hello turn is the ground truth for context
 # injection: the exact payload the provider received, independent of model recall
@@ -245,12 +294,23 @@ if grep -q 'PERSONAL LOCAL NOTE MARKER' "$WIRE" 2>/dev/null; then ok "context-im
 # inlines its body into the system prompt rather than surfacing a scoped pointer. Assert the
 # injected body on the wire, like the two import checks above; the filename never rides along.
 if grep -q 'Tests must be deterministic' "$WIRE" 2>/dev/null; then ok "rules: project rule on the wire"; else bad "rules: project rule missing from payload"; fi
+# The skills PLUMBING is deterministic even though the invocation below is
+# model-dependent: the available_skills listing with the fixture skill must
+# reach the provider payload, so a discovery regression fails here instead of
+# hiding behind the model-declined warn.
+if grep -q 'available_skills' "$WIRE" 2>/dev/null && grep -q 'greet' "$WIRE" 2>/dev/null; then ok "skills: listing reaches the wire"; else bad "skills: available_skills/greet missing from payload"; fi
 
 type_prompt "Call the e2e_ping tool now and repeat its output verbatim."
 if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "mcp: no E2EPONG"; fi
 
 type_prompt "Run this exact bash command: echo FORBIDDEN_MARKER"
 if wait_for 'BLOCKED_BY_E2E_HOOK' 200; then ok "hooks: PreToolUse blocked with its reason"; else bad "hooks: block reason missing"; fi
+
+# env-settings: the fixture's settings env must reach tool subprocesses. The
+# typed prompt carries the variable NAME unexpanded, so the value can only
+# appear through real execution.
+type_prompt "Run this exact bash command: echo marker is \$E2E_ENV_MARKER"
+if wait_for 'marker is ENVWIRE_ABC' 200; then ok "env-settings: settings env reached the bash tool"; else bad "env-settings: ENVWIRE_ABC missing"; fi
 
 type_prompt "Use the memory tool with action save, name wraptest, description e2e check, content MEMCONTENT_XYZ. Do nothing else."
 if wait_file "$FAKEHOME/.pi/agent/memory/$SLUG/wraptest.md" 200 && grep -q 'MEMCONTENT_XYZ' "$FAKEHOME/.pi/agent/memory/$SLUG/wraptest.md"; then
@@ -288,7 +348,9 @@ if grep -q MODIFIED "$FX/data.txt" 2>/dev/null; then
     send Enter
     if wait_for 'Code only' 20; then
       send Down Down Enter
-      sleep 5
+      # Wait for the completion notice instead of a fixed sleep; a slow restore
+      # made the file assertions race the checkout.
+      wait_for 'Rewind complete|Code restored' 30 || true
       if grep -q ORIGINAL "$FX/data.txt"; then ok "checkpoint: code-only restore reverted data.txt"; else bad "checkpoint: data.txt not reverted"; fi
       if [ -f "$FX/probe-new.txt" ]; then ok "checkpoint: later file survives restore (overlay semantics)"; else bad "checkpoint: restore deleted a later file"; fi
     else
@@ -301,6 +363,13 @@ else
   bad "checkpoint: model never modified data.txt"
 fi
 
+# The task carries the marker (a small child model reliably echoes an explicit
+# instruction; two runs proved it ignores a marker living only in the agent
+# body). The old check greped the pane where the typed prompt itself echoes, so
+# it could never fail; discrimination now comes from counting: the echo
+# contributes a fixed number of occurrences, and only the child's reply adds
+# more.
+SUBAGENT_BASELINE=$(capture_all | grep -c 'SUBAGENT_OK' || true)
 type_prompt "Use the subagent tool with agentScope set to both, agent echoer, and this task: reply with the word SUBAGENT_OK."
 if wait_for 'project agent|Source:' 200; then
   ok "subagent: consent prompt for project agent"
@@ -309,7 +378,15 @@ if wait_for 'project agent|Source:' 200; then
 else
   bad "subagent: no consent prompt"
 fi
-if wait_for 'SUBAGENT_OK' 280; then ok "subagent: child pi ran and reported back"; else bad "subagent: no SUBAGENT_OK"; fi
+# The echoed prompt adds one occurrence; the child's reported reply must add at
+# least one more on top of the echo.
+subagent_done=1
+deadline=$(($(date +%s) + 280))
+while (($(date +%s) < deadline)); do
+  if (($(capture_all | grep -c 'SUBAGENT_OK' || true) >= SUBAGENT_BASELINE + 2)); then subagent_done=0; break; fi
+  sleep 3
+done
+if ((subagent_done == 0)); then ok "subagent: child pi ran and reported back"; else bad "subagent: reply never exceeded the prompt echo"; fi
 
 # --- MCP prompts/resources, slash_command, skills, background tasks --------------------
 # The fixture MCP server also advertises the prompts and resources capabilities. The
@@ -346,6 +423,17 @@ if wait_for 'Started background run' 200; then
   sleep 2
   send "/tasks" Enter
   if wait_for 'general-purpose: (running|done)' 30; then ok "tasks: /tasks lists the background run"; else bad "tasks: no background run entry"; fi
+  # 'running' alone proved only registration: a child that hangs or crashes
+  # after registering still listed as running. Re-poll /tasks until it reports
+  # done, so the check covers actual execution to completion.
+  finished=0
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if capture_all | grep -qE 'general-purpose: done'; then finished=1; break; fi
+    sleep 15
+    send "/tasks" Enter
+    sleep 3
+  done
+  if ((finished)); then ok "tasks: background run ran to completion"; else bad "tasks: background run never reached done"; fi
 else
   bad "subagent: background run did not start"
 fi
@@ -377,7 +465,7 @@ json.dump(settings, open(path, "w"))
 PY
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "$BOOT_CMD"
 if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
 # The statusLine command runs on the first status refresh after boot; its output replaces
 # the built-in segment, so STATUS_E2E in the pane proves the configured command drove it.
