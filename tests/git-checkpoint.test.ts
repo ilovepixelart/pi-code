@@ -109,6 +109,21 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
   })
 
+  it('leaves files listed in the repo-local .git/info/exclude out of the snapshot', async () => {
+    // The shadow reads ignore rules from its own git dir, so the repo-local exclude
+    // file (where users hide secrets and scratch that must not be committed) would
+    // otherwise be copied under $HOME and restored by /rewind.
+    const t = setup()
+    writeFileSync(join(t.repo, '.git', 'info', 'exclude'), 'secret.txt\n')
+    writeFileSync(join(t.repo, 'secret.txt'), 'token\n')
+    await checkpointOneTurn(t)
+
+    const shadow = join(hoisted.home, '.pi', 'agent', 'checkpoints', 'session-test.jsonl')
+    const listed = execFileSync('git', ['--git-dir', shadow, 'ls-tree', '-r', '--name-only', t.appended[0].data.ref], { encoding: 'utf8' }).split('\n')
+    expect(listed).toContain('untracked.txt')
+    expect(listed).not.toContain('secret.txt')
+  })
+
   it('captures the tree even when the user global config forces commit signing', async () => {
     // A global commit.gpgsign=true (with no usable gpg) would fail the shadow commit;
     // the snapshot must isolate itself from the user config and still record the change.
