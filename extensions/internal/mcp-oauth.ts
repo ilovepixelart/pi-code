@@ -244,7 +244,12 @@ export function openBrowser(url: string): void {
   else if (process.platform === 'win32') command = 'cmd'
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
   try {
-    spawn(command, args, { stdio: 'ignore', detached: true }).unref()
+    const child = spawn(command, args, { stdio: 'ignore', detached: true })
+    // A missing launcher (a container or an SSH session with no xdg-open) reports itself
+    // asynchronously through 'error'; with no listener node raises it as an
+    // uncaughtException and pi exits. The caller has already shown the URL to open by hand.
+    child.on('error', () => {})
+    child.unref()
   } catch {
     // the notified URL is the fallback
   }
