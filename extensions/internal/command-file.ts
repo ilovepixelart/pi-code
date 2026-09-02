@@ -531,13 +531,6 @@ function fenceBlocks(body: string): FenceBlock[] {
   return blocks
 }
 
-/** Spans of a body inside a protective fenced code block. */
-function fencedRanges(body: string): Array<[number, number]> {
-  return fenceBlocks(body)
-    .filter((block) => !block.exec)
-    .map((block) => [block.start, block.end])
-}
-
 /** Exit 1 is a normal result for Claude's documented search and comparison commands
  * (no matches, files differ); exit 2 and up fails even for these. The PowerShell
  * shell uses a different set, which "includes grep and git diff but not find or
