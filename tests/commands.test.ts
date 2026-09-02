@@ -112,6 +112,7 @@ const setup = (cwd: string, trusted = true) => {
   const notices: string[] = []
   const execCalls: Array<{ file: string; args: string[]; shell: string; timeout?: number; env?: Record<string, string> }> = []
   const execResult = { stderr: '', code: 0, killed: false }
+  let setModelRejection: string | undefined
   let active = ['bash', 'read', 'edit', 'write']
   const pi = {
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
@@ -132,6 +133,7 @@ const setup = (cwd: string, trusted = true) => {
     },
     setModel: async (model: { id: string }) => {
       modelSets.push(model.id)
+      if (setModelRejection) throw new Error(setModelRejection)
       return true
     },
     setThinkingLevel: (level: string) => {
@@ -180,6 +182,9 @@ const setup = (cwd: string, trusted = true) => {
       idle = value
     },
     failExec: (result: { stderr: string; code: number; killed?: boolean }) => Object.assign(execResult, result),
+    rejectSetModel: (message: string) => {
+      setModelRejection = message
+    },
   }
 }
 
@@ -702,6 +707,44 @@ it('substitutes CLAUDE_EFFORT in Claude vocabulary, and leaves it unset when thi
 
   await s.commands.get('e')?.handler('', { ...s.ctx, thinkingLevel: 'off' })
   expect(s.sent.at(-1)).toBe('effort: ${CLAUDE_EFFORT}')
+})
+
+it('reports a command file it cannot read instead of leaving the command missing', async () => {
+  // The command simply is not there afterwards: not in /help, not resolvable by the
+  // model, with nothing to distinguish it from a file that was never written.
+  const cwd = tempDir()
+  // Frontmatter the YAML parser rejects: the file is found, then fails to parse.
+  writeCommand(cwd, 'broken.md', '---\nallowed-tools: [unclosed\n---\nbody')
+  const s = setup(cwd)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    expect(s.commands.has('broken')).toBe(false)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('broken.md'))
+  } finally {
+    warn.mockRestore()
+  }
+})
+
+it('reports a model restore the runtime refused, which would strand the session', async () => {
+  // A command's model: override lasts one run and is put back when the run settles. A
+  // refused restore leaves the session on the command's model with nothing said.
+  const cwd = tempDir()
+  writeCommand(cwd, 'm.md', '---\nmodel: opus\n---\nDo it.')
+  const s = setup(cwd)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('m')?.handler('', s.ctx)
+    s.rejectSetModel('model is gone')
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('model is gone'))
+  } finally {
+    warn.mockRestore()
+  }
 })
 
 describe('shell frontmatter', () => {

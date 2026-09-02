@@ -325,7 +325,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // escape as unhandled; surface it as a no-op instead of leaving the session silently
     // on the command's override model.
     set: (model) => {
-      void pi.setModel(model as Parameters<typeof pi.setModel>[0]).catch(() => {})
+      // A refused switch leaves the turn on the session model rather than the one the
+      // command named, and the reply gives no sign of it, so the refusal is reported.
+      void pi.setModel(model as Parameters<typeof pi.setModel>[0]).catch((error: unknown) => {
+        console.warn(`pi-code-commands: could not switch to ${typeof model === 'object' && model !== null && 'id' in model ? String((model as { id: unknown }).id) : String(model)}: ${error instanceof Error ? error.message : String(error)}`)
+      })
     },
   })
   /** The thinking level to restore after a command's `effort:` override drove its run,
@@ -505,8 +509,12 @@ export default function commandsExtension(pi: ExtensionAPI) {
       let parsed: ParsedCommand
       try {
         parsed = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
-      } catch {
-        continue // an unreadable command file must not take down session start
+      } catch (error) {
+        // An unreadable file must not take down session start, but the command is then
+        // absent from /help and unresolvable by the model, which looks like one that was
+        // never written.
+        console.warn(`pi-code-commands: ignoring ${command.filePath}: ${error instanceof Error ? error.message : String(error)}`)
+        continue
       }
       discovered.set(command.name, command)
       // A user-only command stays off the tool description; it is still in the
