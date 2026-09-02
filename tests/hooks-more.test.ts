@@ -24,6 +24,8 @@ interface Behavior {
   error?: Error
   stdinError?: Error
   hang?: boolean
+  /** A pid for the fake child; far above any real pid so a group kill can only fail. */
+  pid?: number
 }
 
 interface SpawnRecord {
@@ -59,6 +61,7 @@ vi.mock('node:child_process', async (importOriginal) => {
       hoisted.calls.push(record)
 
       const child = new EventEmitter() as Emitter & Record<string, unknown>
+      if (behavior.pid !== undefined) child.pid = behavior.pid
       // Real streams, so setEncoding decodes multi-byte characters split across chunks
       // exactly as it does in production.
       child.stdout = new PassThrough()
@@ -364,6 +367,27 @@ describe('runHookCommand shell selection', () => {
   it('hides the console window a detached child would otherwise open on Windows', async () => {
     await runHookCommand('true', {}, 5000)
     expect(recordFor('true').options as { detached?: boolean; windowsHide?: boolean }).toMatchObject({ detached: true, windowsHide: true })
+  })
+
+  it('ends the whole process tree with taskkill on Windows, where process groups do not exist', async () => {
+    // A fake Git install so the Windows resolution finds a bash; the spawn mock runs nothing.
+    const root = tempDir('gitbash-')
+    mkdirSync(join(root, 'cmd'), { recursive: true })
+    mkdirSync(join(root, 'bin'), { recursive: true })
+    writeFileSync(join(root, 'cmd', 'git.exe'), 'MZ')
+    writeFileSync(join(root, 'bin', 'bash.exe'), 'MZ')
+    process.env.PATH = join(root, 'cmd')
+    script('slow-win', { hang: true, pid: 2_000_000_000 })
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    try {
+      await runHookCommand('slow-win', {}, 20)
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform)
+    }
+    const taskkill = hoisted.calls.find((call) => call.file === 'taskkill')
+    expect(taskkill?.args).toEqual(['/pid', '2000000000', '/T', '/F'])
+    expect(recordFor('slow-win').killSignals).toEqual([])
   })
 
   it('passes the shell field of a settings hook through to the runner', async () => {

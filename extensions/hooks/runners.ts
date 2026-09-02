@@ -81,6 +81,13 @@ const TIMEOUT_EXIT_CODE = 124
  * direct child alone leaves a grandchild alive holding stdout/stderr.
  */
 function killTree(child: ChildProcess): void {
+  if (process.platform === 'win32') {
+    // Windows has no process groups: taskkill /T ends the shell's whole tree. If
+    // taskkill itself cannot start, the direct kill is all that is left.
+    if (child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
+    else child.kill('SIGKILL')
+    return
+  }
   try {
     // Negative pid targets the whole process group, which `detached` gave the shell.
     if (child.pid) {
