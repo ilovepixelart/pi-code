@@ -120,7 +120,7 @@ export interface TodoItem {
   completed: boolean
 }
 
-export function cleanStepText(text: string): string {
+function cleanStepText(text: string): string {
   let cleaned = text
     .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1') // Remove bold/italic
     .replace(/`([^`]+)`/g, '$1') // Remove code

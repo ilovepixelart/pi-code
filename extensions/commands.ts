@@ -45,7 +45,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-c
 import { Type } from 'typebox'
 
 import { matchesBashRules } from './internal/bash-rules.js'
-import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
+import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, type PathRuleTool, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
@@ -55,8 +55,6 @@ import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { createTurnOverride } from './internal/turn-override.js'
-
-type PathRuleTool = 'read' | 'edit' | 'write'
 
 /** Just enough of pi's Model to match and restore; getAvailable returns these. */
 interface ModelLike {

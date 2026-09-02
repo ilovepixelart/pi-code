@@ -69,7 +69,8 @@ Vendored bases (`question`, `notify`, `status-line`) come from pi's MIT example 
 
 ```bash
 npm install
-npm run check           # biome + strict tsc + vitest, the whole gate
+npm run check           # biome + strict tsc + knip + vitest with coverage floors, the whole gate
+scripts/e2e-smoke.sh    # headless deterministic smoke: wire payload against a dead-port model, no real model (also runs in CI)
 scripts/e2e.sh          # quick smoke of the real pi TUI via tmux (needs a working model)
 scripts/e2e-full.sh     # every README feature end to end, model turns included (5-15 min)
 scripts/record-demos.sh # re-records demos/*.tape with vhs at low thinking

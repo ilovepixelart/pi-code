@@ -13,7 +13,7 @@ npm install
 npm run check
 ```
 
-`npm run check` is the whole gate: [Biome](https://biomejs.dev) (format and lint), strict `tsc`, and [Vitest](https://vitest.dev) with coverage. It must pass before a change is ready.
+`npm run check` is the whole gate: [Biome](https://biomejs.dev) (format and lint), strict `tsc`, [knip](https://knip.dev) (unused exports and dependencies), and [Vitest](https://vitest.dev) with coverage floors and shuffled test order. It must pass before a change is ready. CI runs it on ubuntu and windows, node 22 and 24, plus the headless smoke.
 
 To try your changes in a real session, install the checkout and reload after edits:
 
@@ -27,6 +27,7 @@ pi install ./pi-code
 - `extensions/*.ts` are the extensions pi loads, one file per feature.
 - `extensions/internal/*.ts` are shared helpers that pi must not load as extensions (parsers, the trust check, shared-bus contracts, cross-extension seams).
 - `tests/*.ts` are the Vitest suites.
+- `scripts/e2e-smoke.sh` is the headless deterministic smoke: it boots the pi devDependency against a dead-port model and asserts the exact provider payload (no real model or network); CI runs it on every PR.
 - `scripts/e2e.sh` and `scripts/e2e-full.sh` drive a real pi TUI through tmux; they need a working local model.
 
 ## Making a change

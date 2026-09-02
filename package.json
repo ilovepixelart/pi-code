@@ -41,8 +41,9 @@
     "biome:fix": "npx --no-install @biomejs/biome check --write .",
     "type:check": "tsc --noEmit",
     "test": "vitest run --coverage",
-    "check": "npm run biome && npm run type:check && npm run test",
-    "prepublishOnly": "npm run check"
+    "check": "npm run biome && npm run type:check && npm run knip && npm run test",
+    "prepublishOnly": "npm run check",
+    "knip": "npx --no-install knip"
   },
   "engines": {
     "node": ">=22.19"
@@ -68,6 +69,8 @@
     "@earendil-works/pi-tui": "^0.84.2",
     "@types/node": "^26.1.1",
     "@vitest/coverage-v8": "^4.1.10",
+    "fast-check": "^4.9.0",
+    "knip": "^6.34.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
