@@ -12,7 +12,7 @@ import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works
 // is not merely ignored, it narrows the child's registry.
 import { parseToolGrants } from '../internal/command-file.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
-import { installedPlugins } from '../internal/plugins.js'
+import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
 import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
 
 /**
@@ -353,7 +353,10 @@ function pluginAgentDirs(home: string): Array<{ dir: string; pluginName: string 
   return installedPlugins(home).flatMap((plugin) => {
     const declared = plugin.manifest.agents
     const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'agents']
-    return dirs.map((dir) => ({ dir: path.resolve(plugin.root, String(dir)), pluginName: plugin.name }))
+    return dirs
+      .map((dir) => pluginComponentPath(plugin, String(dir)))
+      .filter((dir): dir is string => dir !== undefined)
+      .map((dir) => ({ dir, pluginName: plugin.name }))
   })
 }
 

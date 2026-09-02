@@ -243,6 +243,20 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
  * substituting into text that is still raw JSON must pass an escapeValue that
  * JSON-escapes: a Windows root (C:\Users\...) inserted verbatim injects invalid
  * escape sequences and the subsequent parse throws. */
+/** A plugin component path, resolved inside the plugin root. Claude "rejects a component
+ * path that resolves outside the plugin root, such as `../shared-utils`", so an escaping
+ * entry yields undefined and its caller skips that component. The check is lexical, which
+ * is the rule as documented: a plugin's own root may itself be a symlink (link mode). */
+export function pluginComponentPath(plugin: Pick<InstalledPlugin, 'name' | 'root'>, declared: string): string | undefined {
+  const resolved = path.resolve(plugin.root, declared)
+  const inside = path.relative(plugin.root, resolved)
+  if (inside !== '' && (inside.startsWith(`..${path.sep}`) || inside === '..' || path.isAbsolute(inside))) {
+    console.warn(`pi-code-plugins: plugin ${plugin.name} declares the component path "${declared}", which resolves outside its root; ignoring it`)
+    return undefined
+  }
+  return resolved
+}
+
 export function substitutePluginVars(value: string, plugin: InstalledPlugin, escapeValue: (substituted: string) => string = (substituted) => substituted): string {
   return value
     .replaceAll('${CLAUDE_PLUGIN_ROOT}', escapeValue(plugin.root))

@@ -260,8 +260,13 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   const token = resolveBearerToken(config)
   if (token) headers.Authorization = `Bearer ${token}`
   // A headersHelper generates connect-time headers for non-OAuth auth schemes; its
-  // JSON stdout merges over the static headers.
-  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(fill(config.headersHelper), helperEnv(name, config)))
+  // JSON stdout merges over the static headers. The command text is NOT interpolated:
+  // Claude expands ${VAR} in command, args, env, url and headers, and expanding it here
+  // would read the parent environment, which is the credential set a repository- or
+  // plugin-supplied helper must not see. The helper's own shell expands it against the
+  // stripped environment instead. Plugin path variables are already substituted in
+  // mcp/config.ts, which also refuses ${user_config.*} in a helper.
+  if (config.headersHelper) Object.assign(headers, await runHeadersHelper(config.headersHelper, helperEnv(name, config)))
   warnMissing()
   // Claude: a configured Authorization header, whether static, a bearer token, or
   // helper output, is the server's authentication; there is no OAuth fallback for it.
@@ -367,7 +372,7 @@ async function connectHttpFamily(name: string, config: { url: string; oauth?: OA
   // dynamic registration, keeping it bound to the real callback port. A
   // pre-configured client (oauth.clientId) rides the silent provider too, so its
   // stored tokens refresh with the configured credentials.
-  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth)
+  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth, config.url)
   try {
     const client = newClient()
     await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)

@@ -494,6 +494,14 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * factory: pi runs the factory for invocations that never start a session. Names still
    * connected are filtered out, so a later session start only retries servers that failed
    * or whose transport dropped, without duplicate-name warnings. */
+  /** A project server's headersHelper, dropped while the project is unapproved. */
+  function withoutUntrustedHelper(name: string, config: ServerConfig): ServerConfig {
+    if (!('headersHelper' in config) || config.headersHelper === undefined) return config
+    console.warn(`pi-code-mcp: headersHelper not run for server ${name}: the project is not trusted yet; connecting with its static headers alone`)
+    const { headersHelper: _dropped, ...rest } = config
+    return rest as ServerConfig
+  }
+
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     // Plugin servers merge under the user scope (plugins are user-installed);
     // the user's own entry wins a name clash with a plugin's. A server toggled off
@@ -510,7 +518,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // a deliberate narrowing of Claude's rule to keep the safe default.
     // The stored project decision, read without prompting: consent recorded inside
     // the project only counts once the project itself has been approved.
-    const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+    const projectApproved = isProjectApprovedSilently(ctx)
+    const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), projectApproved)
     // Tag the scope on each project server: a repository-supplied headersHelper runs
     // with credential variables stripped, unlike a user-scope one.
     const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(projectConfigPaths(ctx.cwd))).map(([name, config]) => [name, { ...config, projectScope: true }]))
@@ -519,7 +528,14 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // stays with the local (user-side) definition, so the project's entry is dropped
     // here rather than allowed to shadow it.
     const localNames = localScopeServerNames(os.homedir(), ctx.cwd)
-    const consented = Object.fromEntries(Object.entries(consentedRaw).filter(([name]) => !localNames.has(name)))
+    // Claude: until the folder is trusted, a project server connects with its static
+    // headers alone. Consenting to the server is not consenting to run the command it
+    // ships, so the helper is dropped (and named once) while the project is unapproved.
+    const consented = Object.fromEntries(
+      Object.entries(consentedRaw)
+        .filter(([name]) => !localNames.has(name))
+        .map(([name, config]) => [name, projectApproved ? config : withoutUntrustedHelper(name, config)]),
+    )
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     // The consented project servers carry no ordering dependency on the user scope:

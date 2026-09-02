@@ -352,6 +352,13 @@ const defaultControl = (): typeof hoisted.control => ({
 })
 
 const savedEnv: Record<string, string | undefined> = {}
+/** Record the project-trust decision a previous session's approval dialog would have stored,
+ * so a test can describe an already-trusted project. */
+const rememberApproved = async (cwd: string): Promise<void> => {
+  const { ProjectTrustStore, getAgentDir } = await import('@earendil-works/pi-coding-agent')
+  new ProjectTrustStore(getAgentDir()).set(cwd, true)
+}
+
 const setEnv = (key: string, value: string): void => {
   savedEnv[key] = process.env[key]
   process.env[key] = value
@@ -2330,10 +2337,46 @@ describe('mcp headersHelper environment', () => {
     const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
     mkdirSync(join(harness.home, '.claude'), { recursive: true })
     writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+    // A repository helper only runs once the project is trusted.
+    await rememberApproved(harness.cwd)
     await harness.sessionStart(true)
 
     const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
     expect(headers['X-T']).toBe('absent')
+  })
+
+  it('leaves ${VAR} in a project helper for the stripped shell, not the parent environment', async () => {
+    // The stripping only works if the expansion happens inside the helper's own shell:
+    // interpolating the command text first reads the parent environment, which is exactly
+    // the set the helper must not see. Claude expands ${VAR} in command, args, env, url
+    // and headers, not in the helper command.
+    setEnv('PROBE_HELPER_TOKEN', 'leaked-secret')
+    withTools([{ name: 'go' }])
+    const helper = 'printf \'{"X-T":"%s"}\' "${PROBE_HELPER_TOKEN}"'
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+    // A repository helper only runs once the project is trusted.
+    await rememberApproved(harness.cwd)
+    await harness.sessionStart(true)
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-T']).toBe('')
+  })
+
+  it('does not run a project helper until the project is trusted, connecting with static headers alone', async () => {
+    // A repository's helper is a command the user has not reviewed. Consent to the server
+    // (enabledMcpjsonServers) is not consent to run its command in an untrusted folder.
+    withTools([{ name: 'go' }])
+    const helper = 'printf \'{"X-Helper":"ran"}\''
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headers: { 'X-Static': 'kept' }, headersHelper: helper } } })
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
+    await harness.sessionStart(false)
+
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-Static']).toBe('kept')
+    expect(headers['X-Helper']).toBeUndefined()
   })
 
   it('keeps credential variables for a user-scope helper, which the user wrote', async () => {

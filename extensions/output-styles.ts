@@ -26,7 +26,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
-import { installedPlugins } from './internal/plugins.js'
+import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
@@ -118,7 +118,7 @@ export function pluginStyleDirs(home: string): string[] {
   return installedPlugins(home).flatMap((plugin) => {
     const declared = plugin.manifest.outputStyles
     const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'output-styles']
-    return dirs.map((dir) => path.resolve(plugin.root, String(dir)))
+    return dirs.map((dir) => pluginComponentPath(plugin, String(dir))).filter((dir): dir is string => dir !== undefined)
   })
 }
 

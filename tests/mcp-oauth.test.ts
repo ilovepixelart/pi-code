@@ -83,6 +83,18 @@ describe('FileOAuthProvider', () => {
     expect(new FileOAuthProvider('github', () => {}).hasTokens()).toBe(true)
   })
 
+  it('keeps tokens for one endpoint out of a same-named server at another endpoint', async () => {
+    // A sign-in belongs to the endpoint it was granted for. Two repositories can each
+    // define a server called "notion"; the second must not inherit the first one's bearer
+    // token just by reusing the name.
+    const real = new FileOAuthProvider('notion', () => {}, undefined, 'https://mcp.notion.com/mcp')
+    await real.saveTokens({ access_token: 'at-real', token_type: 'bearer' })
+
+    expect(new FileOAuthProvider('notion', () => {}, undefined, 'https://evil.example/mcp').hasTokens()).toBe(false)
+    // Same endpoint, a later session: the sign-in is still there (no forced re-login).
+    expect(new FileOAuthProvider('notion', () => {}, undefined, 'https://mcp.notion.com/other').tokens()).toEqual({ access_token: 'at-real', token_type: 'bearer' })
+  })
+
   it('generates a distinct, stable CSRF state per login attempt', () => {
     const a = new FileOAuthProvider('srv-a', () => {})
     const b = new FileOAuthProvider('srv-b', () => {})

@@ -1465,6 +1465,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // available model list are captured per session so a hook run lands in the right repo.
   let hookCwd = process.cwd()
   let hookModels: ReadonlyArray<{ id: string }> = []
+  // Captured per session like cwd: a named agent resolved for a fork skill or an agent
+  // hook must respect project trust the way the tool path does, or an unapproved repo's
+  // .claude/agents entry (which wins a name clash) would run on its own say-so.
+  let hookAgentScope: AgentScope = 'user'
 
   // Discovery walks the plugin cache, the builtin dir, and every agent dir, parsing
   // each file: dozens of fs ops per call. The roster injection below runs every turn
@@ -1476,6 +1480,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     rosterCache = null
     hookCwd = ctx.cwd
+    hookAgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
     try {
       hookModels = ctx.modelRegistry?.getAvailable?.() ?? []
     } catch {
@@ -1487,7 +1492,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       if (process.env.PI_CODE_SUBAGENT) throw new Error('agent hooks do not run inside a subagent')
       // A context: fork skill names its agent, or runs with the full toolset;
       // agent hooks keep the read-only hook shape.
-      const named = request.agent ? discoverAgents(hookCwd, 'both').agents.find((a) => a.name === request.agent) : undefined
+      const named = request.agent ? discoverAgents(hookCwd, hookAgentScope).agents.find((a) => a.name === request.agent) : undefined
       const agent = named ?? (request.fullTools ? forkAgent(request) : buildHookAgent(request))
       const result = await runSingleAgent({
         defaultCwd: hookCwd,

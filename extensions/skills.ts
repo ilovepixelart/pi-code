@@ -29,7 +29,7 @@ import { runAgent } from './internal/agent-run.js'
 import { parseCommandFile } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { managedSettingsFile } from './internal/managed-settings.js'
-import { installedPlugins } from './internal/plugins.js'
+import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
@@ -58,7 +58,7 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
   for (const plugin of installedPlugins(home)) {
     const declared = plugin.manifest.skills
     const dirs = Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'skills']
-    candidates.push(...dirs.map((dir) => path.resolve(plugin.root, String(dir))))
+    candidates.push(...dirs.map((dir) => pluginComponentPath(plugin, String(dir))).filter((dir): dir is string => dir !== undefined))
   }
   // Claude loads skills from every .claude/skills between cwd and the repository
   // root; the list goes nearest-first so findClaudeSkill's first match is the

@@ -55,6 +55,7 @@ export async function runInteractiveOAuth(name: string, config: { url: string; o
       authUi.notify(`Authorize "${name}" in the browser. If it did not open: ${authorizationUrl}`, 'info')
     },
     config.oauth,
+    config.url,
   )
   const { server, port } = await startCallbackServer(provider.savedRedirectPort())
   provider.bindRedirectPort(port)

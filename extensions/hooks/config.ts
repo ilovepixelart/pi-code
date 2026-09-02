@@ -7,7 +7,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { readManagedSettings } from '../internal/managed-settings.js'
-import { type InstalledPlugin, substitutePluginVars } from '../internal/plugins.js'
+import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
 
 export interface HookCommand {
@@ -227,6 +227,44 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
  * every hook the plugin declared silently vanished. */
 const jsonEscape = (value: string): string => JSON.stringify(value).slice(1, -1)
 
+/** A reference Claude refuses to substitute into anything that reaches a shell. */
+const USER_CONFIG_REF = /\$\{user_config\./
+
+/**
+ * Drop shell-form hook commands that reference `${user_config.*}`. Claude: "Fields that
+ * run in a shell reject `${user_config.*}`: substituting a configured value into a shell
+ * command would let the shell run whatever that value contains, so the component fails
+ * with an error instead." Exec form (`args`) and every other field still substitute, and
+ * the documented alternative is reading CLAUDE_PLUGIN_OPTION_<KEY> from the hook's
+ * environment. Sibling hooks in the same file are unaffected: one rejected component
+ * costs itself, not the plugin's other hooks.
+ */
+function withoutUserConfigShellCommands(raw: string, source: string): string {
+  let parsed: { hooks?: Record<string, unknown> }
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return raw // mergeHooksJson reports the parse failure
+  }
+  let dropped = false
+  for (const matchers of Object.values(parsed?.hooks ?? {})) {
+    if (!Array.isArray(matchers)) continue
+    for (const entry of matchers) {
+      const record = entry as { hooks?: unknown }
+      if (!Array.isArray(record.hooks)) continue
+      const kept = record.hooks.filter((hook) => {
+        const candidate = hook as { command?: unknown; args?: unknown }
+        if (Array.isArray(candidate.args) || typeof candidate.command !== 'string' || !USER_CONFIG_REF.test(candidate.command)) return true
+        console.warn(`pi-code-hooks: ignoring a hook in ${source}: a shell-form command cannot reference \${user_config.*}; use exec form with "args", or read CLAUDE_PLUGIN_OPTION_<KEY> from the environment`)
+        dropped = true
+        return false
+      })
+      record.hooks = kept
+    }
+  }
+  return dropped ? JSON.stringify(parsed) : raw
+}
+
 export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks
@@ -234,12 +272,14 @@ export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[],
     // numeric event keys), so it falls through to the default path rather than
     // silently registering nothing.
     if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
-      mergeHooksJson(config, substitutePluginVars(JSON.stringify({ hooks: declared }), plugin, jsonEscape), `${plugin.name} (plugin.json)`, sources, `plugin:${plugin.name}`)
+      const inlineSource = `${plugin.name} (plugin.json)`
+      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(JSON.stringify({ hooks: declared }), inlineSource), plugin, jsonEscape), inlineSource, sources, `plugin:${plugin.name}`)
       continue
     }
-    const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
+    const file = pluginComponentPath(plugin, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
+    if (file === undefined) continue
     try {
-      mergeHooksJson(config, substitutePluginVars(fs.readFileSync(file, 'utf-8'), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`)
+      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(fs.readFileSync(file, 'utf-8'), file), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`)
     } catch {
       // a plugin without hooks contributes nothing
     }
