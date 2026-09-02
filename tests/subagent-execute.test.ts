@@ -6,7 +6,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
-import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
+import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, setKnownMcpAliases, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
 
 // The agent-memory tests read settings and stores under the home directory; point
 // homedir at a throwaway dir so the developer's real ~/.claude cannot influence them.
@@ -212,6 +212,9 @@ const results = (result: ToolResult): ResultShape[] => {
 let execute: Execute
 
 beforeEach(() => {
+  // The alias roster is module state that a bus event fills; clearing it keeps a test
+  // that publishes MCP tools from reaching whatever runs next under shuffle.
+  setKnownMcpAliases([])
   spawnCalls = []
   spawnedChildren = []
   scripts = new Map()

@@ -26,7 +26,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 const { FileOAuthProvider, openBrowser, startCallbackServer, waitForAuthCode } = await import('../extensions/internal/mcp-oauth.ts')
 
 let savedAgentDir: string | undefined
-beforeEach(() => {
+beforeEach(async () => {
+  // Module state: without this a pending login from one test would queue the next.
+  const { resetOAuthQueue } = await import('../extensions/mcp/oauth-flow.ts')
+  resetOAuthQueue()
   savedAgentDir = process.env.PI_CODING_AGENT_DIR
   process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'oauth-agent-'))
 })

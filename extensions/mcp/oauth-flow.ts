@@ -28,6 +28,12 @@ function asOAuthRequiredError(name: string, error: unknown): OAuthRequiredError 
  * (stored-token) connects do not pass through here and stay fully parallel. */
 let oauthQueue: Promise<unknown> = Promise.resolve()
 
+/** Test seam: the queue is module state that outlives a test, so one login left pending
+ * would serialize every later login in the same file behind it. */
+export function resetOAuthQueue(): void {
+  oauthQueue = Promise.resolve()
+}
+
 export function serializeInteractiveOAuth<T>(run: () => Promise<T>): Promise<T> {
   const result = oauthQueue.then(run, run)
   oauthQueue = result.then(
