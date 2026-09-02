@@ -224,9 +224,11 @@ describe('runtime version guard for a missing isProjectTrusted callback', () => 
     expect(notify).not.toHaveBeenCalled()
   })
 
-  it('does not throw on a headless runtime that is too old and has no ui to warn through', async () => {
+  it('reads a runtime too old for project trust as unapproved, without a ui to warn through', async () => {
+    // Fail closed: a runtime that cannot report trust has not approved anything, and the
+    // silent variant has no ui to explain itself with.
     const { isProjectApprovedSilently } = await freshApproval()
-    expect(() => isProjectApprovedSilently({ cwd: '/repo' }, deps())).not.toThrow()
+    expect(isProjectApprovedSilently({ cwd: '/repo' }, deps())).toBe(false)
   })
 
   it('does not warn when a modern runtime reports the project untrusted', async () => {

@@ -786,7 +786,7 @@ describe('hooks extension session_start', () => {
     const options = recordFor('home-pre').options as { env?: Record<string, string> }
     expect(options.env?.CLAUDE_PROJECT_DIR).toBe(project)
     expect(options.env?.CLAUDECODE).toBe('1')
-    expect(options.env?.PATH).toBeDefined()
+    expect(options.env?.PATH).toBe(process.env.PATH)
   })
 
   it('loads project settings after user settings when the project is trusted', async () => {

@@ -723,6 +723,9 @@ describe('replay with a failed todo call', () => {
     // pi persists a rejected or blocked call as details: {}, which is truthy; the
     // list must survive it rather than the replay throwing for the rest of the session.
     const entries = [resultEntry([{ id: 1, text: 'kept', done: false }], 2), { type: 'message', message: { role: 'toolResult', toolName: 'todo', details: {} } }]
-    await expect(h.fire('session_start', {}, branchCtx(entries as never, fakeUI()))).resolves.not.toThrow()
+    await h.fire('session_start', {}, branchCtx(entries as never, fakeUI()))
+
+    // The errored result must neither throw nor wipe the list it followed.
+    expect((await h.call({ action: 'list' })).content[0].text).toBe('[ ] #1: kept')
   })
 })
