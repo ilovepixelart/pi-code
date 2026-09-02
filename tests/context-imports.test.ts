@@ -609,7 +609,6 @@ describe('pi wrapper format regression', () => {
   // degrades to a no-op skip.
   it('pins the wrapper pi assembles in its own source', () => {
     const source = readFileSync(join(import.meta.dirname, '..', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'system-prompt.js'), 'utf-8')
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts pi's literal source text, placeholders included
     expect(source).toContain('`<project_instructions path="${filePath}">\\n${content}\\n</project_instructions>\\n\\n`')
     expect(source).toContain('"\\n\\n<project_context>\\n\\n"')
     expect(source).toContain('"Project-specific instructions and guidelines:\\n\\n"')

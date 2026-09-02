@@ -199,7 +199,6 @@ describe('commands extension', () => {
 
   it('leaves ${user_config.*} literal in an ordinary (non-plugin) command', async () => {
     const cwd = tempDir()
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} under test
     writeCommand(cwd, 'deploy.md', 'token is ${user_config.token}')
     const s = setup(cwd)
     await s.handlers.get('session_start')?.({}, s.ctx)

@@ -628,7 +628,6 @@ describe('mcp transport selection', () => {
   it('interpolates env vars in the command and args', async () => {
     setEnv('MCP_BIN', '/opt/bin/server')
     withTools([{ name: 'go' }])
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
     await setupStarted({ user: { local: { command: '${MCP_BIN}', args: ['--port', '${MCP_PORT:-9000}'] } } })
 
     const transport = hoisted.transports[0]
@@ -669,11 +668,9 @@ describe('mcp transport selection', () => {
     expect(hoisted.transports[0].options.args).toEqual([])
   })
 
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
   it('interpolates ${VAR} into the stdio environment', async () => {
     setEnv('MCP_TEST_SECRET', 'sekret')
     withTools([{ name: 'go' }])
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what the config interpolation resolves
     await setupStarted({ user: { local: { command: 'node', env: { API_KEY: 'k-${MCP_TEST_SECRET}', PLAIN: 'literal' } } } })
 
     const env = hoisted.transports[0].options.env as Record<string, string>
@@ -710,12 +707,10 @@ describe('mcp transport selection', () => {
     expect((transport.options.requestInit as { headers: Record<string, string> }).headers).toEqual({})
   })
 
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: the title documents the ${VAR} syntax interpolateEnv parses
   it('interpolates ${VAR} into the url and the headers', async () => {
     setEnv('MCP_TEST_HOST', 'api.example.com')
     setEnv('MCP_TEST_TENANT', 'acme')
     withTools([{ name: 'go' }])
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${} syntax is exactly what the config interpolation resolves
     await setupStarted({ user: { remote: { url: 'https://${MCP_TEST_HOST}/mcp', headers: { 'X-Tenant': '${MCP_TEST_TENANT}' } } } })
 
     const transport = hoisted.transports[0]
@@ -734,7 +729,6 @@ describe('mcp transport selection', () => {
   it('interpolates an env var inside a literal bearerToken', async () => {
     setEnv('MCP_TEST_TOKEN', 'sekret')
     withTools([{ name: 'go' }])
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal ${} config syntax under test
     await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'Bearer-${MCP_TEST_TOKEN}' } } })
 
     const headers = (hoisted.transports[0].options.requestInit as { headers: Record<string, string> }).headers
