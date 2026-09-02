@@ -429,7 +429,9 @@ After completing a step, include a [DONE:n] tag in your response.`,
       planModeEnabled = true
     }
 
-    const entries = ctx.sessionManager.getEntries()
+    // The current branch only: getEntries() lists every branch in the file, so after a
+    // rewind past a plan it would resurrect the abandoned plan and its tool restriction.
+    const entries = ctx.sessionManager.getBranch()
 
     // Restore persisted state
     const planModeEntry = findLast(entries, (e: { type: string; customType?: string }) => e.type === 'custom' && e.customType === 'plan-mode') as { data?: { enabled: boolean; todos?: TodoItem[]; executing?: boolean; savedTools?: string[] } } | undefined

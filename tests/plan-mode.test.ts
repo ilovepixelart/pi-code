@@ -82,7 +82,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
       select: async (_q: string, choices: string[]) => choices[0],
       editor: async () => '',
     },
-    sessionManager: { getEntries: () => [] as unknown[] },
+    sessionManager: { getEntries: () => [] as unknown[], getBranch: () => [] as unknown[] },
   }
 
   const emit = (name: string, event: unknown = {}, context: unknown = ctx) => handlers.get(name)?.(event as never, context as never)
@@ -435,7 +435,8 @@ describe('plan review prompt', () => {
 })
 
 describe('session restore', () => {
-  const restoreCtx = (s: ReturnType<typeof setup>, entries: unknown[]) => ({ ...s.ctx, sessionManager: { getEntries: () => entries } })
+  /** `entries` is the current branch (pi getBranch); `all` is every entry in the file (getEntries). */
+  const restoreCtx = (s: ReturnType<typeof setup>, entries: unknown[], all: unknown[] = entries) => ({ ...s.ctx, sessionManager: { getEntries: () => all, getBranch: () => entries } })
 
   it('enables plan mode from the --plan flag', async () => {
     const s = setup({ flag: true })
@@ -449,6 +450,16 @@ describe('session restore', () => {
     const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: true, todos: [], executing: false } }]
     await s.emit('session_start', {}, restoreCtx(s, entries))
     expect(s.getActiveTools()).not.toContain('write')
+  })
+
+  it('ignores a plan-mode entry that lives on an abandoned branch', async () => {
+    // After a rewind past a plan the entry is still in the session file (getEntries lists
+    // every branch) but not on the current path (getBranch); only the path is state.
+    const s = setup()
+    const stale = { type: 'custom', customType: 'plan-mode', data: { enabled: true, todos: [{ step: 1, text: 'Old', completed: false }], executing: true } }
+    await s.emit('session_start', {}, restoreCtx(s, [], [stale]))
+    expect(s.getActiveTools()).toContain('write')
+    expect(s.widgets.at(-1)).toBeUndefined()
   })
 
   it('rebuilds completion state from [DONE:n] markers after the last execute marker', async () => {
