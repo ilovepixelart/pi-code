@@ -307,7 +307,7 @@ export function parseCommandFile(content: string): ParsedCommand {
 }
 
 /** Split a raw argument string, keeping quoted runs together. */
-export function splitArgs(args: string): string[] {
+function splitArgs(args: string): string[] {
   const out: string[] = []
   const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g
   let match = pattern.exec(args)
