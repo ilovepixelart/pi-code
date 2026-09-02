@@ -30,6 +30,50 @@ function matchesRule(segment: string, rule: string): boolean {
   return segment === normalized
 }
 
+/** Leading `VAR=value` assignments, which Claude strips before matching an `if` pattern. */
+const LEADING_ASSIGNMENTS = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/
+
+/** The bodies of `$(...)`, `` `...` ``, `<(...)` and `>(...)`, which run commands of their own. */
+function substitutionBodies(command: string): string[] {
+  const bodies: string[] = []
+  for (const match of command.matchAll(/\$\(([^()]*)\)|`([^`]*)`|[<>]\(([^()]*)\)/g)) {
+    const body = match[1] ?? match[2] ?? match[3]
+    if (body?.trim()) bodies.push(body.trim())
+  }
+  return bodies
+}
+
+/** Whether the first word of a segment is something only the shell can resolve. */
+const headUnresolvable = (segment: string): boolean => /[$`]/.test(segment.split(/\s+/, 1)[0] ?? '')
+
+/** Whether a pattern names more than the command itself, like `git push *` against `git *`. */
+const namesMoreThanCommand = (rule: string): boolean => rule.split('*', 1)[0].trim().includes(' ')
+
+/**
+ * Claude's `if` filter for a Bash call, which decides whether a hook gets to SEE the
+ * call. That makes it the mirror of a permission rule: a grant must hold for every
+ * segment and fails closed on anything it cannot read, while this runs the hook when any
+ * segment matches and when the input cannot be resolved at all. Claude: "When Claude Code
+ * can't determine which commands the Bash input runs, it runs your hook regardless of the
+ * pattern. Because the `if` filter is best-effort, use the permission system rather than
+ * a hook to enforce a hard allow or deny."
+ *
+ * Each top-level segment is checked with its leading assignments stripped, and so is the
+ * body of every substitution, since one can sit at any argument position. An unresolvable
+ * command name runs the hook whatever the pattern; a substitution anywhere runs it when
+ * the pattern names more than the command.
+ */
+export function matchesBashIfFilter(command: string, rule: string): boolean {
+  const trimmed = rule.trim()
+  const candidates = splitSegments(command).flatMap((segment) => {
+    const stripped = segment.replace(LEADING_ASSIGNMENTS, '')
+    return [stripped, ...substitutionBodies(stripped).flatMap((body) => splitSegments(body).map((inner) => inner.replace(LEADING_ASSIGNMENTS, '')))]
+  })
+  if (candidates.some((candidate) => matchesRule(candidate, trimmed))) return true
+  if (candidates.some(headUnresolvable)) return true
+  return namesMoreThanCommand(trimmed) && (hasSubstitution(command) || /\$[A-Za-z_{]/.test(command))
+}
+
 export function matchesBashRules(command: string, rules: string[]): boolean {
   if (hasSubstitution(command)) return false
   const segments = splitSegments(command)

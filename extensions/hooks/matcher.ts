@@ -4,7 +4,7 @@
  * commands an event fires. Owns the module-level compiled-matcher cache.
  */
 
-import { matchesBashRules } from '../internal/bash-rules.js'
+import { matchesBashIfFilter } from '../internal/bash-rules.js'
 import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
 import type { HookCommand, HookMatcher } from './config.js'
 
@@ -159,9 +159,9 @@ export interface IfFilterTarget {
 
 /** Claude's `if` handler field: permission-rule syntax evaluated only on tool
  * events; on any other event a hook carrying `if` never runs. A bare tool name
- * matches by name; `Bash(pattern)` evaluates against the command via the shared
- * bash-rule matcher and file-tool patterns against the path via the shared
- * permission path rules. A pattern for any other tool matches nothing, which is
+ * matches by name; `Bash(pattern)` evaluates against the command through the if-filter
+ * matcher, which is best effort and errs toward running the hook, and file-tool patterns
+ * against the path via the shared permission path rules. A pattern for any other tool matches nothing, which is
  * also what an unparseable rule does. */
 export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undefined): boolean {
   if (hook.if === undefined) return true
@@ -177,7 +177,7 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
   const input = target.input as Record<string, unknown> | null
   if (fold(target.piName) === 'bash' || (target.claudeName !== undefined && fold(target.claudeName) === 'bash')) {
     const command = typeof input?.command === 'string' ? input.command : ''
-    return command.length > 0 && matchesBashRules(command, [pattern])
+    return command.length > 0 && matchesBashIfFilter(command, pattern)
   }
   let filePath = ''
   if (typeof input?.path === 'string') filePath = input.path

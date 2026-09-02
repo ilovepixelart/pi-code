@@ -22,6 +22,16 @@ describe('passesIfFilter', () => {
     expect(passesIfFilter(hookIf('Edit'), target('read', {}))).toBe(false)
   })
 
+  it('runs a Bash-scoped hook for the shapes Claude documents, and only those', () => {
+    // The full table lives in tests/if-filter-bash.test.ts; these pin the wiring, in
+    // particular that the filter no longer borrows the permission matcher, which requires
+    // every segment to match and refuses anything carrying a substitution.
+    expect(passesIfFilter(hookIf('Bash(git *)'), target('bash', { command: 'FOO=bar git push' }))).toBe(true)
+    expect(passesIfFilter(hookIf('Bash(git *)'), target('bash', { command: 'npm test && git push' }))).toBe(true)
+    expect(passesIfFilter(hookIf('Bash(rm *)'), target('bash', { command: 'echo $(rm -rf /)' }))).toBe(true)
+    expect(passesIfFilter(hookIf('Bash(rm *)'), target('bash', { command: 'echo $(date)' }))).toBe(false)
+  })
+
   it('matches any alternative of a | rule', () => {
     expect(passesIfFilter(hookIf('Edit|Write'), target('write', {}))).toBe(true)
     expect(passesIfFilter(hookIf('Edit|Write'), target('read', {}))).toBe(false)
