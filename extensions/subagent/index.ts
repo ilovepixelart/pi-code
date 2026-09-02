@@ -34,7 +34,7 @@ import { runSubagentStartHooks } from '../internal/subagent-hooks.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { skillDirs } from '../skills.js'
 import { type AgentConfig, type AgentMemoryScope, type AgentScope, type AgentSource, discoverAgents, expandMcpToolPatterns, resolveModelAlias, withPreloadedSkills } from './agents.js'
-import { activeBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
+import { activeBackgroundRuns, allBackgroundRuns, type BackgroundRun, backgroundRun, backgroundStatusText, cancelAllBackgroundRuns, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun, startBackgroundRun } from './background.js'
 import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
 import { type AgentWorktree, cleanupAgentWorktree, createAgentWorktree } from './worktree.js'
 
@@ -569,7 +569,7 @@ function runOutputTail(run: BackgroundRunView): string | undefined {
 /** The /tasks listing: one line per background run, plus the short output tail the
  * registry's own status lines omit. A pure formatter so it tests against a plain list. */
 export function tasksStatusText(runs: ReadonlyArray<BackgroundRunView>): string {
-  if (runs.length === 0) return 'No background subagent runs in this session.'
+  if (runs.length === 0) return 'No background subagent runs.'
   return runs
     .map((run) => {
       const plural = run.turns === 1 ? '' : 's'
@@ -861,7 +861,7 @@ interface BackgroundContext {
   projectApproved: boolean
 }
 
-async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext, onStarted?: (id: string) => void): Promise<ToolResult> {
+async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext): Promise<ToolResult> {
   const { agents, defaultCwd, pi, makeDetails, skillRoots, availableModels, projectApproved } = context
   const task = params.task
   const agentName = params.agent
@@ -958,7 +958,6 @@ async function runBackgroundMode(params: SubagentParamsStatic, context: Backgrou
     removeTmpPrompt(tmpPrompt)
     return backgroundCapResult(makeDetails)
   }
-  onStarted?.(id)
   pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: agent.name, agentId: id })
   return {
     content: [{ type: 'text', text: `Started background run ${id} (${agent.name}). A notification will arrive on completion; check progress with {status: true}.` }],
@@ -1440,21 +1439,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
     if (isMcpToolAliases(data)) setKnownMcpAliases(data)
   })
 
-  // /tasks resolves these against the registry at print time. background.ts owns the
-  // run records but does not enumerate them, so the ids started here are remembered;
-  // a run the registry has since evicted simply drops out of the listing.
-  const startedBackgroundRuns = new Set<string>()
-
-  // The registry self-caps and evicts old runs, so an id kept here after its record is
-  // gone is dead weight. Drop those on every add, bounding the set to the registry's
-  // live capacity rather than letting it grow for the whole session.
-  const rememberBackgroundRun = (id: string): void => {
-    for (const known of startedBackgroundRuns) {
-      if (!backgroundRun(known)) startedBackgroundRuns.delete(known)
-    }
-    startedBackgroundRuns.add(id)
-  }
-
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.
     // The stop event fires here too, so SubagentStop hooks see resumed runs end.
@@ -1588,7 +1572,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
       if (params.resume) {
         const onResumed = (run: { id: string; agent: string }): void => {
-          rememberBackgroundRun(run.id)
           pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })
         }
         return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, onResumed) }], details: makeDetails('single')([]) }
@@ -1632,7 +1615,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved }, (id) => rememberBackgroundRun(id))
+      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved })
 
       const mode: ModeContext = {
         agents,
@@ -1689,8 +1672,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   pi.registerCommand('tasks', {
     description: 'Show background subagent runs',
     handler: async (_args, ctx) => {
-      const runs = [...startedBackgroundRuns].map((id) => backgroundRun(id)).filter((run): run is BackgroundRun => run !== undefined)
-      ctx.ui.notify(tasksStatusText(runs), 'info')
+      ctx.ui.notify(tasksStatusText(allBackgroundRuns()), 'info')
     },
   })
 

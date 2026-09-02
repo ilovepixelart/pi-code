@@ -177,6 +177,13 @@ export function backgroundStatusText(): string {
   return formatStatus(runs.values())
 }
 
+/** Every run this process knows about, live and finished. The registry is module state
+ * that outlives a session switch; a per-session list is not, because pi re-invokes each
+ * extension factory per session. */
+export function allBackgroundRuns(): BackgroundRun[] {
+  return [...runs.values()]
+}
+
 /** A finished run, so a caller can continue its session with a follow-up task. */
 export function backgroundRun(id: string): BackgroundRun | undefined {
   return runs.get(id)
