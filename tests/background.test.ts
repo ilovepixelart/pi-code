@@ -5,7 +5,21 @@ import { dirname, join } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, createJsonlOutputParser, formatStatus, MAX_FINISHED_RUNS, parseFinalOutputFromJsonl, resetBackgroundRuns, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
+import {
+  activeBackgroundRuns,
+  type BackgroundRun,
+  type BackgroundSpawn,
+  backgroundStatusText,
+  cancelAllBackgroundRuns,
+  cancelBackgroundRun,
+  createJsonlOutputParser,
+  formatStatus,
+  MAX_FINISHED_RUNS,
+  parseFinalOutputFromJsonl,
+  resetBackgroundRuns,
+  resumeBackgroundRun,
+  startBackgroundRun,
+} from '../extensions/subagent/background.ts'
 
 describe('createJsonlOutputParser onTurn', () => {
   const asst = (text: string) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })
@@ -216,6 +230,37 @@ describe('background run lifecycle', () => {
 
     expect(done?.partial).toBeFalsy()
     expect(done?.turns).toBe(1)
+  })
+
+  it('removes the rebuilt prompt dir when the run is evicted from the registry', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)![1] as string[]
+    const promptDir = dirname(args[args.indexOf('--system-prompt') + 1])
+    children.at(-1)!.emit('close', 0)
+    expect(existsSync(promptDir)).toBe(true)
+
+    // The rebuilt prompt is kept for further resumes, so it lives exactly as long as
+    // the run stays resumable: eviction from the registry must take it along.
+    for (let i = 0; i <= MAX_FINISHED_RUNS; i++) {
+      startBackgroundRun('scout', `filler ${i}`, spec(), () => {})
+      children.at(-1)!.emit('close', 0)
+    }
+
+    expect(existsSync(promptDir)).toBe(false)
+  })
+
+  it('removes rebuilt prompt dirs when every run is cancelled at quit', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)![1] as string[]
+    const promptDir = dirname(args[args.indexOf('--system-prompt') + 1])
+
+    cancelAllBackgroundRuns()
+
+    expect(existsSync(promptDir)).toBe(false)
   })
 
   it('rebuilds the prompt file once and reuses it across resumes', () => {

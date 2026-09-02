@@ -24,6 +24,8 @@ export interface BackgroundRun {
   stderr?: string
   /** Claude's partial marker: the run stopped at its maxTurns limit. */
   partial?: boolean
+  /** Temp dir holding a prompt file rebuilt for a resume; removed with the run. */
+  rebuiltPromptDir?: string
   /** Set while running so the run can be cancelled; cleared on completion. */
   kill?: () => void
   /** True until the child process actually closes: a cancelled child that ignores
@@ -79,6 +81,7 @@ let finishSequence = 0
 /** Test seam: the registry is module state, so tests reset it between cases to
  * stay order-independent. */
 export function resetBackgroundRuns(): void {
+  for (const run of runs.values()) removeRebuiltPrompt(run)
   runs.clear()
   finishSequence = 0
 }
@@ -86,7 +89,10 @@ export function resetBackgroundRuns(): void {
 function evictFinishedRuns(): void {
   const finished = [...runs.values()].filter((run) => !run.live && run.state !== 'running')
   finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
-  for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_RUNS))) runs.delete(stale.id)
+  for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_RUNS))) {
+    removeRebuiltPrompt(stale)
+    runs.delete(stale.id)
+  }
 }
 
 /** Line-by-line parser keeping only the last assistant text and a turn count, so a
@@ -162,6 +168,8 @@ export function cancelAllBackgroundRuns(): number {
   for (const id of Array.from(runs.keys())) {
     if (cancelBackgroundRun(id) === 'cancelled') count++
   }
+  // Called at quit: nothing in this registry is resumable once pi exits.
+  for (const run of runs.values()) removeRebuiltPrompt(run)
   return count
 }
 
@@ -190,8 +198,9 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   // Persisted so the rebuild happens once: rebuilding per resume leaked one temp
   // prompt dir every follow-up.
   const rebuilt = withRebuiltPrompt(run.spawn)
-  run.spawn = { ...run.spawn, args: rebuilt }
-  const args = rebuilt.map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
+  run.spawn = { ...run.spawn, args: rebuilt.args }
+  if (rebuilt.dir) run.rebuiltPromptDir = rebuilt.dir
+  const args = rebuilt.args.map((arg) => (arg.startsWith('Task: ') ? `Task: ${task}` : arg))
   run.state = 'running'
   run.task = task
   run.output = undefined
@@ -207,24 +216,33 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   return 'resumed'
 }
 
-/** Re-point --system-prompt at a fresh file when the original is gone. */
-function withRebuiltPrompt(spawnSpec: BackgroundSpawn): string[] {
+/** Re-point --system-prompt at a fresh file when the original is gone; `dir` is the
+ * temp dir created for it, which the run then owns. */
+function withRebuiltPrompt(spawnSpec: BackgroundSpawn): { args: string[]; dir?: string } {
   const flag = spawnSpec.args.indexOf('--system-prompt')
-  if (flag === -1 || !spawnSpec.promptBody) return spawnSpec.args
+  if (flag === -1 || !spawnSpec.promptBody) return { args: spawnSpec.args }
   const current = spawnSpec.args[flag + 1]
-  if (current && fs.existsSync(current)) return spawnSpec.args
+  if (current && fs.existsSync(current)) return { args: spawnSpec.args }
   try {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagent-'))
     const file = path.join(dir, 'prompt.md')
     fs.writeFileSync(file, spawnSpec.promptBody, { mode: 0o600 })
     const rebuilt = [...spawnSpec.args]
     rebuilt[flag + 1] = file
-    return rebuilt
+    return { args: rebuilt, dir }
   } catch {
     // Cannot rewrite it: drop the pair rather than hand pi a path it will treat as
     // prompt text, which would replace the agent persona with a temp path.
-    return spawnSpec.args.filter((_arg, i) => i !== flag && i !== flag + 1)
+    return { args: spawnSpec.args.filter((_arg, i) => i !== flag && i !== flag + 1) }
   }
+}
+
+/** The rebuilt prompt lives as long as its run can be resumed, so it goes when the run
+ * leaves the registry: eviction, quit, or the test reset. */
+function removeRebuiltPrompt(run: BackgroundRun): void {
+  if (!run.rebuiltPromptDir) return
+  fs.rmSync(run.rebuiltPromptDir, { recursive: true, force: true })
+  run.rebuiltPromptDir = undefined
 }
 
 export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void, presetId?: string): string | null {
