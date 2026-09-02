@@ -74,6 +74,9 @@ beforeEach(() => {
 // cleaned-up isolation worktree), so the fixture must point at one that does.
 const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ command: 'pi', args: ['--mode', 'json', 'Task: t'], cwd: tmpdir(), ...over })
 
+/** One assistant turn on the child's JSONL stdout. */
+const assistantTurn = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
+
 describe('background run lifecycle', () => {
   it('reports the final text of a stdout stream whose chunks split lines', () => {
     let done: BackgroundRun | undefined
@@ -174,6 +177,45 @@ describe('background run lifecycle', () => {
     }
     expect(resumeBackgroundRun(finished!.id, 'again', () => {})).toBe('at-capacity')
     for (const child of live) child.emit('close', 0)
+  })
+
+  it('reports zero turns when a resume fails to spawn', () => {
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn one'))
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn two'))
+    children.at(-1)!.emit('close', 0)
+
+    // The turn count belongs to the child that ran; a resume that never produced a
+    // turn must not report the previous run's two.
+    let failed: BackgroundRun | undefined
+    expect(
+      resumeBackgroundRun(id!, 'two', (run) => {
+        failed = run
+      }),
+    ).toBe('resumed')
+    children.at(-1)!.emit('error', new Error('spawn pi ENOENT'))
+
+    expect(failed?.state).toBe('failed')
+    expect(failed?.turns).toBe(0)
+  })
+
+  it('clears the partial marker when a capped run is resumed and finishes cleanly', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ maxTurns: 2 }), () => {})
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn one'))
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn two'))
+    children.at(-1)!.emit('close', null)
+
+    let done: BackgroundRun | undefined
+    expect(
+      resumeBackgroundRun(id!, 'two', (run) => {
+        done = run
+      }),
+    ).toBe('resumed')
+    children.at(-1)!.stdout.emit('data', assistantTurn('again'))
+    children.at(-1)!.emit('close', 0)
+
+    expect(done?.partial).toBeFalsy()
+    expect(done?.turns).toBe(1)
   })
 
   it('rebuilds the prompt file once and reuses it across resumes', () => {

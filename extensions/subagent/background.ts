@@ -198,6 +198,11 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   run.exitCode = undefined
   run.stderr = undefined
   run.finishedAt = undefined
+  // Both belong to the child that ran: a resume that dies before its first turn would
+  // otherwise report the previous count, and a clean follow-up to a maxTurns-capped run
+  // would still be offered as partial.
+  run.turns = 0
+  run.partial = undefined
   driveRun(run, { ...run.spawn, args }, onComplete)
   return 'resumed'
 }
