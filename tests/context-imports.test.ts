@@ -632,18 +632,7 @@ describe('pi wrapper format regression', () => {
 })
 
 describe('system prompt rewriting: managed claudeMd, excludes, comment strip', () => {
-  /** Assemble a prompt exactly as pi's buildSystemPrompt does (pinned above). */
-  const assembled = (files: Array<{ path: string; content: string }>): string => {
-    let prompt = 'BASE PROMPT'
-    if (files.length === 0) return prompt
-    prompt += '\n\n<project_context>\n\n'
-    prompt += 'Project-specific instructions and guidelines:\n\n'
-    for (const { path: filePath, content } of files) prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`
-    prompt += '</project_context>\n'
-    return prompt
-  }
-
-  const fire = async (files: Array<{ path: string; content: string }>, cwd: string, systemPrompt = assembled(files)) => {
+  const fire = async (files: Array<{ path: string; content: string }>, cwd: string, systemPrompt = assembledPrompt(files)) => {
     const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
     contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
     return (await handlers.get('before_agent_start')?.({ systemPrompt, systemPromptOptions: { cwd, contextFiles: files } })) as { systemPrompt: string } | undefined
@@ -1280,6 +1269,150 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
     await wired.start(approvingCtx(cwd))
     expect(await wired.fire(cwd)).toBe('BASE')
     expect(wired.instructionEvents()).toEqual([])
+  })
+})
+
+describe('CLAUDE.md beside an AGENTS.md pi loaded instead', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  // Claude Code reads CLAUDE.md and never AGENTS.md, and its documented recipe for a
+  // repository that already has an AGENTS.md is a CLAUDE.md that imports it plus
+  // Claude-specific instructions below. pi picks one context file per directory and
+  // prefers AGENTS.md, so that exact layout loses the Claude-specific half.
+  it('loads the sibling CLAUDE.md that pi passed over', async () => {
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    const claude = join(cwd, 'CLAUDE.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(claude, '@AGENTS.md\n\n## Claude Code\n\nUse plan mode under src/billing/.')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('Use plan mode under src/billing/.')
+    expect(wired.instructionEvents()).toContainEqual({ file_path: claude, memory_type: 'Project', load_reason: 'session_start' })
+  })
+
+  it('does not repeat the AGENTS.md body that the sibling CLAUDE.md imports', async () => {
+    // The documented recipe opens with @AGENTS.md, and pi already injected that file.
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(join(cwd, 'CLAUDE.md'), '@AGENTS.md\n\nCLAUDE EXTRA')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('CLAUDE EXTRA')
+    expect(prompt.split('SHARED AGENT RULES').length - 1).toBe(1)
+  })
+
+  it('resolves the sibling CLAUDE.md own imports', async () => {
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(join(cwd, 'CLAUDE.md'), 'CLAUDE HEAD\n@style.md')
+    writeFileSync(join(cwd, 'style.md'), 'CLAUDE STYLE BODY')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('CLAUDE STYLE BODY')
+  })
+
+  it('leaves a repository that has no AGENTS.md alone', async () => {
+    // pi loads CLAUDE.md itself here; a second block would duplicate it.
+    const cwd = tempDir()
+    const claude = join(cwd, 'CLAUDE.md')
+    writeFileSync(claude, 'ONLY CLAUDE RULES')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const native = [{ path: claude, content: 'ONLY CLAUDE RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt.split('ONLY CLAUDE RULES').length - 1).toBe(1)
+  })
+
+  it('does not add a CLAUDE.md pi already loaded itself', async () => {
+    // Whatever pi's per-directory precedence does today, a file already in the prompt
+    // must never come back as a second block.
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    const claude = join(cwd, 'CLAUDE.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(claude, 'ALREADY LOADED RULES')
+    const native = [
+      { path: agents, content: 'SHARED AGENT RULES' },
+      { path: claude, content: 'ALREADY LOADED RULES' },
+    ]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt.match(/ALREADY LOADED RULES/g)).toHaveLength(1)
+  })
+
+  it('does not also import the sibling CLAUDE.md that another context file references', async () => {
+    // The sibling gets its own block, so an @CLAUDE.md elsewhere must resolve to
+    // nothing rather than repeat the body under Imported context.
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES\n@CLAUDE.md')
+    writeFileSync(join(cwd, 'CLAUDE.md'), 'SIBLING BODY')
+    const native = [{ path: agents, content: 'SHARED AGENT RULES\n@CLAUDE.md' }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt.match(/SIBLING BODY/g)).toHaveLength(1)
+  })
+
+  it('does not load the sibling CLAUDE.md when the project is not approved', async () => {
+    // It is repo-controlled text, gated like every other project-scope file.
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(join(cwd, 'CLAUDE.md'), 'UNTRUSTED CLAUDE RULES')
+
+    const wired = wireWithBus()
+    await wired.start({ cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).not.toContain('UNTRUSTED CLAUDE RULES')
+  })
+
+  it('honors claudeMdExcludes for the sibling CLAUDE.md', async () => {
+    const cwd = tempDir()
+    const agents = join(cwd, 'AGENTS.md')
+    writeFileSync(agents, 'SHARED AGENT RULES')
+    writeFileSync(join(cwd, 'CLAUDE.md'), 'EXCLUDED CLAUDE RULES')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: ['**/CLAUDE.md'] }))
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const native = [{ path: agents, content: 'SHARED AGENT RULES' }]
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).not.toContain('EXCLUDED CLAUDE RULES')
   })
 })
 

@@ -497,6 +497,52 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
   return imported
 }
 
+/** The context-file names pi prefers over CLAUDE.md in the same directory. Mirrors
+ * pi's own lookup order (init.ts CONTEXT_FILE_CANDIDATES); the sibling search below
+ * keys off what pi actually loaded, so this is only used to recognize those files. */
+const AGENTS_FILE_NAMES = new Set(['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD'])
+
+/** The CLAUDE.md files pi passed over.
+ *
+ * Claude Code reads CLAUDE.md and never AGENTS.md, and its documented recipe for a
+ * repository that already has an AGENTS.md is a CLAUDE.md that imports it and adds
+ * Claude-specific instructions below (memory.md, "AGENTS.md"). pi loads one context
+ * file per directory and prefers AGENTS.md, so on exactly that layout the
+ * Claude-specific half never reaches the prompt. Each one found here is loaded like
+ * any other project file: exclude-checked, comment-stripped, imports expanded.
+ *
+ * The `@AGENTS.md` the recipe opens with costs nothing: pi's own file paths already
+ * seed the import seen-set, so the body it names is not injected a second time. */
+function siblingClaudeMdFiles(native: Array<{ path: string; content: string }>): Array<{ path: string; content: string }> {
+  const loaded = new Set(realRoots(native.map((file) => file.path)))
+  const found: Array<{ path: string; content: string }> = []
+  for (const file of native) {
+    if (!AGENTS_FILE_NAMES.has(path.basename(file.path))) continue
+    // CLAUDE.md only: pi also answers to CLAUDE.MD, but Claude Code reads the one
+    // spelling, and on a case-insensitive filesystem looking for both finds the same
+    // file twice under two names.
+    const candidate = path.join(path.dirname(file.path), 'CLAUDE.md')
+    const [real] = realRoots([candidate])
+    if (real !== undefined && loaded.has(real)) continue
+    const content = readContextFile(candidate)
+    if (content === undefined) continue
+    found.push({ path: candidate, content })
+  }
+  return found
+}
+
+/** The CLAUDE.md files pi passed over, appended as project_instructions blocks in the
+ * ./CLAUDE.md slot, ahead of the ./.claude/CLAUDE.md alternate and the locals. */
+function siblingClaudeMdAddition(siblings: Array<{ path: string; content: string }>, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
+  let addition = ''
+  for (const sibling of siblings) {
+    if (sibling.content.trim().length === 0) continue
+    announce({ file_path: sibling.path, memory_type: memoryTypeForPath(sibling.path, home, projectRoot), load_reason: 'session_start' })
+    addition += `\n\n${instructionsBlock(sibling.path, sibling.content.trim())}`
+  }
+  return addition
+}
+
 /** The project-scope ./.claude/CLAUDE.md appended as a project_instructions block,
  * announced as it is added (only when non-empty, matching what reaches the prompt).
  * Claude reads project instructions from ./CLAUDE.md OR ./.claude/CLAUDE.md; pi loads
@@ -660,6 +706,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     memoKey: string,
     native: Array<{ path: string; content: string }>,
     contextFiles: Array<{ path: string; content: string }>,
+    siblings: Array<{ path: string; content: string }>,
     home: string,
     cwd: string,
     excluded: (absPath: string) => boolean,
@@ -672,7 +719,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // files are never re-imported and an excluded file cannot return as an import.
     // The user, project-.claude and managed-file additions join the seed too, so a
     // context file's @import cannot pull any of them in a second time.
-    const ownPaths = [...native, ...localContexts].map((file) => file.path)
+    const ownPaths = [...native, ...localContexts, ...siblings].map((file) => file.path)
     if (userContext !== undefined) ownPaths.push(userContext.path)
     if (projectDotClaude !== undefined) ownPaths.push(projectDotClaude.path)
     ownPaths.push(managedClaudeMdPath())
@@ -792,6 +839,11 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
 
     const keptLocals = localContexts.filter((local) => !excluded(local.path)).map((local) => ({ path: local.path, content: stripBlockComments(local.content) }))
 
+    // Repo-controlled text, so gated on the same approval as the locals and the
+    // ./.claude/CLAUDE.md; read here rather than at session start because only the
+    // turn's contextFiles say which file pi actually chose per directory.
+    const keptSiblings = (projectApproved ? siblingClaudeMdFiles(native) : []).filter((sibling) => !excluded(sibling.path)).map((sibling) => ({ path: sibling.path, content: stripBlockComments(sibling.content) }))
+
     // ./.claude/CLAUDE.md, deduped against pi's native context so that if pi ever
     // loads it too there is no double block, then exclude-checked and comment-stripped
     // like the rest. Its @imports resolve at project roots (rootsForImporter).
@@ -802,18 +854,19 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // The user CLAUDE.md and ./.claude/CLAUDE.md join the import-expansion set so their
     // @imports resolve (each at roots scoped to it, via rootsForImporter); their own
     // bodies are placed separately, so expansion only surfaces what they import.
-    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
+    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...keptSiblings, ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
 
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
     const memoKey = buildImportMemoKey({ cwd, home, projectApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
 
-    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, home, cwd, excluded)
+    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, keptSiblings, home, cwd, excluded)
 
     // Project memory precedes local memory, so the ./.claude/CLAUDE.md block leads the
     // additions, ahead of the CLAUDE.local.md bodies.
-    let addition = projectContextAddition(keptProjectDotClaude, home, projectRoot, announce)
+    let addition = siblingClaudeMdAddition(keptSiblings, home, projectRoot, announce)
+    addition += projectContextAddition(keptProjectDotClaude, home, projectRoot, announce)
     addition += localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)
     addition += importedAddition(imported, budget, home, projectRoot, announce)
