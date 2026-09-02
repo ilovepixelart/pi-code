@@ -24,7 +24,7 @@ Managed `allowedMcpServers`/`deniedMcpServers` entries are typed and matched per
 
 ## Budgets
 
-Connect and per-call budgets honor `MCP_TIMEOUT` (30s default) and `MCP_TOOL_TIMEOUT` (4-hour wall default), plus an idle timeout that a progress notification resets: 5 minutes for remote transports, 30 minutes for stdio (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` overrides, `0` disables). A per-server `timeout` of at least 1000 sets the wall budget and floors the idle window; lower values are ignored. Numeric env values accept `2e3` and `64_000` spellings.
+Connect and per-call budgets honor `MCP_TIMEOUT` (30s default) and `MCP_TOOL_TIMEOUT` (4-hour wall default here, where Claude leaves it at about 28 hours: a wall that long is indistinguishable from none in an interactive session), plus an idle timeout that a progress notification resets: 5 minutes for remote transports, 30 minutes for stdio (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` overrides, `0` disables). A per-server `timeout` of at least 1000 sets the wall budget and floors the idle window; lower values are ignored. Numeric env values accept `2e3` and `64_000` spellings.
 
 ## Surface
 

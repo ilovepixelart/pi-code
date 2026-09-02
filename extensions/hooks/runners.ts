@@ -224,7 +224,11 @@ export async function runHttpHook(hook: { type?: string; command: string; url?: 
     }
     return { code: 0, stdout: body, stderr: '', timedOut: false }
   } catch (error) {
-    return { code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: false }
+    // A timeout is the abort that AbortSignal.timeout raises. Mark it as one so a gated
+    // event fails closed on it, exactly as a command hook that ran out of time does: the
+    // hook never answered, whichever transport it used.
+    const name = error instanceof Error ? error.name : ''
+    return { code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error), timedOut: name === 'TimeoutError' || name === 'AbortError' }
   }
 }
 
@@ -319,7 +323,8 @@ export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeou
   const input = hook.input && typeof hook.input === 'object' ? (substituteInputPaths(hook.input, payload) as Record<string, unknown>) : {}
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<HookRunResult>((resolve) => {
-    timer = setTimeout(() => resolve({ code: 1, stdout: '', stderr: `mcp_tool hook timed out after ${timeoutMs}ms`, timedOut: false }), timeoutMs)
+    // Marked as a timeout so a gated event fails closed on it, like a command hook.
+    timer = setTimeout(() => resolve({ code: 1, stdout: '', stderr: `mcp_tool hook timed out after ${timeoutMs}ms`, timedOut: true }), timeoutMs)
   })
   const call = callMcpTool(hook.server, hook.tool, input)
     .then((result): HookRunResult => ({ code: result.isError ? 1 : 0, stdout: result.text, stderr: '', timedOut: false }))

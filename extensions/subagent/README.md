@@ -39,7 +39,7 @@ This tool executes a separate `pi` subprocess with a delegated system prompt and
 
 **Default behavior:** Loads the bundled builtin agents (Explore, Plan, general-purpose) plus **user-level agents** from `~/.claude/agents` and `~/.pi/agent/agents`. A user or project agent with the same name overrides a builtin. Discovered agents and their descriptions are listed in the system prompt each turn, so the model can pick one itself; project agent descriptions appear only once the project is approved.
 
-To enable project-local agents (`.claude/agents`, `.pi/agents`), pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
+Project-local agents (`.claude/agents`, `.pi/agents`) load once the project is approved: a default call resolves `agentScope` to `"both"` for an approved project and `"user"` otherwise, and an explicit `agentScope` still narrows or widens it. Every invocation passes the project-agent gate either way.
 
 When running interactively, the tool prompts for confirmation before running project-local agents. `confirmProjectAgents: false` skips that prompt for a project you have already approved; an unapproved project is still asked about.
 
@@ -134,9 +134,9 @@ enforces per call.
 
 **Locations:**
 - `~/.claude/agents/*.md`, `~/.pi/agent/agents/*.md` - User-level (always loaded; `~/.pi` wins a name conflict)
-- `.claude/agents/*.md`, `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`; `.pi` wins a name conflict)
+- `.claude/agents/*.md`, `.pi/agents/*.md` - Project-level (an approved project, or an explicit `agentScope` of `"project"`/`"both"`; `.pi` wins a name conflict)
 
-Project agents override user agents with the same name when `agentScope: "both"`.
+Project agents override user agents with the same name when both scopes are in play.
 
 ## Builtin Agents
 
