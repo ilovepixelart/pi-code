@@ -345,8 +345,20 @@ export function runHeadersHelper(command: string, env: NodeJS.ProcessEnv, resolv
       resolve({})
       return
     }
+    const server = env.CLAUDE_CODE_MCP_SERVER_NAME ?? 'the server'
     execFile(shell.file, shell.argsFor(command), { timeout: 10_000, env }, (error, stdout) => {
-      resolve(error ? {} : parseHelperHeaders(stdout))
+      if (error) {
+        // The connect proceeds unauthenticated and the server answers 401, which reads as
+        // a login problem rather than a helper that never produced a header.
+        console.warn(`pi-code-mcp: the headersHelper for ${server} failed: ${error.message}; connecting without the headers it would have supplied`)
+        resolve({})
+        return
+      }
+      const headers = parseHelperHeaders(stdout)
+      if (Object.keys(headers).length === 0 && stdout.trim().length > 0) {
+        console.warn(`pi-code-mcp: the headersHelper for ${server} produced no usable headers; it must print a JSON object of header names to string values`)
+      }
+      resolve(headers)
     })
   })
 }

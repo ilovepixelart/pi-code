@@ -1,6 +1,6 @@
 import { createServer } from 'node:net'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { isTransientConnectError } from '../extensions/mcp/transport.ts'
 
@@ -53,5 +53,38 @@ describe('runHeadersHelper', () => {
 
     // The server still connects, with whatever static headers it was configured with.
     expect(headers).toEqual({})
+  })
+})
+
+describe('runHeadersHelper failure reporting', () => {
+  // A helper is how a server gets its Authorization when there is no OAuth. Silence here
+  // means the connect proceeds unauthenticated and the server answers 401, which the user
+  // then sees as a login problem rather than a broken helper.
+  const nodeShell = () => ({ kind: 'bash' as const, file: process.execPath, argsFor: (command: string) => ['-e', command] })
+
+  it('reports a helper that exits non-zero', async () => {
+    const { runHeadersHelper } = await import('../extensions/mcp/transport.ts')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const headers = await runHeadersHelper('process.exit(3)', { CLAUDE_CODE_MCP_SERVER_NAME: 'vault' }, nodeShell)
+
+      expect(headers).toEqual({})
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('vault'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('reports a helper whose output is not usable as headers', async () => {
+    const { runHeadersHelper } = await import('../extensions/mcp/transport.ts')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const headers = await runHeadersHelper('process.stdout.write("not json")', { CLAUDE_CODE_MCP_SERVER_NAME: 'vault' }, nodeShell)
+
+      expect(headers).toEqual({})
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('vault'))
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
