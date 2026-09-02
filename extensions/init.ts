@@ -16,12 +16,14 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+
+import { CONTEXT_FILE_CANDIDATES } from './internal/context-files.js'
+
+export { CONTEXT_FILE_CANDIDATES }
+
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 import { repoRoot } from './internal/project-root.js'
-
-/** Context files pi recognizes, in its lookup order; the first hit wins. */
-export const CONTEXT_FILE_CANDIDATES = ['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD']
 
 function statOf(target: string): fs.Stats | undefined {
   try {

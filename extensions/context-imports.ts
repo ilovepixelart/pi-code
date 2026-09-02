@@ -67,9 +67,10 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
-
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { AGENTS_FILE_NAMES } from './internal/context-files.js'
+import { externalImportDecision, externalImportKey, rememberExternalImportDecision } from './internal/external-imports.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
 import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext, sliceBytes } from './internal/output-guard.js'
@@ -107,8 +108,13 @@ export function expandHome(target: string, home: string): string {
   return target
 }
 
+/** Stands for "no boundary" in an allowed-roots list: the grant a project gets when
+ * its external imports are approved, where a file may import from anywhere as Claude's
+ * dialog allows. A real path never equals it, and realRoots never produces it. */
+const ANY_ROOT = '*'
+
 function isUnder(target: string, roots: string[]): boolean {
-  return roots.some((root) => target === root || target.startsWith(root + path.sep))
+  return roots.some((root) => root === ANY_ROOT || target === root || target.startsWith(root + path.sep))
 }
 
 /** Realpath the roots that exist; used both to seed and to bound the import search. */
@@ -271,11 +277,16 @@ export function collectImports(content: string, fromDir: string, home: string, a
  * project's transcripts, so granting those roots to a cloned repo's `CLAUDE.md`
  * would let it read them into the system prompt.
  */
-export function rootsForImporter(importer: string, home: string, cwd: string): string[] {
+export function rootsForImporter(importer: string, home: string, cwd: string, externalApproved = false): string[] {
   const userRoots = realRoots([claudeConfigDir(home), path.join(home, '.pi')])
   const [real] = realRoots([importer])
   const fromUserConfig = real !== undefined && isUnder(real, userRoots)
   if (fromUserConfig) return realRoots([cwd, ...userRoots])
+  // The project was asked about its external imports and allowed them, so a project
+  // file may reach outside, as Claude's dialog grants. The widening is deliberately
+  // only for project files: a user-scope file's roots are its own config, and an
+  // approval given to a repository must not extend them.
+  if (externalApproved) return [ANY_ROOT]
   // A non-config file is bounded at the repository root: that covers an ancestor
   // context file (a repo-root CLAUDE.md or CLAUDE.local.md in a subdirectory
   // session, where cwd alone silently dropped its relative imports) without
@@ -498,22 +509,55 @@ function additionalDirExtras(addDirs: string[], seenSet: Set<string>, excluded: 
   return extras
 }
 
+/** The parts of one launch-time expansion that every file shares: where it runs, what
+ * has already been read, the budget they all draw on, and whether this project's
+ * external imports were approved. */
+interface ExpansionContext {
+  home: string
+  cwd: string
+  seen: Set<string>
+  excluded: (absPath: string) => boolean
+  budget: ImportBudget
+  externalApproved: boolean
+}
+
 /** Resolve every context and additional-dir file's @imports through the one shared
  * budget, each with roots scoped to the importing file so a project file never
- * reaches user config. */
-function expandImports(contextFiles: Array<{ path: string; content: string }>, extras: Array<{ path: string; content: string; dir: string }>, home: string, cwd: string, seenSet: Set<string>, excluded: (absPath: string) => boolean, budget: ImportBudget): ImportedFile[] {
+ * reaches user config unless the project's external imports were approved. */
+function expandImports(contextFiles: Array<{ path: string; content: string }>, extras: Array<{ path: string; content: string; dir: string }>, run: ExpansionContext): ImportedFile[] {
   const imported: ImportedFile[] = []
+  const options = { budget: run.budget, isExcluded: run.excluded }
   for (const file of contextFiles) {
-    const allowedRoots = rootsForImporter(file.path, home, cwd)
-    imported.push(...collectImports(file.content, path.dirname(file.path), home, allowedRoots, seenSet, { budget, importer: file.path, isExcluded: excluded }))
+    const allowedRoots = rootsForImporter(file.path, run.home, run.cwd, run.externalApproved)
+    imported.push(...collectImports(file.content, path.dirname(file.path), run.home, allowedRoots, run.seen, { ...options, importer: file.path }))
   }
   for (const extra of extras) {
     // The additional dir itself is an allowed root, so its files' relative imports
     // resolve even from .claude/rules two levels down.
-    const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, home, cwd)]
-    imported.push(...collectImports(extra.content, path.dirname(extra.path), home, allowedRoots, seenSet, { budget, importer: extra.path, isExcluded: excluded }))
+    const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, run.home, run.cwd)]
+    imported.push(...collectImports(extra.content, path.dirname(extra.path), run.home, allowedRoots, run.seen, { ...options, importer: extra.path }))
   }
   return imported
+}
+
+/** The external-import dialog's title. Exported so a test can tell it apart from the
+ * project-trust dialog by identity rather than by matching a prefix that a retitle
+ * would silently break. */
+export const EXTERNAL_IMPORT_PROMPT_TITLE = 'Load imports from outside this project?'
+
+/** Ask about the imports the expansion just refused for leaving the project.
+ *
+ * The list is the refusals the enforcing path produced, not a second enumeration of
+ * what it might refuse: same files, same depth, same resolution, same exclusions. That
+ * is the only way the dialog can promise it names everything the approval lets in.
+ */
+async function askExternalImports(ctx: ExtensionContext, root: string, refused: ReadonlySet<string>): Promise<boolean> {
+  const listed = [...refused]
+    .sort((a, b) => a.localeCompare(b, 'en'))
+    .map((file) => `  ${file}`)
+    .join('\n')
+  const body = `${root}\n\nIts context files import these files from outside the project:\n\n${listed}\n\nThey will be read into every session's context. Only allow this for repositories you trust.`
+  return await ctx.ui.confirm(EXTERNAL_IMPORT_PROMPT_TITLE, body)
 }
 
 /** Every context file that could load on demand for a touched directory, shallowest
@@ -556,14 +600,17 @@ function nestedContextBlock(file: string, dir: string, load: NestedLoadContext):
   // seed the seen set, so a nested file importing the root CLAUDE.md does not pay for
   // a body already in the system prompt.
   const seen = new Set([...load.launchLoaded, real])
+  const budget = createImportBudget()
   const imports = collectImports(content, dir, load.home, rootsForImporter(real, load.home, load.cwd), seen, {
     importer: real,
     isExcluded: (absPath) => isExcludedPath(absPath, load.excludeGlobs, load.home),
-    budget: createImportBudget(),
+    budget,
   })
   return {
     read: true,
-    text: [instructionsBlock(file, body), ...imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)].join('\n\n'),
+    // The refusal notice rides along, so an import this file names and does not get is
+    // as visible here as it is at launch.
+    text: [instructionsBlock(file, body), ...imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)].join('\n\n') + refusedImportsAddition(budget.refused),
     events: [
       { file_path: file, memory_type: memoryTypeForPath(file, load.home, load.projectRoot), load_reason: 'nested_traversal', trigger_file_path: load.touched },
       ...imports.map((entry) => ({
@@ -598,11 +645,6 @@ function nestedContextDirs(from: string, cwd: string): string[] {
   // it: nothing below cwd to load. A file in cwd itself ends the loop with no dirs.
   return current === cwd ? dirs : []
 }
-
-/** The context-file names pi prefers over CLAUDE.md in the same directory. Mirrors
- * pi's own lookup order (init.ts CONTEXT_FILE_CANDIDATES); the sibling search below
- * keys off what pi actually loaded, so this is only used to recognize those files. */
-const AGENTS_FILE_NAMES = new Set(['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD'])
 
 /** The blocks and instruction loads for one touched directory. `loaded` is the
  * session's set of already-attached files and is updated in place, so a file that
@@ -766,6 +808,7 @@ function buildImportMemoKey(input: {
   cwd: string
   home: string
   projectApproved: boolean
+  externalApproved: boolean
   addDirsRaw: string
   excludeGlobs: string[]
   native: Array<{ path: string; content: string }>
@@ -776,7 +819,7 @@ function buildImportMemoKey(input: {
   contextFiles: Array<{ path: string; content: string }>
 }): string {
   const keyHash = createHash('sha256')
-  keyHash.update(`${input.cwd}\0${input.home}\0${input.projectApproved}\0${input.addDirsRaw}\0${input.excludeGlobs.join(',')}\0`)
+  keyHash.update(`${input.cwd}\0${input.home}\0${input.projectApproved}\0${input.externalApproved}\0${input.addDirsRaw}\0${input.excludeGlobs.join(',')}\0`)
   for (const file of [...input.native, ...input.localContexts]) keyHash.update(`${file.path}\0`)
   if (input.userContext !== undefined) keyHash.update(`${input.userContext.path}\0`)
   if (input.projectDotClaude !== undefined) keyHash.update(`${input.projectDotClaude.path}\0`)
@@ -850,12 +893,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // set) is rebuilt for next turn.
   const resolveImports = (
     memoKey: string,
-    native: Array<{ path: string; content: string }>,
-    contextFiles: Array<{ path: string; content: string }>,
-    siblings: Array<{ path: string; content: string }>,
-    home: string,
-    cwd: string,
-    excluded: (absPath: string) => boolean,
+    files: { native: Array<{ path: string; content: string }>; context: Array<{ path: string; content: string }>; siblings: Array<{ path: string; content: string }> },
+    run: { home: string; cwd: string; excluded: (absPath: string) => boolean; externalApproved: boolean },
   ): { extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] } => {
     if (importMemo?.key === memoKey && memoIsFresh(importMemo)) {
       const { extras, budget, imported } = importMemo
@@ -865,7 +904,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // files are never re-imported and an excluded file cannot return as an import.
     // The user, project-.claude and managed-file additions join the seed too, so a
     // context file's @import cannot pull any of them in a second time.
-    const ownPaths = [...native, ...localContexts, ...siblings].map((file) => file.path)
+    const ownPaths = [...files.native, ...localContexts, ...files.siblings].map((file) => file.path)
     if (userContext !== undefined) ownPaths.push(userContext.path)
     if (projectDotClaude !== undefined) ownPaths.push(projectDotClaude.path)
     ownPaths.push(managedClaudeMdPath())
@@ -874,14 +913,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // Claude's --add-dir memory loading, env-gated. The files join the seen set
     // before import expansion so an @import cannot pull one in twice, and they get
     // the same exclude and comment-strip treatment as native context files.
-    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), home, cwd) : []
-    const extras = additionalDirExtras(addDirs, seenSet, excluded, projectApproved)
+    const addDirs = additionalDirsClaudeMdEnabled() ? parseAdditionalDirs(pi.getFlag?.('add-dir'), run.home, run.cwd) : []
+    const extras = additionalDirExtras(addDirs, seenSet, run.excluded, projectApproved)
 
     // One budget for the whole run, so N context files cannot each spend a full one.
     // Exclusion applies inside the recursion: an excluded @import is skipped before
     // it is read, so its transitive imports never load and it spends no budget.
     const budget = createImportBudget()
-    const imported = expandImports(contextFiles, extras, home, cwd, seenSet, excluded, budget)
+    const imported = expandImports(files.context, extras, { ...run, seen: seenSet, budget })
 
     // Revalidation set: every file the expansion read, plus each add-dir itself
     // (a directory's mtime moves when a memory file is added or removed there).
@@ -945,7 +984,27 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     gatedFilesApproved = isGatedFileApproved(ctx)
   })
 
-  pi.on('before_agent_start', async (event) => {
+  /** The launch-time expansion, asking about what it refuses for leaving the project
+   * when this project has not been asked yet.
+   *
+   * Claude asks once per project and remembers the answer either way. The list is what
+   * this very expansion refused, so it names exactly the files the answer governs, and
+   * on approval the expansion is simply redone with the wider roots. */
+  const expandAskingAboutExternals = async (
+    cwd: string,
+    ctx: ExtensionContext | undefined,
+    expandWith: (externalApproved: boolean) => { extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] },
+  ): Promise<{ extras: Array<{ path: string; content: string; dir: string }>; budget: ImportBudget; imported: ImportedFile[] }> => {
+    const key = externalImportKey(cwd)
+    const decided = externalImportDecision(key)
+    const result = expandWith(decided === true)
+    if (decided !== null || result.budget.refused.size === 0 || ctx?.hasUI !== true) return result
+    const approved = await askExternalImports(ctx, key, result.budget.refused)
+    rememberExternalImportDecision(key, approved)
+    return approved ? expandWith(true) : result
+  }
+
+  pi.on('before_agent_start', async (event, ctx) => {
     const home = os.homedir()
     const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
     const native: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
@@ -1007,9 +1066,16 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
     const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
-    const memoKey = buildImportMemoKey({ cwd, home, projectApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
+    const expandWith = (externalApproved: boolean) => {
+      const memoKey = buildImportMemoKey({ cwd, home, projectApproved, externalApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
+      return resolveImports(memoKey, { native, context: contextFiles, siblings: keptSiblings }, { home, cwd, excluded, externalApproved })
+    }
 
-    const { extras, budget, imported } = resolveImports(memoKey, native, contextFiles, keptSiblings, home, cwd, excluded)
+    // Claude's external-import dialog. Asked from the refusals the expansion just
+    // produced, so the files named are exactly the files the answer governs, and asked
+    // here rather than at session start because only this event knows which context
+    // files pi actually loaded. Once per project: the answer is remembered either way.
+    const { extras, budget, imported } = await expandAskingAboutExternals(cwd, ctx, expandWith)
     launchLoadedPaths = realRoots([...contextFiles.map((file) => file.path), ...imported.map((entry) => entry.path)])
 
     // Project memory precedes local memory, so the ./.claude/CLAUDE.md block leads the
