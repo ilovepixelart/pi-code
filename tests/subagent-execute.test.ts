@@ -1856,6 +1856,20 @@ describe('subagent run semantics conformance', () => {
     expect(spawnCalls[0].args).not.toContain('--append-system-prompt')
   })
 
+  it('launches an agent whose tools list names only pi-code tools', async () => {
+    // The child runs pi with pi-code loaded, so todo, question, memory, slash_command and
+    // plan_mode_complete exist there. Leaving them out of the known set turned an agent
+    // scoped to them into a launch failure claiming it had no tools at all.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ tools: ['todo', 'question'] })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('done')] })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).not.toContain('zero tools')
+    const args = spawnCalls[0].args
+    expect(args[args.indexOf('--tools') + 1]).toBe('todo,question')
+  })
+
   it('honors CLAUDE_CODE_SUBAGENT_MODEL when nothing else assigns a model', async () => {
     // Claude's model order: invocation model, frontmatter model, then this
     // environment variable, then the main conversation's model.
