@@ -49,9 +49,33 @@ function listDirs(dir: string): string[] {
   }
 }
 
-/** Version directories sort numerically segment-wise, so 1.10.0 beats 1.9.0. */
+/** One version string split for comparison: optional v prefix dropped, numeric
+ * base segments, and whatever follows a dash as the prerelease tag. */
+function parseVersion(version: string): { base: number[]; pre: string | undefined } {
+  const stripped = version.replace(/^v/i, '')
+  const dash = stripped.indexOf('-')
+  const base = (dash === -1 ? stripped : stripped.slice(0, dash)).split('.').map((segment) => Number.parseInt(segment, 10) || 0)
+  return { base, pre: dash === -1 ? undefined : stripped.slice(dash + 1) }
+}
+
+/** Semver ordering to the depth plugin cache dirs need: 1.10.0 beats 1.9.0,
+ * 10.0.0 beats v2.0.0, and a release outranks its own prerelease (a plain
+ * string sort got both of the latter wrong). */
+function compareVersions(a: string, b: string): number {
+  const left = parseVersion(a)
+  const right = parseVersion(b)
+  for (let i = 0; i < Math.max(left.base.length, right.base.length); i++) {
+    const diff = (left.base[i] ?? 0) - (right.base[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  if (left.pre === right.pre) return 0
+  if (left.pre === undefined) return 1
+  if (right.pre === undefined) return -1
+  return left.pre.localeCompare(right.pre, 'en', { numeric: true })
+}
+
 function newestVersion(versions: string[]): string | undefined {
-  return [...versions].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })).at(-1)
+  return [...versions].sort(compareVersions).at(-1)
 }
 
 /** The enablement map, later files winning per key, as settings scopes merge. */

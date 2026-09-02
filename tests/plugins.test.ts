@@ -93,6 +93,26 @@ describe('installedPlugins', () => {
     expect(plugins[0].root).toBe(newest)
   })
 
+  it('ranks a release above its own prerelease, per semver', () => {
+    // The update-then-grace layout can hold 1.0.0-beta beside 1.0.0; a plain
+    // string sort ranks the prerelease higher and serves stale plugin code.
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0-beta')
+    const release = install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+
+    expect(installedPlugins(h, [])[0].root).toBe(release)
+  })
+
+  it('compares numerically across a stray v prefix', () => {
+    const h = home()
+    install(h, 'community', 'formatter', 'v2.0.0')
+    const newest = install(h, 'community', 'formatter', '10.0.0')
+    enable(h, { formatter: true })
+
+    expect(installedPlugins(h, [])[0].root).toBe(newest)
+  })
+
   it('attaches userConfig from pluginConfigs in settings', () => {
     const h = home()
     install(h, 'community', 'formatter', '1.0.0')
