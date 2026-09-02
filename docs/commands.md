@@ -4,8 +4,8 @@ Registers `.claude/commands/**/*.md` as slash commands with Claude's command con
 
 ## Naming and arguments
 
-- Commands load from every `.claude/commands` between the working directory and the repository root, the nearest winning a name clash. Subdirectory commands register as `/dir:name` (`frontend/build.md` is `/frontend:build`); current Claude docs name a command by file name alone, so the qualified form is a pi-code divergence.
-- `$ARGUMENTS` (with the `ARGUMENTS:` append when unused), 0-based `$ARGUMENTS[N]`/`$N`, named `arguments:` frontmatter.
+- Commands load from every project `.claude/commands` between the working directory and the repository root, then the personal `~/.claude/commands`, then the enterprise directory beside the managed settings file; per Claude, enterprise overrides personal and personal overrides project. A command is named by its file name alone (subdirectories only organize the files).
+- `$ARGUMENTS` (the `ARGUMENTS:` append fires only when no placeholder received an argument), 0-based `$ARGUMENTS[N]`/`$N`, named `arguments:` frontmatter. The model-facing listing always keeps every command name; over budget only descriptions are shed.
 - `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}` in bodies and `allowed-tools` rules.
 
 ## Dynamic content

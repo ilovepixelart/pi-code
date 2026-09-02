@@ -5,8 +5,8 @@
  * handing `.claude/commands` to pi's prompt-template loader. Owning registration
  * is what makes the rest of Claude's command contract reachable: `$ARGUMENTS` and
  * positional substitution, `` !`cmd` `` bash output, `@file` inlining, subdirectory
- * commands (registered as `/frontend:build`; current Claude docs name a command by
- * file name alone, so the qualified form is a pi-code divergence), and the
+ * commands (named by file name alone, as Claude documents; subdirectories only
+ * organize the files), and the
  * `allowed-tools`, `argument-hint` and `model` frontmatter (`model` switches the
  * session model for the command's run via `pi.setModel`, restored on agent_end).
  * `shell: powershell` runs a command's injected spans through PowerShell when a
@@ -47,7 +47,7 @@ import { Type } from 'typebox'
 import { matchesBashRules } from './internal/bash-rules.js'
 import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
-import { readManagedSettings } from './internal/managed-settings.js'
+import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
@@ -115,15 +115,18 @@ function isDirectory(target: string): boolean {
   }
 }
 
-/** Existing `.claude/commands` directories, user first then project. The project
- * directory is the nearest at or above cwd (bounded at the repository root, matching
- * the approval walk) and is included only for approved projects. */
+/** Existing `.claude/commands` directories in Claude's precedence order (later
+ * directories win in collectCommands): project first, then personal, then the
+ * enterprise directory beside the managed settings file, per "enterprise
+ * overrides personal, and personal overrides project". The project directories
+ * are included only for approved projects. */
 export function commandDirs(cwd: string, home: string, trusted: boolean): string[] {
-  const candidates = [path.join(claudeConfigDir(home), 'commands')]
+  const candidates: string[] = []
   // Claude scans every .claude/commands between cwd and the repository root, the
-  // nearest winning a name clash: collectCommands lets later directories win, so
-  // the project list goes root-first with the nearest last.
+  // nearest winning an intra-project name clash: root-first with the nearest last.
   if (trusted) candidates.push(...ancestorDirs(cwd, path.join('.claude', 'commands')).reverse())
+  candidates.push(path.join(claudeConfigDir(home), 'commands'))
+  candidates.push(path.join(path.dirname(managedSettingsFile()), '.claude', 'commands'))
   const dirs: string[] = []
   for (const dir of candidates) {
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)
@@ -270,23 +273,22 @@ export function slashCommandBudget(contextWindow: number | undefined, env: Recor
 /** The slash_command tool description: usage framing plus the budgeted command
  * list, each entry `/name - description (argument-hint)`. */
 export function slashCommandToolDescription(commands: SlashCommandEntry[], budget: number): string {
-  const lines: string[] = []
-  let used = 0
-  let omitted = 0
-  for (const command of commands) {
+  // Claude: "The listing always contains every skill name"; the budget shortens
+  // descriptions (later entries lose theirs first), never drops a name, so an
+  // omitted-but-invocable command can no longer contradict the listing.
+  const lines = commands.map((command) => `/${command.name}`)
+  let used = lines.reduce((total, line) => total + line.length + 1, 0)
+  for (const [index, command] of commands.entries()) {
     const hintSuffix = command.argumentHint ? ` (${command.argumentHint})` : ''
     // when_to_use is model-facing trigger text, appended after the description and before
     // the argument hint; it shares the per-entry cap and never reaches the user surface.
     const whenSuffix = command.whenToUse ? ` ${command.whenToUse}` : ''
     const entry = `/${command.name} - ${command.description}${whenSuffix}${hintSuffix}`.slice(0, ENTRY_CHAR_CAP)
-    if (used + entry.length + 1 > budget) {
-      omitted++
-      continue // a shorter later entry may still fit the remaining budget
-    }
-    used += entry.length + 1
-    lines.push(entry)
+    const growth = entry.length - lines[index].length
+    if (used + growth > budget) continue
+    used += growth
+    lines[index] = entry
   }
-  if (omitted > 0) lines.push(`(${omitted} more ${omitted === 1 ? 'command was' : 'commands were'} omitted: raise SLASH_COMMAND_TOOL_CHAR_BUDGET to list them)`)
   return ["Execute a custom slash command on the user's behalf. The command expands to instructions for you to follow in this conversation.", '', 'Available commands:', ...lines].join('\n')
 }
 
