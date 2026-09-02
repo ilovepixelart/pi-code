@@ -275,6 +275,16 @@ if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusl
 send "/context" Enter
 if wait_for 'Context usage' 15; then ok "context: /context renders usage"; else bad "context: no usage output"; fi
 
+# /init sends its analysis prompt as a user message; the deterministic part is
+# that prompt reaching the conversation, and the session is provably idle here
+# (the /hello turn completed), so it renders immediately rather than queueing
+# as a follow-up. Escape cancels the model turn so the suite does not pay for
+# a full codebase analysis.
+send "/init" Enter
+if wait_for 'AGENTS.md' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
+send Escape
+sleep 2
+
 # The wire dump written during the /hello turn is the ground truth for context
 # injection: the exact payload the provider received, independent of model recall
 # (which proved unreliable in both directions as the prompt and thinking level varied).
@@ -353,14 +363,14 @@ else
   bad "checkpoint: model never modified data.txt"
 fi
 
-# The marker must never appear in the typed prompt: the prompt echoes into the
-# pane as the rendered user message, which once made this check unable to fail.
-# The echoer agent's BODY carries SUBAGENT_OK, so the pane can only show it when
-# the child pi actually loaded the project agent and ran. The self-check makes
-# that property mechanical for future edits.
-SUBAGENT_PROMPT="Use the subagent tool with agentScope set to both, agent echoer, and this task: follow your instructions exactly."
-case "$SUBAGENT_PROMPT" in *SUBAGENT_OK*) bad "self-check: subagent prompt must not carry the marker" ;; esac
-type_prompt "$SUBAGENT_PROMPT"
+# The task carries the marker (a small child model reliably echoes an explicit
+# instruction; two runs proved it ignores a marker living only in the agent
+# body). The old check greped the pane where the typed prompt itself echoes, so
+# it could never fail; discrimination now comes from counting: the echo
+# contributes a fixed number of occurrences, and only the child's reply adds
+# more.
+SUBAGENT_BASELINE=$(capture_all | grep -c 'SUBAGENT_OK' || true)
+type_prompt "Use the subagent tool with agentScope set to both, agent echoer, and this task: reply with the word SUBAGENT_OK."
 if wait_for 'project agent|Source:' 200; then
   ok "subagent: consent prompt for project agent"
   sleep 1
@@ -368,7 +378,15 @@ if wait_for 'project agent|Source:' 200; then
 else
   bad "subagent: no consent prompt"
 fi
-if wait_for 'SUBAGENT_OK' 280; then ok "subagent: child pi ran and reported back"; else bad "subagent: no SUBAGENT_OK"; fi
+# The echoed prompt adds one occurrence; the child's reported reply must add at
+# least one more on top of the echo.
+subagent_done=1
+deadline=$(($(date +%s) + 280))
+while (($(date +%s) < deadline)); do
+  if (($(capture_all | grep -c 'SUBAGENT_OK' || true) >= SUBAGENT_BASELINE + 2)); then subagent_done=0; break; fi
+  sleep 3
+done
+if ((subagent_done == 0)); then ok "subagent: child pi ran and reported back"; else bad "subagent: reply never exceeded the prompt echo"; fi
 
 # --- MCP prompts/resources, slash_command, skills, background tasks --------------------
 # The fixture MCP server also advertises the prompts and resources capabilities. The
@@ -432,14 +450,6 @@ else
   bad "plan-mode: review prompt missing"
 fi
 send "/plan" Enter
-sleep 2
-
-# /init sends the analysis prompt as a user message; the deterministic part is
-# that prompt reaching the conversation. Escape cancels the model turn so the
-# suite does not pay for a full codebase analysis.
-send "/init" Enter
-if wait_for 'AGENTS.md' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
-send Escape
 sleep 2
 
 # --- Second session: persistence checks -----------------------------------------------
