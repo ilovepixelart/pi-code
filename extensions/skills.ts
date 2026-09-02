@@ -147,6 +147,28 @@ function skillOverrideFor(name: string, cwd: string, trusted: boolean): string |
   return value
 }
 
+/** Claude's skillOverrides "off": the skill is hidden and does not run; the
+ * invocation is swallowed with a notice. Undefined lets the invocation proceed. */
+function refusedByOverride(name: string, ctx: ExtensionContext, trusted: boolean): { action: 'handled' } | undefined {
+  if (skillOverrideFor(name, ctx.cwd, trusted) !== 'off') return undefined
+  if (ctx.hasUI) ctx.ui.notify(`Skill "${name}" is turned off by skillOverrides in settings.`, 'info')
+  return { action: 'handled' }
+}
+
+/** Claude's context: fork run: the expanded skill content becomes the prompt that
+ * drives a subagent, without the conversation history. Divergence: Claude
+ * backgrounds the fork by default; pi-code waits for the result in the invoking
+ * turn (Claude's background: false behavior, which is also what Claude itself
+ * does in -p and SDK runs). */
+async function runForkedSkill(name: string, filePath: string, expanded: string, agentName: string | undefined): Promise<{ action: 'transform'; text: string }> {
+  try {
+    const output = await runAgent({ prompt: expanded, fullTools: true, ...(agentName ? { agent: agentName } : {}) })
+    return { action: 'transform', text: `<skill name="${name}" location="${filePath}">\nThe skill ran in a forked subagent (no conversation history shared). Its result:\n\n${output}\n</skill>` }
+  } catch (error) {
+    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${error instanceof Error ? error.message : String(error)}\n</skill>` }
+  }
+}
+
 /** A `/skill:name args` invocation into its expanded skill block, or undefined to
  * pass the input through to pi untouched. The expanded body is wrapped in pi's
  * skill-block format so downstream behavior (the baseDir note for relative
@@ -161,11 +183,8 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const trusted = isProjectApprovedSilently(ctx)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
   if (!found) return
-  // Claude's skillOverrides: a skill set to "off" is hidden and does not run.
-  if (skillOverrideFor(name, ctx.cwd, trusted) === 'off') {
-    if (ctx.hasUI) ctx.ui.notify(`Skill "${name}" is turned off by skillOverrides in settings.`, 'info')
-    return { action: 'handled' }
-  }
+  const refused = refusedByOverride(name, ctx, trusted)
+  if (refused) return refused
   let parsed: ReturnType<typeof parseCommandFile>
   let content: string
   try {
@@ -186,18 +205,8 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
     pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })
   }
   const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
-  // Claude's context: fork runs the skill in a subagent; the expanded content
-  // becomes the prompt that drives it, without the conversation history.
-  // Divergence: Claude backgrounds the fork by default; pi-code waits for the
-  // result in the invoking turn (Claude's background: false behavior, which is
-  // also what Claude itself does in -p and SDK runs).
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
-    try {
-      const output = await runAgent({ prompt: expanded, fullTools: true, ...(typeof frontmatter.agent === 'string' ? { agent: frontmatter.agent.trim() } : {}) })
-      return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nThe skill ran in a forked subagent (no conversation history shared). Its result:\n\n${output}\n</skill>` }
-    } catch (error) {
-      return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${error instanceof Error ? error.message : String(error)}\n</skill>` }
-    }
+    return runForkedSkill(name, found.filePath, expanded, typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined)
   }
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
 }
