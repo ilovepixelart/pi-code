@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import * as http from 'node:http'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -153,6 +154,34 @@ describe('lastAssistantText', () => {
 })
 
 describe('runMcpToolHook', () => {
+  it('fails a PreToolUse tool call closed when an http or mcp_tool guard times out', async () => {
+    // pi-code fails a timed-out PreToolUse hook closed because there is no permission
+    // prompt to fall back on. That reasoning does not depend on the hook's type: a guard
+    // that never answered has not allowed anything, whichever transport it used.
+    // A server that accepts and never answers: a refused port would fail instantly for a
+    // different reason, which is not the case under test.
+    const hanging = createServer(() => {})
+    await new Promise<void>((resolve) => hanging.listen(0, '127.0.0.1', () => resolve()))
+    const port = (hanging.address() as { port: number }).port
+    try {
+      const timedOutHttp = await runHttpHook({ command: 'http', url: `http://127.0.0.1:${port}/hook` }, {}, 20)
+      expect(timedOutHttp.timedOut).toBe(true)
+    } finally {
+      hanging.close()
+    }
+
+    // A caller that never settles, so the deadline decides rather than an instant
+    // rejection from a server that is not registered.
+    const { setMcpToolCaller } = await import('../extensions/internal/mcp-call.ts')
+    setMcpToolCaller(() => new Promise(() => {}))
+    try {
+      const timedOutMcp = await runMcpToolHook({ type: 'mcp_tool', command: '', server: 'srv', tool: 'check' } as never, {}, 5)
+      expect(timedOutMcp.timedOut).toBe(true)
+    } finally {
+      setMcpToolCaller(undefined)
+    }
+  })
+
   afterEach(() => setMcpToolCaller(undefined))
 
   it('calls the named server tool and returns its text as stdout', async () => {

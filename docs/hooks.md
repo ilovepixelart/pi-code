@@ -25,7 +25,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 - `type: "prompt"`: evaluates in-process against the session model.
 - `type: "mcp_tool"`: calls a connected server's tool. String values in `input` support `${path}` substitution from the hook's JSON input (`${tool_input.file_path}`); without `input` the tool is called with no arguments.
 - `type: "agent"` (experimental): spawns a read-only Read/Grep/Glob subagent that returns the JSON decision.
-- For all non-command types: a missing model/server/runner is non-blocking; only a PreToolUse timeout fails closed.
+- For all non-command types: a missing model, server or runner is non-blocking, while a timeout fails closed on the gated events (PreToolUse, UserPromptSubmit) as it does for a command hook, whatever the transport.
 
 ## Payloads and decisions
 
