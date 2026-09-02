@@ -563,8 +563,12 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // is why serverToolCount reads from `registered` to recover the true count here.
     status.clear()
     // A same-process session switch (/new, /resume) shut the last session down;
-    // this one may reconnect again.
+    // this one may reconnect again. projectConnected guards against connecting the project
+    // scope twice within one session, so it belongs to the session that set it: leaving it
+    // set here left every project server disconnected for the rest of the process, since
+    // the shutdown had already dropped their clients.
     shuttingDown = false
+    projectConnected = false
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd }

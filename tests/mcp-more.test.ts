@@ -2364,6 +2364,21 @@ describe('mcp headersHelper environment', () => {
     expect(headers['X-T']).toBe('')
   })
 
+  it('reconnects project servers after a same-process session switch', async () => {
+    // /new, /resume and /fork run session_shutdown then session_start in one process. The
+    // shutdown drops every client, so the next session has to connect the project scope
+    // again; otherwise its tools are gone for the rest of the run.
+    withTools([{ name: 'go' }])
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp' } } })
+    await harness.sessionStart(true)
+    expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
+
+    await harness.shutdown()
+    await harness.sessionStart(true)
+
+    expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
+  })
+
   it('does not run a project helper until the project is trusted, connecting with static headers alone', async () => {
     // A repository's helper is a command the user has not reviewed. Consent to the server
     // (enabledMcpjsonServers) is not consent to run its command in an untrusted folder.
