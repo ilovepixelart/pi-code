@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 # Headless deterministic e2e smoke: boots the pi devDependency against an
 # isolated home whose model points at a dead port, and asserts the exact
 # provider payload captured by scripts/lib/wire-probe.ts. No tmux, no model,
@@ -13,16 +13,16 @@ PI_BIN="$REPO/node_modules/.bin/pi"
 PASS=0
 FAIL=0
 
-ok() { PASS=$((PASS + 1)); print "PASS $1" }
-bad() { FAIL=$((FAIL + 1)); print "FAIL $1" }
+ok() { PASS=$((PASS + 1)); printf 'PASS %s\n' "$1"; }
+bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 
 SMOKE=$(mktemp -d)
-cleanup() { rm -rf "$SMOKE" }
+cleanup() { rm -rf "$SMOKE"; }
 trap cleanup EXIT
 trap 'cleanup; trap - INT; kill -INT $$' INT
 trap 'cleanup; trap - TERM; kill -TERM $$' TERM
 
-[ -x "$PI_BIN" ] || { print "FAIL smoke: $PI_BIN missing; run npm ci first"; exit 1 }
+[ -x "$PI_BIN" ] || { printf 'FAIL smoke: %s missing; run npm ci first\n' "$PI_BIN"; exit 1; }
 
 # --- Fixture: the context surfaces whose payload injection is deterministic ---
 FX="$SMOKE/fx"
@@ -63,12 +63,12 @@ if run_pi "$PI_BIN" list 2>/dev/null | grep -qF "$REPO"; then ok "smoke: pi list
 run_pi "$PI_BIN" -p "hi" > "$SMOKE/pi-out.log" 2>&1
 [ -s "$WIRE" ] && ok "smoke: wire probe captured the provider payload" || bad "smoke: no wire payload captured (pi output: $(tail -1 "$SMOKE/pi-out.log" 2>/dev/null))"
 
-wire_has() { grep -q "$1" "$WIRE" 2>/dev/null }
+wire_has() { grep -q "$1" "$WIRE" 2>/dev/null; }
 if wire_has 'ZANZIBAR'; then ok "smoke: @import chain content on the wire"; else bad "smoke: import content missing from payload"; fi
 if wire_has 'PERSONAL LOCAL NOTE MARKER'; then ok "smoke: CLAUDE.local.md on the wire"; else bad "smoke: local marker missing from payload"; fi
 if wire_has 'Tests must be deterministic'; then ok "smoke: project rule on the wire"; else bad "smoke: project rule missing from payload"; fi
 if wire_has 'available_skills' && wire_has 'greet'; then ok "smoke: skills listing on the wire"; else bad "smoke: skills listing missing from payload"; fi
 
-print ""
-print "e2e-smoke finished: $PASS passed, $FAIL failed"
+printf '\n'
+printf 'e2e-smoke finished: %s passed, %s failed\n' "$PASS" "$FAIL"
 exit $((FAIL > 0))

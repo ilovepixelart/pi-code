@@ -95,4 +95,4 @@ jobs:
       - name: Run the deterministic smoke
         # Boots the pi devDependency headless against a dead-port model and
         # asserts the exact provider payload; no real model or network needed.
-        run: zsh scripts/e2e-smoke.sh
+        run: bash scripts/e2e-smoke.sh
