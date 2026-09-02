@@ -200,6 +200,29 @@ describe('installedPlugins', () => {
   })
 })
 
+describe('installedPlugins manifest failures', () => {
+  it('reports a plugin manifest it cannot parse instead of dropping the plugin', () => {
+    // Without the manifest the plugin has no components at all: no commands, agents,
+    // skills, hooks or MCP servers, and nothing says why it stopped working.
+    const home = mkdtempSync(join(tmpdir(), 'plug-home-'))
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', 'broken', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), '{"name": "broken",}')
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { broken: true } }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      resetInstalledPluginsCache()
+      installedPlugins(home)
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('plugin.json'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
 describe('installedPlugins cache', () => {
   it('serves a repeat call without re-reading settings or manifests', () => {
     const h = home()
