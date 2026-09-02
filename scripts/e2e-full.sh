@@ -18,14 +18,19 @@ ok() { PASS=$((PASS + 1)); print -P "%F{green}PASS%f $1" }
 bad() { FAIL=$((FAIL + 1)); print -P "%F{red}FAIL%f $1" }
 warn() { WARN=$((WARN + 1)); print -P "%F{yellow}WARN%f $1" }
 
+# Two depths: capture() is the CURRENT screen, for state checks (badges,
+# status segments) where scrollback would resurrect stale frames; capture_all()
+# adds scrollback, for marker searches where a verbose reply can scroll a
+# marker past the visible rows between 2s polls.
 capture() { tmux capture-pane -t "$SESSION" -p }
+capture_all() { tmux capture-pane -t "$SESSION" -p -S -200 }
 send() { tmux send-keys -t "$SESSION" "$@" }
 type_prompt() { tmux send-keys -t "$SESSION" -l "$1"; tmux send-keys -t "$SESSION" Enter }
 
-wait_for() { # wait_for <regex> <timeout-seconds>
+wait_for() { # wait_for <regex> <timeout-seconds>: appearance searches include scrollback
   local deadline=$(($(date +%s) + $2))
   while (($(date +%s) < deadline)); do
-    if capture | grep -qE "$1"; then return 0; fi
+    if capture_all | grep -qE "$1"; then return 0; fi
     sleep 2
   done
   return 1
@@ -35,6 +40,15 @@ wait_file() { # wait_file <path> <timeout-seconds>
   local deadline=$(($(date +%s) + $2))
   while (($(date +%s) < deadline)); do
     [ -e "$1" ] && return 0
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_absent() { # wait_for_absent <regex> <timeout-seconds>: poll until the pane no longer matches
+  local deadline=$(($(date +%s) + $2))
+  while (($(date +%s) < deadline)); do
+    capture | grep -qE "$1" || return 0
     sleep 2
   done
   return 1
@@ -138,32 +152,33 @@ done
 # A wire probe records the exact provider payload of each request, giving the context
 # checks a deterministic oracle: what the model was actually sent, not what it recalls.
 WIRE="$FAKEHOME/wire.json"
+# Appends one JSON line per request: an overwrite-per-request dump could be
+# clobbered by a later request (session titling, a follow-up turn) between the
+# turn under test and the greps, flipping good checks into false FAILs.
 cat > "$FAKEHOME/wire-probe.ts" <<'EOF'
 import * as fs from 'node:fs'
 export default function wireProbe(pi: { on: (event: string, handler: (event: unknown) => void) => void }) {
   pi.on('before_provider_request', (event) => {
     const target = process.env.PI_E2E_WIRE
-    if (target) fs.writeFileSync(target, JSON.stringify(event))
+    if (target) fs.appendFileSync(target, `${JSON.stringify(event)}\n`)
   })
 }
 EOF
+# Allowlist, not denylist: only the model-selection keys ride in from the real
+# settings. Copying everything minus a strip list let any other developer key (a
+# global statusLine, hooks, timeout tuning) shape the "isolated" run; a fresh
+# home also means no stale lastChangelogVersion, so no changelog wall over boot.
 python3 - "$HOME/.pi/agent/settings.json" "$FAKEHOME/.pi/agent/settings.json" "$REPO" "$FAKEHOME/wire-probe.ts" <<'PY'
 import json, sys
 src, dst, repo, probe = sys.argv[1:5]
 try:
-    settings = json.load(open(src))
+    real = json.load(open(src))
 except Exception:
-    settings = {}
+    real = {}
+settings = {key: real[key] for key in ("defaultModel", "defaultProvider") if key in real}
 settings["packages"] = [repo]
 settings["defaultThinkingLevel"] = "low"
 settings["extensions"] = [probe]
-# lastChangelogVersion rides in from the developer's real global settings; a stale value
-# (e.g. an install several releases back) makes pi paint the full "What's New" changelog
-# wall over the boot screen, burying the banners these checks grep for. Dropping it lets
-# pi treat the throwaway home as a fresh install: it records the current version silently
-# and shows no changelog.
-for key in ("skills", "prompts", "lastChangelogVersion"):
-    settings.pop(key, None)
 json.dump(settings, open(dst, "w"))
 PY
 
@@ -210,18 +225,27 @@ fi
 
 # pi 0.81 flushes the resource block only after session_start handlers complete,
 # which serial MCP connect timeouts can push well past an eager window.
-if wait_for '\[Extensions\]' 120 && capture | grep -A20 '\[Extensions\]' | grep -q 'todo.ts'; then
+# Two independent greps, not a fixed -A window: the extension block grows with
+# every added extension and a clipped window false-FAILs at exactly the count
+# that pushes an entry out of it.
+if wait_for '\[Extensions\]' 120 && capture_all | grep -q 'todo.ts'; then
   ok "boot: extensions loaded"
 else
   bad "boot: extensions missing"
 fi
 
 # Known pi TUI interaction: on a fast boot pi drops all but the last session_start
-# notify() banner (reproduced with only this checkout loaded). The features are asserted
-# on substance elsewhere: rules by the unit suite, MCP by the tool-call turn below.
+# notify() banner (reproduced with only this checkout loaded). One consistent rule:
+# every individual banner is a warn (which banner survives is ordering luck; the
+# old scheme hard-failed output-style only because it happened to be last), and
+# ONE bad check requires that at least one banner rendered at all, so a
+# regression silencing the whole notify path cannot hide behind the warns.
+# Features are asserted on substance elsewhere: rules/imports on the wire, MCP by
+# the /mcp turn, memory by the on-disk file.
 if wait_for 'Rules loaded: global (yes|no), project 1' 20; then ok "rules: project rule counted"; else warn "rules: banner not rendered (known pi TUI interaction)"; fi
-if wait_for 'Output style: Pirate' 15; then ok "output-style: active style announced"; else bad "output-style: no banner"; fi
+if wait_for 'Output style: Pirate' 15; then ok "output-style: active style announced"; else warn "output-style: banner not rendered (known pi TUI interaction)"; fi
 if wait_for 'MCP: ' 30; then ok "mcp: connect summary banner"; else warn "mcp: summary banner not rendered (known pi TUI interaction)"; fi
+if capture_all | grep -qE 'Rules loaded: |Output style: |MCP: '; then ok "boot: at least one session-start banner rendered"; else bad "boot: notify path rendered no banner at all"; fi
 if wait_file "$FX/.e2e-session-start" 10; then ok "hooks: SessionStart hook ran"; else bad "hooks: SessionStart marker missing"; fi
 if capture | grep -q '○ ready'; then ok "statusline: ready segment"; else bad "statusline: no ready segment"; fi
 
@@ -235,8 +259,7 @@ sleep 1
 send "/plan" Enter
 if wait_for '⏸ plan' 15; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
 send "/plan" Enter
-sleep 2
-if capture | grep -q '⏸ plan'; then bad "plan-mode: badge stuck"; else ok "plan-mode: badge off"; fi
+if wait_for_absent '⏸ plan' 20; then ok "plan-mode: badge off"; else bad "plan-mode: badge stuck"; fi
 
 send "/rewind" Enter
 if wait_for 'No checkpoints recorded yet' 15; then ok "checkpoint: empty-session notice"; else bad "checkpoint: no empty notice"; fi
@@ -261,6 +284,11 @@ if grep -q 'PERSONAL LOCAL NOTE MARKER' "$WIRE" 2>/dev/null; then ok "context-im
 # inlines its body into the system prompt rather than surfacing a scoped pointer. Assert the
 # injected body on the wire, like the two import checks above; the filename never rides along.
 if grep -q 'Tests must be deterministic' "$WIRE" 2>/dev/null; then ok "rules: project rule on the wire"; else bad "rules: project rule missing from payload"; fi
+# The skills PLUMBING is deterministic even though the invocation below is
+# model-dependent: the available_skills listing with the fixture skill must
+# reach the provider payload, so a discovery regression fails here instead of
+# hiding behind the model-declined warn.
+if grep -q 'available_skills' "$WIRE" 2>/dev/null && grep -q 'greet' "$WIRE" 2>/dev/null; then ok "skills: listing reaches the wire"; else bad "skills: available_skills/greet missing from payload"; fi
 
 type_prompt "Call the e2e_ping tool now and repeat its output verbatim."
 if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "mcp: no E2EPONG"; fi
@@ -304,7 +332,9 @@ if grep -q MODIFIED "$FX/data.txt" 2>/dev/null; then
     send Enter
     if wait_for 'Code only' 20; then
       send Down Down Enter
-      sleep 5
+      # Wait for the completion notice instead of a fixed sleep; a slow restore
+      # made the file assertions race the checkout.
+      wait_for 'Rewind complete|Code restored' 30 || true
       if grep -q ORIGINAL "$FX/data.txt"; then ok "checkpoint: code-only restore reverted data.txt"; else bad "checkpoint: data.txt not reverted"; fi
       if [ -f "$FX/probe-new.txt" ]; then ok "checkpoint: later file survives restore (overlay semantics)"; else bad "checkpoint: restore deleted a later file"; fi
     else
@@ -317,7 +347,14 @@ else
   bad "checkpoint: model never modified data.txt"
 fi
 
-type_prompt "Use the subagent tool with agentScope set to both, agent echoer, and this task: reply with the word SUBAGENT_OK."
+# The marker must never appear in the typed prompt: the prompt echoes into the
+# pane as the rendered user message, which once made this check unable to fail.
+# The echoer agent's BODY carries SUBAGENT_OK, so the pane can only show it when
+# the child pi actually loaded the project agent and ran. The self-check makes
+# that property mechanical for future edits.
+SUBAGENT_PROMPT="Use the subagent tool with agentScope set to both, agent echoer, and this task: introduce yourself."
+case "$SUBAGENT_PROMPT" in *SUBAGENT_OK*) bad "self-check: subagent prompt must not carry the marker" ;; esac
+type_prompt "$SUBAGENT_PROMPT"
 if wait_for 'project agent|Source:' 200; then
   ok "subagent: consent prompt for project agent"
   sleep 1
@@ -362,6 +399,17 @@ if wait_for 'Started background run' 200; then
   sleep 2
   send "/tasks" Enter
   if wait_for 'general-purpose: (running|done)' 30; then ok "tasks: /tasks lists the background run"; else bad "tasks: no background run entry"; fi
+  # 'running' alone proved only registration: a child that hangs or crashes
+  # after registering still listed as running. Re-poll /tasks until it reports
+  # done, so the check covers actual execution to completion.
+  finished=0
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if capture_all | grep -qE 'general-purpose: done'; then finished=1; break; fi
+    sleep 15
+    send "/tasks" Enter
+    sleep 3
+  done
+  if ((finished)); then ok "tasks: background run ran to completion"; else bad "tasks: background run never reached done"; fi
 else
   bad "subagent: background run did not start"
 fi
