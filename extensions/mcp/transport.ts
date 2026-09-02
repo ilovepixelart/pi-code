@@ -336,9 +336,11 @@ export async function connectWithRetries(name: string, config: ServerConfig, aut
  * environment helperEnv built. It runs through the platform shell (/bin/sh; Git Bash
  * or PowerShell on Windows). A failure, a 10s timeout, or a machine with no shell
  * yields no extra headers rather than blocking the connection. */
-function runHeadersHelper(command: string, env: NodeJS.ProcessEnv): Promise<Record<string, string>> {
+export function runHeadersHelper(command: string, env: NodeJS.ProcessEnv, resolve_ = resolveShell): Promise<Record<string, string>> {
   return new Promise((resolve) => {
-    const shell = resolveShell(undefined)
+    // The resolver is a parameter so a test can drive both outcomes on any platform:
+    // stubbing the platform cannot produce a shell-less host on a machine that has one.
+    const shell = resolve_(undefined)
     if (!shell) {
       resolve({})
       return

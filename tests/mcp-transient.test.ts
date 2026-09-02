@@ -33,3 +33,25 @@ describe('isTransientConnectError', () => {
     expect(isTransientConnectError(Object.assign(new Error('server error'), { code: 503 }))).toBe(true)
   })
 })
+
+describe('runHeadersHelper', () => {
+  // Both outcomes on every platform: the resolver is injected, so the shell-less case
+  // does not depend on the host lacking Git Bash and PowerShell.
+  it('runs the helper through the resolved shell and parses its JSON', async () => {
+    const { runHeadersHelper } = await import('../extensions/mcp/transport.ts')
+    const sh = () => ({ kind: 'bash' as const, file: process.execPath, argsFor: (command: string) => ['-e', command] })
+
+    const headers = await runHeadersHelper('process.stdout.write(JSON.stringify({ "X-From": "helper" }))', process.env, sh)
+
+    expect(headers).toEqual({ 'X-From': 'helper' })
+  })
+
+  it('yields no headers when the machine has no shell to run it with', async () => {
+    const { runHeadersHelper } = await import('../extensions/mcp/transport.ts')
+
+    const headers = await runHeadersHelper('process.stdout.write(JSON.stringify({ "X-From": "helper" }))', process.env, () => undefined)
+
+    // The server still connects, with whatever static headers it was configured with.
+    expect(headers).toEqual({})
+  })
+})

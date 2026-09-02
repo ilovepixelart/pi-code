@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -712,16 +712,14 @@ describe('resume from a different working directory', () => {
 })
 
 describe('shadow repo init failure', () => {
-  // chmod 0o555 does not make a directory unwritable on Windows, so the failure
-  // this test simulates cannot be produced there.
-  it.skipIf(process.platform === 'win32')('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
+  it('notifies that checkpoints are disabled when the shadow repo cannot be created', async () => {
+    // A file where the checkpoints root has to be a directory: git init fails on every
+    // platform, unlike chmod 0o555, which Windows ignores.
     const t = setup()
-    chmodSync(hoisted.home, 0o555)
-    try {
-      await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
-    } finally {
-      chmodSync(hoisted.home, 0o755)
-    }
+    mkdirSync(join(hoisted.home, '.pi', 'agent'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.pi', 'agent', 'checkpoints'), 'not a directory')
+
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
 
     expect(t.notifications.some((n) => n.startsWith('[warning] Checkpoints disabled:'))).toBe(true)
   })

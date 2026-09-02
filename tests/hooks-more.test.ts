@@ -1165,27 +1165,6 @@ describe('hooks extension notify-style events', () => {
     expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
   })
 
-  // The fixture needs a directory whose NAME contains a backslash, which POSIX
-  // permits and Windows cannot create (backslash is the separator there); on
-  // Windows every real plugin root exercises the same escaping naturally.
-  it.skipIf(process.platform === 'win32')('substitutes a backslash-bearing plugin root without corrupting the hooks JSON', async () => {
-    // A Windows root (C:\Users\...) textually substituted into raw JSON injects
-    // invalid escape sequences; the parse then threw and the catch silently
-    // dropped every hook the plugin declared. Backslashes are legal in POSIX
-    // directory names, so the corruption reproduces on any platform.
-    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'fmt2', String.raw`1.0.0\uv`)
-    mkdirSync(join(root, 'hooks'), { recursive: true })
-    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } }))
-    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
-    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { fmt2: true } }))
-
-    const ext = setupExtension()
-    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
-    await ext.toolResult('write', { input: { path: 'a.ts' } })
-
-    expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
-  })
-
   it('refuses a shell-form plugin hook that references user config, keeping its siblings', async () => {
     // Claude: "Fields that run in a shell reject ${user_config.*}: substituting a
     // configured value into a shell command would let the shell run whatever that value

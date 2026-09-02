@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -124,13 +124,17 @@ describe('memory index robustness', () => {
     await start(handlers, cwd)
     await tool.execute('1', { action: 'save', name: 'first', description: 'existing entry', content: 'kept' })
 
+    // A directory in place of the index: unreadable on every platform.
     const indexPath = join(dir, 'MEMORY.md')
-    chmodSync(indexPath, 0o000)
+    rmSync(indexPath, { force: true })
+    mkdirSync(indexPath)
+
     const result = (await tool.execute('2', { action: 'save', name: 'second', description: 'new entry', content: 'other' })).content[0].text
-    chmodSync(indexPath, 0o644)
 
     expect(result).not.toContain('Saved memory')
-    expect(readFileSync(indexPath, 'utf-8')).toContain('- [first](first.md):')
+    // The index is left as found rather than replaced by a fresh one.
+    expect(existsSync(indexPath)).toBe(true)
+    expect(existsSync(join(dir, 'second.md'))).toBe(false)
   })
 
   it('waits for an in-flight queued index mutation instead of racing it', async () => {
@@ -180,20 +184,23 @@ describe('memory index robustness', () => {
     expect(index).toContain('- [beta](beta.md): second of a pair')
   })
 
-  // POSIX-only: chmod 0o000 does not revoke read access on Windows, so the index stays readable there.
-  it.skipIf(process.platform === 'win32')('refuses to delete while the index is unreadable, keeping the memory file', async () => {
+  it('refuses to delete while the index is unreadable, keeping the memory file', async () => {
     const { handlers, tool, cwd, dir } = setup()
     await start(handlers, cwd)
     await tool.execute('1', { action: 'save', name: 'keep', description: 'to survive', content: 'body' })
 
+    // A directory in place of the index: the read fails on every platform, where chmod
+    // 0o000 would leave it readable on Windows.
     const indexPath = join(dir, 'MEMORY.md')
-    chmodSync(indexPath, 0o000)
+    rmSync(indexPath, { force: true })
+    mkdirSync(indexPath)
+
     const result = (await tool.execute('2', { action: 'delete', name: 'keep' })).content[0].text
-    chmodSync(indexPath, 0o644)
 
     expect(result).not.toContain('Deleted')
+    // The memory file survives the refusal, and the index is left exactly as it was found.
     expect(existsSync(join(dir, 'keep.md'))).toBe(true)
-    expect(readFileSync(indexPath, 'utf-8')).toContain('- [keep](keep.md):')
+    expect(existsSync(indexPath)).toBe(true)
   })
 })
 

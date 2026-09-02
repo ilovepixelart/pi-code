@@ -632,7 +632,9 @@ describe('runHookCommand timeout (real shell)', () => {
     expect(result.timedOut).toBe(true)
   })
 
-  // POSIX-only: /bin/sh process groups and negative-pid kill(0) probes are POSIX semantics.
+  // The POSIX half of the tree kill: process groups and negative-pid kill(0) probes have
+  // no Windows equivalent, so the win32 arm is covered by its own test over the spawn
+  // recorder ("ends the whole process tree with taskkill" in hooks-more).
   it.skipIf(process.platform === 'win32')('kills the shell descendants rather than leaving them running past the timeout', async () => {
     const dir = tempDir()
     const flag = join(dir, 'grandchild-survived')

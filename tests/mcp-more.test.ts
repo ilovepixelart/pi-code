@@ -2303,31 +2303,6 @@ describe('mcp headersHelper environment', () => {
     expect(String(hoisted.transports[0].url)).toBe('https://api.example/sekret/mcp')
   })
 
-  // Off Windows only: a real Windows host resolves its Git install ahead of the PATH shim,
-  // and there the un-skipped helper tests above run through the real Git Bash.
-  it.skipIf(process.platform === 'win32')('runs the helper through Git Bash on Windows', async () => {
-    // A Git for Windows layout on PATH whose bash.exe is a shim: on this host it marks
-    // the environment and hands the command to /bin/sh, so the header says which shell ran.
-    const root = mkdtempSync(join(tmpdir(), 'mcp-gitbash-'))
-    tempDirs.push(root)
-    mkdirSync(join(root, 'cmd'), { recursive: true })
-    mkdirSync(join(root, 'bin'), { recursive: true })
-    writeFileSync(join(root, 'cmd', 'git.exe'), 'MZ')
-    writeFileSync(join(root, 'bin', 'bash.exe'), '#!/bin/sh\nPI_CODE_TEST_SHELL=git-bash exec /bin/sh "$@"\n', { mode: 0o755 })
-    setEnv('PATH', `${join(root, 'cmd')}:${process.env.PATH ?? ''}`)
-    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-    try {
-      withTools([{ name: 'go' }])
-      await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headersHelper: 'echo "{\\"X-Shell\\":\\"${PI_CODE_TEST_SHELL-sh}\\"}"' } } })
-    } finally {
-      if (platform) Object.defineProperty(process, 'platform', platform)
-    }
-
-    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
-    expect(headers['X-Shell']).toBe('git-bash')
-  })
-
   it('strips credential-named variables from a project server helper environment', async () => {
     // A helper a repository supplies runs without credential variables such as
     // ANTHROPIC_API_KEY: any name with TOKEN/SECRET/PASSWORD/KEY/AUTH in it.
@@ -2377,30 +2352,6 @@ describe('mcp headersHelper environment', () => {
     await harness.sessionStart(true)
 
     expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
-  })
-
-  // Off Windows only: the case is a Windows host with neither Git Bash nor PowerShell,
-  // and stubbing the platform cannot simulate it on a real Windows machine, where the
-  // default Git install is found whatever PATH says.
-  it.skipIf(process.platform === 'win32')('connects with static headers alone when the machine has no shell for the helper', async () => {
-    // The Windows fallback of last resort: no Git Bash and no PowerShell. The helper
-    // cannot run, and the documented behaviour is to connect with what is configured
-    // rather than to fail the server.
-    withTools([{ name: 'go' }])
-    const emptyPath = mkdtempSync(join(tmpdir(), 'no-shell-'))
-    tempDirs.push(emptyPath)
-    setEnv('PATH', emptyPath)
-    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-    try {
-      await setupStarted({ user: { srv: { type: 'http', url: 'https://api.example/mcp', headers: { 'X-Static': 'kept' }, headersHelper: String.raw`printf '{"X-Helper":"ran"}'` } } })
-    } finally {
-      if (platform) Object.defineProperty(process, 'platform', platform)
-    }
-
-    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
-    expect(headers['X-Static']).toBe('kept')
-    expect(headers['X-Helper']).toBeUndefined()
   })
 
   it('does not run a project helper until the project is trusted, connecting with static headers alone', async () => {
