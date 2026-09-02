@@ -125,8 +125,7 @@ export function commandDirs(cwd: string, home: string, trusted: boolean): string
   // Claude scans every .claude/commands between cwd and the repository root, the
   // nearest winning an intra-project name clash: root-first with the nearest last.
   if (trusted) candidates.push(...ancestorDirs(cwd, path.join('.claude', 'commands')).reverse())
-  candidates.push(path.join(claudeConfigDir(home), 'commands'))
-  candidates.push(path.join(path.dirname(managedSettingsFile()), '.claude', 'commands'))
+  candidates.push(path.join(claudeConfigDir(home), 'commands'), path.join(path.dirname(managedSettingsFile()), '.claude', 'commands'))
   const dirs: string[] = []
   for (const dir of candidates) {
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)
