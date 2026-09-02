@@ -44,8 +44,16 @@ describe('httpFetch pins the connection to the validated address', () => {
   })
 
   it('surfaces a connection error when the pinned address refuses', async () => {
-    // 127.0.0.1:1 is not listening; the pin sends the socket there and it fails.
-    await expect(httpFetch(new URL('http://blocked.internal.test/'), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toThrow()
+    // A bind-then-closed port is guaranteed refusing on any machine, unlike a
+    // fixed port that a local server could be listening on. The specific code
+    // proves the pin carried the socket to the address (a DNS failure or URL
+    // error would reject with a different code and mean the pin was bypassed).
+    const server = createHttpServer()
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const deadPort = (server.address() as AddressInfo).port
+    await new Promise<void>((r) => server.close(() => r()))
+
+    await expect(httpFetch(new URL(`http://blocked.internal.test:${deadPort}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toMatchObject({ code: 'ECONNREFUSED' })
   })
 
   it.each([204, 205, 304])('returns a bodyless response for null-body status %i without crashing', async (status) => {

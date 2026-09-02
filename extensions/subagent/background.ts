@@ -76,6 +76,13 @@ export function activeBackgroundRuns(): number {
  * completing in the same millisecond still evict in their true finish order. */
 let finishSequence = 0
 
+/** Test seam: the registry is module state, so tests reset it between cases to
+ * stay order-independent. */
+export function resetBackgroundRuns(): void {
+  runs.clear()
+  finishSequence = 0
+}
+
 function evictFinishedRuns(): void {
   const finished = [...runs.values()].filter((run) => !run.live && run.state !== 'running')
   finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))

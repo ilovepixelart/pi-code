@@ -321,13 +321,16 @@ const withTools = (tools: ToolDef[]): void => {
   hoisted.control.listTools = async () => ({ tools })
 }
 
-/** Poll a condition to a deadline; for interleaving a step into an in-flight connect flow. */
-const waitFor = async (predicate: () => boolean, timeoutMs = 3000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('condition not met within timeout')
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
+/** Poll a condition to a deadline; for interleaving a step into an in-flight
+ * connect flow. Runs on the real clock, so the budget is generous for starved
+ * CI runners; vi.waitFor reports the elapsed wait on failure. */
+const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
+  await vi.waitFor(
+    () => {
+      if (!predicate()) throw new Error('condition not met within timeout')
+    },
+    { timeout: timeoutMs, interval: 10 },
+  )
 }
 
 const defaultControl = (): typeof hoisted.control => ({
