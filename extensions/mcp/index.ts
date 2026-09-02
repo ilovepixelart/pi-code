@@ -595,6 +595,34 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     status.clear()
   })
 
+  // Claude references MCP resources with @server:uri mentions, fetched into the
+  // conversation when referenced. Only mentions naming a connected server expand;
+  // anything else (an email, a handle) stays untouched.
+  pi.on('input', async (event) => {
+    if (event.source === 'extension') return
+    const mentions = [...event.text.matchAll(/@([A-Za-z0-9_-]+):(\S+)/g)].filter((match) => clients.has(match[1]))
+    if (mentions.length === 0) return
+    const sections: string[] = []
+    for (const match of mentions) {
+      const [, server, uri] = match
+      try {
+        const client = clients.get(server)
+        if (!client) continue
+        const wall = callTimeoutMs()
+        const result = await withTimeout(client.readResource({ uri }, callRequestOptions(wall, callTuning(server))), wall, `read ${uri}`)
+        const text = (result.contents as Array<{ text?: string }>)
+          .map((entry) => entry.text)
+          .filter((value): value is string => typeof value === 'string')
+          .join('\n')
+        if (text) sections.push(capForContext(`<mcp-resource server="${server}" uri="${uri}">\n${text}\n</mcp-resource>`))
+      } catch {
+        // An unreadable resource leaves the mention as plain text.
+      }
+    }
+    if (sections.length === 0) return
+    return { action: 'transform', text: `${event.text}\n\n${sections.join('\n\n')}` }
+  })
+
   pi.registerCommand('mcp', {
     description: 'Show MCP server status and tools',
     handler: async (_args, ctx) => {

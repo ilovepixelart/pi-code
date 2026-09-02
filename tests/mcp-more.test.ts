@@ -221,6 +221,7 @@ interface Harness {
   toolNames: () => string[]
   commandNames: () => string[]
   runSlash: (name: string, args: string, idle?: boolean) => Promise<void>
+  input: (text: string) => Promise<unknown>
 }
 
 const writeServers = (file: string, servers: Record<string, unknown>): void => {
@@ -297,6 +298,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     runSlash: async (name: string, args: string, idle = true) => {
       await commands.get(name)?.handler(args, makeCtx(true, true, idle))
     },
+    input: async (text: string) => handlers.get('input')?.({ text, source: 'interactive' }, makeCtx(true)),
   }
 }
 
@@ -2512,5 +2514,27 @@ describe('mcp tool-call auth retry', () => {
 
     await expect(harness.tools[0].execute('c1', {})).rejects.toThrow('expired')
     expect(calls).toBe(2)
+  })
+})
+
+describe('mcp resource mentions', () => {
+  it('inlines an @server:uri resource mention into the prompt', async () => {
+    // Claude: MCP resources are referenced with @ mentions and fetched into the
+    // conversation when referenced.
+    withTools([{ name: 'go' }])
+    hoisted.control.readResource = async (args) => ({ contents: [{ uri: args.uri, text: 'RESOURCE BODY' }] })
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+
+    const result = (await harness.input('analyze @srv:file:///spec.md please')) as { action: string; text: string } | undefined
+    expect(result?.action).toBe('transform')
+    expect(result?.text).toContain('analyze @srv:file:///spec.md please')
+    expect(result?.text).toContain('RESOURCE BODY')
+  })
+
+  it('leaves a mention for an unconnected server untouched', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+
+    expect(await harness.input('email me @nosuch:thing please')).toBeUndefined()
   })
 })

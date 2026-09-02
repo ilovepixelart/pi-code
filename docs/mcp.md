@@ -15,7 +15,7 @@ Managed `allowedMcpServers`/`deniedMcpServers` entries are typed and matched per
 ## Transports and auth
 
 - stdio, HTTP (streamable with SSE fallback), SSE, and WebSocket by `type`. WebSocket is url-only: any `headers`/`bearerToken`/`headersHelper` on a ws server is ignored with a warning (the SDK transport carries no headers; Claude documents header auth for ws, so authenticated ws servers cannot be used yet).
-- `${VAR}` / `${VAR:-default}` expansion in values.
+- `${VAR}` / `${VAR:-default}` expansion in values; `:-` follows shell semantics deliberately (substitutes when unset OR empty), a pinned reading of the doc's "if set" summary.
 - Stdio servers get `CLAUDE_PROJECT_DIR` (and `CLAUDE_PLUGIN_ROOT` for a plugin's server) in their environment; every client answers `roots/list` with the session's launch directory.
 - A `headersHelper` command's stdout JSON merges into the transport headers (http/sse). The helper runs with `CLAUDE_CODE_MCP_SERVER_NAME` and `CLAUDE_CODE_MCP_SERVER_URL` set (credential-expanded url parts shown as `REDACTED`); a project- or plugin-supplied helper runs without credential-named variables (`TOKEN`/`SECRET`/`PASSWORD`/`KEY`/`AUTH`).
 - Bearer tokens, or OAuth for remote servers: browser login on 401/403 after a confirm, CSRF-guarded loopback callback, tokens under `~/.pi/agent/mcp-oauth`, silent refresh later. A configured `Authorization` header (static, bearer, or helper-supplied) is the server's authentication: auth failures report as failed connections with no OAuth fallback.
@@ -28,4 +28,4 @@ Connect and per-call budgets honor `MCP_TIMEOUT` (30s default) and `MCP_TOOL_TIM
 
 ## Surface
 
-A connected server's prompts register as `/mcp__server__prompt` commands; resources are reachable through the `list_mcp_resources`/`read_mcp_resource` tools; tools refresh on `list_changed`. `/mcp` shows status.
+A connected server's prompts register as `/mcp__server__prompt` commands; resources are reachable through the `list_mcp_resources`/`read_mcp_resource` tools and via `@server:uri` mentions in a prompt, which fetch and inline the resource (mentions naming an unconnected server stay literal); tools refresh on `list_changed`. `/mcp` shows status.

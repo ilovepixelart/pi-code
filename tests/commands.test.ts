@@ -582,11 +582,13 @@ describe('plugin commands', () => {
     expect(s.sent[0]).toBe('Deploy to eu-west-1 as .')
   })
 
-  it('does not register commands from a plugin nobody enabled', async () => {
+  it('does not register commands from an explicitly disabled plugin', async () => {
     const cwd = tempDir()
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'dormant', '1.0.0')
     mkdirSync(join(root, 'commands'), { recursive: true })
     writeFileSync(join(root, 'commands', 'x.md'), 'body')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { dormant: false } }))
     const s = setup(cwd)
     await s.handlers.get('session_start')?.({}, s.ctx)
 

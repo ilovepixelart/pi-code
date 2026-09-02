@@ -71,13 +71,15 @@ describe('installedPlugins', () => {
     expect(plugins[0].dataDir).toBe(join(h, '.claude', 'plugins', 'data', 'my_plugin-my-market'))
   })
 
-  it('skips plugins that are not enabled or explicitly disabled', () => {
+  it('skips an explicitly disabled plugin while a no-entry install stays enabled by default', () => {
+    // Claude: defaultEnabled defaults to true, so an installed plugin with no
+    // enabledPlugins entry runs; an explicit false turns it off.
     const h = home()
     install(h, 'community', 'formatter', '1.0.0')
     install(h, 'community', 'linter', '1.0.0')
     enable(h, { linter: false })
 
-    expect(installedPlugins(h, [])).toEqual([])
+    expect(installedPlugins(h, []).map((p) => p.name)).toEqual(['formatter'])
   })
 
   it('honors marketplace-qualified enablement and picks the newest version', () => {
@@ -178,5 +180,43 @@ describe('installedPlugins cache', () => {
     utimesSync(manifest, future, future)
 
     expect(installedPlugins(h)[0].manifest.displayName).toBe('Edited')
+  })
+})
+
+describe('plugin default enablement and managed control', () => {
+  it('enables an installed plugin with no enabledPlugins entry, per defaultEnabled defaulting to true', () => {
+    const h = home()
+    install(h, 'community', 'fresh', '1.0.0')
+
+    expect(installedPlugins(h, []).some((p) => p.name === 'fresh')).toBe(true)
+  })
+
+  it('keeps a defaultEnabled: false plugin off until the user opts in', () => {
+    const h = home()
+    const dir = install(h, 'community', 'optin', '1.0.0')
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'optin', defaultEnabled: false }))
+
+    expect(installedPlugins(h, []).some((p) => p.name === 'optin')).toBe(false)
+    enable(h, { optin: true })
+    resetInstalledPluginsCache()
+    expect(installedPlugins(h, []).some((p) => p.name === 'optin')).toBe(true)
+  })
+
+  it('lets managed enabledPlugins force-enable and block over the user setting', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const h = home()
+    setManagedSettingsPath(join(h, 'managed-settings.json'))
+    try {
+      install(h, 'community', 'forced', '1.0.0')
+      install(h, 'community', 'blocked', '1.0.0')
+      enable(h, { forced: false, blocked: true })
+      writeFileSync(join(h, 'managed-settings.json'), JSON.stringify({ enabledPlugins: { forced: true, blocked: false } }))
+
+      const names = installedPlugins(h, []).map((p) => p.name)
+      expect(names).toContain('forced')
+      expect(names).not.toContain('blocked')
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
   })
 })

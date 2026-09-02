@@ -16,6 +16,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { claudeConfigDir } from './config-dir.js'
+import { readManagedSettings } from './managed-settings.js'
 
 export interface InstalledPlugin {
   name: string
@@ -169,16 +170,30 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   return plugins
 }
 
+/** The plugin's effective enablement per Claude's precedence: a managed
+ * enabledPlugins entry force-enables or blocks, then the user's setting, then the
+ * manifest's defaultEnabled, which defaults to true ("starts in an enabled state
+ * when the user has not set one"). */
+function pluginEnabled(qualified: string, pluginDir: string, enabled: Record<string, boolean>, manifest: Record<string, unknown>): boolean {
+  const managedEntry = readManagedSettings().enabledPlugins
+  if (managedEntry !== null && typeof managedEntry === 'object') {
+    const managedState = (managedEntry as Record<string, unknown>)[qualified] ?? (managedEntry as Record<string, unknown>)[pluginDir]
+    if (typeof managedState === 'boolean') return managedState
+  }
+  const userState = enabled[qualified] ?? enabled[pluginDir]
+  if (typeof userState === 'boolean') return userState
+  return manifest.defaultEnabled !== false
+}
+
 /** Resolve one cached plugin directory into an enabled InstalledPlugin, or null to skip
- * it: not turned on in settings, or no version directory on disk yet. */
+ * it: turned off by managed/user settings or defaultEnabled, or no version yet. */
 function resolvePlugin(home: string, cacheDir: string, marketplace: string, pluginDir: string, enabled: Record<string, boolean>, configs: Record<string, Record<string, string>>): InstalledPlugin | null {
   const qualified = `${pluginDir}@${marketplace}`
-  const state = enabled[qualified] ?? enabled[pluginDir]
-  if (state !== true) return null
   const version = newestVersion(listDirs(path.join(cacheDir, marketplace, pluginDir)))
   if (!version) return null
   const root = path.join(cacheDir, marketplace, pluginDir, version)
   const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
+  if (!pluginEnabled(qualified, pluginDir, enabled, manifest)) return null
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
   // Claude: "{id} is the plugin identifier with characters outside a-z, A-Z, 0-9,
   // _, and - replaced by -", one dash per character, underscores kept.
