@@ -32,6 +32,15 @@ describe('passesIfFilter', () => {
     expect(passesIfFilter(hookIf('Bash(rm *)'), target('bash', { command: 'echo $(date)' }))).toBe(false)
   })
 
+  it('matches an MCP tool name carrying hyphens or digits', () => {
+    // Claude's scoped MCP spelling is mcp__<server>__<tool>, and server names routinely
+    // carry hyphens and digits. A rule naming one parsed as unmatchable, so the hook
+    // never ran for the tool it was written for.
+    expect(passesIfFilter(hookIf('mcp__brave-search__search'), target('mcp__brave-search__search', {}))).toBe(true)
+    expect(passesIfFilter(hookIf('mcp__s3__put'), target('mcp__s3__put', {}))).toBe(true)
+    expect(passesIfFilter(hookIf('mcp__brave-search__search'), target('mcp__other__search', {}))).toBe(false)
+  })
+
   it('matches any alternative of a | rule', () => {
     expect(passesIfFilter(hookIf('Edit|Write'), target('write', {}))).toBe(true)
     expect(passesIfFilter(hookIf('Edit|Write'), target('read', {}))).toBe(false)

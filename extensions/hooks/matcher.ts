@@ -166,7 +166,9 @@ export interface IfFilterTarget {
 export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undefined): boolean {
   if (hook.if === undefined) return true
   if (target === undefined) return false
-  const parsed = /^([A-Za-z_|]+?)(?:\((.*)\))?$/.exec(hook.if.trim())
+  // Digits and hyphens are part of a tool name: an MCP tool is mcp__<server>__<tool> and
+  // server names carry both, so a stricter class silently matched nothing.
+  const parsed = /^([\w|-]+?)(?:\((.*)\))?$/.exec(hook.if.trim())
   if (!parsed) return false
   const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
   const ruleTools = new Set(parsed[1].split('|').map(fold))
