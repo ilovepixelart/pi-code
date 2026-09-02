@@ -11,7 +11,7 @@
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=ilovepixelart_pi-code&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=ilovepixelart_pi-code)
 
-Claude Code experience for the [pi](https://pi.dev) coding agent, in one package. Point pi at a project that already has a `.claude/` directory and it reads your existing config: rules, commands, skills, hooks, output styles, MCP servers, and agents. It also adds the Claude Code features pi lacks: a todo overlay, checkpoints, memory, web search, and subagents.
+Claude Code experience for the [pi](https://pi.dev) coding agent, in one package. Point pi at a project that already has a `.claude/` directory and it reads your existing config: rules, commands, skills, hooks, output styles, MCP servers, and agents. It also adds the Claude Code features pi lacks: a todo overlay, checkpoints, memory, web search, subagents, and goals.
 
 What a repository ships is treated as untrusted until you approve it: project MCP servers, hooks, agents, rules, output styles, commands and skills load only once you say yes.
 
@@ -53,9 +53,10 @@ Each topic links to its own doc with the full contract and any divergences from 
 - **[Statusline](docs/statusline.md)** — your Claude `statusLine` command with the documented stdin JSON.
 - **[WebSearch / WebFetch](docs/web.md)** — key-free search and SSRF-guarded fetch.
 - **[Claude plugins](docs/plugins.md)** — installed marketplace plugins: commands, agents, hooks, MCP servers, styles, skills.
+- **[Goal](docs/goal.md)**: `/goal <condition>` keeps the session working until a separate model check confirms the condition holds, with status, clear, block cap, background-work deferral, and resume.
 - **[Session extras](docs/session-extras.md)** — project trust, plan mode, todos, checkpoints/rewind, AskUserQuestion, notifications, think keywords, session titles, `/context`, `/init`.
 
-Slash commands: `/init`, `/context`, `/memory`, `/todos`, `/rewind`, `/tasks`, `/agents`, `/plan`, `/mcp`, `/hooks`, and `/output-style`, alongside your own `/dir:name` commands, `/skill:name` skills, `/plugin:name` plugin commands, and each connected server's `/mcp__server__prompt` prompts.
+Slash commands: `/init`, `/context`, `/goal`, `/memory`, `/todos`, `/rewind`, `/tasks`, `/agents`, `/plan`, `/mcp`, `/hooks`, and `/output-style`, alongside your own `/dir:name` commands, `/skill:name` skills, `/plugin:name` plugin commands, and each connected server's `/mcp__server__prompt` prompts.
 
 pi has no general permission system, so most of what Claude routes through a permission prompt maps to hard behavior here: `allowed-tools` restricts the turn's tool set instead of pre-approving calls, and a hook that times out on PreToolUse or UserPromptSubmit fails closed. A hook's `permissionDecision: "ask"` is the exception: it shows a confirm dialog and lets the call through when you approve (a headless run has no dialog, so it blocks). Where a Claude restriction cannot be expressed at all (an argument-scoped grant in an agent's `tools:`), the definition is rejected rather than widened.
 
