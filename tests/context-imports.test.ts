@@ -11,6 +11,7 @@ import contextImports, {
   collectImports,
   createImportBudget,
   expandHome,
+  externalImportTargets,
   IMPORT_TRUNCATED_MARKER,
   instructionsBlock,
   isExcludedPath,
@@ -1272,6 +1273,187 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
   })
 })
 
+describe('externalImportTargets', () => {
+  // Claude: "An import in a project-level memory file is external when its path
+  // resolves outside your working directory."
+  it('counts an import that leaves the project and ignores one that stays', () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'src')
+    mkdirSync(sub)
+    const file = join(sub, 'CLAUDE.md')
+    const content = ['@style.md', '@../shared/notes.md', '@~/.claude/personal.md', `@${join(tempDir(), 'elsewhere.md')}`].join('\n')
+
+    const targets = externalImportTargets([{ path: file, content }], hoisted.home, sub)
+
+    // Inside the repository, which is the boundary the project roots draw.
+    expect(targets).not.toContain(join(sub, 'style.md'))
+    expect(targets).not.toContain(join(repo, 'shared', 'notes.md'))
+    // Outside it.
+    expect(targets).toContain(join(hoisted.home, '.claude', 'personal.md'))
+    expect(targets).toHaveLength(2)
+  })
+
+  it('reports a target that does not exist, so the list does not depend on the disk', () => {
+    const repo = tempDir()
+    const file = join(repo, 'CLAUDE.md')
+    const absent = join(tempDir(), 'never-written.md')
+
+    expect(externalImportTargets([{ path: file, content: `@${absent}` }], hoisted.home, repo)).toEqual([absent])
+  })
+
+  it('lists each target once however many files name it', () => {
+    const repo = tempDir()
+    const shared = join(tempDir(), 'shared.md')
+    const files = [
+      { path: join(repo, 'CLAUDE.md'), content: `@${shared}` },
+      { path: join(repo, 'AGENTS.md'), content: `@${shared}` },
+    ]
+
+    expect(externalImportTargets(files, hoisted.home, repo)).toEqual([shared])
+  })
+
+  it('ignores an @ inside a code span or fence, like the import reader does', () => {
+    const repo = tempDir()
+    const outside = join(tempDir(), 'x.md')
+    const content = ['`@' + outside + '`', '```', '@' + outside, '```'].join('\n')
+
+    expect(externalImportTargets([{ path: join(repo, 'CLAUDE.md'), content }], hoisted.home, repo)).toEqual([])
+  })
+})
+
+describe('external import approval', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  /** A project CLAUDE.md importing one file from the user's home, Claude's documented
+   * worktree recipe, plus the native entry pi would have loaded for it. */
+  const projectImportingHome = (body = 'PROJECT RULES\n@~/.claude/my-project-instructions.md') => {
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const external = join(hoisted.home, '.claude', 'my-project-instructions.md')
+    writeFileSync(external, 'PERSONAL INSTRUCTIONS')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, body)
+    return { cwd, external, native: [{ path: claudeMd, content: body }] }
+  }
+
+  const ctxWith = (cwd: string, confirm: (title: string, body: string) => Promise<boolean>, asked: string[][]) => ({
+    cwd,
+    isProjectTrusted: () => true,
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      confirm: async (title: string, body: string) => {
+        asked.push([title, body])
+        return confirm(title, body)
+      },
+    },
+  })
+
+  // Claude: "The first time Claude Code encounters external imports in a project, it
+  // shows an approval dialog listing the files."
+  it('asks once, listing the external files, and loads them when allowed', async () => {
+    const { cwd, external, native } = projectImportingHome()
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0][1]).toContain(external)
+    expect(prompt).toContain('PERSONAL INSTRUCTIONS')
+  })
+
+  // Claude: "If you decline, the imports stay disabled and the dialog doesn't appear again."
+  it('keeps a refusal and never asks that project again', async () => {
+    const { cwd, native } = projectImportingHome()
+    const asked: string[][] = []
+
+    const first = wireWithBus()
+    await first.start(ctxWith(cwd, async () => false, asked))
+    const firstPrompt = await first.fire(cwd, native, assembledPrompt(native))
+    expect(firstPrompt).not.toContain('PERSONAL INSTRUCTIONS')
+
+    const second = wireWithBus()
+    await second.start(ctxWith(cwd, async () => true, asked))
+    const secondPrompt = await second.fire(cwd, native, assembledPrompt(native))
+
+    expect(asked).toHaveLength(1)
+    expect(secondPrompt).not.toContain('PERSONAL INSTRUCTIONS')
+  })
+
+  it('remembers an approval and never asks that project again', async () => {
+    const { cwd, native } = projectImportingHome()
+    const asked: string[][] = []
+
+    const first = wireWithBus()
+    await first.start(ctxWith(cwd, async () => true, asked))
+    await first.fire(cwd, native, assembledPrompt(native))
+
+    const second = wireWithBus()
+    await second.start(ctxWith(cwd, async () => false, asked))
+    const prompt = await second.fire(cwd, native, assembledPrompt(native))
+
+    expect(asked).toHaveLength(1)
+    expect(prompt).toContain('PERSONAL INSTRUCTIONS')
+  })
+
+  it('does not ask when no import reaches outside the project', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'style.md'), 'STYLE BODY')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, 'PROJECT RULES\n@style.md')
+    const native = [{ path: claudeMd, content: 'PROJECT RULES\n@style.md' }]
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(asked).toHaveLength(0)
+    expect(prompt).toContain('STYLE BODY')
+  })
+
+  it('refuses without asking when there is no interface to ask through', async () => {
+    // A headless run has no user to answer, and an unanswered question is not consent.
+    const { cwd, native } = projectImportingHome()
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start({ ...ctxWith(cwd, async () => true, asked), hasUI: false })
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(asked).toHaveLength(0)
+    expect(prompt).not.toContain('PERSONAL INSTRUCTIONS')
+  })
+
+  it('does not widen what a user-scope file may already read', async () => {
+    // The user CLAUDE.md loads its own imports with no dialog either way; approving a
+    // project must not turn it into a reader of the whole filesystem.
+    const { cwd, native } = projectImportingHome()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'elsewhere.md'), 'ELSEWHERE BODY')
+    writeFileSync(join(hoisted.home, '.claude', 'CLAUDE.md'), `@${join(outside, 'elsewhere.md')}`)
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('PERSONAL INSTRUCTIONS')
+    expect(prompt).not.toContain('ELSEWHERE BODY')
+  })
+})
+
 describe('imports refused for resolving outside the project', () => {
   let savedAgentDir: string | undefined
   beforeEach(() => {
@@ -1281,6 +1463,15 @@ describe('imports refused for resolving outside the project', () => {
   afterEach(() => {
     if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  /** Trusts the project but declines its external imports, so the refusal path runs.
+   * The two dialogs are told apart by title. */
+  const decliningExternal = (cwd: string) => ({
+    cwd,
+    isProjectTrusted: () => true,
+    hasUI: true,
+    ui: { notify: () => {}, confirm: async (title: string) => !title.startsWith('Load imports from outside') },
   })
 
   // Claude shows an approval dialog listing external imports; pi-code refuses them.
@@ -1296,7 +1487,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: `PROJECT RULES\n@${secret}` }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain('## Imports not loaded (@)')
@@ -1317,7 +1508,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: `@${shared}` }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain('## Imports not loaded (@)')
@@ -1340,7 +1531,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: body }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain(`\n- ${present}`)
@@ -1360,7 +1551,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: '@link.md' }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain(`\n- ${link}`)
@@ -1382,7 +1573,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: `@${shared}` }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain('SHARED BODY')
@@ -1401,7 +1592,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: `@${secret}` }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).not.toContain('## Imports not loaded (@)')
@@ -1415,7 +1606,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: 'PROJECT RULES\n@style.md' }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).toContain('STYLE BODY')
@@ -1430,7 +1621,7 @@ describe('imports refused for resolving outside the project', () => {
     const native = [{ path: claudeMd, content: 'PROJECT RULES\n@nope.md' }]
 
     const wired = wireWithBus()
-    await wired.start(approvingCtx(cwd))
+    await wired.start(decliningExternal(cwd))
     const prompt = await wired.fire(cwd, native, assembledPrompt(native))
 
     expect(prompt).not.toContain('## Imports not loaded (@)')
