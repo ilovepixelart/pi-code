@@ -72,12 +72,13 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
 import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
+import { sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
-import { fenceMarker, stripBlockComments } from './internal/strip-comments.js'
+import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
@@ -145,16 +146,14 @@ export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
 function importTargets(content: string): string[] {
   const targets: string[] = []
-  // A fence only closes with the character that opened it: a backtick-fenced
-  // example may legitimately contain tilde-fence lines, and vice versa.
-  let fence: string | null = null
+  // CommonMark fences: closed only by the same character in a run at least as long
+  // as the opener, so a backtick example may hold tilde lines or shorter fences.
+  let fence: Fence | null = null
   for (const line of content.split('\n')) {
-    const marker = fenceMarker(line.trimStart())
-    if (marker !== null && (fence === null || fence === marker)) {
-      fence = fence === null ? marker : null
-      continue
-    }
-    if (fence !== null) continue
+    const trimmed = line.trimStart()
+    const step = stepFence(fence, trimmed, fenceMarker(trimmed))
+    fence = step.fence
+    if (step.fenced) continue
     // Backreference so a multi-backtick span (``literal `@x` backticks``) strips whole.
     const withoutSpans = line.replace(/(`+)[^`]*?\1/g, '')
     for (const match of withoutSpans.matchAll(/(^|\s)@(\S+)/g)) targets.push(match[2])
@@ -222,8 +221,10 @@ function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: 
     const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded)
     if (!file) continue
     scan.budget.files -= 1
-    const kept = file.body.slice(0, scan.budget.bytes)
-    scan.budget.bytes -= kept.length
+    // The budget is bytes: a string slice counts UTF-16 units and lets CJK text through
+    // at three times the budget without ever reaching the truncation marker.
+    const kept = sliceBytes(file.body, scan.budget.bytes)
+    scan.budget.bytes -= Buffer.byteLength(kept)
     const body = kept.length < file.body.length ? `${kept.trim()}\n${IMPORT_TRUNCATED_MARKER}` : kept.trim()
     // Comments are stripped before the scan for further imports, so a
     // commented-out @import stays dead at every depth, matching the top level

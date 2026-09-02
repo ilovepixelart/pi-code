@@ -179,7 +179,7 @@ const setup = (cwd: string, trusted = true) => {
     setIdle: (value: boolean) => {
       idle = value
     },
-    failExec: (result: { stderr: string; code: number }) => Object.assign(execResult, result),
+    failExec: (result: { stderr: string; code: number; killed?: boolean }) => Object.assign(execResult, result),
   }
 }
 
@@ -647,6 +647,20 @@ describe('claude variables and skill frontmatter wiring', () => {
 
     expect(s.sent).toEqual([])
     expect(s.notices.some((n) => n.includes('broken-cmd'))).toBe(true)
+  })
+
+  it('aborts the invocation when a bash span is killed at its timeout, even with exit code 0', async () => {
+    // pi reports a timeout kill as killed:true with code 0 (a signal death has no exit
+    // code); Claude kills the command at the Bash timeout and that failure aborts the skill.
+    const cwd = tempDir()
+    writeCommand(cwd, 'f.md', 'status: !`sleep 999`')
+    const s = setup(cwd)
+    s.failExec({ stderr: '', code: 0, killed: true })
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('f')?.handler('', s.ctx)
+
+    expect(s.sent).toEqual([])
+    expect(s.notices.some((n) => n.includes('sleep 999') && n.includes('timed out'))).toBe(true)
   })
 
   it('runs bash spans with merged stderr under the Bash tool budget', async () => {

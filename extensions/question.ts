@@ -179,7 +179,7 @@ export default function question(pi: ExtensionAPI) {
 
     renderCall(args, theme, _context) {
       const multi = args.multiSelect === true
-      const heading = args.header ? `[${args.header}] ` : ''
+      const heading = args.header ? `[${shortHeader(String(args.header))}] ` : ''
       let text = theme.fg('toolTitle', theme.bold('question ')) + theme.fg('muted', heading + String(args.question ?? ''))
       const opts = Array.isArray(args.options) ? args.options : []
       if (opts.length) {

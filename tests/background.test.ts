@@ -5,7 +5,21 @@ import { dirname, join } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, createJsonlOutputParser, formatStatus, MAX_FINISHED_RUNS, parseFinalOutputFromJsonl, resetBackgroundRuns, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
+import {
+  activeBackgroundRuns,
+  type BackgroundRun,
+  type BackgroundSpawn,
+  backgroundStatusText,
+  cancelAllBackgroundRuns,
+  cancelBackgroundRun,
+  createJsonlOutputParser,
+  formatStatus,
+  MAX_FINISHED_RUNS,
+  parseFinalOutputFromJsonl,
+  resetBackgroundRuns,
+  resumeBackgroundRun,
+  startBackgroundRun,
+} from '../extensions/subagent/background.ts'
 
 describe('createJsonlOutputParser onTurn', () => {
   const asst = (text: string) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })
@@ -73,6 +87,9 @@ beforeEach(() => {
 // A real cwd: resume refuses a working directory that no longer exists (a
 // cleaned-up isolation worktree), so the fixture must point at one that does.
 const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ command: 'pi', args: ['--mode', 'json', 'Task: t'], cwd: tmpdir(), ...over })
+
+/** One assistant turn on the child's JSONL stdout. */
+const assistantTurn = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
 
 describe('background run lifecycle', () => {
   it('reports the final text of a stdout stream whose chunks split lines', () => {
@@ -174,6 +191,76 @@ describe('background run lifecycle', () => {
     }
     expect(resumeBackgroundRun(finished!.id, 'again', () => {})).toBe('at-capacity')
     for (const child of live) child.emit('close', 0)
+  })
+
+  it('reports zero turns when a resume fails to spawn', () => {
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn one'))
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn two'))
+    children.at(-1)!.emit('close', 0)
+
+    // The turn count belongs to the child that ran; a resume that never produced a
+    // turn must not report the previous run's two.
+    let failed: BackgroundRun | undefined
+    expect(
+      resumeBackgroundRun(id!, 'two', (run) => {
+        failed = run
+      }),
+    ).toBe('resumed')
+    children.at(-1)!.emit('error', new Error('spawn pi ENOENT'))
+
+    expect(failed?.state).toBe('failed')
+    expect(failed?.turns).toBe(0)
+  })
+
+  it('clears the partial marker when a capped run is resumed and finishes cleanly', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ maxTurns: 2 }), () => {})
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn one'))
+    children.at(-1)!.stdout.emit('data', assistantTurn('turn two'))
+    children.at(-1)!.emit('close', null)
+
+    let done: BackgroundRun | undefined
+    expect(
+      resumeBackgroundRun(id!, 'two', (run) => {
+        done = run
+      }),
+    ).toBe('resumed')
+    children.at(-1)!.stdout.emit('data', assistantTurn('again'))
+    children.at(-1)!.emit('close', 0)
+
+    expect(done?.partial).toBeFalsy()
+    expect(done?.turns).toBe(1)
+  })
+
+  it('removes the rebuilt prompt dir when the run is evicted from the registry', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)![1] as string[]
+    const promptDir = dirname(args[args.indexOf('--system-prompt') + 1])
+    children.at(-1)!.emit('close', 0)
+    expect(existsSync(promptDir)).toBe(true)
+
+    // The rebuilt prompt is kept for further resumes, so it lives exactly as long as
+    // the run stays resumable: eviction from the registry must take it along.
+    for (let i = 0; i <= MAX_FINISHED_RUNS; i++) {
+      startBackgroundRun('scout', `filler ${i}`, spec(), () => {})
+      children.at(-1)!.emit('close', 0)
+    }
+
+    expect(existsSync(promptDir)).toBe(false)
+  })
+
+  it('removes rebuilt prompt dirs when every run is cancelled at quit', () => {
+    const id = startBackgroundRun('scout', 'one', spec({ args: ['--system-prompt', '/nonexistent/prompt.md', 'Task: one'], promptBody: 'PERSONA' }), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id!, 'two', () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)![1] as string[]
+    const promptDir = dirname(args[args.indexOf('--system-prompt') + 1])
+
+    cancelAllBackgroundRuns()
+
+    expect(existsSync(promptDir)).toBe(false)
   })
 
   it('rebuilds the prompt file once and reuses it across resumes', () => {

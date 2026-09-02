@@ -21,6 +21,12 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter('Just rules.')).toEqual({ paths: [], body: 'Just rules.' })
   })
 
+  it('detects frontmatter behind a UTF-8 byte order mark', () => {
+    // Windows editors prepend one; without this the whole header leaked into the body
+    // and the rule lost its path scope.
+    expect(parseFrontmatter('\uFEFF---\npaths: ["src/**"]\n---\nBody')).toEqual({ paths: ['src/**'], body: 'Body' })
+  })
+
   it('parses a block list of paths and strips the frontmatter from the body', () => {
     const md = '---\npaths:\n  - "src/**/*.ts"\n  - "**/*.test.ts"\n---\nUse strict types.'
     expect(parseFrontmatter(md)).toEqual({ paths: ['src/**/*.ts', '**/*.test.ts'], body: 'Use strict types.' })

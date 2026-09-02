@@ -13,8 +13,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
-
 import { splitSegments } from './shell-split.js'
+import { type Fence, fenceMarker, stepFence } from './strip-comments.js'
 
 /** The pi file tools a Claude path rule can govern. */
 export type PathRuleTool = 'read' | 'edit' | 'write'
@@ -421,7 +421,7 @@ export function discoverCommandFiles(root: string): DiscoveredCommand[] {
   return found
 }
 
-export type CommandExec = (command: string) => Promise<{ stdout: string; stderr: string; code: number }>
+export type CommandExec = (command: string) => Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>
 
 /** PowerShell single-quote escaping: inside a '...' literal the only special
  * characters are the quote delimiters themselves, written doubled. PowerShell's
@@ -511,20 +511,27 @@ interface FenceBlock {
 }
 
 /** Fenced blocks of a body: Claude's dynamic syntax is literal text inside a plain
- * fence, while a ```! fence is itself a placeholder that executes. */
+ * fence, while a ```! fence is itself a placeholder that executes. Fences follow
+ * CommonMark: any indentation, closed only by the opener's character in a run at
+ * least as long, so a tilde line or a shorter fence inside stays content. */
 function fenceBlocks(body: string): FenceBlock[] {
   const blocks: FenceBlock[] = []
-  const fence = /^(```|~~~)([^\n]*)$/gm
+  let fence: Fence | null = null
   let open: { index: number; exec: boolean; contentStart: number } | undefined
-  let match = fence.exec(body)
-  while (match !== null) {
-    if (open === undefined) {
-      open = { index: match.index, exec: match[1] === '```' && match[2].trim() === '!', contentStart: match.index + match[0].length + 1 }
-    } else {
-      blocks.push({ start: open.index, end: match.index + match[0].length, exec: open.exec, content: body.slice(Math.min(open.contentStart, match.index), match.index).replace(/\n$/, '') })
+  let offset = 0
+  for (const line of body.split('\n')) {
+    const trimmed = line.trimStart()
+    const step = stepFence(fence, trimmed, fenceMarker(trimmed))
+    const lineEnd = offset + line.length
+    if (fence === null && step.fence !== null) {
+      // Only the exact, unindented ```! opener executes, as Claude documents it.
+      open = { index: offset, exec: line.startsWith('```') && step.fence.length === 3 && trimmed.slice(3).trim() === '!', contentStart: lineEnd + 1 }
+    } else if (fence !== null && step.fence === null && open !== undefined) {
+      blocks.push({ start: open.index, end: lineEnd, exec: open.exec, content: body.slice(Math.min(open.contentStart, offset), offset).replace(/\n$/, '') })
       open = undefined
     }
-    match = fence.exec(body)
+    fence = step.fence
+    offset = lineEnd + 1
   }
   // An unterminated fence protects to the end of the body rather than executing.
   if (open !== undefined) blocks.push({ start: open.index, end: body.length, exec: false, content: '' })
@@ -563,6 +570,10 @@ export function benignExitOne(command: string, shell: SpanShell = 'bash'): boole
  * documents: the model never sees a half-expanded body. */
 async function runSpan(exec: CommandExec, command: string, pattern: string, shell: SpanShell): Promise<string> {
   const result = await exec(command)
+  // A timeout kill arrives as killed:true with code 0 (a signal death has no exit code),
+  // so the code alone would paste the partial output as a success. Claude kills a span
+  // at the Bash timeout and that failure aborts the invocation.
+  if (result.killed) throw new Error(`Shell command timed out for pattern "${pattern}"`)
   if (result.code !== 0 && !(result.code === 1 && benignExitOne(command, shell))) {
     throw new Error(`Shell command failed for pattern "${pattern}"\n[stderr]\n${(result.stderr || result.stdout).trim()}`)
   }

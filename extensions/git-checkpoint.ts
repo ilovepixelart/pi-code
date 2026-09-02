@@ -194,6 +194,32 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
     // Written on every start, so repos that predate the sidecar pick it up too.
     rememberWorkTree(shadowDir, ctx.cwd)
+    await mirrorLocalExcludes(ctx.cwd)
+  }
+
+  /** git reads ignore rules from the tree's .gitignore files, the user's global excludes,
+   * and $GIT_DIR/info/exclude. The shadow is the GIT_DIR here, so the repo's own
+   * .git/info/exclude (where secrets and scratch that must never be committed live)
+   * would be snapshotted and restored. Mirror it into the shadow on every start; the
+   * global excludes stay untouched (core.excludesFile is single-valued, so pointing it
+   * at the repo file would replace them). */
+  async function mirrorLocalExcludes(cwd: string): Promise<void> {
+    if (!shadowDir) return
+    // Resolved through git so a linked worktree maps to its common dir; outside a repo
+    // git exits 128 and there is nothing to mirror.
+    const located = await pi.exec('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd })
+    const target = path.join(shadowDir, 'info', 'exclude')
+    try {
+      const source = located.code === 0 ? path.resolve(cwd, located.stdout.trim()) : undefined
+      if (source && fs.existsSync(source)) {
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        fs.copyFileSync(source, target)
+      } else {
+        fs.rmSync(target, { force: true })
+      }
+    } catch {
+      // A failed mirror only means local excludes are not honored this session.
+    }
   }
 
   /** `checkout -f <ref> -- .` errors when the ref's tree holds no files, so an empty

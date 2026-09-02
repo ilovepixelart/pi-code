@@ -273,6 +273,29 @@ describe('collectImports', () => {
     expect(budget.bytes).toBe(MAX_IMPORT_BYTES)
   })
 
+  it('charges the import budget in bytes, not UTF-16 units', () => {
+    // MAX_IMPORT_BYTES is a byte budget; slicing by string length let CJK text through at
+    // three times the budget and never appended the truncation marker.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'cjk.md'), '漢'.repeat(100))
+    const budget = createImportBudget()
+    budget.bytes = 100
+
+    const out = collectImports('@cjk.md', dir, dir, [dir], new Set(), { budget })
+
+    expect(out.map((f) => f.body)).toEqual([`${'漢'.repeat(33)}\n${IMPORT_TRUNCATED_MARKER}`])
+    expect(budget.bytes).toBe(1)
+  })
+
+  it('keeps a fence open across a shorter same-character fence line', () => {
+    // CommonMark: a closer must be at least as long as its opener, so the classic
+    // three-backtick block quoted inside a four-backtick one is content.
+    const dir = tempDir()
+    writeFileSync(join(dir, 'a.md'), '````\n```\n@b.md\n````')
+    writeFileSync(join(dir, 'b.md'), 'B')
+    expect(collectImports('@a.md', dir, dir, [dir], new Set()).map((f) => f.body)).toEqual(['````\n```\n@b.md\n````'])
+  })
+
   it('is cycle-safe', () => {
     const dir = tempDir()
     writeFileSync(join(dir, 'a.md'), '@b.md')

@@ -68,7 +68,8 @@ function parsePaths(frontmatter: string): string[] {
 
 /** Split YAML-ish frontmatter off the front of a rule file, extracting `paths`. */
 export function parseFrontmatter(content: string): Frontmatter {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content)
+  // A leading byte order mark (Windows editors add one) is part of the header, not the body.
+  const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content)
   if (!match) return { paths: [], body: content }
   return { paths: parsePaths(match[1]), body: content.slice(match[0].length) }
 }

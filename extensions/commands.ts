@@ -197,7 +197,7 @@ function commandVars(ctx: { cwd: string }, filePath: string, plugin?: CommandPlu
 
 /** The exec seam expandCommand runs spans through; pi itself satisfies it. */
 interface SpanRunner {
-  exec(command: string, args: string[], options?: { cwd?: string; timeout?: number }): Promise<{ stdout: string; stderr: string; code: number }>
+  exec(command: string, args: string[], options?: { cwd?: string; timeout?: number }): Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>
 }
 
 /**
@@ -231,7 +231,7 @@ export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, a
           // pwsh cannot merge a native command's stderr in-script (spanExec sets
           // mergeStreams), so it is appended here; the sh script merges via 2>&1.
           const stdout = run.mergeStreams ? result.stdout + result.stderr : result.stdout
-          return { stdout, stderr: result.stderr, code: result.code }
+          return { stdout, stderr: result.stderr, code: result.code, killed: result.killed }
         }
       : async () => ({ stdout: SHELL_DISABLED_PLACEHOLDER, stderr: '', code: 0 })
   let expanded = await expandDynamicContent(withVars, ctx.cwd, exec, parsed.shell === 'powershell' ? 'powershell' : 'bash')

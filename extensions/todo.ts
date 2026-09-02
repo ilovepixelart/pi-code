@@ -387,8 +387,12 @@ export default function todoExtension(pi: ExtensionAPI) {
     content: [{ type: 'text' as const, text }],
     details,
   })
-  const ok = (action: TodoAction, text: string) => toolMessage(text, { action, todos: [...todos], nextId })
-  const fail = (action: TodoAction, error: string) => toolMessage(`Error: ${error}`, { action, todos: [...todos], nextId, error })
+  // pi keeps a result's details by reference in the live session, and start/complete
+  // mutate the todo objects in place, so each result carries its own copies: without
+  // them a rewind replays, and the TUI re-renders, today's statuses on earlier calls.
+  const snapshot = () => todos.map((t) => ({ ...t }))
+  const ok = (action: TodoAction, text: string) => toolMessage(text, { action, todos: snapshot(), nextId })
+  const fail = (action: TodoAction, error: string) => toolMessage(`Error: ${error}`, { action, todos: snapshot(), nextId, error })
 
   const handleAdd = (params: TodoParamsType) => {
     if (!params.text) return fail('add', 'text required for add')
