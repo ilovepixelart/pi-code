@@ -281,7 +281,7 @@ if wait_for 'Context usage' 15; then ok "context: /context renders usage"; else 
 # as a follow-up. Escape cancels the model turn so the suite does not pay for
 # a full codebase analysis.
 send "/init" Enter
-if wait_for 'AGENTS.md' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
+if wait_for 'analyze this codebase' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
 send Escape
 sleep 2
 
