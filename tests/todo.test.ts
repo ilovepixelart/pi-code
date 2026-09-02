@@ -85,6 +85,16 @@ describe('todo tool status machine', () => {
     expect(second.content[0].text).toContain('Added todo #2')
   })
 
+  it('keeps the statuses a result was created with when later calls change the list', async () => {
+    // pi stores a tool result's details by reference, so a result must hold its own
+    // snapshot: start/complete mutate the live todo objects.
+    const { call } = setup()
+    const added = await call({ action: 'add', text: 'a' })
+    await call({ action: 'start', id: 1 })
+    await call({ action: 'complete', id: 1 })
+    expect(added.details.todos).toEqual([{ id: 1, text: 'a', status: 'pending', activeForm: undefined }])
+  })
+
   it('rejects add without text', async () => {
     const result = await call({ action: 'add' })
     expect(result.details.error).toBe('text required for add')

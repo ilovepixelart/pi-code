@@ -197,6 +197,16 @@ describe('session replay', () => {
     expect((await h.call({ action: 'list' })).content[0].text).toBe('[ ] #1: kept')
   })
 
+  it('replays the statuses recorded at an entry rather than later changes to the same objects', async () => {
+    const h = setup()
+    const first = await h.call({ action: 'add', text: 'a' })
+    await h.call({ action: 'start', id: 1 })
+    await h.call({ action: 'complete', id: 1 })
+    // A rewind to the first call replays the details object pi kept by reference.
+    await h.fire('session_tree', {}, branchCtx([{ type: 'message', message: { role: 'toolResult', toolName: 'todo', details: first.details } }], fakeUI()))
+    expect((await h.call({ action: 'list' })).content[0].text).toBe('[ ] #1: a')
+  })
+
   it('replaces existing todos on a session_tree replay', async () => {
     const h = setup()
     await h.call({ action: 'add', text: 'local' })
