@@ -343,7 +343,9 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     if (attachTargets.length === 0) return
     if (event.isError) return
     if (event.toolName !== 'read' && event.toolName !== 'edit' && event.toolName !== 'write') return
-    const rel = (event.input as { path?: unknown } | undefined)?.path
+    const input = event.input as { path?: unknown; file_path?: unknown } | undefined
+    // pi's edit and write tools accept file_path as an alias for path.
+    const rel = typeof input?.path === 'string' ? input.path : input?.file_path
     if (typeof rel !== 'string' || rel.length === 0) return
     // Realpath both sides (roots canonicalise at session_start): a tool reporting
     // the resolved real path in a symlinked checkout must still match.
