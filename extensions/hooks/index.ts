@@ -97,6 +97,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
+import { resolveModelOverride } from '../internal/model-lookup.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
@@ -230,13 +231,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   }
   /** Claude's prompt-hook `model` override, resolved against the models this user
    * can run (exact id first, then a substring match); the session model otherwise. */
-  const resolveHookModel = (ctx: ExtensionContext, override: string | undefined): ExtensionContext['model'] => {
-    if (!override) return ctx.model
-    const available = (ctx as { modelRegistry?: { getAvailable?: () => ReadonlyArray<{ id: string; name?: string }> } }).modelRegistry?.getAvailable?.() ?? []
-    const needle = override.toLowerCase()
-    const match = available.find((model) => model.id.toLowerCase() === needle) ?? available.find((model) => model.id.toLowerCase().includes(needle) || model.name?.toLowerCase().includes(needle))
-    return (match as ExtensionContext['model']) ?? ctx.model
-  }
+  const resolveHookModel = (ctx: ExtensionContext, override: string | undefined): ExtensionContext['model'] => resolveModelOverride(ctx, override)
 
   /** Kills for background hooks still running; Claude kills async hooks at teardown,
    * so session_shutdown reaps anything left rather than let a hung hook pin the
