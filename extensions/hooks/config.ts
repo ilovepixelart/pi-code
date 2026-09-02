@@ -7,7 +7,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { readManagedSettings } from '../internal/managed-settings.js'
-import { type InstalledPlugin, substitutePluginVars } from '../internal/plugins.js'
+import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
 
 export interface HookCommand {
@@ -275,7 +275,8 @@ export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[],
       mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(JSON.stringify({ hooks: declared }), inlineSource), plugin, jsonEscape), inlineSource, sources, `plugin:${plugin.name}`)
       continue
     }
-    const file = path.resolve(plugin.root, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
+    const file = pluginComponentPath(plugin, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
+    if (file === undefined) continue
     try {
       mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(fs.readFileSync(file, 'utf-8'), file), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`)
     } catch {

@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -66,6 +66,23 @@ describe('skillDirs', () => {
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
     expect(skillDirs(cwd, home, false)).toEqual([join(root, 'skills')])
+  })
+
+  it('skips a plugin skills directory declared outside the plugin root', () => {
+    const cwd = tempDir('cs-proj-')
+    const home = tempDir('cs-home-')
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    // A real directory outside the plugin: without the guard it would be scanned, since
+    // the only other thing standing between a declared path and the loader is existence.
+    const outside = join(home, 'outside-skills')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: relative(root, outside) }))
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+
+    expect(skillDirs(cwd, home, false)).toEqual([])
   })
 
   it('finds project skills at the repository root from a subdirectory session', () => {

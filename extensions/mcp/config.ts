@@ -8,7 +8,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import type { OAuthServerConfig } from '../internal/mcp-oauth.js'
-import type { InstalledPlugin } from '../internal/plugins.js'
+import { type InstalledPlugin, pluginComponentPath } from '../internal/plugins.js'
 import { findNearestFile } from '../internal/project-root.js'
 
 export interface StdioServerConfig {
@@ -156,7 +156,9 @@ function rawPluginServerEntries(plugin: InstalledPlugin): Record<string, unknown
   const servers: Record<string, unknown> = {}
   for (const entry of paths) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(path.resolve(plugin.root, entry), 'utf-8'))
+      const file = pluginComponentPath(plugin, entry)
+      if (file === undefined) continue
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
       Object.assign(servers, parsed.mcpServers ?? {})
     } catch {
       // Malformed or missing JSON contributes no entries.

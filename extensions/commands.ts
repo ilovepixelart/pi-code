@@ -50,7 +50,7 @@ import { claudeConfigDir } from './internal/config-dir.js'
 import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
-import { type InstalledPlugin, installedPlugins } from './internal/plugins.js'
+import { type InstalledPlugin, installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
@@ -146,7 +146,7 @@ function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] {
   const found: DiscoveredCommand[] = []
   for (const plugin of plugins) {
     const declared = plugin.manifest.commands
-    const dirs = (Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'commands']).map((entry) => path.resolve(plugin.root, String(entry)))
+    const dirs = (Array.isArray(declared) ? declared : [typeof declared === 'string' ? declared : 'commands']).map((entry) => pluginComponentPath(plugin, String(entry))).filter((dir): dir is string => dir !== undefined)
     for (const dir of dirs) {
       for (const command of discoverCommandFiles(dir)) {
         found.push({ name: `${plugin.name}:${command.name}`, filePath: command.filePath, plugin: { root: plugin.root, dataDir: plugin.dataDir, ...(plugin.userConfig ? { userConfig: plugin.userConfig } : {}) } })

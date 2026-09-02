@@ -16,7 +16,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync }
 })
 
-import { installedPlugins, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
+import { installedPlugins, pluginComponentPath, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
 
 describe('substitutePluginVars user_config', () => {
   const plugin = { name: 'p', root: '/r', dataDir: '/d', manifest: {}, userConfig: { token: 'secret-x', region: 'eu' } }
@@ -44,6 +44,25 @@ const enable = (root: string, entries: Record<string, boolean>): void => {
   mkdirSync(join(root, '.claude'), { recursive: true })
   writeFileSync(join(root, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: entries }))
 }
+
+describe('pluginComponentPath', () => {
+  // Claude: a plugin's component path "rejects a component path that resolves outside the
+  // plugin root, such as ../shared-utils".
+  const root = join(tmpdir(), 'plugins', 'p')
+  const plugin = { name: 'p', root, dataDir: join(tmpdir(), 'd'), manifest: {} }
+
+  it('resolves a declared path inside the plugin root', () => {
+    expect(pluginComponentPath(plugin, 'skills')).toBe(join(root, 'skills'))
+    expect(pluginComponentPath(plugin, 'nested/dir')).toBe(join(root, 'nested', 'dir'))
+    expect(pluginComponentPath(plugin, './commands')).toBe(join(root, 'commands'))
+  })
+
+  it('rejects a declared path that escapes the plugin root', () => {
+    expect(pluginComponentPath(plugin, '../shared-utils')).toBeUndefined()
+    expect(pluginComponentPath(plugin, 'skills/../../elsewhere')).toBeUndefined()
+    expect(pluginComponentPath(plugin, join(tmpdir(), 'elsewhere'))).toBeUndefined()
+  })
+})
 
 describe('installedPlugins', () => {
   it('loads an enabled cached plugin with its root and data dir', () => {
