@@ -539,7 +539,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
         `  Auto memory: ${isEnabled ? 'on' : 'off'}`,
         `  Store:       ${store}`,
         `  Index:       ${path.join(store, INDEX_FILE)}`,
-        `  User memory (CLAUDE.md):    ${path.join(home, '.claude', 'CLAUDE.md')}`,
+        // The loader reads it from the configured directory, so CLAUDE_CONFIG_DIR moves it.
+        `  User memory (CLAUDE.md):    ${path.join(claudeConfigDir(home), 'CLAUDE.md')}`,
         `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
         // Claude's /memory lists every documented location, including files that
         // do not exist yet.
