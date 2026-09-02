@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import contextImports from '../extensions/context-imports.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
 /**
@@ -2543,5 +2544,37 @@ describe('settings watching', () => {
     } finally {
       delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
     }
+  })
+})
+
+describe('mcp_tool hook dispatch', () => {
+  afterEach(() => setMcpToolCaller(undefined))
+
+  it('routes a configured mcp_tool hook through the dispatcher to the caller seam', async () => {
+    // The type === 'mcp_tool' dispatch arm had no end-to-end path: config ->
+    // matcher -> boundRunner -> runMcpToolHook -> the seam, with the tool's
+    // verdict feeding the decision like any command hook's stdout.
+    const calls: Array<[string, string, Record<string, unknown>]> = []
+    setMcpToolCaller(async (server, tool, input) => {
+      calls.push([server, tool, input])
+      return { text: JSON.stringify({ decision: 'block', reason: 'mcp guard says no' }), isError: false }
+    })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 'guard-srv', tool: 'vet', input: { command: '${tool_input.command}' } }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const decision = (await ext.toolCall('bash', { command: 'rm -rf /' })) as { block: boolean; reason?: string }
+
+    expect(calls).toEqual([['guard-srv', 'vet', { command: 'rm -rf /' }]])
+    expect(decision?.block).toBe(true)
+    expect(decision?.reason).toContain('mcp guard says no')
+  })
+
+  it('lets the tool proceed when the mcp_tool hook returns no verdict', async () => {
+    setMcpToolCaller(async () => ({ text: 'all fine', isError: false }))
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 'guard-srv', tool: 'vet' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
   })
 })
