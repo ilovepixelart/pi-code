@@ -38,6 +38,9 @@ describe('matchesBashRules', () => {
   it('fails closed on substitution, which can hide any command', () => {
     expect(matchesBashRules('git add $(rm -rf /)', ['git add:*'])).toBe(false)
     expect(matchesBashRules('git add `id`', ['git add:*'])).toBe(false)
+    // Process substitution runs the inner command too, in both directions.
+    expect(matchesBashRules('git add <(id)', ['git add:*'])).toBe(false)
+    expect(matchesBashRules('git add >(id)', ['git add:*'])).toBe(false)
   })
 
   it('fails closed on an unbalanced quote and on an empty command', () => {
