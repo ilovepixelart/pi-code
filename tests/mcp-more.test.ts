@@ -2551,7 +2551,12 @@ describe('the registered mcp_tool caller (cross-extension joint)', () => {
     await setupStarted({ user: { db: { command: 'db-server' } } })
     hoisted.control.callTool = async (params: Record<string, unknown>) => {
       calls.push(params)
-      return { content: [{ type: 'text', text: 'row 1' }, { type: 'text', text: 'row 2' }] }
+      return {
+        content: [
+          { type: 'text', text: 'row 1' },
+          { type: 'text', text: 'row 2' },
+        ],
+      }
     }
 
     await expect(callMcpTool('db', 'query', { sql: 'select 1' })).resolves.toEqual({ text: 'row 1\nrow 2', isError: false })

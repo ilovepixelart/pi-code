@@ -238,7 +238,14 @@ describe('runInteractiveOAuth failure typing', () => {
       close: async () => {},
     }
     const transport = { finishAuth: async () => {} }
-    return runInteractiveOAuth('srv', { url: 'https://mcp.example/' }, () => transport as never, 'connect srv', authUi as never, () => client as never)
+    return runInteractiveOAuth(
+      'srv',
+      { url: 'https://mcp.example/' },
+      () => transport as never,
+      'connect srv',
+      authUi as never,
+      () => client as never,
+    )
   }
 
   it('types a declined consent as OAuthRequiredError without opening anything', async () => {
@@ -259,8 +266,11 @@ describe('runInteractiveOAuth failure typing', () => {
       connect: async () => {
         throw Object.assign(new Error('boom mid-flow'), { code: 500 })
       },
-    }).catch((e: Error) => e)
-    expect(error.message).toBe('login for srv failed: boom mid-flow')
+    }).then(
+      () => undefined,
+      (e: Error) => e,
+    )
+    expect(error?.message).toBe('login for srv failed: boom mid-flow')
   })
 
   it('returns the client when the retry connects clean (authorized between attempts)', async () => {
