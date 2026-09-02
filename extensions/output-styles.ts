@@ -102,10 +102,10 @@ function isDirectory(target: string): boolean {
  */
 export function styleDirs(cwd: string, home: string, trusted: boolean): string[] {
   const dirs = [path.join(claudeConfigDir(home), 'output-styles')]
-  // Claude loads every .claude/output-styles between cwd and the repository root,
-  // using the one closest to cwd for a name clash: styleForName is first-match,
-  // so the nearest directory goes first.
-  if (trusted) dirs.push(...ancestorDirs(cwd, path.join('.claude', 'output-styles')))
+  // Claude loads every .claude/output-styles between cwd and the repository root, using
+  // the one closest to cwd for a name clash. loadStyles keys by name and later dirs win,
+  // so the ancestors go farthest first and the nearest lands last.
+  if (trusted) dirs.push(...ancestorDirs(cwd, path.join('.claude', 'output-styles')).reverse())
   return dirs.filter((dir) => isDirectory(dir))
 }
 

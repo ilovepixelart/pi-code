@@ -90,6 +90,22 @@ describe('styleDirs', () => {
   })
 })
 
+it('lets the directory nearest the working directory win a name clash', () => {
+  // Claude: "When more than one of these nested directories defines a style with the
+  // same name, Claude Code uses the one closest to the working directory."
+  const repo = tempDir()
+  mkdirSync(join(repo, '.git'))
+  const sub = join(repo, 'pkg')
+  mkdirSync(join(repo, '.claude', 'output-styles'), { recursive: true })
+  mkdirSync(join(sub, '.claude', 'output-styles'), { recursive: true })
+  writeFileSync(join(repo, '.claude', 'output-styles', 'shared.md'), '---\nname: Shared\n---\nROOT BODY')
+  writeFileSync(join(sub, '.claude', 'output-styles', 'shared.md'), '---\nname: Shared\n---\nNEAREST BODY')
+
+  const resolved = styleForName(loadStyles(styleDirs(sub, tempDir(), true)), 'Shared')
+
+  expect(resolved?.body).toContain('NEAREST BODY')
+})
+
 describe('pluginStyleDirs', () => {
   // Lay down one enabled cached plugin with an optional manifest, as installedPlugins reads it.
   const installPlugin = (home: string, name: string, manifest: Record<string, unknown> = {}): string => {
