@@ -334,7 +334,16 @@ describe('capCheckpoints', () => {
 
     let seen: string[] = []
     const base = t.makeCtx(entries, [], []) as { ui: Record<string, unknown> }
-    const ctx = { ...base, ui: { ...base.ui, select: async (_title: string, labels: string[]) => (seen = labels, undefined) } }
+    const ctx = {
+      ...base,
+      ui: {
+        ...base.ui,
+        select: async (_title: string, labels: string[]) => {
+          seen = labels
+          return undefined
+        },
+      },
+    }
     await t.commands.get('rewind')?.handler('', ctx)
 
     expect(seen).toHaveLength(MAX_CHECKPOINTS_PER_SESSION)
