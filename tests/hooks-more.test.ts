@@ -994,6 +994,17 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     expect(patched?.content.map((c) => c.text)).toEqual(['boom', 'the network was down'])
   })
 
+  it('ignores a decision-block verdict on a failed tool: only its context lands', async () => {
+    // "A failed tool cannot be blocked": the exit-0 decision:block spelling must
+    // not surface a block notice on a failure, while additionalContext still does.
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'judge' }] }] })
+    script('judge', { stdout: [JSON.stringify({ decision: 'block', reason: 'retry it', hookSpecificOutput: { additionalContext: 'the network was down' } })], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const patched = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })) as { content: Array<{ text: string }> } | undefined
+    expect(patched?.content.map((c) => c.text)).toEqual(['boom', 'the network was down'])
+  })
+
   it('appends a PostToolUseFailure hook stderr (exit 2) to the failed result', async () => {
     writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'diag' }] }] })
     script('diag', { stderr: ['check your credentials'], code: 2 })
