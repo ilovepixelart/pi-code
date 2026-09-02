@@ -2379,7 +2379,10 @@ describe('mcp headersHelper environment', () => {
     expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
   })
 
-  it('connects with static headers alone when the machine has no shell for the helper', async () => {
+  // Off Windows only: the case is a Windows host with neither Git Bash nor PowerShell,
+  // and stubbing the platform cannot simulate it on a real Windows machine, where the
+  // default Git install is found whatever PATH says.
+  it.skipIf(process.platform === 'win32')('connects with static headers alone when the machine has no shell for the helper', async () => {
     // The Windows fallback of last resort: no Git Bash and no PowerShell. The helper
     // cannot run, and the documented behaviour is to connect with what is configured
     // rather than to fail the server.
