@@ -152,7 +152,13 @@ export function urlPatternMatches(pattern: string, url: string): boolean {
   return wildcardRegExp(patternParts.path).test(urlParts.path ?? '/')
 }
 
-const configUrl = (config: ServerConfig): string | undefined => (config as { url?: string }).url
+/** A config file is user- or repo-written JSON, so any field can hold any value. Only a
+ * string `url` makes a server remote: a config that carries some other value there is
+ * still gated by its command, and no policy entry is evaluated against a non-string. */
+const configUrl = (config: ServerConfig): string | undefined => {
+  const url = (config as { url?: unknown }).url
+  return typeof url === 'string' ? url : undefined
+}
 const configArgv = (config: ServerConfig): string[] | undefined => {
   const command = (config as { command?: string }).command
   if (typeof command !== 'string') return undefined

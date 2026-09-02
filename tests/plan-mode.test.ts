@@ -590,6 +590,53 @@ describe('session restore', () => {
     expect(s.getActiveTools()).toContain('write')
   })
 
+  // The session file is data on disk: a hand-edit, a truncated write or an entry from a
+  // different tool can put any JSON in these fields. A field that is not the shape the
+  // restore expects must be ignored, never fed into the tool gating.
+  it('ignores a persisted savedTools that is not an array of strings', async () => {
+    const s = setup()
+    const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: true, todos: [], executing: false, savedTools: 'read' } }]
+
+    await s.emit('session_start', {}, restoreCtx(s, entries))
+
+    // Falling back to the live active set, leaving plan mode after this restores it.
+    await s.runCommand('plan')
+    expect(s.getActiveTools()).toContain('write')
+    expect(s.getActiveTools()).toContain('edit')
+  })
+
+  it('ignores a persisted enabled flag that is not a boolean', async () => {
+    const s = setup()
+    // "false" is a truthy string: read as-is it would silently enter plan mode.
+    const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: 'false', todos: [], executing: false } }]
+
+    await s.emit('session_start', {}, restoreCtx(s, entries))
+
+    expect(s.getActiveTools()).toContain('write')
+  })
+
+  it('ignores a persisted executing flag that is not a boolean', async () => {
+    const s = setup()
+    // "no" is a truthy string: read as-is it would resume into execution mode.
+    const todos = [{ step: 1, text: 'Inspect the parser', completed: false }]
+    const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: false, todos, executing: 'no' } }]
+
+    await s.emit('session_start', {}, restoreCtx(s, entries))
+    const injected = (await s.emit('before_agent_start')) as { message?: { content: string } } | undefined
+
+    expect(injected?.message?.content ?? '').not.toContain('EXECUTING PLAN')
+  })
+
+  it('ignores persisted todos that are not an array', async () => {
+    const s = setup()
+    const entries = [{ type: 'custom', customType: 'plan-mode', data: { enabled: false, todos: 'step one', executing: true } }]
+
+    await s.emit('session_start', {}, restoreCtx(s, entries))
+    const injected = (await s.emit('before_agent_start')) as { message?: { content: string } } | undefined
+
+    expect(injected?.message?.content ?? '').not.toContain('EXECUTING PLAN')
+  })
+
   it('does not carry plan state into a fresh session with no plan entry', async () => {
     const s = setup()
     await s.runCommand('plan')
