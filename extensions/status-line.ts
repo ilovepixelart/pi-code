@@ -31,8 +31,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
 import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
@@ -296,10 +296,10 @@ export default function statusLine(pi: ExtensionAPI) {
     const sessionName = ctx.sessionManager.getSessionName?.()
     if (sessionName) payload.session_name = sessionName
     if (ctx.thinkingLevel) {
-      // pi's off/minimal are outside Claude's effort vocabulary: minimal maps to
-      // low, and off omits effort entirely (thinking disabled says the rest).
+      // Thinking disabled says the rest, so off carries no effort field of its own.
       payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
-      if (ctx.thinkingLevel !== 'off') payload.effort = { level: ctx.thinkingLevel === 'minimal' ? 'low' : ctx.thinkingLevel }
+      const effort = claudeEffortLevel(ctx.thinkingLevel)
+      if (effort) payload.effort = { level: effort }
     }
     if (styleName) payload.output_style = { name: styleName }
     // The current utilization of the account's rate-limit windows, when the

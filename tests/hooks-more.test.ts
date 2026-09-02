@@ -2547,6 +2547,19 @@ describe('hooks suppressOriginalPrompt', () => {
     return ext
   }
 
+  it('reports effort in Claude vocabulary, omitting it when thinking is off', async () => {
+    // Claude's effort levels are low, medium, high, xhigh and max. pi adds minimal and
+    // off, which a hook keying on the documented set cannot read.
+    const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'effort-probe' }] }] })
+
+    await ext.toolCall('bash', { command: 'x' }, 't1', { thinkingLevel: 'minimal' })
+    expect(JSON.parse(recordFor('effort-probe').stdin).effort).toEqual({ level: 'low' })
+
+    hoisted.calls.length = 0
+    await ext.toolCall('bash', { command: 'x' }, 't1', { thinkingLevel: 'off' })
+    expect(JSON.parse(recordFor('effort-probe').stdin).effort).toBeUndefined()
+  })
+
   it('keeps the prompt when a non-blocking hook sets suppressOriginalPrompt', async () => {
     // Claude scopes the field to a block: "If true when decision is block, omits the
     // original prompt text from the block message shown to the user", and separately

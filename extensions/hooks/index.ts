@@ -96,6 +96,7 @@
 
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { claudeEffortLevel } from '../internal/effort.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
@@ -228,7 +229,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
     const transcript = ctx.sessionManager.getSessionFile()
     if (transcript) common.transcript_path = transcript
-    if (ctx.thinkingLevel) common.effort = { level: ctx.thinkingLevel }
+    // Claude vocabulary only: pi's minimal maps to low and off carries no effort.
+    const effort = claudeEffortLevel(ctx.thinkingLevel)
+    if (effort) common.effort = { level: effort }
     return common
   }
   /** Claude's prompt-hook `model` override, resolved against the models this user
