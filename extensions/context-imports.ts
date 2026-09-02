@@ -138,9 +138,12 @@ export interface ImportBudget {
   files: number
   bytes: number
   dropped: number
+  /** Existing files an @import named that resolve outside the importer's allowed
+   * roots. Collected so the refusal can be reported rather than left silent. */
+  refused: Set<string>
 }
 
-export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0 })
+export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0, refused: new Set() })
 
 /** The `@path` targets of a context file, in document order. Claude Code evaluates
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
@@ -162,7 +165,7 @@ function importTargets(content: string): string[] {
 }
 
 /** Read one `@path` target, or null when it is unresolvable, already seen, outside `allowedRoots`, excluded, or unreadable. */
-function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded?: (realPath: string) => boolean): { real: string; body: string } | null {
+function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded: ((realPath: string) => boolean) | undefined, refused: Set<string>): { real: string; body: string } | null {
   const resolved = path.resolve(fromDir, expandHome(target, home))
   let real: string
   try {
@@ -171,7 +174,12 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     return null
   }
   if (seen.has(real)) return null
-  if (!isUnder(real, allowedRoots)) return null
+  if (!isUnder(real, allowedRoots)) {
+    // Recorded, not read: the file exists but the importer may not reach it. Claude
+    // asks before loading an external import; pi-code refuses, and says which.
+    refused.add(real)
+    return null
+  }
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
@@ -218,7 +226,7 @@ function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: 
       scan.budget.dropped += 1
       continue
     }
-    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded)
+    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded, scan.budget.refused)
     if (!file) continue
     scan.budget.files -= 1
     // The budget is bytes: a string slice counts UTF-16 units and lets CJK text through
@@ -604,6 +612,19 @@ function additionalDirsAddition(extras: Array<{ path: string; content: string; d
 /** The `## Imported context (@)` section for every resolved @import, with the
  * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
  * was imported. */
+/** The refusal notice: every existing file an @import named that its importer may not
+ * reach. Claude asks about these through an approval dialog and loads the ones you
+ * allow; pi-code refuses them, and this is what says so. Silence was the real defect:
+ * the importing file looks loaded and its instructions are simply not there. */
+function refusedImportsAddition(refused: Set<string>): string {
+  if (refused.size === 0) return ''
+  const list = [...refused]
+    .sort()
+    .map((file) => `- ${file}`)
+    .join('\n')
+  return `\n\n## Imports not loaded (@)\n\nThese files resolve outside what the file importing them may read, so their contents are not in context:\n\n${list}`
+}
+
 function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
   if (imported.length === 0) return ''
   const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')
@@ -896,6 +917,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     addition += localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)
     addition += importedAddition(imported, budget, home, projectRoot, announce)
+    addition += refusedImportsAddition(budget.refused)
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }

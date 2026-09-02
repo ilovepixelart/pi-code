@@ -1272,6 +1272,89 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
   })
 })
 
+describe('imports refused for resolving outside the project', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  // Claude shows an approval dialog listing external imports; pi-code refuses them.
+  // Refusing silently is the part that misleads: the file looks loaded and its
+  // instructions are simply absent, with nothing anywhere saying so.
+  it('names the refused file in the prompt instead of dropping it silently', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    const secret = join(outside, 'shared.md')
+    writeFileSync(secret, 'SHARED INSTRUCTIONS')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, `PROJECT RULES\n@${secret}`)
+    const native = [{ path: claudeMd, content: `PROJECT RULES\n@${secret}` }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('## Imports not loaded (@)')
+    expect(prompt).toContain(`\n- ${secret}`)
+    // The body itself never enters context; only the fact that it was refused.
+    expect(prompt).not.toContain('SHARED INSTRUCTIONS')
+  })
+
+  it('reports a refused import even when nothing else imported', async () => {
+    // With no successful import there is no "Imported context" section to hang the
+    // notice on, which is exactly the case that used to say nothing at all.
+    const cwd = tempDir()
+    const outside = tempDir()
+    const shared = join(outside, 'only.md')
+    writeFileSync(shared, 'SHARED ONLY')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, `@${shared}`)
+    const native = [{ path: claudeMd, content: `@${shared}` }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('## Imports not loaded (@)')
+    expect(prompt).toContain(`\n- ${shared}`)
+    expect(prompt).not.toContain('SHARED ONLY')
+  })
+
+  it('says nothing when every import resolved', async () => {
+    const cwd = tempDir()
+    writeFileSync(join(cwd, 'style.md'), 'STYLE BODY')
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, 'PROJECT RULES\n@style.md')
+    const native = [{ path: claudeMd, content: 'PROJECT RULES\n@style.md' }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).toContain('STYLE BODY')
+    expect(prompt).not.toContain('## Imports not loaded (@)')
+  })
+
+  it('does not report an import that is merely missing', async () => {
+    // A typo is not an escape; only a file that exists and sits outside is refused.
+    const cwd = tempDir()
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, 'PROJECT RULES\n@nope.md')
+    const native = [{ path: claudeMd, content: 'PROJECT RULES\n@nope.md' }]
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd, native, assembledPrompt(native))
+
+    expect(prompt).not.toContain('## Imports not loaded (@)')
+  })
+})
+
 describe('subdirectory context files load on demand', () => {
   let savedAgentDir: string | undefined
   beforeEach(() => {

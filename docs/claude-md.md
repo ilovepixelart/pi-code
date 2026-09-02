@@ -4,7 +4,7 @@ Context files and path-scoped rules, beyond what pi loads natively. Sources: [`e
 
 ## CLAUDE.md and imports
 
-- Resolves `@path` imports pi's native loader skips (4-hop depth, budget-capped). An import that resolves outside the working directory is refused rather than approved through a dialog, and is currently dropped without a word.
+- Resolves `@path` imports pi's native loader skips (4-hop depth, budget-capped). An import that resolves outside what its importing file may read is refused rather than approved through a dialog, and the refused paths are listed under `## Imports not loaded (@)` so the gap is visible. Claude instead asks once per project and loads what you allow, so its worktree recipe (`@~/.claude/my-project-instructions.md` in a project `CLAUDE.md`) does not load here.
 - Loads a `CLAUDE.md` that sits beside an `AGENTS.md` pi chose instead (approval-gated, imports expanded). pi picks one context file per directory and prefers `AGENTS.md`; Claude reads `CLAUDE.md` and never `AGENTS.md`, so its recommended split, a `CLAUDE.md` opening with `@AGENTS.md` and adding Claude-specific instructions below, would otherwise lose the Claude half. The `@AGENTS.md` does not duplicate the body pi already injected.
 - Loads the user `~/.claude/CLAUDE.md` and the project `.claude/CLAUDE.md` (approval-gated, deduped against the repo-root `CLAUDE.md`/`AGENTS.md` pi loads natively).
 - Loads every `CLAUDE.local.md` from the repo root down to cwd (approval-gated, root first).
