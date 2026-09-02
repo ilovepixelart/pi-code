@@ -271,8 +271,8 @@ describe('mcp adapter helpers', () => {
   })
 
   it('separates always-loaded user config from trust-gated project config', () => {
-    expect(userConfigPaths('/home')).toEqual(['/home/.claude.json', '/home/.pi/agent/mcp.json'])
-    expect(projectConfigPaths('/proj')).toEqual(['/proj/.mcp.json', '/proj/.pi/mcp.json'])
+    expect(userConfigPaths('/home')).toEqual([join('/home', '.claude.json'), join('/home', '.pi', 'agent', 'mcp.json')])
+    expect(projectConfigPaths('/proj')).toEqual([join('/proj', '.mcp.json'), join('/proj', '.pi', 'mcp.json')])
   })
 
   it('resolves HOME-scope config under CLAUDE_CONFIG_DIR while leaving project scope alone', () => {

@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from '../extensions/internal/instruction-events.ts'
@@ -35,39 +37,42 @@ describe('isInstructionLoadEvent', () => {
 })
 
 describe('memoryTypeForPath', () => {
-  const home = '/home/u'
+  // The classifier compares against root + path.sep, so the fixtures must carry
+  // the platform separator; join derives them for both.
+  const home = join('/home', 'u')
+  const repo = join('/repo')
 
   it('classifies CLAUDE.local.md as Local wherever it sits', () => {
-    expect(memoryTypeForPath('/repo/CLAUDE.local.md', home, '/repo')).toBe('Local')
-    expect(memoryTypeForPath('/home/u/proj/CLAUDE.local.md', home, '/home/u/proj')).toBe('Local')
+    expect(memoryTypeForPath(join(repo, 'CLAUDE.local.md'), home, repo)).toBe('Local')
+    expect(memoryTypeForPath(join(home, 'proj', 'CLAUDE.local.md'), home, join(home, 'proj'))).toBe('Local')
   })
 
   it('classifies a file under home but outside the project as User', () => {
-    expect(memoryTypeForPath('/home/u/.claude/CLAUDE.md', home, '/repo')).toBe('User')
+    expect(memoryTypeForPath(join(home, '.claude', 'CLAUDE.md'), home, repo)).toBe('User')
   })
 
   it('classifies a project file as Project even when the project lives under home', () => {
-    expect(memoryTypeForPath('/home/u/proj/CLAUDE.md', home, '/home/u/proj')).toBe('Project')
-    expect(memoryTypeForPath('/home/u/proj/.claude/CLAUDE.md', home, '/home/u/proj')).toBe('Project')
+    expect(memoryTypeForPath(join(home, 'proj', 'CLAUDE.md'), home, join(home, 'proj'))).toBe('Project')
+    expect(memoryTypeForPath(join(home, 'proj', '.claude', 'CLAUDE.md'), home, join(home, 'proj'))).toBe('Project')
   })
 
   it('does not treat a sibling directory with a home-prefixed name as under home', () => {
-    expect(memoryTypeForPath('/home/username/x/CLAUDE.md', home, '/repo')).toBe('Project')
+    expect(memoryTypeForPath(join('/home', 'username', 'x', 'CLAUDE.md'), home, repo)).toBe('Project')
   })
 
   it('classifies a git-root file above the nearest package marker as Project (monorepo)', () => {
     // repoRoot stops at the nearest .git OR package.json, so a subpackage session
     // reports a projectRoot below the git root; a context file in an ancestor of
     // that root is still project memory, not user config.
-    expect(memoryTypeForPath('/home/u/mono/CLAUDE.md', home, '/home/u/mono/packages/app')).toBe('Project')
+    expect(memoryTypeForPath(join(home, 'mono', 'CLAUDE.md'), home, join(home, 'mono', 'packages', 'app'))).toBe('Project')
   })
 
   it('keeps a home-level context file User even though home is an ancestor of the project', () => {
-    expect(memoryTypeForPath('/home/u/AGENTS.md', home, '/home/u/proj')).toBe('User')
+    expect(memoryTypeForPath(join(home, 'AGENTS.md'), home, join(home, 'proj'))).toBe('User')
   })
 
   it('falls back to Project for a path under neither root', () => {
-    expect(memoryTypeForPath('/srv/shared/CLAUDE.md', home, '/repo')).toBe('Project')
+    expect(memoryTypeForPath(join('/srv', 'shared', 'CLAUDE.md'), home, repo)).toBe('Project')
   })
 })
 

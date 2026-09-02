@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -655,7 +655,7 @@ describe('runSingleAgent process handling', () => {
     expect(piArgs(call).slice(0, 5)).toEqual(['--mode', 'json', '-p', '--no-session', '--system-prompt'])
     expect(call.promptFile?.content).toBe('Be terse.')
     // Unsafe characters in the agent name are replaced before it reaches the filesystem.
-    expect(call.promptFile?.path.endsWith('/prompt-my_agent_1.md')).toBe(true)
+    expect(call.promptFile?.path.endsWith(`${sep}prompt-my_agent_1.md`)).toBe(true)
     expect(fs.existsSync(call.promptFile?.path as string)).toBe(false)
   })
 

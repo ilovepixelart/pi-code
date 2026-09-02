@@ -1,7 +1,7 @@
 import type { EventEmitter as Emitter } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -2003,7 +2003,7 @@ describe('Claude vocabulary and decision-control conformance', () => {
     await ext.toolCall('edit', { path: 'src/a.ts', edits: [{ oldText: 'x', newText: 'y' }] })
     const stdin = JSON.parse(recordFor('guard').stdin)
     expect(stdin.tool_name).toBe('Edit')
-    expect(stdin.tool_input.file_path).toBe('/proj/src/a.ts')
+    expect(stdin.tool_input.file_path).toBe(resolve('/proj', 'src/a.ts'))
     expect(stdin.tool_input.old_string).toBe('x')
     expect(stdin.tool_input.new_string).toBe('y')
   })

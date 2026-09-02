@@ -311,7 +311,8 @@ describe('spanExec', () => {
     expect(run.mergeStreams).toBeUndefined()
   })
 
-  it('runs an empty or comment-only span as a no-op, not an sh syntax error', () => {
+  // POSIX-only: this spawns the constructed /bin/sh invocation, which does not exist on Windows.
+  it.skipIf(process.platform === 'win32')('runs an empty or comment-only span as a no-op, not an sh syntax error', () => {
     // `{ }` around an empty span is a hard sh syntax error (exit 2), which
     // aborted the whole invocation; the group opens with a `:` null command so
     // these degenerate spans stay harmless while real ones keep the merge.
@@ -323,7 +324,8 @@ describe('spanExec', () => {
     }
   })
 
-  it('keeps a real span exit code and its stderr merge on the sh path', () => {
+  // POSIX-only: this spawns the constructed /bin/sh invocation, which does not exist on Windows.
+  it.skipIf(process.platform === 'win32')('keeps a real span exit code and its stderr merge on the sh path', () => {
     const result = runSh('echo out; echo err >&2; exit 3')
     expect(result.status).toBe(3)
     expect(result.stdout).toBe('out\nerr\n')
