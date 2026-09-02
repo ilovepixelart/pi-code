@@ -9,12 +9,45 @@ describe('matchesBashRules', () => {
     expect(matchesBashRules('npm run build --watch', ['npm run build'])).toBe(false)
   })
 
-  it('treats a :* suffix as a string prefix, as Claude documents', () => {
-    expect(matchesBashRules('git add -A', ['git add:*'])).toBe(true)
-    expect(matchesBashRules('git add', ['git add:*'])).toBe(true)
-    // A string prefix, not a word boundary: npm run test:* covers npm run test:unit.
-    expect(matchesBashRules('npm run test:unit', ['npm run test:*'])).toBe(true)
-    expect(matchesBashRules('git commit -m x', ['git add:*'])).toBe(false)
+  // Oracle: the wildcard table and the three rules stated beneath it in Claude's
+  // permissions reference, plus its ":*" equivalence sentence.
+  it.each([
+    ['npm run build', 'npm run build', true],
+    ['npm run build', 'npm run build --watch', false],
+    ['npm run *', 'npm run build', true],
+    ['npm run *', 'npm run test --watch', true],
+    ['npm run *', 'npm run', true],
+    ['npm run *', 'npm install', false],
+    ['git log * main', 'git log --oneline main', true],
+    ['git log * main', 'git log -5 main', true],
+    ['git log * main', 'git log main', false],
+    ['git log * main', 'git push origin main', false],
+    ['git * main', 'git merge main', true],
+    ['git * main', 'git push origin main', true],
+    ['git * main', 'git log', false],
+    ['* --version', 'node --version', true],
+    ['* --version', 'node -v', false],
+    ['ls *', 'ls -la', true],
+    ['ls *', 'ls', true],
+    ['ls *', 'lsof', false],
+    ['ls*', 'ls -la', true],
+    ['ls*', 'lsof', true],
+    ['* --help *', 'npm --help x', true],
+    ['* --help *', 'npm --help', false],
+  ])('rule %s against %s', (rule, command, expected) => {
+    expect(matchesBashRules(command, [rule])).toBe(expected)
+  })
+
+  it('reads a trailing :* as the equivalent trailing wildcard, not a string prefix', () => {
+    // Claude: "The :* suffix is an equivalent way to write a trailing wildcard, so
+    // Bash(ls:*) matches the same commands as Bash(ls *)", and the space in that form is
+    // part of the rule.
+    expect(matchesBashRules('ls -la', ['ls:*'])).toBe(true)
+    expect(matchesBashRules('ls', ['ls:*'])).toBe(true)
+    expect(matchesBashRules('lsof', ['ls:*'])).toBe(false)
+    expect(matchesBashRules('git addx -A', ['git add:*'])).toBe(false)
+    // Recognized only at the end: elsewhere the colon is a literal character.
+    expect(matchesBashRules('git push', ['git:* push'])).toBe(false)
   })
 
   it('treats * elsewhere as a wildcard', () => {
