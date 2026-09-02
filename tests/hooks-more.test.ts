@@ -385,7 +385,8 @@ describe('runHookCommand shell selection', () => {
     } finally {
       if (platform) Object.defineProperty(process, 'platform', platform)
     }
-    const taskkill = hoisted.calls.find((call) => call.file === 'taskkill')
+    // By absolute path under SystemRoot, never a PATH lookup a writable directory could hijack.
+    const taskkill = hoisted.calls.find((call) => /System32[\\/]taskkill\.exe$/.test(call.file))
     expect(taskkill?.args).toEqual(['/pid', '2000000000', '/T', '/F'])
     expect(recordFor('slow-win').killSignals).toEqual([])
   })

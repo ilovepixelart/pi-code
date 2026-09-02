@@ -5,6 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process'
+import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
@@ -82,9 +83,11 @@ const TIMEOUT_EXIT_CODE = 124
  */
 function killTree(child: ChildProcess): void {
   if (process.platform === 'win32') {
-    // Windows has no process groups: taskkill /T ends the shell's whole tree. If
-    // taskkill itself cannot start, the direct kill is all that is left.
-    if (child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
+    // Windows has no process groups: taskkill /T ends the shell's whole tree. By
+    // absolute path, so a writable PATH entry cannot stand in for it. If taskkill itself
+    // cannot start, the direct kill is all that is left.
+    const taskkill = path.join(process.env.SystemRoot ?? String.raw`C:\Windows`, 'System32', 'taskkill.exe')
+    if (child.pid) spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
     else child.kill('SIGKILL')
     return
   }
