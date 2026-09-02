@@ -394,9 +394,11 @@ export function substituteVars(text: string, vars: Record<string, string | undef
   return text.replaceAll(/\$\{(CLAUDE_[A-Z0-9_]+)\}/g, (token, name: string) => vars[name] ?? token)
 }
 
-/** `a/b/c.md` becomes Claude's `a:b:c`. */
+/** Claude: "You invoke a command file by its file name"; subdirectories organize
+ * files without namespacing, so `a/b/c.md` is `/c`. A same-name file in another
+ * subdirectory takes the name over (scan order decides), as with Claude. */
 export function commandNameFor(relativePath: string): string {
-  return relativePath.replace(/\.md$/, '').split(path.sep).join(':')
+  return path.basename(relativePath, '.md')
 }
 
 /** Every `*.md` under a commands directory, including nested ones. */

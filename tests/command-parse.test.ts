@@ -388,7 +388,9 @@ describe('resolvePowershellBinary', () => {
 })
 
 describe('discoverCommandFiles', () => {
-  it('walks subdirectories and names them with Claude namespacing', () => {
+  it('walks subdirectories, naming each command by its file name alone', () => {
+    // Claude: "You invoke a command file by its file name"; subdirectories only
+    // organize the files.
     const root = tempDir()
     mkdirSync(join(root, 'frontend'), { recursive: true })
     writeFileSync(join(root, 'hello.md'), 'hi')
@@ -396,7 +398,7 @@ describe('discoverCommandFiles', () => {
 
     const found = discoverCommandFiles(root)
     const names = found.map((f) => f.name).sort()
-    expect(names).toEqual(['frontend:build', 'hello'])
+    expect(names).toEqual(['build', 'hello'])
   })
 
   it('returns nothing for a missing directory', () => {
@@ -406,7 +408,9 @@ describe('discoverCommandFiles', () => {
 
 describe('commandNameFor', () => {
   it('joins nested segments with colons and drops the extension', () => {
-    expect(commandNameFor('a/b/c.md')).toBe('a:b:c')
+    // Claude: "You invoke a command file by its file name"; subdirectories
+    // organize files without namespacing the name.
+    expect(commandNameFor('a/b/c.md')).toBe('c')
     expect(commandNameFor('top.md')).toBe('top')
   })
 })

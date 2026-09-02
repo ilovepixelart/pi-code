@@ -83,13 +83,14 @@ describe('commandDirs', () => {
 })
 
 describe('collectCommands', () => {
-  it('lets a project command override a user command of the same name', () => {
+  it('lets a personal command win a name clash with a project command', () => {
+    // Claude: "personal overrides project".
     const cwd = tempDir()
     writeCommand(hoisted.home, 'ship.md', 'user version')
     writeCommand(cwd, 'ship.md', 'project version')
     const found = collectCommands(commandDirs(cwd, hoisted.home, true))
     expect(found).toHaveLength(1)
-    expect(found[0].filePath).toContain(cwd)
+    expect(found[0].filePath).toContain(hoisted.home)
   })
 })
 
@@ -183,16 +184,16 @@ const setup = (cwd: string, trusted = true) => {
 }
 
 describe('commands extension', () => {
-  it('registers a nested command under its namespaced name and drives a turn with substituted args', async () => {
+  it('registers a nested command under its file name and drives a turn with substituted args', async () => {
     const cwd = tempDir()
     writeCommand(cwd, join('frontend', 'build.md'), '---\ndescription: Build it\nargument-hint: [target]\n---\nBuild $0 now.')
     const s = setup(cwd)
     await s.handlers.get('session_start')?.({}, s.ctx)
 
-    expect([...s.commands.keys()]).toEqual(['frontend:build'])
-    expect(s.commands.get('frontend:build')?.description).toBe('Build it [target]')
+    expect([...s.commands.keys()]).toEqual(['build'])
+    expect(s.commands.get('build')?.description).toBe('Build it [target]')
 
-    await s.commands.get('frontend:build')?.handler('web', s.ctx)
+    await s.commands.get('build')?.handler('web', s.ctx)
     expect(s.sent).toEqual(['Build web now.'])
   })
 
@@ -978,15 +979,15 @@ describe('slashCommandToolDescription', () => {
     expect(entry).toHaveLength(1536)
   })
 
-  it('drops entries past the overall budget and says so', () => {
+  it('keeps the name of an over-budget entry, shedding only its description', () => {
     const commands = [
       { name: 'a', description: 'first command' },
       { name: 'b', description: 'x'.repeat(300) },
     ]
     const text = slashCommandToolDescription(commands, 60)
     expect(text).toContain('/a - first command')
-    expect(text).not.toContain('/b')
-    expect(text).toContain('omitted')
+    expect(text.split('\n')).toContain('/b')
+    expect(text).not.toContain('omitted')
   })
 })
 
@@ -1183,5 +1184,68 @@ describe('disableSkillShellExecution', () => {
 
     expect(s.execCalls).toEqual([])
     expect(s.sent[0]).toBe(`status: ${SHELL_DISABLED_PLACEHOLDER}\n${SHELL_DISABLED_PLACEHOLDER}`)
+  })
+})
+
+describe('command precedence and naming conformance', () => {
+  it('lets a personal command override a project command of the same name', () => {
+    // Claude: across levels, enterprise overrides personal, and personal
+    // overrides project.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.claude', 'commands'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'commands', 'deploy.md'), 'PROJECT BODY')
+    mkdirSync(join(hoisted.home, '.claude', 'commands'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'commands', 'deploy.md'), 'PERSONAL BODY')
+
+    const commands = collectCommands(commandDirs(cwd, hoisted.home, true))
+    const deploy = commands.find((c) => c.name === 'deploy')
+    expect(deploy && readFileSync(deploy.filePath, 'utf-8')).toBe('PERSONAL BODY')
+  })
+
+  it('loads enterprise commands from the managed settings directory with top precedence', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const managedDir = tempDir()
+    setManagedSettingsPath(join(managedDir, 'managed-settings.json'))
+    try {
+      mkdirSync(join(managedDir, '.claude', 'commands'), { recursive: true })
+      writeFileSync(join(managedDir, '.claude', 'commands', 'deploy.md'), 'ENTERPRISE BODY')
+      mkdirSync(join(hoisted.home, '.claude', 'commands'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'commands', 'deploy.md'), 'PERSONAL BODY')
+
+      const commands = collectCommands(commandDirs(tempDir(), hoisted.home, true))
+      const deploy = commands.find((c) => c.name === 'deploy')
+      expect(deploy && readFileSync(deploy.filePath, 'utf-8')).toBe('ENTERPRISE BODY')
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  })
+
+  it('keeps every command name in the tool listing, shortening descriptions when over budget', () => {
+    // Claude: "The listing always contains every skill name"; the budget shortens
+    // descriptions, never drops names.
+    const commands = Array.from({ length: 20 }, (_, i) => ({ name: `cmd-${i}`, description: 'd'.repeat(200) }))
+    const text = slashCommandToolDescription(commands, 800)
+    for (let i = 0; i < 20; i++) expect(text).toContain(`/cmd-${i}`)
+    expect(text).not.toContain('omitted')
+  })
+})
+
+describe('ARGUMENTS append rule', () => {
+  it('appends the arguments only when no placeholder received one, per the documented rule', async () => {
+    // Claude: "When no placeholder receives an argument, Claude Code appends
+    // them as ARGUMENTS: <value>."
+    const cwd = tempDir()
+    writeCommand(cwd, 'named.md', '---\narguments: [issue]\n---\nFix $issue please.')
+    writeCommand(cwd, 'blind.md', 'Just do the thing.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    // A named placeholder consumed the argument: no append.
+    await s.commands.get('named')?.handler('123', s.ctx)
+    expect(s.sent.at(-1)).toBe('Fix 123 please.')
+
+    // Nothing consumed the argument: the append carries it.
+    await s.commands.get('blind')?.handler('456', s.ctx)
+    expect(s.sent.at(-1)).toBe('Just do the thing.\n\nARGUMENTS: 456')
   })
 })
