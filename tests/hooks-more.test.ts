@@ -2578,3 +2578,35 @@ describe('mcp_tool hook dispatch', () => {
     expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
   })
 })
+
+describe('prompt hook model override', () => {
+  afterEach(() => setCompleteBackend(null))
+
+  const answer = { role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"allow"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }
+
+  const runWith = async (override: string | undefined, available: Array<{ id: string; name?: string }>) => {
+    const seen: string[] = []
+    setCompleteBackend(async (model) => {
+      seen.push((model as { id: string }).id)
+      return answer as never
+    })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'ok? $ARGUMENTS', ...(override === undefined ? {} : { model: override }) }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', { command: 'ls' }, 't1', { model: { id: 'session-model' }, modelRegistry: { getAvailable: () => available } })
+    return seen
+  }
+
+  it('resolves an exact model id from the registry', async () => {
+    expect(await runWith('guard-9', [{ id: 'big-1' }, { id: 'guard-9' }])).toEqual(['guard-9'])
+  })
+
+  it('falls back to a substring match on id or display name', async () => {
+    expect(await runWith('haiku', [{ id: 'big-1' }, { id: 'small-haiku-2', name: 'Small Haiku' }])).toEqual(['small-haiku-2'])
+  })
+
+  it('uses the session model when the override matches nothing or is absent', async () => {
+    expect(await runWith('nope', [{ id: 'big-1' }])).toEqual(['session-model'])
+    expect(await runWith(undefined, [{ id: 'big-1' }])).toEqual(['session-model'])
+  })
+})
