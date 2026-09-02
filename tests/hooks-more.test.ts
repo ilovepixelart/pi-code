@@ -1041,8 +1041,9 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })
     expect(commandsRun()).toEqual(['failed'])
-    // A failed call keeps pi's response shape (the error details are the payload).
-    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't1', tool_response: { content: [{ type: 'text', text: 'boom' }], isError: true } })
+    // Claude: the failure arrives "as top-level fields", error plus is_interrupt, rather
+    // than as a tool_response.
+    expect(JSON.parse(recordFor('failed').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't1', error: 'boom', is_interrupt: false })
   })
 
   it('does not run PostToolUseFailure hooks on a successful execution', async () => {

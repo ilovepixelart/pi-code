@@ -512,7 +512,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, textContent(event.content), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
     const startedAt = toolStartTimes.get(event.toolCallId)
     toolStartTimes.delete(event.toolCallId)
-    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, tool_response: response, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
+    // Claude delivers a failure as top-level fields rather than a tool_response: "error
+    // information as top-level fields ... error ... is_interrupt". is_interrupt is false
+    // here because pi reports a cancelled tool through the result, not this event.
+    const failure = event.isError ? { error: textContent(event.content), is_interrupt: false } : { tool_response: response }
+    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, ...failure, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
