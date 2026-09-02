@@ -68,9 +68,9 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
 import { claudeConfigDir } from './internal/config-dir.js'
-import { externalImportDecision, rememberExternalImportDecision } from './internal/external-imports.js'
+import { AGENTS_FILE_NAMES, CONTEXT_FILE_CANDIDATES } from './internal/context-files.js'
+import { externalImportDecision, externalImportKey, rememberExternalImportDecision } from './internal/external-imports.js'
 import { type InstructionLoadEvent, memoryTypeForPath, publishInstructionLoad } from './internal/instruction-events.js'
 import { managedSettingsPath, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext, sliceBytes } from './internal/output-guard.js'
@@ -540,18 +540,68 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
   return imported
 }
 
+/** The external-import dialog's title. Exported so a test can tell it apart from the
+ * project-trust dialog by identity rather than by matching a prefix that a retitle
+ * would silently break. */
+export const EXTERNAL_IMPORT_PROMPT_TITLE = 'Load imports from outside this project?'
+
+/** Every context file pi would load for this session, ancestors included.
+ *
+ * The same candidate list and the same unbounded walk pi's own loader uses
+ * (CONTEXT_FILE_CANDIDATES, first hit per directory, cwd to the filesystem root), so
+ * the set scanned for external imports is the set the approval widens. Anything
+ * narrower would show the user a shorter list than the grant covers. Read without the
+ * 4 MiB display cap for the same reason: pi loads a larger file, so it must be scanned.
+ */
+function nativeContextFiles(cwd: string): Array<{ path: string; content: string }> {
+  const files: Array<{ path: string; content: string }> = []
+  let currentDir = cwd
+  while (true) {
+    for (const name of CONTEXT_FILE_CANDIDATES) {
+      const candidate = path.join(currentDir, name)
+      let content: string
+      try {
+        content = fs.readFileSync(candidate, 'utf-8')
+      } catch {
+        continue
+      }
+      files.push({ path: candidate, content })
+      break
+    }
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) return files
+    currentDir = parentDir
+  }
+}
+
 /** The `@` targets a project context file names that resolve outside the project.
  *
- * Lexical, and never touching the filesystem: the list is what the dialog shows, and
- * it must say the same thing whether or not the files are there. Callers pass project
- * files only; a user-scope file's imports load without a dialog either way. */
+ * This is what the approval dialog lists, so it has to name everything the approval
+ * would let in. Comments are stripped first, since a commented-out import can never
+ * load and padding the list with dead entries would bury the real one. A target is
+ * external when it resolves outside the importer's roots either as written or after
+ * the symlinks are followed, so a link committed inside the project cannot smuggle a
+ * path past a lexical test. It reports a target that is not on disk like one that is,
+ * so the list says the same thing whether or not the files are there.
+ *
+ * Depth one only, which is the consent boundary: the user allows the project to reach
+ * these files, and what those files themselves import is their own content, not the
+ * project's. Callers pass project files; a user-scope file's imports load with no
+ * dialog either way.
+ */
 export function externalImportTargets(files: Array<{ path: string; content: string }>, home: string, cwd: string): string[] {
   const found = new Set<string>()
   for (const file of files) {
     const roots = rootsForImporter(file.path, home, cwd)
-    for (const target of importTargets(file.content)) {
+    for (const target of importTargets(stripBlockComments(file.content))) {
       const resolved = path.resolve(path.dirname(file.path), expandHome(target, home))
-      if (!isUnder(resolved, roots)) found.add(resolved)
+      if (!isUnder(resolved, roots)) {
+        found.add(resolved)
+        continue
+      }
+      // Inside as written, outside once resolved: a committed symlink out of the tree.
+      const [real] = realRoots([resolved])
+      if (real !== undefined && !isUnder(real, roots)) found.add(resolved)
     }
   }
   return [...found].sort((a, b) => a.localeCompare(b, 'en'))
@@ -577,6 +627,8 @@ interface NestedLoadContext {
   touched: string
   /** Paths already in the system prompt, so a nested @import does not repeat one. */
   launchLoaded: string[]
+  /** Whether this project's external imports were approved, same grant as at launch. */
+  externalApproved: boolean
 }
 
 /** One nested context file's block and the instruction loads it should announce, or
@@ -597,14 +649,17 @@ function nestedContextBlock(file: string, dir: string, load: NestedLoadContext):
   // seed the seen set, so a nested file importing the root CLAUDE.md does not pay for
   // a body already in the system prompt.
   const seen = new Set([...load.launchLoaded, real])
-  const imports = collectImports(content, dir, load.home, rootsForImporter(real, load.home, load.cwd), seen, {
+  const budget = createImportBudget()
+  const imports = collectImports(content, dir, load.home, rootsForImporter(real, load.home, load.cwd, load.externalApproved), seen, {
     importer: real,
     isExcluded: (absPath) => isExcludedPath(absPath, load.excludeGlobs, load.home),
-    budget: createImportBudget(),
+    budget,
   })
   return {
     read: true,
-    text: [instructionsBlock(file, body), ...imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)].join('\n\n'),
+    // The refusal notice rides along, so an import this file names and does not get is
+    // as visible here as it is at launch.
+    text: [instructionsBlock(file, body), ...imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)].join('\n\n') + refusedImportsAddition(budget.refused),
     events: [
       { file_path: file, memory_type: memoryTypeForPath(file, load.home, load.projectRoot), load_reason: 'nested_traversal', trigger_file_path: load.touched },
       ...imports.map((entry) => ({
@@ -639,11 +694,6 @@ function nestedContextDirs(from: string, cwd: string): string[] {
   // it: nothing below cwd to load. A file in cwd itself ends the loop with no dirs.
   return current === cwd ? dirs : []
 }
-
-/** The context-file names pi prefers over CLAUDE.md in the same directory. Mirrors
- * pi's own lookup order (init.ts CONTEXT_FILE_CANDIDATES); the sibling search below
- * keys off what pi actually loaded, so this is only used to recognize those files. */
-const AGENTS_FILE_NAMES = new Set(['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD'])
 
 /** The blocks and instruction loads for one touched directory. `loaded` is the
  * session's set of already-attached files and is updated in place, so a file that
@@ -954,17 +1004,17 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
    * had, since the enforcement is the recorded answer, not the scan. */
   const resolveExternalImports = async (ctx: ExtensionContext): Promise<boolean> => {
     const home = os.homedir()
-    const root = repoRoot(ctx.cwd) ?? ctx.cwd
+    const root = externalImportKey(ctx.cwd)
     const stored = externalImportDecision(root)
     if (stored !== null) return stored
-    const scanned = [...ancestorFiles(ctx.cwd, 'CLAUDE.md'), ...ancestorFiles(ctx.cwd, 'AGENTS.md')].map((file) => ({ path: file, content: readContextFile(file) })).filter((file): file is { path: string; content: string } => file.content !== undefined)
-    const targets = externalImportTargets([...scanned, ...localContexts, ...(projectDotClaude === undefined ? [] : [projectDotClaude])], home, ctx.cwd)
+    const scanned = [...nativeContextFiles(ctx.cwd), ...localContexts, ...(projectDotClaude === undefined ? [] : [projectDotClaude])]
+    const targets = externalImportTargets(scanned, home, ctx.cwd)
     if (targets.length === 0) return false
     // A run with no one to ask has not been given consent.
     if (!ctx.hasUI) return false
     const listed = targets.map((file) => `  ${file}`).join('\n')
     const body = `${root}\n\nIts context files import these files from outside the project:\n\n${listed}\n\nThey will be read into every session's context. Only allow this for repositories you trust.`
-    const approved = await ctx.ui.confirm('Load imports from outside this project?', body)
+    const approved = await ctx.ui.confirm(EXTERNAL_IMPORT_PROMPT_TITLE, body)
     rememberExternalImportDecision(root, approved)
     return approved
   }
@@ -1115,7 +1165,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const home = os.homedir()
     const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
     const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, home, projectApproved), readManagedSettings())
-    const load: NestedLoadContext = { home, cwd: ctx.cwd, realCwd, projectRoot, excludeGlobs, touched, launchLoaded: launchLoadedPaths }
+    const load: NestedLoadContext = { home, cwd: ctx.cwd, realCwd, projectRoot, excludeGlobs, touched, launchLoaded: launchLoadedPaths, externalApproved: externalImportsApproved }
     const { bodies, events } = nestedContextAttachments(touchedDir, load, nestedLoaded, gatedFilesApproved)
     for (const loaded of events) announce(loaded)
     if (bodies.length === 0) return

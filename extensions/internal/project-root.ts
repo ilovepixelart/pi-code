@@ -27,6 +27,24 @@ export function repoRoot(from: string): string | undefined {
   }
 }
 
+/** The git checkout at or above `from`, or undefined outside one.
+ *
+ * Narrower than repoRoot on purpose, and used where a key must be stable rather than
+ * merely near: repoRoot also stops at package.json, which every package of a monorepo
+ * ships, so a decision keyed on it changes the moment the session starts one directory
+ * deeper. `.git` cannot be committed into a repository, so it is not a marker the
+ * repository can add to move its own key.
+ */
+export function gitRoot(from: string): string | undefined {
+  let currentDir = from
+  while (true) {
+    if (fs.existsSync(path.join(currentDir, '.git'))) return currentDir
+    const parentDir = path.dirname(currentDir)
+    if (parentDir === currentDir) return undefined
+    currentDir = parentDir
+  }
+}
+
 function statOf(target: string): fs.Stats | null {
   try {
     return fs.statSync(target)

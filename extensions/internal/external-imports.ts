@@ -7,8 +7,14 @@
  * disabled and the dialog doesn't appear again."
  *
  * The answer lives beside pi's own trust store rather than in the repository, so a
- * clone cannot ship its own approval, and it is keyed on the project root so every
- * subdirectory session and worktree of one repository shares the decision.
+ * clone cannot ship its own approval. It is keyed on the checkout: the resolved git
+ * root, or the resolved working directory outside a repository.
+ *
+ * The key is the git root and not the project root because a repository must not be
+ * able to move its own key. The project root also stops at package.json, so declining
+ * at the top of a monorepo and starting the next session inside a package produced a
+ * different key and asked again, which is not a decision that was kept. A separate
+ * worktree of one repository is a separate checkout and is asked separately.
  */
 
 import * as fs from 'node:fs'
@@ -17,7 +23,19 @@ import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 
 import { atomicWriteFile } from './atomic-write.js'
+import { gitRoot } from './project-root.js'
 import { isRecord } from './values.js'
+
+/** The key for a working directory: its checkout, resolved, so the same checkout
+ * reached through a symlink is the same project. */
+export function externalImportKey(cwd: string): string {
+  const root = gitRoot(cwd) ?? cwd
+  try {
+    return fs.realpathSync(root)
+  } catch {
+    return root
+  }
+}
 
 /** The store file. A seam: the tests point it at a temp directory. */
 export function externalImportStorePath(agentDir: string = getAgentDir()): string {

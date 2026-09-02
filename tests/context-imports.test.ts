@@ -10,6 +10,7 @@ import contextImports, {
   claudeMdExcludeFiles,
   collectImports,
   createImportBudget,
+  EXTERNAL_IMPORT_PROMPT_TITLE,
   expandHome,
   externalImportTargets,
   IMPORT_TRUNCATED_MARKER,
@@ -1407,6 +1408,124 @@ describe('external import approval', () => {
     expect(prompt).toContain('PERSONAL INSTRUCTIONS')
   })
 
+  // The dialog is only meaningful if it names everything the approval lets in. These
+  // are the shapes that used to make it list less than it granted.
+  it.each([
+    ['AGENTS.override.md, which pi prefers over every other candidate', 'AGENTS.override.md'],
+    ['AGENTS.MD, another candidate the scan has to know about', 'AGENTS.MD'],
+  ])('lists the external import held by %s', async (_label, name) => {
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const listed = join(hoisted.home, '.claude', 'listed.md')
+    const hidden = join(hoisted.home, '.claude', 'hidden.md')
+    writeFileSync(listed, 'LISTED BODY')
+    writeFileSync(hidden, 'HIDDEN BODY')
+    writeFileSync(join(cwd, name), `@${hidden}`)
+    const claudeMd = join(cwd, 'CLAUDE.md')
+    writeFileSync(claudeMd, `@${listed}`)
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+
+    expect(asked[0][1]).toContain(hidden)
+  })
+
+  it('lists an external import in a context file above the nearest package', async () => {
+    // repoRoot stops at package.json, so a monorepo package used to hide whatever the
+    // repository root imported while pi loaded it all the same.
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const hidden = join(hoisted.home, '.claude', 'hidden.md')
+    writeFileSync(hidden, 'HIDDEN BODY')
+    writeFileSync(join(repo, 'CLAUDE.md'), `@${hidden}`)
+    const pkg = join(repo, 'pkg')
+    mkdirSync(pkg)
+    writeFileSync(join(pkg, 'package.json'), '{}')
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(pkg, async () => true, asked))
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0][1]).toContain(hidden)
+  })
+
+  it('lists an import that only leaves the project once its symlink is followed', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'secret.md'), 'SECRET BODY')
+    symlinkSync(join(outside, 'secret.md'), join(cwd, 'notes.md'))
+    writeFileSync(join(cwd, 'CLAUDE.md'), '@notes.md')
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0][1]).toContain(join(cwd, 'notes.md'))
+  })
+
+  it('does not list an import that is commented out and can never load', async () => {
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const real = join(hoisted.home, '.claude', 'real.md')
+    writeFileSync(real, 'REAL BODY')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `<!-- @/etc/passwd -->\n@${real}`)
+    const asked: string[][] = []
+
+    const wired = wireWithBus()
+    await wired.start(ctxWith(cwd, async () => true, asked))
+
+    expect(asked[0][1]).toContain(real)
+    expect(asked[0][1]).not.toContain('/etc/passwd')
+  })
+
+  it('keeps a refusal when the next session starts inside a package of the same checkout', async () => {
+    // The decision is keyed on the checkout, not on the nearest package.json, so a
+    // repository cannot move its own key by adding a marker one directory down.
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const external = join(hoisted.home, '.claude', 'personal.md')
+    writeFileSync(external, 'PERSONAL INSTRUCTIONS')
+    writeFileSync(join(repo, 'CLAUDE.md'), `@${external}`)
+    const pkg = join(repo, 'pkg')
+    mkdirSync(pkg)
+    writeFileSync(join(pkg, 'package.json'), '{}')
+    const asked: string[][] = []
+
+    const first = wireWithBus()
+    await first.start(ctxWith(repo, async () => false, asked))
+
+    const second = wireWithBus()
+    await second.start(ctxWith(pkg, async () => true, asked))
+
+    expect(asked).toHaveLength(1)
+  })
+
+  it('keeps a refusal when the same checkout is reached through a symlink', async () => {
+    const parent = tempDir()
+    const repo = join(parent, 'repo')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const external = join(hoisted.home, '.claude', 'personal.md')
+    writeFileSync(external, 'PERSONAL INSTRUCTIONS')
+    writeFileSync(join(repo, 'CLAUDE.md'), `@${external}`)
+    const link = join(parent, 'link')
+    symlinkSync(repo, link)
+    const asked: string[][] = []
+
+    const first = wireWithBus()
+    await first.start(ctxWith(repo, async () => false, asked))
+
+    const second = wireWithBus()
+    await second.start(ctxWith(link, async () => true, asked))
+
+    expect(asked).toHaveLength(1)
+  })
+
   it('does not ask when no import reaches outside the project', async () => {
     const cwd = tempDir()
     writeFileSync(join(cwd, 'style.md'), 'STYLE BODY')
@@ -1471,7 +1590,7 @@ describe('imports refused for resolving outside the project', () => {
     cwd,
     isProjectTrusted: () => true,
     hasUI: true,
-    ui: { notify: () => {}, confirm: async (title: string) => !title.startsWith('Load imports from outside') },
+    ui: { notify: () => {}, confirm: async (title: string) => title !== EXTERNAL_IMPORT_PROMPT_TITLE },
   })
 
   // Claude shows an approval dialog listing external imports; pi-code refuses them.
@@ -1855,6 +1974,43 @@ describe('subdirectory context files load on demand', () => {
     const result = await wired.handlers.get('tool_result')?.({ toolName: 'edit', input: { file_path: join('src', 'a.ts') }, content: [{ type: 'text', text: 'FILE BODY' }], isError: false }, { cwd })
 
     expect(texts(result).join('\n')).toContain('SRC RULES')
+  })
+
+  it('honors the project external-import approval for a nested file too', async () => {
+    // The same @import in the repo-root CLAUDE.md and in src/CLAUDE.md must not get
+    // different answers from one approval. Only a launch-time file can raise the
+    // dialog, since a subdirectory file is reached mid-turn where asking is not an
+    // option; the answer it got covers both.
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const external = join(hoisted.home, '.claude', 'shared.md')
+    writeFileSync(external, 'SHARED EXTERNAL BODY')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `@${external}`)
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', `SRC RULES\n@${external}`)
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('SHARED EXTERNAL BODY')
+  })
+
+  it('says which of a nested file imports it would not load', async () => {
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    const external = join(hoisted.home, '.claude', 'shared.md')
+    writeFileSync(external, 'SHARED EXTERNAL BODY')
+    writeFileSync(join(cwd, 'CLAUDE.md'), `@${external}`)
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', `SRC RULES\n@${external}`)
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async (title: string) => title !== EXTERNAL_IMPORT_PROMPT_TITLE } })
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+    const joined = texts(result).join('\n')
+
+    expect(joined).not.toContain('SHARED EXTERNAL BODY')
+    expect(joined).toContain('## Imports not loaded (@)')
+    expect(joined).toContain(external)
   })
 
   it('attaches nothing when the project is not approved', async () => {
