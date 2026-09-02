@@ -82,6 +82,7 @@ printf -- '---\nname: Pirate\ndescription: e2e style\nkeep-coding-instructions: 
 printf '{"outputStyle": "Pirate"}\n' > "$FX/.claude/settings.local.json"
 cat > "$FX/.claude/settings.json" <<'EOF'
 {
+  "env": { "E2E_ENV_MARKER": "ENVWIRE_ABC" },
   "hooks": {
     "SessionStart": [{ "hooks": [{ "command": "touch .e2e-session-start" }] }],
     "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "command": "if grep -q FORBIDDEN_MARKER; then echo BLOCKED_BY_E2E_HOOK >&2; exit 2; fi" }] }]
@@ -152,18 +153,9 @@ done
 # A wire probe records the exact provider payload of each request, giving the context
 # checks a deterministic oracle: what the model was actually sent, not what it recalls.
 WIRE="$FAKEHOME/wire.json"
-# Appends one JSON line per request: an overwrite-per-request dump could be
-# clobbered by a later request (session titling, a follow-up turn) between the
-# turn under test and the greps, flipping good checks into false FAILs.
-cat > "$FAKEHOME/wire-probe.ts" <<'EOF'
-import * as fs from 'node:fs'
-export default function wireProbe(pi: { on: (event: string, handler: (event: unknown) => void) => void }) {
-  pi.on('before_provider_request', (event) => {
-    const target = process.env.PI_E2E_WIRE
-    if (target) fs.appendFileSync(target, `${JSON.stringify(event)}\n`)
-  })
-}
-EOF
+# The committed probe (also used by the headless smoke) appends one JSON line
+# per request, so a later request cannot clobber the payload under test.
+cp "$REPO/scripts/lib/wire-probe.ts" "$FAKEHOME/wire-probe.ts"
 # Allowlist, not denylist: only the model-selection keys ride in from the real
 # settings. Copying everything minus a strip list let any other developer key (a
 # global statusLine, hooks, timeout tuning) shape the "isolated" run; a fresh
@@ -270,10 +262,18 @@ if wait_for 'No checkpoints recorded yet' 15; then ok "checkpoint: empty-session
 send "/hooks" Enter
 if wait_for 'PreToolUse:' 15 && capture | grep -q 'FORBIDDEN_MARKER'; then ok "hooks: /hooks viewer shows the PreToolUse guard"; else bad "hooks: /hooks viewer missing the guard"; fi
 
+# The fixture ships a project agent, so /agents must list it with its file path.
+send "/agents" Enter
+if wait_for 'echoer - ' 15; then ok "agents: /agents lists the project agent"; else bad "agents: echoer missing from the listing"; fi
+
 # --- Model turns ----------------------------------------------------------------------
 type_prompt "/hello"
 if wait_for 'HELLO_MARKER' 200; then ok "commands: /hello template drove the turn"; else bad "commands: no HELLO_MARKER"; fi
 if wait_for '✓ turn' 60; then ok "statusline: turn counter"; else bad "statusline: no turn segment"; fi
+
+# After a completed turn /context has usage to report.
+send "/context" Enter
+if wait_for 'Context usage' 15; then ok "context: /context renders usage"; else bad "context: no usage output"; fi
 
 # The wire dump written during the /hello turn is the ground truth for context
 # injection: the exact payload the provider received, independent of model recall
@@ -295,6 +295,12 @@ if wait_for 'E2EPONG' 200; then ok "mcp: model called the MCP tool"; else bad "m
 
 type_prompt "Run this exact bash command: echo FORBIDDEN_MARKER"
 if wait_for 'BLOCKED_BY_E2E_HOOK' 200; then ok "hooks: PreToolUse blocked with its reason"; else bad "hooks: block reason missing"; fi
+
+# env-settings: the fixture's settings env must reach tool subprocesses. The
+# typed prompt carries the variable NAME unexpanded, so the value can only
+# appear through real execution.
+type_prompt "Run this exact bash command: echo marker is \$E2E_ENV_MARKER"
+if wait_for 'marker is ENVWIRE_ABC' 200; then ok "env-settings: settings env reached the bash tool"; else bad "env-settings: ENVWIRE_ABC missing"; fi
 
 type_prompt "Use the memory tool with action save, name wraptest, description e2e check, content MEMCONTENT_XYZ. Do nothing else."
 if wait_file "$FAKEHOME/.pi/agent/memory/$SLUG/wraptest.md" 200 && grep -q 'MEMCONTENT_XYZ' "$FAKEHOME/.pi/agent/memory/$SLUG/wraptest.md"; then
@@ -352,7 +358,7 @@ fi
 # The echoer agent's BODY carries SUBAGENT_OK, so the pane can only show it when
 # the child pi actually loaded the project agent and ran. The self-check makes
 # that property mechanical for future edits.
-SUBAGENT_PROMPT="Use the subagent tool with agentScope set to both, agent echoer, and this task: introduce yourself."
+SUBAGENT_PROMPT="Use the subagent tool with agentScope set to both, agent echoer, and this task: follow your instructions exactly."
 case "$SUBAGENT_PROMPT" in *SUBAGENT_OK*) bad "self-check: subagent prompt must not carry the marker" ;; esac
 type_prompt "$SUBAGENT_PROMPT"
 if wait_for 'project agent|Source:' 200; then
@@ -426,6 +432,14 @@ else
   bad "plan-mode: review prompt missing"
 fi
 send "/plan" Enter
+sleep 2
+
+# /init sends the analysis prompt as a user message; the deterministic part is
+# that prompt reaching the conversation. Escape cancels the model turn so the
+# suite does not pay for a full codebase analysis.
+send "/init" Enter
+if wait_for 'AGENTS.md' 20; then ok "init: /init sent the analysis prompt"; else bad "init: no analysis prompt"; fi
+send Escape
 sleep 2
 
 # --- Second session: persistence checks -----------------------------------------------
