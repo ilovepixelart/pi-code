@@ -23,7 +23,6 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionContext, parseFrontmatter } from '@earendil-works/pi-coding-agent'
-
 import { expandCommand, shellExecutionDisabled } from './commands.js'
 import { runAgent } from './internal/agent-run.js'
 import { parseCommandFile } from './internal/command-file.js'
@@ -34,14 +33,7 @@ import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.js'
-
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory()
-  } catch {
-    return false
-  }
-}
+import { errorMessage, isDirectory } from './internal/values.js'
 
 /** Existing `.claude/skills` directories, user first then project. The project
  * directory is included only for approved projects: pi's loader surfaces every skill's
@@ -165,7 +157,7 @@ async function runForkedSkill(name: string, filePath: string, expanded: string, 
     const output = await runAgent({ prompt: expanded, fullTools: true, ...(agentName ? { agent: agentName } : {}) })
     return { action: 'transform', text: `<skill name="${name}" location="${filePath}">\nThe skill ran in a forked subagent (no conversation history shared). Its result:\n\n${output}\n</skill>` }
   } catch (error) {
-    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${error instanceof Error ? error.message : String(error)}\n</skill>` }
+    return { action: 'transform', text: `<skill name="${name}">\nThe forked subagent run failed: ${errorMessage(error)}\n</skill>` }
   }
 }
 

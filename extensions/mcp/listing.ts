@@ -4,6 +4,7 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { errorMessage } from '../internal/values.js'
 import type { McpPromptInfo } from './mapping.js'
 import { callRequestOptions, withTimeout } from './transport.js'
 
@@ -76,7 +77,7 @@ export async function collectServerResourceEntries(entries: Array<Record<string,
   try {
     await collectResources(entries, name, client, budget)
   } catch (error) {
-    entries.push({ server: name, error: error instanceof Error ? error.message : String(error) })
+    entries.push({ server: name, error: errorMessage(error) })
   }
   try {
     await collectResourceTemplates(entries, name, client, budget)

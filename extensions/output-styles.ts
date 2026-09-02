@@ -24,13 +24,13 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.js'
-
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
+import { isDirectory } from './internal/values.js'
 
 export interface OutputStyle {
   name: string
@@ -85,14 +85,6 @@ export function applyStyle(systemPrompt: string, style: OutputStyle): string {
     if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
   }
   return `${systemPrompt}\n\n${styleSection}`
-}
-
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory()
-  } catch {
-    return false
-  }
 }
 
 /**

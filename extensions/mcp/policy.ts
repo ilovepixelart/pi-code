@@ -9,6 +9,7 @@ import * as path from 'node:path'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import { managedSettingsFile } from '../internal/managed-settings.js'
 import { findNearestFile } from '../internal/project-root.js'
+import { errorMessage } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
 export interface ProjectServerPolicy {
@@ -227,7 +228,7 @@ export function loadManagedMcpServers(managedFile: string = managedSettingsFile(
   } catch (error) {
     // Present but corrupt: fail closed to an empty managed set, exactly like an empty map,
     // rather than reopening the user/project/plugin scopes.
-    console.warn(`pi-code-mcp: managed-mcp.json is present but not valid JSON (${file}); failing closed to no MCP servers: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(`pi-code-mcp: managed-mcp.json is present but not valid JSON (${file}); failing closed to no MCP servers: ${errorMessage(error)}`)
     return {}
   }
   if (parsed === null || typeof parsed !== 'object') return {}

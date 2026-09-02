@@ -37,7 +37,6 @@
 
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
 import { hookFiles, readSettingsDisableAllHooks, stopHookBlockCap } from './hooks/index.js'
 import {
   checkinIntervalMs,
@@ -66,6 +65,7 @@ import { completeText } from './internal/model-complete.js'
 import { resolveModelOverride } from './internal/model-lookup.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.js'
+import { errorMessage } from './internal/values.js'
 
 /** Session entry type the goal state persists under, and the custom message type its
  * transcript lines (kickoff, verdicts, check-ins) carry. */
@@ -340,7 +340,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       // A user interrupt is not an evaluator failure: the goal stays, nothing to say.
       if (ctx.signal?.aborted) return
       // No verdict is a hook error in Claude's terms: the turn ends and the goal stays.
-      if (generation === startedGeneration) tell(ctx, `Goal evaluator error: ${error instanceof Error ? error.message : String(error)}. The goal stays set; the next turn is evaluated again.`, 'warning')
+      if (generation === startedGeneration) tell(ctx, `Goal evaluator error: ${errorMessage(error)}. The goal stays set; the next turn is evaluated again.`, 'warning')
       return
     }
     // Interrupted, cleared, or replaced during the await: this verdict must not act.

@@ -6,7 +6,6 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works/pi-coding-agent'
-
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
@@ -14,6 +13,7 @@ import { parseToolGrants } from '../internal/command-file.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
 import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
+import { errorMessage } from '../internal/values.js'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -180,7 +180,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   } catch (error) {
     // Malformed YAML must not abort discovery for the whole directory, but a silent drop
     // reads as "that agent does not exist", so it is named like the other rejections here.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${error instanceof Error ? error.message : String(error)})`)
+    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
     return null
   }
   const { frontmatter, body } = parsed
