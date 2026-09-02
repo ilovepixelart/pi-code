@@ -218,10 +218,12 @@ const setupExtension = () => {
 }
 
 describe('runHookCommand process wiring', () => {
-  it('runs the command through /bin/sh by absolute path, streams piped and detached into its own group', async () => {
+  it('runs the command through the platform shell by absolute path, streams piped and detached into its own group', async () => {
     await runHookCommand('guard.sh', {}, 5000)
     const record = recordFor('guard.sh')
-    expect(record.file).toBe('/bin/sh')
+    // /bin/sh off Windows; on the Windows runners Git for Windows is installed, so Git Bash.
+    if (process.platform === 'win32') expect(record.file).toMatch(/\\Git\\bin\\bash\.exe$/)
+    else expect(record.file).toBe('/bin/sh')
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
     // the grandchildren a compound command forks. Claude marks every subprocess it

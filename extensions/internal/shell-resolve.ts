@@ -63,11 +63,13 @@ function isProjectTooling(dir: string, cwd: string): boolean {
   return relative.split(path.sep).some((segment) => PROJECT_TOOLING_DIRS.has(segment))
 }
 
-/** Git Bash in Claude's documented order, or undefined when none is installed. */
-export function resolveGitBash(env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): string | undefined {
+/** Git Bash in Claude's documented order, or undefined when none is installed.
+ * `installRoots` is the default install location list, a parameter so tests on a
+ * Windows host that has Git there can still exercise the later rules. */
+export function resolveGitBash(env: Record<string, string | undefined> = process.env, cwd: string = process.cwd(), installRoots: string[] = DEFAULT_GIT_ROOTS): string | undefined {
   const override = env.CLAUDE_CODE_GIT_BASH_PATH
   if (override && GIT_BASH_NAMES.has(path.basename(override).toLowerCase()) && isFile(override)) return override
-  for (const root of DEFAULT_GIT_ROOTS) {
+  for (const root of installRoots) {
     const bash = path.join(root, 'bin', 'bash.exe')
     if (isFile(bash)) return bash
   }
@@ -87,8 +89,8 @@ export const toPowershellPlaceholders = (command: string): string => command.rep
 
 /** The bash for an injected command span: /bin/sh off Windows, Git Bash on Windows
  * (undefined when it is not installed). */
-export function bashBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): string | undefined {
-  return platform === 'win32' ? resolveGitBash(env, cwd) : '/bin/sh'
+export function bashBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd(), installRoots?: string[]): string | undefined {
+  return platform === 'win32' ? resolveGitBash(env, cwd, installRoots) : '/bin/sh'
 }
 
 const bashShell = (file: string): ResolvedShell => ({ kind: 'bash', file, argsFor: (command) => ['-c', command] })
@@ -107,12 +109,12 @@ const powershellShell = (file: string): ResolvedShell => ({
  * Windows Git Bash, then PowerShell. Undefined means nothing on this machine can run
  * it (Windows with neither Git Bash nor PowerShell installed).
  */
-export function resolveShell(preferred: string | undefined, platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): ResolvedShell | undefined {
+export function resolveShell(preferred: string | undefined, platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd(), installRoots?: string[]): ResolvedShell | undefined {
   if (preferred === 'powershell') {
     const powershell = resolvePowershellBinary(platform, env)
     if (powershell) return powershellShell(powershell)
   }
-  const bash = bashBinary(platform, env, cwd)
+  const bash = bashBinary(platform, env, cwd, installRoots)
   if (bash) return bashShell(bash)
   const powershell = resolvePowershellBinary(platform, env)
   return powershell ? powershellShell(powershell) : undefined

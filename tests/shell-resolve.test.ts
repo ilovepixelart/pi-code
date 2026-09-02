@@ -39,21 +39,21 @@ describe('resolveGitBash', () => {
   it('honors CLAUDE_CODE_GIT_BASH_PATH when it names an existing bash.exe', () => {
     const bash = join(tempDir(), 'bash.exe')
     writeFileSync(bash, 'MZ')
-    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: bash, PATH: '' }, tempDir())).toBe(bash)
+    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: bash, PATH: '' }, tempDir(), [])).toBe(bash)
   })
 
   it('ignores an override that is missing or not named bash.exe, sh.exe, bash, or sh', () => {
     const dir = tempDir()
     const gitBashLauncher = join(dir, 'git-bash.exe')
     writeFileSync(gitBashLauncher, 'MZ')
-    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: gitBashLauncher, PATH: '' }, tempDir())).toBeUndefined()
-    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: join(dir, 'bash.exe'), PATH: '' }, tempDir())).toBeUndefined()
+    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: gitBashLauncher, PATH: '' }, tempDir(), [])).toBeUndefined()
+    expect(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: join(dir, 'bash.exe'), PATH: '' }, tempDir(), [])).toBeUndefined()
   })
 
   it('finds bin\\bash.exe beside the git on PATH', () => {
     const root = tempDir()
     const onPath = gitInstall(root)
-    expect(resolveGitBash({ PATH: onPath }, tempDir())).toBe(join(root, 'bin', 'bash.exe'))
+    expect(resolveGitBash({ PATH: onPath }, tempDir(), [])).toBe(join(root, 'bin', 'bash.exe'))
   })
 
   it('skips a git below the launch directory under node_modules or a virtual environment', () => {
@@ -62,18 +62,24 @@ describe('resolveGitBash', () => {
     const venv = gitInstall(join(cwd, '.venv', 'git'))
     const real = tempDir()
     const realOnPath = gitInstall(real)
-    expect(resolveGitBash({ PATH: [local, venv, realOnPath].join(delimiter) }, cwd)).toBe(join(real, 'bin', 'bash.exe'))
-    expect(resolveGitBash({ PATH: [local, venv].join(delimiter) }, cwd)).toBeUndefined()
+    expect(resolveGitBash({ PATH: [local, venv, realOnPath].join(delimiter) }, cwd, [])).toBe(join(real, 'bin', 'bash.exe'))
+    expect(resolveGitBash({ PATH: [local, venv].join(delimiter) }, cwd, [])).toBeUndefined()
   })
 
   it('skips a git sitting in the launch directory itself', () => {
     const root = tempDir()
     const cwd = gitInstall(root)
-    expect(resolveGitBash({ PATH: cwd }, cwd)).toBeUndefined()
+    expect(resolveGitBash({ PATH: cwd }, cwd, [])).toBeUndefined()
+  })
+
+  // Real-host oracle: the windows-latest runners install Git for Windows in the default
+  // location, which is the first rule after the override.
+  it.skipIf(process.platform !== 'win32')('finds Git for Windows in its default install directory on this host', () => {
+    expect(resolveGitBash({ PATH: '' }, tempDir())).toMatch(/\\Git\\bin\\bash\.exe$/)
   })
 
   it('returns undefined when no git is on PATH', () => {
-    expect(resolveGitBash({ PATH: tempDir() }, tempDir())).toBeUndefined()
+    expect(resolveGitBash({ PATH: tempDir() }, tempDir(), [])).toBeUndefined()
   })
 })
 
@@ -89,7 +95,7 @@ describe('resolveShell', () => {
 
   it('prefers Git Bash on Windows', () => {
     const root = tempDir()
-    const shell = resolveShell(undefined, 'win32', { PATH: gitInstall(root) }, tempDir())
+    const shell = resolveShell(undefined, 'win32', { PATH: gitInstall(root) }, tempDir(), [])
     expect(shell?.kind).toBe('bash')
     expect(shell?.file).toBe(join(root, 'bin', 'bash.exe'))
     expect(shell?.argsFor('echo hi')).toEqual(['-c', 'echo hi'])
@@ -98,7 +104,7 @@ describe('resolveShell', () => {
   it('falls back to PowerShell on Windows without Git Bash and rewrites the documented placeholders', () => {
     const dir = tempDir()
     const powershell = powershellAt(dir, 'powershell.exe')
-    const shell = resolveShell(undefined, 'win32', { PATH: dir }, tempDir())
+    const shell = resolveShell(undefined, 'win32', { PATH: dir }, tempDir(), [])
     expect(shell?.kind).toBe('powershell')
     expect(shell?.file).toBe(powershell)
     expect(shell?.argsFor('echo ${CLAUDE_PROJECT_DIR} $CLAUDE_PROJECT_DIR')).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo ${env:CLAUDE_PROJECT_DIR} $CLAUDE_PROJECT_DIR\nexit $LASTEXITCODE'])
@@ -115,7 +121,7 @@ describe('resolveShell', () => {
   })
 
   it('resolves nothing on Windows with neither Git Bash nor PowerShell', () => {
-    expect(resolveShell(undefined, 'win32', { PATH: tempDir() }, tempDir())).toBeUndefined()
+    expect(resolveShell(undefined, 'win32', { PATH: tempDir() }, tempDir(), [])).toBeUndefined()
   })
 })
 
