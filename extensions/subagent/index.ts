@@ -388,8 +388,11 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         resolve(code ?? 0)
       })
 
-      proc.on('error', () => {
+      proc.on('error', (error: Error) => {
         cleanup()
+        // A child that never started leaves no stdout and no stderr, so this message is the
+        // only diagnostic; without it the failure reads as "(no output)".
+        if (!currentResult.stderr) currentResult.stderr = error.message
         resolve(1)
       })
 

@@ -781,13 +781,15 @@ describe('runSingleAgent process handling', () => {
     expect(results(result)[0].stderr).toBe('warn: deprecated flag')
   })
 
-  it('treats a spawn error as exit code 1', async () => {
+  it('treats a spawn error as exit code 1 and reports what failed', async () => {
     script('inspect', { fail: true })
 
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
 
     expect(results(result)[0].exitCode).toBe(1)
-    expect(text(result)).toBe('Agent failed: (no output)')
+    // The spawn error is the only diagnostic a child that never started leaves; without it
+    // the model and the user get "(no output)" and nothing to act on.
+    expect(text(result)).toBe('Agent failed: spawn ENOENT')
   })
 
   it('maps a null exit code to zero', async () => {
