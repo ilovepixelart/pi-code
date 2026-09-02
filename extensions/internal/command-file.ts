@@ -433,26 +433,7 @@ export function powershellQuote(value: string): string {
   return value.replaceAll(/['‘’‚‛]/g, '$&$&')
 }
 
-/** The PowerShell names worth trying: pwsh everywhere it installs, plus the
- * Windows spellings on win32, where powershell.exe ships with the OS. */
-const powershellCandidates = (platform: string): string[] => (platform === 'win32' ? ['pwsh', 'pwsh.exe', 'powershell.exe'] : ['pwsh'])
-
-/** First PowerShell binary found on PATH, or undefined when none is installed. */
-export function resolvePowershellBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env): string | undefined {
-  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
-  for (const candidate of powershellCandidates(platform)) {
-    for (const dir of dirs) {
-      const full = path.join(dir, candidate)
-      try {
-        fs.accessSync(full, fs.constants.X_OK)
-        if (fs.statSync(full).isFile()) return full
-      } catch {
-        // not here; keep looking
-      }
-    }
-  }
-  return undefined
-}
+export { resolvePowershellBinary } from './shell-resolve.js'
 
 export interface SpanExec {
   command: string
