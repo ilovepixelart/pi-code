@@ -230,7 +230,7 @@ describe('runHookCommand process wiring', () => {
     const expectedEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
     if (process.stdout.columns) expectedEnv.COLUMNS = String(process.stdout.columns)
     if (process.stdout.rows) expectedEnv.LINES = String(process.stdout.rows)
-    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: expectedEnv })
+    expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env: expectedEnv })
   })
 
   it('marks the hook child with CLAUDECODE=1 even when the parent env lacks it', async () => {
@@ -330,6 +330,47 @@ describe('runHookCommand exec form', () => {
     await vi.advanceTimersByTimeAsync(1000)
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.killSignals).toEqual(['SIGKILL'])
+  })
+})
+
+describe('runHookCommand shell selection', () => {
+  // A PowerShell on PATH is enough for the resolver; the spawn mock never runs it.
+  const pwshOnPath = (): string => {
+    const bin = tempDir('pwsh-')
+    const pwsh = join(bin, 'pwsh')
+    writeFileSync(pwsh, '#!/bin/sh\n', { mode: 0o755 })
+    process.env.PATH = bin
+    return pwsh
+  }
+
+  it('runs a shell: powershell hook through the PowerShell on PATH with the documented argv', async () => {
+    const pwsh = pwshOnPath()
+    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, '/proj', undefined, undefined, 'powershell')
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe(pwsh)
+    expect(record.args).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo ${env:CLAUDE_PROJECT_DIR}\nexit $LASTEXITCODE'])
+  })
+
+  it('ignores shell for an exec-form hook, which spawns its executable directly', async () => {
+    pwshOnPath()
+    await runHookCommand('/bin/echo', {}, 5000, undefined, ['x'], undefined, 'powershell')
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe('/bin/echo')
+    expect(record.args).toEqual(['x'])
+  })
+
+  it('hides the console window a detached child would otherwise open on Windows', async () => {
+    await runHookCommand('true', {}, 5000)
+    expect(recordFor('true').options as { detached?: boolean; windowsHide?: boolean }).toMatchObject({ detached: true, windowsHide: true })
+  })
+
+  it('passes the shell field of a settings hook through to the runner', async () => {
+    const pwsh = pwshOnPath()
+    writeSettings(hoisted.home, 'settings.json', { SessionStart: [{ matcher: 'startup', hooks: [{ command: 'home-session', shell: 'powershell' }] }] })
+    await setupExtension().sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const record = hoisted.calls[hoisted.calls.length - 1]
+    expect(record.file).toBe(pwsh)
+    expect(record.args[3]).toContain('home-session')
   })
 })
 

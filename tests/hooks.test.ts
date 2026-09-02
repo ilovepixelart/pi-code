@@ -578,8 +578,7 @@ describe('runPreToolUse', () => {
 })
 
 describe('runHookCommand (real shell)', () => {
-  // POSIX-only: runHookCommand's shell path spawns /bin/sh, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('decodes multi-byte output split across stream chunks', async () => {
+  it('decodes multi-byte output split across stream chunks', async () => {
     // 100KB of two-byte characters crosses many 64KB pipe boundaries. Concatenating raw
     // Buffers would mangle every code point that straddles one, and a mangled byte in a
     // hook's deny decision makes it unparseable, which reads as an allow.
@@ -589,15 +588,13 @@ describe('runHookCommand (real shell)', () => {
     expect(result.stdout.length).toBeGreaterThan(50_000)
   })
 
-  // POSIX-only: runHookCommand's shell path spawns /bin/sh, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('captures a non-zero exit code and stderr', async () => {
+  it('captures a non-zero exit code and stderr', async () => {
     const result = await runHookCommand('echo boom >&2; exit 2', {}, 5000)
     expect(result.code).toBe(2)
     expect(result.stderr).toContain('boom')
   })
 
-  // POSIX-only: runHookCommand's shell path spawns /bin/sh, which does not exist on Windows.
-  it.skipIf(process.platform === 'win32')('delivers the payload as JSON on stdin', async () => {
+  it('delivers the payload as JSON on stdin', async () => {
     const result = await runHookCommand('cat', { tool_name: 'bash' }, 5000)
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('"tool_name":"bash"')
@@ -884,8 +881,7 @@ describe('hook stdout parsing rule', () => {
 })
 
 describe('hook command child environment', () => {
-  // POSIX-only: the probe runs sh variable expansion through runHookCommand's /bin/sh path.
-  it.skipIf(process.platform === 'win32')('marks hook commands with CLAUDE_CODE_CHILD_SESSION and passes terminal dimensions', async () => {
+  it('marks hook commands with CLAUDE_CODE_CHILD_SESSION and passes terminal dimensions', async () => {
     // Claude sets CLAUDE_CODE_CHILD_SESSION=1 in hook and status line commands
     // (not stdio MCP servers), and COLUMNS/LINES to the terminal dimensions.
     const savedColumns = Object.getOwnPropertyDescriptor(process.stdout, 'columns')

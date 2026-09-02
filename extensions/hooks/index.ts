@@ -72,7 +72,9 @@
  * agent-frontmatter hooks arrive via PI_CODE_AGENT_HOOKS (Stop pre-converted to
  * SubagentStop, fired at the child's own agent end) and die with the process.
  *
- * Hook commands run via `sh -c` with the event JSON on stdin. A PreToolUse
+ * Hook commands run through the platform shell (`sh -c`; on Windows Git Bash, or
+ * PowerShell when Git Bash is absent, see internal/shell-resolve) with the event JSON
+ * on stdin. A PreToolUse
  * hook blocks the tool by exiting 2 (stderr becomes the reason) or by printing
  * `{"hookSpecificOutput": {"permissionDecision": "deny", ...}}` (or the older
  * `{"decision": "block"}`).
@@ -271,7 +273,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
         if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms)
         if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-        return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild)
+        return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild, hook.shell)
       }
       // Claude's `once` (skill-frontmatter hooks only): removed after the first
       // successful run; a failure, block, or timeout leaves it in place.
