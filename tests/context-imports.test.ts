@@ -1272,6 +1272,157 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
   })
 })
 
+describe('subdirectory context files load on demand', () => {
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
+
+  /** Wire the extension with a bus and expose the handlers, so a tool_result can fire. */
+  const wireTools = () => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const emitted: Array<{ channel: string; data: unknown }> = []
+    contextImports({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
+    } as never)
+    return {
+      handlers,
+      instructionEvents: () => emitted.filter((entry) => entry.channel === INSTRUCTIONS_CHANNEL).map((entry) => entry.data),
+    }
+  }
+
+  const readResult = (relPath: string) => ({ toolName: 'read', input: { path: relPath }, content: [{ type: 'text', text: 'FILE BODY' }], isError: false })
+  const texts = (result: unknown): string[] => ((result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []).map((block) => block.text ?? '')
+
+  const writeAt = (dir: string, name: string, body: string): string => {
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, name)
+    writeFileSync(file, body)
+    return file
+  }
+
+  // Claude: "Claude also discovers CLAUDE.md and CLAUDE.local.md files in subdirectories
+  // under your current working directory. Instead of loading them at launch, they are
+  // included when Claude reads files in those subdirectories."
+  it('attaches a subdirectory CLAUDE.md when a file there is read, once per session', async () => {
+    const cwd = tempDir()
+    const file = writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+
+    const first = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+    expect(texts(first).join('\n')).toContain('SRC RULES')
+    // The tool's own output survives; the memory is appended after it.
+    expect(texts(first)).toContain('FILE BODY')
+    expect(wired.instructionEvents()).toContainEqual({ file_path: file, memory_type: 'Project', load_reason: 'nested_traversal', trigger_file_path: join(cwd, 'src', 'a.ts') })
+
+    const second = await wired.handlers.get('tool_result')?.(readResult(join('src', 'b.ts')), { cwd })
+    expect(texts(second).join('\n')).not.toContain('SRC RULES')
+  })
+
+  it('attaches every level between the touched file and cwd, deepest last', async () => {
+    const cwd = tempDir()
+    writeAt(cwd, 'CLAUDE.md', 'ROOT RULES')
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+    writeAt(join(cwd, 'src', 'api'), 'CLAUDE.md', 'API RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'api', 'h.ts')), { cwd })
+    const joined = texts(result).join('\n')
+
+    expect(joined).toContain('SRC RULES')
+    expect(joined).toContain('API RULES')
+    expect(joined.indexOf('SRC RULES')).toBeLessThan(joined.indexOf('API RULES'))
+    // cwd's own CLAUDE.md is loaded at launch, never on demand.
+    expect(joined).not.toContain('ROOT RULES')
+  })
+
+  it('attaches a subdirectory CLAUDE.local.md after the CLAUDE.md beside it', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+    const local = writeAt(join(cwd, 'src'), 'CLAUDE.local.md', 'SRC LOCAL NOTES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+    const joined = texts(result).join('\n')
+
+    expect(joined.indexOf('SRC RULES')).toBeLessThan(joined.indexOf('SRC LOCAL NOTES'))
+    expect(wired.instructionEvents()).toContainEqual({ file_path: local, memory_type: 'Local', load_reason: 'nested_traversal', trigger_file_path: join(cwd, 'src', 'a.ts') })
+  })
+
+  it('resolves the subdirectory file own @imports', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES\n@style.md')
+    writeAt(join(cwd, 'src'), 'style.md', 'SRC STYLE BODY')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).toContain('SRC STYLE BODY')
+  })
+
+  it('attaches nothing for a file outside the working directory', async () => {
+    const cwd = tempDir()
+    const outside = tempDir()
+    writeAt(outside, 'CLAUDE.md', 'OUTSIDE RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join(outside, 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('OUTSIDE RULES')
+  })
+
+  it('attaches nothing when the project is not approved', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'UNTRUSTED SRC RULES')
+    // Claude-shaped config with no recorded decision: repo-controlled text stays out.
+    writeAt(join(cwd, '.claude'), 'settings.json', '{}')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => true, hasUI: false, ui: { notify: () => {} } })
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('UNTRUSTED SRC RULES')
+  })
+
+  it('honors claudeMdExcludes for a subdirectory file', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'EXCLUDED SRC RULES')
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ claudeMdExcludes: ['**/src/CLAUDE.md'] }))
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('EXCLUDED SRC RULES')
+  })
+
+  it('attaches nothing on a failed tool call or a non-file tool', async () => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+
+    const failed = await wired.handlers.get('tool_result')?.({ ...readResult(join('src', 'a.ts')), isError: true }, { cwd })
+    expect(texts(failed).join('\n')).not.toContain('SRC RULES')
+    const other = await wired.handlers.get('tool_result')?.({ ...readResult(join('src', 'a.ts')), toolName: 'bash' }, { cwd })
+    expect(texts(other).join('\n')).not.toContain('SRC RULES')
+  })
+})
+
 describe('CLAUDE.md beside an AGENTS.md pi loaded instead', () => {
   let savedAgentDir: string | undefined
   beforeEach(() => {

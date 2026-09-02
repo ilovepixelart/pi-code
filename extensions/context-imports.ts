@@ -497,6 +497,29 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
   return imported
 }
 
+/** The context files Claude loads on demand rather than at launch, in the order it
+ * reads them within a directory. */
+const NESTED_CONTEXT_NAMES = ['CLAUDE.md', 'CLAUDE.local.md'] as const
+
+/** The directories between a touched file and cwd, nearest cwd first.
+ *
+ * Claude loads CLAUDE.md from cwd and every directory above it at launch, and the
+ * ones below "are included when Claude reads files in those directories"
+ * (memory.md). Only the strictly-below range belongs here; cwd's own file is
+ * already in the prompt. A file outside cwd contributes nothing.
+ */
+function nestedContextDirs(touched: string, cwd: string): string[] {
+  const dirs: string[] = []
+  let current = path.dirname(touched)
+  while (current !== cwd && current !== path.dirname(current)) {
+    dirs.unshift(current)
+    current = path.dirname(current)
+  }
+  // The walk reached the filesystem root without meeting cwd, so the file is outside
+  // it: nothing below cwd to load. A file in cwd itself ends the loop with no dirs.
+  return current === cwd ? dirs : []
+}
+
 /** The context-file names pi prefers over CLAUDE.md in the same directory. Mirrors
  * pi's own lookup order (init.ts CONTEXT_FILE_CANDIDATES); the sibling search below
  * keys off what pi actually loaded, so this is only used to recognize those files. */
@@ -662,6 +685,9 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // Whether project settings may contribute claudeMdExcludes; decided at session
   // start with the silent check, so no prompt fires mid-flight.
   let projectApproved = false
+  // Nested CLAUDE.md/CLAUDE.local.md files already attached this session, so a second
+  // read in the same subtree does not repeat them.
+  const nestedLoaded = new Set<string>()
   // Instruction loads already announced on the shared bus, keyed reason:path.
   // before_agent_start fires every turn, so without this a configured
   // InstructionsLoaded hook would fire once per file per turn.
@@ -873,5 +899,59 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }
+  })
+
+  // Claude's nested traversal: CLAUDE.md and CLAUDE.local.md below the working
+  // directory are not loaded at launch but "are included when Claude reads files in
+  // those subdirectories" (memory.md). pi's loader stops at cwd, so the whole
+  // below-cwd range is missing; this attaches each one to the tool result that
+  // touched its directory, which is the same seam claude-rules uses for a scoped
+  // rule. Once per file per session, ordered shallowest first so the deepest
+  // instructions are read last, matching the launch-time ordering.
+  pi.on('tool_result', async (event, ctx) => {
+    if (event.isError) return
+    if (event.toolName !== 'read' && event.toolName !== 'edit' && event.toolName !== 'write') return
+    // Repo-controlled text, gated like every other project file this extension adds.
+    if (!projectApproved) return
+    const rel = (event.input as { path?: unknown } | undefined)?.path
+    if (typeof rel !== 'string' || rel.length === 0) return
+    const touched = path.resolve(ctx.cwd, rel)
+
+    const home = os.homedir()
+    const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
+    const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, home, projectApproved), readManagedSettings())
+    const bodies: string[] = []
+    for (const dir of nestedContextDirs(touched, ctx.cwd)) {
+      for (const name of NESTED_CONTEXT_NAMES) {
+        const file = path.join(dir, name)
+        if (nestedLoaded.has(file)) continue
+        if (isExcludedPath(file, excludeGlobs, home)) continue
+        const content = readContextFile(file)
+        if (content === undefined) continue
+        nestedLoaded.add(file)
+        const body = stripBlockComments(content).trim()
+        if (body.length === 0) continue
+        // Its own @imports resolve at project roots, on a budget of their own: this
+        // load is outside the launch-time expansion the shared budget covers.
+        const seen = new Set(realRoots([file]))
+        const imports = collectImports(content, dir, home, rootsForImporter(file, home, ctx.cwd), seen, {
+          importer: file,
+          isExcluded: (absPath) => isExcludedPath(absPath, excludeGlobs, home),
+        })
+        const importBodies = imports.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`)
+        bodies.push([instructionsBlock(file, body), ...importBodies].join('\n\n'))
+        announce({
+          file_path: file,
+          memory_type: memoryTypeForPath(file, home, projectRoot),
+          load_reason: 'nested_traversal',
+          trigger_file_path: touched,
+        })
+        for (const entry of imports) {
+          announce({ file_path: entry.path, memory_type: memoryTypeForPath(entry.path, home, projectRoot), load_reason: 'include', parent_file_path: file })
+        }
+      }
+    }
+    if (bodies.length === 0) return
+    return { content: [...event.content, ...bodies.map((text) => ({ type: 'text' as const, text }))] }
   })
 }
