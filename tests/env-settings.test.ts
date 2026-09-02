@@ -152,6 +152,24 @@ describe('env-settings extension', () => {
     expect(process.env.ENVTEST_PROJECT).toBeUndefined()
   })
 
+  it('ignores a parent directory settings.json, like every other settings consumer', async () => {
+    // Claude reads the shared settings.json from the session's own directory: "to use a
+    // file committed at the repository root, start Claude Code there". Walking up meant a
+    // subdirectory session inherited env the rest of pi-code would not read.
+    track('ENVTEST_ANCESTOR')
+    const repo = tempDir('env-repo-')
+    mkdirSync(join(repo, '.git'))
+    writeSettings(repo, 'settings.json', { ENVTEST_ANCESTOR: 'from-root' })
+    const sub = join(repo, 'packages', 'app')
+    mkdirSync(sub, { recursive: true })
+    hoisted.approved = true
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd: sub, isProjectTrusted: () => true })
+
+    expect(process.env.ENVTEST_ANCESTOR).toBeUndefined()
+  })
+
   it('adds approved project env at session_start', async () => {
     track('ENVTEST_PROJECT')
     const project = tempDir('env-proj-')
