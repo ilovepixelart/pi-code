@@ -2302,7 +2302,9 @@ describe('mcp headersHelper environment', () => {
     expect(String(hoisted.transports[0].url)).toBe('https://api.example/sekret/mcp')
   })
 
-  it('runs the helper through Git Bash on Windows', async () => {
+  // Off Windows only: a real Windows host resolves its Git install ahead of the PATH shim,
+  // and there the un-skipped helper tests above run through the real Git Bash.
+  it.skipIf(process.platform === 'win32')('runs the helper through Git Bash on Windows', async () => {
     // A Git for Windows layout on PATH whose bash.exe is a shim: on this host it marks
     // the environment and hands the command to /bin/sh, so the header says which shell ran.
     const root = mkdtempSync(join(tmpdir(), 'mcp-gitbash-'))

@@ -690,6 +690,12 @@ describe('claude variables and skill frontmatter wiring', () => {
 })
 
 describe('shell frontmatter', () => {
+  // The bash path is /bin/sh off Windows; the Windows runners have Git for Windows, so Git Bash.
+  const expectBashPath = (file: string): void => {
+    if (process.platform === 'win32') expect(file).toMatch(/\\Git\\bin\\bash\.exe$/)
+    else expect(file).toBe('/bin/sh')
+  }
+
   it('runs a powershell command span through the resolved pwsh binary with -Command', async () => {
     const cwd = tempDir()
     hoisted.pwshBinary = '/opt/homebrew/bin/pwsh'
@@ -738,7 +744,7 @@ describe('shell frontmatter', () => {
     expect(s.sent[0]).not.toContain('stray noise')
   })
 
-  it('falls back to /bin/sh when no PowerShell binary is installed', async () => {
+  it('falls back to the bash path when no PowerShell binary is installed', async () => {
     const cwd = tempDir()
     // hoisted.pwshBinary stays undefined: the resolver finds nothing, as on this mac.
     writeCommand(cwd, 'ps.md', '---\nshell: powershell\n---\nfiles: !`Get-ChildItem`')
@@ -746,7 +752,7 @@ describe('shell frontmatter', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('ps')?.handler('', s.ctx)
 
-    expect(s.execCalls[0].file).toBe('/bin/sh')
+    expectBashPath(s.execCalls[0].file)
     expect(s.execCalls[0].args[0]).toBe('-c')
     expect(s.execCalls[0].args[1]).toContain('Get-ChildItem')
     expect(s.execCalls[0].args[1]).toContain(`export CLAUDE_PROJECT_DIR='${cwd}'`)
@@ -761,7 +767,7 @@ describe('shell frontmatter', () => {
     await s.handlers.get('session_start')?.({}, s.ctx)
     await s.commands.get('sh')?.handler('', s.ctx)
 
-    expect(s.execCalls[0].file).toBe('/bin/sh')
+    expectBashPath(s.execCalls[0].file)
     expect(s.execCalls[0].args[0]).toBe('-c')
   })
 })
