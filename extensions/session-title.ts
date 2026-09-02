@@ -21,6 +21,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 import { completeText } from './internal/model-complete.js'
+import { contentText } from './internal/values.js'
 
 const TITLE_SYSTEM = 'You name a coding session from its first user message. Reply with a terse 3 to 6 word title in Title Case that captures the task. No quotes, no surrounding punctuation, no trailing period. Output the title only, nothing else.'
 /** A title is a few words; a tight cap keeps the extra call cheap and stops a runaway reply. */
@@ -29,23 +30,12 @@ const TITLE_MAX_TOKENS = 24
  * bounded prompt keeps the input cost of the extra call small. */
 const MAX_PROMPT_CHARS = 1000
 
-/** Join the text of a message's content, mirroring git-checkpoint's extraction: content is
- * either a plain string or an array of parts, of which only text parts carry a title's worth. */
-function extractText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join(' ')
-}
-
 /** Text of the first user message in the branch, or empty when the run carried no user text
  * (for example a slash-command-only turn), in which case there is nothing to title from. */
 export function firstUserText(ctx: ExtensionContext): string {
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry?.type === 'message' && entry.message.role === 'user') {
-      return extractText(entry.message.content).trim()
+      return contentText(entry.message.content, ' ').trim()
     }
   }
   return ''

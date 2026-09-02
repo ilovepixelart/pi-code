@@ -19,7 +19,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
-import { errorMessage } from './internal/values.js'
+import { contentText, errorMessage } from './internal/values.js'
 
 const CUSTOM_TYPE = 'git-checkpoint'
 /** Sidecar inside the bare shadow repo recording the work tree it snapshots. */
@@ -117,17 +117,8 @@ function rememberWorkTree(shadowDir: string, cwd: string): void {
   }
 }
 
-function extractText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join(' ')
-}
-
 function promptSnippet(content: unknown): string {
-  const text = extractText(content).replace(/\s+/g, ' ').trim()
+  const text = contentText(content, ' ').replace(/\s+/g, ' ').trim()
   if (text.length <= PROMPT_SNIPPET_LENGTH) return text
   return `${text.slice(0, PROMPT_SNIPPET_LENGTH)}…`
 }
