@@ -98,6 +98,12 @@ export function stampModified(content: string, iso: string): string {
   return `---\n${body}modified: ${iso}\n---${rest}`
 }
 
+/** Length of the line break `text` starts with: CRLF, LF, or none. */
+function leadingLineBreak(text: string): number {
+  if (text.startsWith('\r\n')) return 2
+  return text.startsWith('\n') ? 1 : 0
+}
+
 /** Drop every `<!-- ... -->` (and the line break after it) in one pass. A regex strip
  * can rebuild a comment from one nested in another: `<!-<!-- x -->-- y -->` loses the
  * inner comment and becomes `<!--- y -->`. After a removal the scan resumes three
@@ -111,8 +117,7 @@ function removeComments(text: string): string {
     const close = open === -1 ? -1 : out.indexOf('-->', open + 4)
     if (close === -1) return out
     const tail = out.slice(close + 3)
-    const lineBreak = tail.startsWith('\r\n') ? 2 : tail.startsWith('\n') ? 1 : 0
-    out = out.slice(0, open) + tail.slice(lineBreak)
+    out = out.slice(0, open) + tail.slice(leadingLineBreak(tail))
     cursor = Math.max(0, open - 3)
   }
   return out
