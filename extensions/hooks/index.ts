@@ -651,10 +651,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const run = boundRunner(ctx)
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    const stopMessages: string[] = []
     const block = results
       .filter((result) => !result.timedOut)
       .map((result) => {
         const parsed = tryParseJson(result.stdout)
+        // Claude: continue "takes precedence over any event-specific decision fields", and
+        // stopReason is the message shown when it is false. A hook that asks to stop wins
+        // over its own block, whatever exit code carried it.
+        if (parsed?.continue === false) {
+          if (parsed.stopReason) stopMessages.push(String(parsed.stopReason))
+          return { block: false, reason: '' }
+        }
         if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
         // Any JSON blocking spelling counts, including the prompt/agent hook reply
         // schemas (permissionDecision deny, ok:false), which arrive as stdout here.
@@ -669,6 +677,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
         return { block: false, reason: '' }
       })
       .find((verdict) => verdict.block)
+    for (const message of stopMessages) ctx.ui.notify(message, 'warning')
     if (!block) {
       // A non-blocking Stop breaks the streak: the next block starts a fresh count.
       stopHookActive = false

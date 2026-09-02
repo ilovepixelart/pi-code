@@ -2547,6 +2547,21 @@ describe('hooks suppressOriginalPrompt', () => {
     return ext
   }
 
+  it('honors continue:false over a Stop hook decision, showing its stopReason', async () => {
+    // Claude: continue "takes precedence over any event-specific decision fields", and
+    // stopReason is the "message shown to the user when continue is false". A hook that
+    // sets both was continuing the turn on the strength of the field it overrides.
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'halt' }] }] })
+    script('halt', { stdout: ['{"decision":"block","reason":"keep going","continue":false,"stopReason":"budget spent"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    await ext.agentEnd([{ role: 'assistant', content: 'done' }])
+
+    expect(ext.sent).toEqual([])
+    expect(ext.notes.at(-1)?.msg).toContain('budget spent')
+  })
+
   it('reports effort in Claude vocabulary, omitting it when thinking is off', async () => {
     // Claude's effort levels are low, medium, high, xhigh and max. pi adds minimal and
     // off, which a hook keying on the documented set cannot read.
