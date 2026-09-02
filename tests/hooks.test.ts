@@ -417,6 +417,20 @@ describe('formatHooksSummary', () => {
 })
 
 describe('matchingCommands', () => {
+  it('reports a matcher whose regex does not compile instead of quietly matching by name', () => {
+    // The fallback matches the literal text, which almost never matches a tool name, so
+    // the hook silently never fires and its matcher reads as merely wrong, not broken.
+    resetMatcherCache()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const broken = { matcher: 'Bash(', hooks: [{ command: 'guard.sh' }] } as never
+      expect(matchingCommands([broken], 'bash')).toEqual([])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Bash('))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   const bashHook = { matcher: 'Bash', hooks: [{ command: 'guard.sh' }] }
 
   it('matches a Claude PascalCase matcher against a lowercase pi tool name', () => {

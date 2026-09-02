@@ -59,8 +59,10 @@ function compileMatcher(matcher: string): CompiledMatcher {
   } else {
     try {
       compiled = { regex: new RegExp(matcher, 'i') }
-    } catch {
-      // An invalid regex matcher falls back to exact-name matching, as before.
+    } catch (error) {
+      // The fallback matches the literal text, which almost never matches a tool name, so
+      // the hook simply never fires. Say so: the matcher reads as merely wrong otherwise.
+      console.warn(`pi-code-hooks: matcher ${matcher} is not a valid regular expression (${error instanceof Error ? error.message : String(error)}); it will only match a tool of that exact name`)
       compiled = { tokens: exactTokens(matcher) }
     }
   }
