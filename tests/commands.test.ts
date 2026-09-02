@@ -688,6 +688,22 @@ describe('claude variables and skill frontmatter wiring', () => {
   })
 })
 
+it('substitutes CLAUDE_EFFORT in Claude vocabulary, and leaves it unset when thinking is off', async () => {
+  // env-vars: CLAUDE_EFFORT is "low, medium, high, xhigh, or max" and is "only set when
+  // the current model supports the effort parameter", so pi's minimal and off must not
+  // reach a command body as themselves.
+  const cwd = tempDir()
+  writeCommand(cwd, 'e.md', 'effort: ${CLAUDE_EFFORT}')
+  const s = setup(cwd)
+  await s.handlers.get('session_start')?.({}, s.ctx)
+
+  await s.commands.get('e')?.handler('', { ...s.ctx, thinkingLevel: 'minimal' })
+  expect(s.sent.at(-1)).toBe('effort: low')
+
+  await s.commands.get('e')?.handler('', { ...s.ctx, thinkingLevel: 'off' })
+  expect(s.sent.at(-1)).toBe('effort: ${CLAUDE_EFFORT}')
+})
+
 describe('shell frontmatter', () => {
   // The bash path is /bin/sh off Windows; the Windows runners have Git for Windows, so Git Bash.
   const expectBashPath = (file: string): void => {

@@ -43,10 +43,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
-
 import { matchesBashRules } from './internal/bash-rules.js'
 import { type CommandExec, type DiscoveredCommand, discoverCommandFiles, expandDynamicContent, type ParsedCommand, type PathRuleTool, parseCommandFile, resolvePowershellBinary, spanExec, substituteArgsDetailed, substituteVars } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { claudeEffortLevel } from './internal/effort.js'
 import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
@@ -187,7 +187,9 @@ function commandVars(ctx: { cwd: string }, filePath: string, plugin?: CommandPlu
   const varCtx = ctx as unknown as VarContext
   return {
     CLAUDE_SESSION_ID: varCtx.sessionManager?.getSessionId?.(),
-    CLAUDE_EFFORT: varCtx.thinkingLevel,
+    // Claude vocabulary only, and unset when thinking is off: the variable promises
+    // low|medium|high|xhigh|max, and an unset one stays literal in the body.
+    CLAUDE_EFFORT: claudeEffortLevel(varCtx.thinkingLevel),
     CLAUDE_SKILL_DIR: path.dirname(filePath),
     CLAUDE_PROJECT_DIR: repoRoot(ctx.cwd) ?? ctx.cwd,
     CLAUDE_PLUGIN_ROOT: plugin?.root,
