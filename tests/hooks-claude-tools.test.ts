@@ -40,6 +40,11 @@ describe('claudeToolInput', () => {
   it('maps grep ignoreCase to the documented -i flag', () => {
     expect(claudeToolInput('grep', { pattern: 'todo', ignoreCase: true }, '/proj')).toEqual({ pattern: 'todo', '-i': true })
   })
+
+  it('maps pi find input to the documented Glob fields, resolving the path', () => {
+    expect(claudeToolInput('find', { pattern: '*.ts', path: 'src' }, '/proj')).toEqual({ pattern: '*.ts', path: '/proj/src' })
+    expect(claudeToolInput('find', { pattern: '*.ts' }, '/proj')).toEqual({ pattern: '*.ts' })
+  })
 })
 
 describe('piToolInput', () => {
@@ -53,6 +58,15 @@ describe('piToolInput', () => {
     expect(piToolInput('bash', { description: 'no command' })).toBeUndefined()
     expect(piToolInput('edit', { file_path: '/p/a.ts' })).toBeUndefined()
     expect(piToolInput('write', { file_path: '/p/a.ts' })).toBeUndefined()
+  })
+
+  it('converts read, grep and glob rewrites, which had no executions at all', () => {
+    expect(piToolInput('read', { file_path: '/p/a.ts', offset: 5, limit: 10 })).toEqual({ path: '/p/a.ts', offset: 5, limit: 10 })
+    expect(piToolInput('read', { offset: 5 })).toBeUndefined()
+    expect(piToolInput('grep', { pattern: 'todo', path: '/p', '-i': true })).toEqual({ pattern: 'todo', path: '/p', ignoreCase: true })
+    expect(piToolInput('grep', { path: '/p' })).toBeUndefined()
+    expect(piToolInput('find', { pattern: '*.ts', path: '/p' })).toEqual({ pattern: '*.ts', path: '/p' })
+    expect(piToolInput('find', { path: '/p' })).toBeUndefined()
   })
 })
 

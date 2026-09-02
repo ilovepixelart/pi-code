@@ -2541,3 +2541,40 @@ describe('mcp resource mentions', () => {
     expect(await harness.input('email me @nosuch:thing please')).toBeUndefined()
   })
 })
+
+describe('the registered mcp_tool caller (cross-extension joint)', () => {
+  // Both halves of the seam were green against stubs while the real registered
+  // callback had zero executions; these pin the joint with only the SDK client faked.
+  it('serves callMcpTool through the real callback: config lookup, text mapping, isError', async () => {
+    const { callMcpTool } = await import('../extensions/internal/mcp-call.ts')
+    const calls: Array<Record<string, unknown>> = []
+    await setupStarted({ user: { db: { command: 'db-server' } } })
+    hoisted.control.callTool = async (params: Record<string, unknown>) => {
+      calls.push(params)
+      return {
+        content: [
+          { type: 'text', text: 'row 1' },
+          { type: 'text', text: 'row 2' },
+        ],
+      }
+    }
+
+    await expect(callMcpTool('db', 'query', { sql: 'select 1' })).resolves.toEqual({ text: 'row 1\nrow 2', isError: false })
+    expect(calls[0]).toMatchObject({ name: 'query', arguments: { sql: 'select 1' } })
+  })
+
+  it('maps a server-reported tool error to isError true', async () => {
+    const { callMcpTool } = await import('../extensions/internal/mcp-call.ts')
+    await setupStarted({ user: { db: { command: 'db-server' } } })
+    hoisted.control.callTool = async () => ({ content: [{ type: 'text', text: 'no such table' }], isError: true })
+
+    await expect(callMcpTool('db', 'query', {})).resolves.toEqual({ text: 'no such table', isError: true })
+  })
+
+  it('rejects for a server name that is not connected', async () => {
+    const { callMcpTool } = await import('../extensions/internal/mcp-call.ts')
+    await setupStarted({ user: { db: { command: 'db-server' } } })
+
+    await expect(callMcpTool('nosuch', 'query', {})).rejects.toThrow('not connected')
+  })
+})

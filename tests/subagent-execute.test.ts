@@ -1959,3 +1959,59 @@ describe('subagent context and hooks conformance', () => {
     expect(env.PI_CODE_AGENT_HOOKS).toBeUndefined()
   })
 })
+
+describe('execute dispatch: resume and cancel arms', () => {
+  // These arms of the tool never executed through execute(); only the text
+  // helpers were unit-tested, so a regression in the wiring (events, completion
+  // notification, registry calls) had no test to fail.
+  it('refuses a resume without a follow-up task before touching the registry', async () => {
+    const result = await execute('c1', { resume: 'bg-1' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toBe('Pass task with resume: the follow-up needs an instruction.')
+    expect(resumeBackgroundRunMock).not.toHaveBeenCalled()
+  })
+
+  it('resumes through the registry, emits the start phase, and notifies on completion', async () => {
+    resumeBackgroundRunMock.mockReturnValue('resumed')
+    backgroundRunMock.mockReturnValue({ id: 'bg-1', agent: 'scout', state: 'running', turns: 0 })
+
+    const result = await execute('c1', { resume: 'bg-1', task: 'continue the audit' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('Resumed background run bg-1')
+    expect(resumeBackgroundRunMock).toHaveBeenCalledWith('bg-1', 'continue the audit', expect.any(Function))
+    expect(emittedEvents).toContainEqual({ channel: 'pi-code:subagent', data: { phase: 'start', agentType: 'scout', agentId: 'bg-1' } })
+
+    // The completion callback handed to the registry is the wired notification
+    // path: it must emit the stop phase and wake the model with the outcome.
+    const onComplete = resumeBackgroundRunMock.mock.calls[0][2] as (run: unknown) => void
+    onComplete({ id: 'bg-1', agent: 'scout', state: 'done', turns: 2, output: 'all clear' })
+    expect(emittedEvents).toContainEqual({ channel: 'pi-code:subagent', data: { phase: 'stop', agentType: 'scout', agentId: 'bg-1' } })
+    expect(sendMessageMock).toHaveBeenCalledWith(expect.objectContaining({ customType: 'subagent-background' }), { triggerTurn: true })
+  })
+
+  it.each([
+    ['still-running', 'is still running'],
+    ['at-capacity', 'cap reached'],
+    ['cwd-gone', 'no longer exists'],
+    ['unknown', 'Unknown background run'],
+  ])('reports a %s resume outcome in the tool text', async (outcome, expected) => {
+    resumeBackgroundRunMock.mockReturnValue(outcome)
+    backgroundStatusTextMock.mockReturnValue('(no background runs)')
+
+    const result = await execute('c1', { resume: 'bg-9', task: 'again' }, undefined, undefined, trustedCtx)
+    expect(text(result)).toContain(expected)
+  })
+
+  it('cancels through the registry and reports each outcome', async () => {
+    cancelBackgroundRunMock.mockReturnValue('cancelled')
+    expect(text(await execute('c1', { cancel: 'bg-1' }, undefined, undefined, trustedCtx))).toBe('Cancelled background run bg-1.')
+    expect(cancelBackgroundRunMock).toHaveBeenCalledWith('bg-1')
+
+    cancelBackgroundRunMock.mockReturnValue('not-running')
+    expect(text(await execute('c1', { cancel: 'bg-1' }, undefined, undefined, trustedCtx))).toContain('already finished')
+
+    cancelBackgroundRunMock.mockReturnValue('unknown')
+    backgroundStatusTextMock.mockReturnValue('(no background runs)')
+    expect(text(await execute('c1', { cancel: 'bg-9' }, undefined, undefined, trustedCtx))).toContain('Unknown background run: bg-9')
+  })
+})

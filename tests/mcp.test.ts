@@ -517,3 +517,43 @@ describe('plugin server substitution safety', () => {
     expect((servers.beta as { command: string }).command).toBe('b-srv')
   })
 })
+
+describe('connect misconfiguration diagnostics', () => {
+  // Each connect attempt targets something that fails fast; the diagnostic must
+  // land before the failure so a misconfigured server never dies silently.
+  const spyWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+  it('warns about an undefined ${VAR} reference instead of failing with a mystery', async () => {
+    const { connect } = await import('../extensions/mcp/transport.ts')
+    const warn = spyWarn()
+    try {
+      await expect(connect('s', { command: '/nonexistent-mcp-${PI_CODE_TEST_UNSET_VAR}' } as never)).rejects.toThrow()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('undefined variable'))
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('PI_CODE_TEST_UNSET_VAR'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('warns that configured auth is ignored on a WebSocket server', async () => {
+    const { connect } = await import('../extensions/mcp/transport.ts')
+    const warn = spyWarn()
+    try {
+      await expect(connect('w', { type: 'ws', url: 'ws://127.0.0.1:1/', headers: { Authorization: 'Bearer x' } } as never)).rejects.toThrow()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('headers/bearerToken/headersHelper are ignored'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('warns that oauth.authServerMetadataUrl cannot override SDK discovery', async () => {
+    const { connect } = await import('../extensions/mcp/transport.ts')
+    const warn = spyWarn()
+    try {
+      await expect(connect('h', { type: 'http', url: 'http://127.0.0.1:1/', oauth: { authServerMetadataUrl: 'http://127.0.0.1:1/meta' } } as never)).rejects.toThrow()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('standard discovery'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})

@@ -281,6 +281,16 @@ describe('context: fork and skillOverrides', () => {
 
       const dirs = skillDirs(cwd, hoisted.home, true)
       expect(dirs[0]).toBe(join(managedDir, '.claude', 'skills'))
+
+      // The observable outcome, not the directory ordering: invoking the clashing
+      // name expands the enterprise body. Directory order alone would still pass
+      // if resolution flipped to last-match; the expansion cannot.
+      const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+      skillsExt({ on: (name: string, fn: never) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: '', code: 0 }) } as never)
+      const result = (await handlers.get('input')?.({ text: '/skill:deploy', source: 'interactive' }, { cwd })) as { action: string; text: string }
+      expect(result?.action).toBe('transform')
+      expect(result.text).toContain('ENTERPRISE BODY')
+      expect(result.text).not.toContain('PERSONAL BODY')
     } finally {
       setManagedSettingsPath(undefined)
     }

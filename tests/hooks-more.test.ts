@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import contextImports from '../extensions/context-imports.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
 
 /**
@@ -994,6 +995,17 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     expect(patched?.content.map((c) => c.text)).toEqual(['boom', 'the network was down'])
   })
 
+  it('ignores a decision-block verdict on a failed tool: only its context lands', async () => {
+    // "A failed tool cannot be blocked": the exit-0 decision:block spelling must
+    // not surface a block notice on a failure, while additionalContext still does.
+    writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'judge' }] }] })
+    script('judge', { stdout: [JSON.stringify({ decision: 'block', reason: 'retry it', hookSpecificOutput: { additionalContext: 'the network was down' } })], code: 0 })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const patched = (await ext.toolResult('bash', { input: { command: 'x' }, content: [{ type: 'text', text: 'boom' }], isError: true })) as { content: Array<{ text: string }> } | undefined
+    expect(patched?.content.map((c) => c.text)).toEqual(['boom', 'the network was down'])
+  })
+
   it('appends a PostToolUseFailure hook stderr (exit 2) to the failed result', async () => {
     writeSettings(hoisted.home, 'settings.json', { PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ command: 'diag' }] }] })
     script('diag', { stderr: ['check your credentials'], code: 2 })
@@ -1953,6 +1965,18 @@ describe('hook spawn failures', () => {
     expect(decision.context).toBe('')
   })
 
+  it('fails closed on a timed-out UserPromptSubmit hook, like PreToolUse does', async () => {
+    // A gate that delivered no verdict must not read as an allow; the timeout
+    // direction was only pinned for PreToolUse.
+    const runner: HookRunner = async () => ({ code: 0, stdout: '', stderr: '', timedOut: true })
+    const config = { UserPromptSubmit: [{ hooks: [{ command: 'audit.sh' }] }] }
+    const decision = await runUserPromptSubmit(config, 'hello', runner)
+    expect(decision.block).toBe(true)
+    expect(decision.reason).toContain('timed out')
+    expect(decision.reason).toContain('audit.sh')
+    expect(decision.context).toBe('')
+  })
+
   it('blocks the tool end to end when the hook process errors before spawning', async () => {
     writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard' }] }] })
     script('guard', { error: new Error('spawn /bin/sh ENOENT') })
@@ -2520,5 +2544,69 @@ describe('settings watching', () => {
     } finally {
       delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
     }
+  })
+})
+
+describe('mcp_tool hook dispatch', () => {
+  afterEach(() => setMcpToolCaller(undefined))
+
+  it('routes a configured mcp_tool hook through the dispatcher to the caller seam', async () => {
+    // The type === 'mcp_tool' dispatch arm had no end-to-end path: config ->
+    // matcher -> boundRunner -> runMcpToolHook -> the seam, with the tool's
+    // verdict feeding the decision like any command hook's stdout.
+    const calls: Array<[string, string, Record<string, unknown>]> = []
+    setMcpToolCaller(async (server, tool, input) => {
+      calls.push([server, tool, input])
+      return { text: JSON.stringify({ decision: 'block', reason: 'mcp guard says no' }), isError: false }
+    })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 'guard-srv', tool: 'vet', input: { command: '${tool_input.command}' } }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const decision = (await ext.toolCall('bash', { command: 'rm -rf /' })) as { block: boolean; reason?: string }
+
+    expect(calls).toEqual([['guard-srv', 'vet', { command: 'rm -rf /' }]])
+    expect(decision?.block).toBe(true)
+    expect(decision?.reason).toContain('mcp guard says no')
+  })
+
+  it('lets the tool proceed when the mcp_tool hook returns no verdict', async () => {
+    setMcpToolCaller(async () => ({ text: 'all fine', isError: false }))
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 'guard-srv', tool: 'vet' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    expect(await ext.toolCall('bash', { command: 'ls' })).toBeUndefined()
+  })
+})
+
+describe('prompt hook model override', () => {
+  afterEach(() => setCompleteBackend(null))
+
+  const answer = { role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"allow"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }
+
+  const runWith = async (override: string | undefined, available: Array<{ id: string; name?: string }>) => {
+    const seen: string[] = []
+    setCompleteBackend(async (model) => {
+      seen.push((model as { id: string }).id)
+      return answer as never
+    })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'ok? $ARGUMENTS', ...(override === undefined ? {} : { model: override }) }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', { command: 'ls' }, 't1', { model: { id: 'session-model' }, modelRegistry: { getAvailable: () => available } })
+    return seen
+  }
+
+  it('resolves an exact model id from the registry', async () => {
+    expect(await runWith('guard-9', [{ id: 'big-1' }, { id: 'guard-9' }])).toEqual(['guard-9'])
+  })
+
+  it('falls back to a substring match on id or display name', async () => {
+    expect(await runWith('haiku', [{ id: 'big-1' }, { id: 'small-haiku-2', name: 'Small Haiku' }])).toEqual(['small-haiku-2'])
+  })
+
+  it('uses the session model when the override matches nothing or is absent', async () => {
+    expect(await runWith('nope', [{ id: 'big-1' }])).toEqual(['session-model'])
+    expect(await runWith(undefined, [{ id: 'big-1' }])).toEqual(['session-model'])
   })
 })

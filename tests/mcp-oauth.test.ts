@@ -221,3 +221,79 @@ describe('openBrowser', () => {
     expect(spawnMock.calls).toHaveLength(1)
   })
 })
+
+describe('runInteractiveOAuth failure typing', () => {
+  // The typed OAuthRequiredError is what keeps the typeless-url caller from
+  // retrying an auth failure over SSE and stacking a second login prompt; the
+  // whole failure half of the flow had zero executions.
+  const flow = async (over: { approve?: boolean; connect?: (attempt: number) => Promise<void> } = {}) => {
+    const { runInteractiveOAuth } = await import('../extensions/mcp/oauth-flow.ts')
+    const authUi = { confirm: async () => over.approve !== false, notify: () => {} }
+    let attempts = 0
+    const client = {
+      connect: async () => {
+        attempts += 1
+        await over.connect?.(attempts)
+      },
+      close: async () => {},
+    }
+    const transport = { finishAuth: async () => {} }
+    return runInteractiveOAuth(
+      'srv',
+      { url: 'https://mcp.example/' },
+      () => transport as never,
+      'connect srv',
+      authUi as never,
+      () => client as never,
+    )
+  }
+
+  it('types a declined consent as OAuthRequiredError without opening anything', async () => {
+    const { OAuthRequiredError } = await import('../extensions/mcp/transport.ts')
+    await expect(flow({ approve: false })).rejects.toBeInstanceOf(OAuthRequiredError)
+    await expect(flow({ approve: false })).rejects.toThrow('login declined for srv')
+  })
+
+  it('wraps a non-auth flow failure as OAuthRequiredError with the detail', async () => {
+    const { OAuthRequiredError } = await import('../extensions/mcp/transport.ts')
+    const failing = flow({
+      connect: async () => {
+        throw Object.assign(new Error('boom mid-flow'), { code: 500 })
+      },
+    })
+    await expect(failing).rejects.toBeInstanceOf(OAuthRequiredError)
+    const error = await flow({
+      connect: async () => {
+        throw Object.assign(new Error('boom mid-flow'), { code: 500 })
+      },
+    }).then(
+      () => undefined,
+      (e: Error) => e,
+    )
+    expect(error?.message).toBe('login for srv failed: boom mid-flow')
+  })
+
+  it('returns the client when the retry connects clean (authorized between attempts)', async () => {
+    await expect(flow()).resolves.toBeDefined()
+  })
+})
+
+describe('headless OAuth refusal', () => {
+  it('reports a typed run-pi-interactively error for a 401 server with no UI', async () => {
+    const { createServer } = await import('node:http')
+    const server = createServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end('unauthorized')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+    try {
+      const { connect, OAuthRequiredError } = await import('../extensions/mcp/transport.ts')
+      const failing = connect('locked', { type: 'http', url: `http://127.0.0.1:${port}/` } as never)
+      await expect(failing).rejects.toBeInstanceOf(OAuthRequiredError)
+      await expect(connect('locked', { type: 'http', url: `http://127.0.0.1:${port}/` } as never)).rejects.toThrow('run pi interactively')
+    } finally {
+      server.close()
+    }
+  })
+})

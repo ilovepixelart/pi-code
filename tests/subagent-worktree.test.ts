@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -40,6 +40,37 @@ describe('createAgentWorktree', () => {
     const created = await createAgentWorktree(plain, 'x')
     expect('error' in created).toBe(true)
   })
+
+  it('reports the git failure when the worktree cannot be created', async () => {
+    // A repo with no commits has no default branch and no HEAD to branch from;
+    // the declared isolation boundary must fail the run, not silently drop.
+    const empty = mkdtempSync(join(tmpdir(), 'wt-empty-'))
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: empty })
+    const created = await createAgentWorktree(empty, 'x')
+    expect('error' in created).toBe(true)
+  })
+
+  it('branches from the default branch, not the parent checkout HEAD', async () => {
+    // Claude: the worktree starts from the repository's default branch. A clone
+    // has origin/HEAD; a commit on the local checkout must not become the base.
+    const origin = makeRepo()
+    const clone = mkdtempSync(join(tmpdir(), 'wt-clone-'))
+    execFileSync('git', ['clone', '--quiet', origin, clone], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } })
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: clone, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } })
+        .toString()
+        .trim()
+    const originMain = git('rev-parse', 'origin/main')
+    git('config', 'user.email', 'test@test')
+    git('config', 'user.name', 'test')
+    writeFileSync(join(clone, 'local.txt'), 'ahead\n')
+    git('add', 'local.txt')
+    git('commit', '-m', 'local work')
+
+    const worktree = asWorktree(await createAgentWorktree(clone, 'based'))
+    expect(worktree.baseSha).toBe(originMain)
+    expect(worktree.baseSha).not.toBe(git('rev-parse', 'HEAD'))
+  })
 })
 
 describe('cleanupAgentWorktree', () => {
@@ -59,6 +90,28 @@ describe('cleanupAgentWorktree', () => {
     writeFileSync(join(worktree.dir, 'a.txt'), 'changed\n')
     expect(await cleanupAgentWorktree(repo, worktree)).toBe('kept')
     expect(existsSync(worktree.dir)).toBe(true)
+  })
+
+  it('keeps the worktree when the only changes are untracked files', async () => {
+    // The refactor trap: git diff --quiet would call this clean and delete an
+    // agent's freshly written output; git status --porcelain must count it.
+    const repo = makeRepo()
+    const worktree = asWorktree(await createAgentWorktree(repo, 'author'))
+    writeFileSync(join(worktree.dir, 'new-output.txt'), 'work\n')
+    expect(await cleanupAgentWorktree(repo, worktree)).toBe('kept')
+    expect(existsSync(worktree.dir)).toBe(true)
+  })
+
+  it('keeps rather than destroys when the cleanup inspection itself fails', async () => {
+    // Losing work is the only unacceptable outcome: a worktree dir that cannot
+    // be inspected (here: already gone) must resolve to kept, never to a delete
+    // of the branch that may still hold commits.
+    const repo = makeRepo()
+    const worktree = asWorktree(await createAgentWorktree(repo, 'ghost'))
+    rmSync(worktree.dir, { recursive: true, force: true })
+    expect(await cleanupAgentWorktree(repo, worktree)).toBe('kept')
+    const branches = execFileSync('git', ['branch', '--list'], { cwd: repo }).toString()
+    expect(branches).toContain(worktree.branch)
   })
 
   it('keeps the worktree when the agent committed past the base', async () => {
