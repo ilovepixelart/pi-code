@@ -2546,15 +2546,26 @@ describe('hooks suppressOriginalPrompt', () => {
     return ext
   }
 
-  it('replaces the prompt with the hook context when suppressOriginalPrompt is set', async () => {
-    // Claude's UserPromptSubmit suppressOriginalPrompt: the original prompt is
-    // hidden; the hook's context is what reaches the model.
-    script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX ONLY","suppressOriginalPrompt":true}}'], code: 0 })
+  it('keeps the prompt when a non-blocking hook sets suppressOriginalPrompt', async () => {
+    // Claude scopes the field to a block: "If true when decision is block, omits the
+    // original prompt text from the block message shown to the user", and separately
+    // "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+    // alongside it". Treating it as a replacement dropped what the user actually typed.
+    script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX","suppressOriginalPrompt":true}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'suppress' }] }] })
 
-    const result = (await ext.input('the original secret prompt')) as { action: string; text?: string }
+    const result = (await ext.input('the original prompt')) as { action: string; text?: string }
     expect(result.action).toBe('transform')
-    expect(result.text).toBe('CTX ONLY')
+    expect(result.text).toBe('CTX\n\nthe original prompt')
+  })
+
+  it('never echoes the prompt in a block message, which is what the field asks for', async () => {
+    script('deny', { stdout: ['{"decision":"block","reason":"no secrets in prompts","hookSpecificOutput":{"suppressOriginalPrompt":true}}'], code: 0 })
+    const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'deny' }] }] })
+
+    expect(await ext.input('my api key is sk-live-123')).toEqual({ action: 'handled' })
+    expect(ext.notes.at(-1)?.msg).toBe('no secrets in prompts')
+    expect(ext.notes.at(-1)?.msg).not.toContain('sk-live-123')
   })
 
   it('keeps the prompt when no hook suppresses it', async () => {

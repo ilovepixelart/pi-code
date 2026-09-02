@@ -576,10 +576,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return { action: 'handled' }
     }
     // Claude injects a UserPromptSubmit hook's context ahead of the prompt; transform is
-    // pi's seam for rewriting the submitted text. With suppressOriginalPrompt the
-    // context replaces the prompt entirely (honored only when context exists, since
-    // an empty submission would be no turn at all).
-    if (decision.context) return { action: 'transform', text: decision.suppress ? decision.context : `${decision.context}\n\n${event.text}` }
+    // pi's seam for rewriting the submitted text. The prompt itself always survives:
+    // "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+    // alongside it". suppressOriginalPrompt scopes to the block message, which never
+    // carries the prompt here, so it needs nothing of its own.
+    if (decision.context) return { action: 'transform', text: `${decision.context}\n\n${event.text}` }
     return { action: 'continue' }
   })
 

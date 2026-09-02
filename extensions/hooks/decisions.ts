@@ -262,8 +262,6 @@ export interface PromptDecision {
   block: boolean
   reason?: string
   context: string
-  /** Claude's suppressOriginalPrompt: the hook's context replaces the prompt. */
-  suppress?: boolean
 }
 
 /** Additional context a UserPromptSubmit hook contributes: an explicit
@@ -291,17 +289,13 @@ export async function runUserPromptSubmit(config: HooksConfig, prompt: string, r
   }
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const contexts: string[] = []
-  let suppress = false
   for (const result of results) {
     const decision = interpretHookResult(result.code, result.stdout, result.stderr)
     if (decision.block) return { block: true, reason: decision.reason, context: '' }
-    // Claude's suppressOriginalPrompt: any hook setting it hides the original
-    // prompt, and the collected context is what reaches the model.
-    if (tryParseJson(result.stdout)?.hookSpecificOutput?.suppressOriginalPrompt === true) suppress = true
     const context = promptContext(result.stdout)
     if (context) contexts.push(context)
   }
-  return { block: false, context: contexts.join('\n'), suppress }
+  return { block: false, context: contexts.join('\n') }
 }
 
 /** The feedback lines one PostToolUse/PostToolUseFailure result appends next to the
