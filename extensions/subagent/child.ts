@@ -187,3 +187,11 @@ export function agentHooksEnv(agent: AgentConfig, agentId: string): Record<strin
   if (Array.isArray(stop)) hooks.SubagentStop = [...(Array.isArray(hooks.SubagentStop) ? (hooks.SubagentStop as unknown[]) : []), ...stop]
   return { PI_CODE_AGENT_HOOKS: JSON.stringify({ agent: agent.name, id: agentId, hooks }) }
 }
+
+/** The task argument with any SubagentStart hook context ahead of it, per Claude:
+ * "added to the subagent's context at the start of its conversation, before its
+ * first prompt". */
+export function taskWithStartContext(task: string, contexts: string[]): string {
+  const context = contexts.filter(Boolean).join('\n')
+  return context ? `${context}\n\nTask: ${task}` : `Task: ${task}`
+}
