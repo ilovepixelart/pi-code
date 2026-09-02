@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, createJsonlOutputParser, formatStatus, parseFinalOutputFromJsonl, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
+import { activeBackgroundRuns, type BackgroundRun, type BackgroundSpawn, backgroundStatusText, cancelBackgroundRun, createJsonlOutputParser, formatStatus, MAX_FINISHED_RUNS, parseFinalOutputFromJsonl, resetBackgroundRuns, resumeBackgroundRun, startBackgroundRun } from '../extensions/subagent/background.ts'
 
 describe('createJsonlOutputParser onTurn', () => {
   const asst = (text: string) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })
@@ -60,6 +60,7 @@ class FakeProc extends EventEmitter {
 const children: FakeProc[] = []
 
 beforeEach(() => {
+  resetBackgroundRuns()
   children.length = 0
   spawnMock.mockReset()
   spawnMock.mockImplementation(() => {
@@ -156,7 +157,7 @@ describe('background run lifecycle', () => {
     const finished = backgroundStatusText()
       .split('\n')
       .filter((line) => line.includes('done (exit'))
-    expect(finished.length).toBeLessThanOrEqual(20)
+    expect(finished.length).toBe(MAX_FINISHED_RUNS)
   })
 
   it('refuses to resume while the running cap is full', () => {
