@@ -1,6 +1,5 @@
-import { describe, expect, it } from 'vitest'
-
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { describe, expect, it } from 'vitest'
 import { collectServerResourceEntries } from '../extensions/mcp/listing.ts'
 
 type Resources = Array<{ uri: string; name: string }>
@@ -55,9 +54,12 @@ describe('collectServerResourceEntries', () => {
     await collectServerResourceEntries(
       entries,
       's',
-      clientOf(async () => ({ resources: [] }), async () => {
-        throw new Error('method not found')
-      }),
+      clientOf(
+        async () => ({ resources: [] }),
+        async () => {
+          throw new Error('method not found')
+        },
+      ),
       1000,
     )
     expect(entries).toEqual([])

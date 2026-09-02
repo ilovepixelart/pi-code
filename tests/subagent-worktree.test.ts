@@ -56,7 +56,10 @@ describe('createAgentWorktree', () => {
     const origin = makeRepo()
     const clone = mkdtempSync(join(tmpdir(), 'wt-clone-'))
     execFileSync('git', ['clone', '--quiet', origin, clone], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } })
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: clone, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).toString().trim()
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: clone, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } })
+        .toString()
+        .trim()
     const originMain = git('rev-parse', 'origin/main')
     git('config', 'user.email', 'test@test')
     git('config', 'user.name', 'test')
