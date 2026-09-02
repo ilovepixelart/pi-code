@@ -23,8 +23,9 @@ if ! curl -sf http://localhost:11434/api/tags 2>/dev/null | grep -q '"gpt-oss:20
   exit 1
 fi
 
-DEMO_DIR=/tmp/pi-demo
-rm -rf "$DEMO_DIR"
+# A fresh dir per run: the old fixed /tmp/pi-demo was rm -rf'd on every start,
+# colliding across users and concurrent runs on a shared machine.
+DEMO_DIR=$(mktemp -d -t pi-demo)
 mkdir -p "$DEMO_DIR/.claude/rules" "$DEMO_DIR/.claude/commands"
 git -C "$DEMO_DIR" init -qb main
 git -C "$DEMO_DIR" -c user.name=demo -c user.email=demo@local commit -q --allow-empty -m init
