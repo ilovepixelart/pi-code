@@ -101,6 +101,16 @@ describe('installedPlugins', () => {
     expect(installedPlugins(h)[0].userConfig).toEqual({ api_token: 'tok-1' })
   })
 
+  it('coerces number and boolean option values to strings and drops the rest', () => {
+    // ${user_config.KEY} substitutes into command strings, so scalars must
+    // arrive as text and structured values must not arrive at all.
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    mkdirSync(join(h, '.claude'), { recursive: true })
+    writeFileSync(join(h, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { formatter: true }, pluginConfigs: { formatter: { options: { retries: 3, verbose: true, name: 'x', nested: { no: 1 }, list: [1] } } } }))
+    expect(installedPlugins(h)[0].userConfig).toEqual({ retries: '3', verbose: 'true', name: 'x' })
+  })
+
   it('lets a later user settings file toggle a plugin off, project files never counted', () => {
     const h = home()
     install(h, 'community', 'formatter', '1.0.0')
