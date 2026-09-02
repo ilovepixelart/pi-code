@@ -43,6 +43,18 @@ wait_file() { # wait_file <path> <timeout-seconds>
 # --- Fixture: a project exercising every .claude surface ------------------------------
 FX=$(mktemp -d)
 FX=$(cd "$FX" && pwd -P)
+
+# Installed before anything else exists so an abort at any point cleans up. zsh
+# runs no EXIT trap on an untrapped INT/TERM, and a Ctrl-C mid-model-turn would
+# otherwise leave a live pi burning the account plus both temp trees; the signal
+# traps clean up and re-raise so the exit status stays signal-shaped.
+cleanup() {
+  tmux kill-session -t "$SESSION" 2>/dev/null
+  rm -rf ${FAKEHOME:+"$FAKEHOME"} "$FX"
+}
+trap cleanup EXIT
+trap 'cleanup; trap - INT; kill -INT $$' INT
+trap 'cleanup; trap - TERM; kill -TERM $$' TERM
 git -C "$FX" init -qb main
 git -C "$FX" -c user.name=e2e -c user.email=e2e@local commit -q --allow-empty -m init
 mkdir -p "$FX/.claude/rules" "$FX/.claude/commands" "$FX/.claude/skills/greet" "$FX/.claude/output-styles" "$FX/.claude/agents" "$FX/notes"
@@ -65,7 +77,10 @@ EOF
 printf 'Project context for the e2e run.\n\n@notes/extra.md\n' > "$FX/CLAUDE.md"
 printf 'The codeword is ZANZIBAR.\n' > "$FX/notes/extra.md"
 printf 'PERSONAL LOCAL NOTE MARKER\n' > "$FX/CLAUDE.local.md"
-printf -- '---\nname: echoer\ndescription: Replies with a requested marker word\n---\nWhen given a task asking for a marker word, reply with exactly that word and nothing else.\n' > "$FX/.claude/agents/echoer.md"
+# The marker lives ONLY in the agent body, never in the typed prompt: the prompt
+# echoes into the pane as the rendered user message, so a prompt-carried marker
+# would green the check before (and regardless of whether) the child pi ran.
+printf -- '---\nname: echoer\ndescription: Replies with its fixed marker word\n---\nWhatever the task says, reply with exactly the word SUBAGENT_OK and nothing else.\n' > "$FX/.claude/agents/echoer.md"
 printf 'ORIGINAL\n' > "$FX/data.txt"
 printf 'node_modules\n' > "$FX/.gitignore"
 ln -s "$REPO/node_modules" "$FX/node_modules"
@@ -175,14 +190,15 @@ if [ -z "$PI_VERSION" ] || ! is-at-least 0.79.1 "$PI_VERSION"; then
 fi
 
 say "fixture: $FX"
-cleanup() {
-  tmux kill-session -t "$SESSION" 2>/dev/null
-  rm -rf "$FAKEHOME" "$FX"
-}
-trap cleanup EXIT
 
+# The tmux server keeps its own environment: an inherited PI_CODING_AGENT_DIR or
+# CLAUDE_CONFIG_DIR would point pi inside the "isolated" home at the real config
+# (the scripted trust-approve would then write the real trust store), and PATH
+# drift could boot a different pi than the one the guards above validated.
+PI_BIN=$(command -v pi)
+BOOT_CMD="env -u PI_CODING_AGENT_DIR -u CLAUDE_CONFIG_DIR HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 $PI_BIN"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "$BOOT_CMD"
 
 # --- Deterministic checks -------------------------------------------------------------
 if wait_for 'Trust this project\?' 30; then
@@ -377,7 +393,7 @@ json.dump(settings, open(path, "w"))
 PY
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "HOME=$FAKEHOME PI_E2E_WIRE=$WIRE PI_SKIP_VERSION_CHECK=1 pi"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$FX" "$BOOT_CMD"
 if wait_for '\[Extensions\]' 120; then ok "trust: stored decision honored on re-boot"; else bad "trust: re-boot failed"; fi
 # The statusLine command runs on the first status refresh after boot; its output replaces
 # the built-in segment, so STATUS_E2E in the pane proves the configured command drove it.
