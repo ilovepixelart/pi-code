@@ -620,12 +620,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // handler on a UI dialog, which would starve the Stop hook and idle notification
   // until the user answers it. agent_end can fire slightly early before a rare
   // automatic retry or compaction; that is the better tradeoff.
-  pi.on('agent_end', async (event, ctx) => {
-    // Claude's Notification event, for the one type pi can honestly source: the
-    // agent finished and is waiting for input. Per Claude, idle_prompt fires when
-    // the turn ended about 60 seconds ago and the user hasn't typed since, so it
-    // arms here and input or the next turn cancels it. Observational only; exit
-    // codes and JSON output are ignored, as Claude documents for this event.
+  /** Claude's Notification event, for the one type pi can honestly source: the agent
+   * finished and is waiting for input. idle_prompt fires when the turn ended about 60
+   * seconds ago and the user has not typed since, so it arms here and input or the next
+   * turn cancels it. Observational only; exit codes and JSON output are ignored. */
+  const armIdlePrompt = (ctx: ExtensionContext): void => {
     cancelIdlePrompt()
     const notifyCommands = matchingCommands(config.Notification, ['idle_prompt'])
     if (notifyCommands.length > 0) {
@@ -635,6 +634,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
       }, IDLE_PROMPT_DELAY_MS)
       idlePromptTimer.unref?.()
     }
+  }
+  pi.on('agent_end', async (event, ctx) => {
+    armIdlePrompt(ctx)
 
     // In a subagent child, the agent-frontmatter Stop hooks were converted to
     // SubagentStop and fire here, at the child's own end, notify-style; before the
