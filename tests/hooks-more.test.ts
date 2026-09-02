@@ -177,6 +177,10 @@ const setupExtension = () => {
   const notes: Array<{ msg: string; level: string }> = []
   const defaultCtx = {
     ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) },
+    // Without this capability the first sessionStart in the file emits the
+    // once-per-module runtime-too-old warning into whichever test happens to run
+    // first, making every notes[N] index order-dependent under shuffle.
+    isProjectTrusted: () => false,
     cwd: '/proj',
     thinkingLevel: 'high',
     sessionManager: { getSessionId: () => 'sess-1', getSessionFile: () => '/tmp/sess-1.jsonl' },
