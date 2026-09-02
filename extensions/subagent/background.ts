@@ -204,7 +204,7 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   if (!fs.existsSync(run.spawn.cwd)) return 'cwd-gone'
   // Persisted so the rebuild happens once: rebuilding per resume leaked one temp
   // prompt dir every follow-up.
-  const rebuilt = withRebuiltPrompt(run.spawn)
+  const rebuilt = withRebuiltPrompt(run.spawn, run.agent)
   run.spawn = { ...run.spawn, args: rebuilt.args }
   if (rebuilt.dir) run.rebuiltPromptDir = rebuilt.dir
   // The task prompt is always the final argument: both spawn paths push it last and the
@@ -228,7 +228,7 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
 
 /** Re-point --system-prompt at a fresh file when the original is gone; `dir` is the
  * temp dir created for it, which the run then owns. */
-function withRebuiltPrompt(spawnSpec: BackgroundSpawn): { args: string[]; dir?: string } {
+function withRebuiltPrompt(spawnSpec: BackgroundSpawn, agent: string): { args: string[]; dir?: string } {
   const flag = spawnSpec.args.indexOf('--system-prompt')
   if (flag === -1 || !spawnSpec.promptBody) return { args: spawnSpec.args }
   const current = spawnSpec.args[flag + 1]
@@ -240,9 +240,12 @@ function withRebuiltPrompt(spawnSpec: BackgroundSpawn): { args: string[]; dir?: 
     const rebuilt = [...spawnSpec.args]
     rebuilt[flag + 1] = file
     return { args: rebuilt, dir }
-  } catch {
+  } catch (error) {
     // Cannot rewrite it: drop the pair rather than hand pi a path it will treat as
-    // prompt text, which would replace the agent persona with a temp path.
+    // prompt text, which would replace the agent persona with a temp path. The child then
+    // runs as a plain assistant instead of the agent asked for, and nothing in its output
+    // says so, hence the notice.
+    console.warn(`pi-code-subagent: resuming ${agent} without its agent prompt: ${error instanceof Error ? error.message : String(error)}`)
     return { args: spawnSpec.args.filter((_arg, i) => i !== flag && i !== flag + 1) }
   }
 }
