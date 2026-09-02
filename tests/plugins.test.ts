@@ -93,6 +93,26 @@ describe('installedPlugins', () => {
     expect(plugins[0].root).toBe(newest)
   })
 
+  it('sees a same-size settings rewrite within one timestamp tick', () => {
+    // The mtime:size token cannot distinguish these two writes; only content
+    // can. Same defect class as the settings-watch flake fixed in #170.
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    mkdirSync(join(h, '.claude'), { recursive: true })
+    const settings = join(h, '.claude', 'settings.json')
+    const on = '{"enabledPlugins":{"formatter":true }}'
+    const off = '{"enabledPlugins":{"formatter":false}}'
+    expect(on.length).toBe(off.length)
+    const frozen = new Date('2026-01-02T03:04:05Z')
+    writeFileSync(settings, on)
+    utimesSync(settings, frozen, frozen)
+    expect(installedPlugins(h, []).map((p) => p.name)).toEqual(['formatter'])
+
+    writeFileSync(settings, off)
+    utimesSync(settings, frozen, frozen)
+    expect(installedPlugins(h, [])).toEqual([])
+  })
+
   it('ranks a release above its own prerelease, per semver', () => {
     // The update-then-grace layout can hold 1.0.0-beta beside 1.0.0; a plain
     // string sort ranks the prerelease higher and serves stale plugin code.
@@ -155,8 +175,10 @@ describe('installedPlugins cache', () => {
 
     const mark = fsHoisted.reads
     expect(installedPlugins(h)).toEqual(first)
-    // The walk is memoized; a repeat call revalidates with stats, not file reads.
-    expect(fsHoisted.reads).toBe(mark)
+    // The walk is memoized. Revalidation re-reads only the one small settings
+    // file (content-hashed so a same-size rewrite is seen); the expensive part,
+    // re-parsing every manifest in the tree, must not happen.
+    expect(fsHoisted.reads).toBe(mark + 1)
   })
 
   it('re-reads after resetInstalledPluginsCache', () => {

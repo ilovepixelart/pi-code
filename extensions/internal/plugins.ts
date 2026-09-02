@@ -12,6 +12,7 @@
  * ~/.claude/plugins/data/<id>, id being the qualified name folded to dashes.
  */
 
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -125,7 +126,8 @@ export function resetInstalledPluginsCache(): void {
   pluginCache.clear()
 }
 
-/** mtime plus size, so a same-instant rewrite with different content still differs. */
+/** mtime plus size; cheap, but blind to a same-size rewrite within one
+ * timestamp tick, so only directory-tree entries use it. */
 function statToken(target: string): string {
   try {
     const stat = fs.statSync(target)
@@ -135,15 +137,25 @@ function statToken(target: string): string {
   }
 }
 
+/** Content hash for the small settings files: a same-size rewrite within one
+ * mtime tick (the settings-watch flake class) must still invalidate the cache. */
+function contentToken(target: string): string {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex')
+  } catch {
+    return 'missing'
+  }
+}
+
 /**
- * A cheap change signature for one home's plugin config: the settings files' stat
- * tokens plus the cache tree's directory names and mtimes down through each plugin's
+ * A cheap change signature for one home's plugin config: the settings files'
+ * content hashes plus the cache tree's directory names and mtimes down through each plugin's
  * version directories, and the stat token of the resolved (newest) version's manifest
  * so an in-place edit of it invalidates the cache. Costs a few stats where the full
  * walk reads and parses the settings and every manifest.
  */
 function pluginFingerprint(cacheDir: string, settingsFiles: string[]): string {
-  const parts = settingsFiles.map(statToken)
+  const parts = settingsFiles.map(contentToken)
   for (const marketplace of listDirs(cacheDir)) {
     const marketplaceDir = path.join(cacheDir, marketplace)
     parts.push(`${marketplace}:${statToken(marketplaceDir)}`)
