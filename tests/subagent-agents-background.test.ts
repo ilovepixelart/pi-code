@@ -766,6 +766,13 @@ describe('finished-run eviction', () => {
 })
 
 describe('agent skills preload', () => {
+  // Without this, fakeHome.path holds whatever an earlier describe left (or ''
+  // before any set it, when join('', '.claude', ...) resolves against the repo
+  // checkout and the fixtures leak into the real working tree).
+  beforeEach(() => {
+    fakeHome.path = mkdtempSync(join(tmpdir(), 'preload-home-'))
+  })
+
   it('parses a skills list and appends the named skill bodies to the prompt', () => {
     const skillsRoot = join(fakeHome.path, '.claude', 'skills')
     mkdirSync(join(skillsRoot, 'deploy'), { recursive: true })
