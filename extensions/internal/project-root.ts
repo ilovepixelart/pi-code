@@ -65,10 +65,15 @@ function mainCheckout(root: string): string {
   } catch {
     return root
   }
-  const match = /^gitdir:\s*(.+)$/m.exec(pointer)
-  if (!match) return root
+  // Parsed rather than matched: the file is one `gitdir: <path>` line, and a regex
+  // over an arbitrary-length path is a backtracking cost for nothing.
+  const [firstLine = ''] = pointer.split('\n')
+  const prefix = 'gitdir:'
+  if (!firstLine.startsWith(prefix)) return root
+  const target = firstLine.slice(prefix.length).trim()
+  if (!target) return root
   // <main>/.git/worktrees/<name> -> <main>
-  const worktreeDir = path.resolve(root, match[1].trim())
+  const worktreeDir = path.resolve(root, target)
   const marker = `${path.sep}.git${path.sep}worktrees${path.sep}`
   const cut = worktreeDir.lastIndexOf(marker)
   if (cut === -1) return root
