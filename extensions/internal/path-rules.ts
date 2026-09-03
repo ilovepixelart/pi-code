@@ -107,10 +107,17 @@ function bracketClass(body: string): string | null {
   // unterminated `[` already is: the pattern is invalid and matches nothing. Without
   // this the throw escaped compileGlobs, which does not catch, and took the permission
   // check that called it with it.
+  return isBuildableClass(source) ? source : null
+}
+
+/** Whether JavaScript will build this character class. Asking RegExp is the only
+ * faithful test: the invalid forms are its rules, not ones worth re-deriving here. */
+function isBuildableClass(source: string): boolean {
   try {
-    return new RegExp(source) && source
+    new RegExp(source)
+    return true
   } catch {
-    return null
+    return false
   }
 }
 
