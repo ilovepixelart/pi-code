@@ -300,7 +300,7 @@ describe('runHookCommand process wiring', () => {
 
 describe('runHookCommand exec form', () => {
   it('spawns the executable directly with its args and no /bin/sh wrapper', async () => {
-    await runHookCommand('/usr/bin/notify', {}, 5000, undefined, ['--message', 'hi; rm -rf /'])
+    await runHookCommand('/usr/bin/notify', {}, 5000, { args: ['--message', 'hi; rm -rf /'] })
     const record = hoisted.calls.find((call) => call.file === '/usr/bin/notify')
     expect(record).toBeDefined()
     // No `/bin/sh -c`: the executable is spawned directly, so the metacharacters in the
@@ -310,14 +310,14 @@ describe('runHookCommand exec form', () => {
   })
 
   it('delivers the payload as JSON on stdin, like the shell path', async () => {
-    await runHookCommand('/bin/tool', { tool_name: 'bash' }, 5000, undefined, ['run'])
+    await runHookCommand('/bin/tool', { tool_name: 'bash' }, 5000, { args: ['run'] })
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(JSON.parse(record?.stdin ?? '')).toEqual({ tool_name: 'bash' })
   })
 
   it('substitutes $ARGUMENTS per arg with a $$-safe replacer', async () => {
     const payload = { tool_input: { command: 'echo $$ && x $&' } }
-    await runHookCommand('/bin/tool', payload, 5000, undefined, ['--json', '$ARGUMENTS', 'tail-$ARGUMENTS'])
+    await runHookCommand('/bin/tool', payload, 5000, { args: ['--json', '$ARGUMENTS', 'tail-$ARGUMENTS'] })
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.args[0]).toBe('--json')
     // The whole event JSON replaces $ARGUMENTS; the $$ / $& inside it survive verbatim
@@ -331,7 +331,7 @@ describe('runHookCommand exec form', () => {
   it('kills the exec-form child at the timeout, like the shell path', async () => {
     vi.useFakeTimers()
     script('holdopen', { hang: true })
-    void runHookCommand('/bin/tool', {}, 1000, undefined, ['run', 'holdopen'])
+    void runHookCommand('/bin/tool', {}, 1000, { args: ['run', 'holdopen'] })
     await vi.advanceTimersByTimeAsync(1000)
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.killSignals).toEqual(['SIGKILL'])
@@ -350,7 +350,7 @@ describe('runHookCommand shell selection', () => {
 
   it('runs a shell: powershell hook through the PowerShell on PATH with the documented argv', async () => {
     const pwsh = pwshOnPath()
-    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, '/proj', undefined, undefined, 'powershell')
+    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, { projectDir: '/proj', shell: 'powershell' })
     const record = hoisted.calls[hoisted.calls.length - 1]
     expect(record.file).toBe(pwsh)
     expect(record.args).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo ${env:CLAUDE_PROJECT_DIR}\nexit $LASTEXITCODE'])
@@ -358,7 +358,7 @@ describe('runHookCommand shell selection', () => {
 
   it('ignores shell for an exec-form hook, which spawns its executable directly', async () => {
     pwshOnPath()
-    await runHookCommand('/bin/echo', {}, 5000, undefined, ['x'], undefined, 'powershell')
+    await runHookCommand('/bin/echo', {}, 5000, { args: ['x'], shell: 'powershell' })
     const record = hoisted.calls[hoisted.calls.length - 1]
     expect(record.file).toBe('/bin/echo')
     expect(record.args).toEqual(['x'])

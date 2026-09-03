@@ -40,9 +40,9 @@ vi.mock('../extensions/hooks/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../extensions/hooks/index.js')>()
   return {
     ...actual,
-    runHookCommand: async (command: string, payload: unknown, _timeout?: number, _projectDir?: string, _args?: string[], onChild?: (kill: () => void) => void) => {
+    runHookCommand: async (command: string, payload: unknown, _timeout?: number, options?: { onChild?: (kill: () => void) => void }) => {
       hoisted.runs.push({ command, payload })
-      onChild?.(() => hoisted.kills.push(hoisted.runs.length))
+      options?.onChild?.(() => hoisted.kills.push(hoisted.runs.length))
       // A test can hold the first run open to exercise in-flight queueing.
       if (hoisted.gate) {
         const gate = hoisted.gate

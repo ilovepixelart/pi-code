@@ -86,6 +86,15 @@ function substitutePathRule(rule: string, vars: Record<string, string | undefine
   return rule.trimStart().startsWith('${CLAUDE_') && path.isAbsolute(substituted) ? `/${substituted}` : substituted
 }
 
+/** One scalar argument scope checked against one call: undefined when the tool is
+ * unscoped for this run or the call matches, otherwise a block naming the rules in
+ * force and the value that failed them. */
+function scopeVerdict(rules: string[] | undefined, tool: string, subjectLabel: string, subject: string, matches: (rules: string[]) => boolean): { block: true; reason: string } | undefined {
+  if (!rules) return undefined
+  if (matches(rules)) return undefined
+  return { block: true, reason: `allowed-tools: ${tool} is scoped for this command.\nAllowed: ${rules.join(', ')}\n${subjectLabel}: ${subject}` }
+}
+
 /** The path rules that survive an allowed-tools intersection: only the tools the
  * grant kept get their scopes, each rule ${CLAUDE_*}-substituted like the body. */
 function scopedPathRules(pathRules: Partial<Record<PathRuleTool, string[]>>, granted: string[], vars: Record<string, string | undefined>): Partial<Record<PathRuleTool, string[]>> {
@@ -371,41 +380,20 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // best effort and errs toward running the hook). A new scoped tool must be added in
   // both; the shared roster is ARG_RULE_TOOLS in internal/command-file.ts.
   pi.on('tool_call', async (event, ctx) => {
-    if (pendingBashRules && event.toolName === 'bash') {
-      const command = typeof event.input.command === 'string' ? event.input.command : ''
-      if (matchesBashRules(command, pendingBashRules)) return
-      return {
-        block: true,
-        reason: `allowed-tools: bash is scoped for this command.\nAllowed: ${pendingBashRules.join(', ')}\nCommand: ${command}`,
-      }
+    const input = event.input as Record<string, unknown>
+    const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+    // The four scalar-scope tools share one shape: rules in force, the part of the call
+    // they judge, and the sentence naming both when it blocks. One helper keeps the arms
+    // from drifting; only the subject and the matcher differ.
+    if (event.toolName === 'bash') return scopeVerdict(pendingBashRules, 'bash', 'Command', text(input.command), (rules) => matchesBashRules(text(input.command), rules))
+    if (event.toolName === 'web_fetch') return scopeVerdict(pendingDomainRules, 'web_fetch', 'Url', text(input.url), (rules) => matchesDomainRules(text(input.url), rules))
+    if (event.toolName === 'subagent') {
+      const names = agentNamesIn(input)
+      return scopeVerdict(pendingAgentRules, 'subagent', 'Agents', names.join(', '), (rules) => matchesAgentRules(names, rules))
     }
-    if (pendingDomainRules && event.toolName === 'web_fetch') {
-      const url = typeof event.input.url === 'string' ? event.input.url : ''
-      if (matchesDomainRules(url, pendingDomainRules)) return
-      return {
-        block: true,
-        reason: `allowed-tools: web_fetch is scoped for this command.\nAllowed: ${pendingDomainRules.join(', ')}\nUrl: ${url}`,
-      }
-    }
-    if (pendingAgentRules && event.toolName === 'subagent') {
-      const names = agentNamesIn(event.input)
-      if (matchesAgentRules(names, pendingAgentRules)) return
-      return {
-        block: true,
-        reason: `allowed-tools: subagent is scoped for this command.\nAllowed: ${pendingAgentRules.join(', ')}\nAgents: ${names.join(', ')}`,
-      }
-    }
-    if (pendingSkillRules && event.toolName === 'slash_command') {
-      const invocation = typeof event.input.command === 'string' ? event.input.command : ''
-      if (matchesSkillRules(invocation, pendingSkillRules)) return
-      return {
-        block: true,
-        reason: `allowed-tools: slash_command is scoped for this command.\nAllowed: ${pendingSkillRules.join(', ')}\nCommand: ${invocation}`,
-      }
-    }
+    if (event.toolName === 'slash_command') return scopeVerdict(pendingSkillRules, 'slash_command', 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
-    const input = event.input as Record<string, unknown>
     const filePath = typeof input.path === 'string' ? input.path : ''
     const anchors = { cwd: ctx.cwd, projectRoot: repoRoot(ctx.cwd) ?? ctx.cwd, home: os.homedir() }
     if (filePath && matchesPathRules(filePath, rules, anchors)) return

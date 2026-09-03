@@ -45,7 +45,20 @@ export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number
  * `args` array it becomes the exec path: `command` is spawned directly with those args.
  * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
  * still running at session end can be reaped (Claude kills async hooks at teardown). */
-export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[], onChild?: (kill: () => void) => void, shell?: string, plugin?: { root: string; dataDir: string }) => Promise<HookRunResult>
+/** How one command hook is spawned, beyond the payload and its budget. Grouped rather
+ * than trailing off the parameter list: the exec form, the shell choice and the
+ * declaring plugin are all per-hook fields that arrive together from one HookCommand. */
+export interface HookSpawnOptions {
+  projectDir?: string
+  /** exec-form argv; shell-form when absent. */
+  args?: string[]
+  onChild?: (kill: () => void) => void
+  shell?: string
+  /** The declaring plugin's paths, exported to the child. */
+  plugin?: { root: string; dataDir: string }
+}
+
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, options?: HookSpawnOptions) => Promise<HookRunResult>
 
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
@@ -123,7 +136,7 @@ function shellInvocation(command: string, shell: string | undefined): { file: st
   return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args, onChild, shell, plugin) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, { projectDir, args, onChild, shell, plugin } = {}) =>
   new Promise((resolve) => {
     // /bin/sh by absolute path off Windows, so the shell can't be resolved through an
     // attacker-controlled PATH; on Windows the resolver follows Claude's documented Git

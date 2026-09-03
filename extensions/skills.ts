@@ -39,6 +39,13 @@ import { errorMessage, isDirectory, isRecord } from './internal/values.js'
  * directory is included only for approved projects: pi's loader surfaces every skill's
  * name and description to the model, so an untrusted repository would otherwise get
  * text into the prompt without the user ever agreeing to load its config. */
+/** The extra skill directories a manifest declares, as a list. A string is one entry,
+ * a list is itself, anything else declares none. */
+function declaredSkillDirs(declared: unknown): string[] {
+  if (Array.isArray(declared)) return declared.map(String)
+  return typeof declared === 'string' ? [declared] : []
+}
+
 export function skillDirs(cwd: string, home: string, trusted: boolean): string[] {
   // Claude's precedence: enterprise (the skills directory beside the managed
   // settings file) overrides personal, and personal overrides project; discovery
@@ -53,8 +60,7 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
     // declaration as a replacement silently dropped every skill in the conventional
     // location. (The reference's one exception, a marketplace entry whose source resolves
     // to the marketplace root, is a marketplace shape pi-code does not model.)
-    const declared = plugin.manifest.skills
-    const extra = Array.isArray(declared) ? declared : typeof declared === 'string' ? [declared] : []
+    const extra = declaredSkillDirs(plugin.manifest.skills)
     const dirs = [...extra, 'skills']
     candidates.push(...dirs.map((dir) => pluginComponentPath(plugin, String(dir))).filter((dir): dir is string => dir !== undefined))
     // NOT SUPPORTED: Claude's single-skill layout, "a plugin that ships exactly one skill

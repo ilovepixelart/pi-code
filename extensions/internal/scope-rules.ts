@@ -15,10 +15,10 @@
  */
 
 /** Regex specials except `*`, which carries the rule's own wildcard meaning. */
-const escapeExceptStar = (text: string): string => text.replace(/[.+?^${}()|[\]\\]/g, String.raw`\$&`)
+const escapeExceptStar = (text: string): string => text.replaceAll(/[.+?^${}()|[\]\\]/g, String.raw`\$&`)
 
 /** A hostname pattern segment: `*` matches any text that does not cross a dot. */
-const hostPattern = (pattern: string): string => escapeExceptStar(pattern).replace(/\*/g, '[^.]*')
+const hostPattern = (pattern: string): string => escapeExceptStar(pattern).replaceAll('*', '[^.]*')
 
 /** Lowercased, with the trailing `.` the reference strips from both sides removed. */
 const canonicalHost = (host: string): string => host.trim().toLowerCase().replace(/\.$/, '')
@@ -65,14 +65,6 @@ export function matchesDomainRules(url: string, rules: string[]): boolean {
 }
 
 /**
- * Claude: "Use `Agent(AgentName)` rules to control which subagents Claude can use."
- *
- * Every agent the call names must match, not just the first. A subagent call carries
- * names in `agent`, `tasks[].agent` and `chain[].agent`; gating one field would let
- * parallel or chain mode route around the rule. A call naming no agent cannot be
- * checked against the scope, so it fails closed too.
- */
-/**
  * Claude: "Permission syntax: `Skill(name)` for exact match, `Skill(name *)` for
  * prefix match with any arguments."
  *
@@ -95,25 +87,30 @@ export function matchesSkillRules(invocation: string, rules: string[]): boolean 
   })
 }
 
+/** The `agent` of one call or task entry, when it has one. */
+const agentNameOf = (value: unknown): string | undefined => {
+  const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : undefined
+  return typeof record?.agent === 'string' ? record.agent : undefined
+}
+
 /** Every agent name one subagent call names, across all three modes: `agent` for
  * single, and the `agent` of each entry in `tasks` (parallel) or `chain` (sequential).
  * One collector, so a rule checked against single mode cannot be quietly skipped for
  * the two modes that carry their names in an array. */
 export function agentNamesIn(input: unknown): string[] {
   const raw = input !== null && typeof input === 'object' ? (input as Record<string, unknown>) : {}
-  const names: string[] = []
-  if (typeof raw.agent === 'string') names.push(raw.agent)
-  for (const key of ['tasks', 'chain']) {
-    const items = raw[key]
-    if (!Array.isArray(items)) continue
-    for (const item of items) {
-      const entry = item !== null && typeof item === 'object' ? (item as Record<string, unknown>) : undefined
-      if (entry && typeof entry.agent === 'string') names.push(entry.agent)
-    }
-  }
-  return names
+  const listed = ['tasks', 'chain'].flatMap((key) => (Array.isArray(raw[key]) ? (raw[key] as unknown[]) : []))
+  return [input, ...listed].map(agentNameOf).filter((name): name is string => name !== undefined)
 }
 
+/**
+ * Claude: "Use `Agent(AgentName)` rules to control which subagents Claude can use."
+ *
+ * Every agent the call names must match, not just the first. A subagent call carries
+ * names in `agent`, `tasks[].agent` and `chain[].agent`; gating one field would let
+ * parallel or chain mode route around the rule. A call naming no agent cannot be
+ * checked against the scope, so it fails closed too.
+ */
 export function matchesAgentRules(names: string[], rules: string[]): boolean {
   if (names.length === 0) return false
   return names.every((name) => rules.some((rule) => rule.trim() !== '' && rule.trim() === name.trim()))

@@ -116,14 +116,14 @@ describe('runHookCommand exec form (real shell)', () => {
   it('spawns the executable directly with no shell, so metacharacters in args stay literal', async () => {
     // Through a shell these would be command-substituted or split; exec form passes each
     // arg through untouched.
-    const result = await runHookCommand(process.execPath, {}, 5000, undefined, [...ECHO_ARGV, '$(whoami)', 'a;b', '$HOME'])
+    const result = await runHookCommand(process.execPath, {}, 5000, { args: [...ECHO_ARGV, '$(whoami)', 'a;b', '$HOME'] })
     expect(result.code).toBe(0)
     expect(result.stdout).toBe('$(whoami) a;b $HOME\n')
   })
 
   it('delivers the payload on stdin and substitutes $ARGUMENTS per arg from the payload', async () => {
     const payload = { k: 'v' }
-    const result = await runHookCommand(process.execPath, payload, 5000, undefined, [...ECHO_ARGV, '$ARGUMENTS'])
+    const result = await runHookCommand(process.execPath, payload, 5000, { args: [...ECHO_ARGV, '$ARGUMENTS'] })
     expect(result.stdout).toBe(`${JSON.stringify(payload)}\n`)
   })
 })

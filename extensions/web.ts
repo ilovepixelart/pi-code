@@ -212,6 +212,27 @@ function upgradeToHttps(rawUrl: string): string {
  * defaulted, so a new caller has to decide which it wants. */
 type CrossHost = 'follow' | 'report'
 
+/** The next hop of a redirect, or the naming result that ends the fetch. Split from
+ * fetchText so the loop reads as request-then-hop; every guard the hop needs lives
+ * here. */
+function redirectTarget(response: Response, url: URL, rawUrl: string, crossHost: CrossHost): { kind: 'next'; next: URL } | { kind: 'redirect'; to: string } {
+  // The hop's body is never read; without the cancel its socket stays held
+  // until the 20s abort timeout, once per hop.
+  void response.body?.cancel().catch(() => {})
+  const location = response.headers.get('location')
+  if (!location) throw new Error(`redirect without location from ${url.hostname}`)
+  const next = new URL(location, url)
+  // Only the caller's URL was scheme-checked; a redirect could hand back data: or
+  // file:, which carry no host for the address guard to inspect.
+  if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${next.protocol} from ${rawUrl}`)
+  // Claude: "When a URL redirects to a different host, WebFetch returns a text
+  // result that names the original URL and the redirect target instead of following
+  // it." The target is never requested, so the per-hop address guard never sees it
+  // and never needs to: a cross-host hop cannot reach anything at all from here.
+  if (crossHost === 'report' && next.hostname.toLowerCase() !== url.hostname.toLowerCase()) return { kind: 'redirect', to: next.href }
+  return { kind: 'next', next }
+}
+
 async function fetchText(rawUrl: string, crossHost: CrossHost, transport = httpFetch): Promise<FetchOutcome> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -223,21 +244,9 @@ async function fetchText(rawUrl: string, crossHost: CrossHost, transport = httpF
       userAgent: USER_AGENT,
     })
     if (response.status >= 300 && response.status < 400) {
-      // The hop's body is never read; without the cancel its socket stays held
-      // until the 20s abort timeout, once per hop.
-      void response.body?.cancel().catch(() => {})
-      const location = response.headers.get('location')
-      if (!location) throw new Error(`redirect without location from ${url.hostname}`)
-      const next = new URL(location, url)
-      // Only the caller's URL was scheme-checked; a redirect could hand back data: or
-      // file:, which carry no host for the address guard to inspect.
-      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${next.protocol} from ${rawUrl}`)
-      // Claude: "When a URL redirects to a different host, WebFetch returns a text
-      // result that names the original URL and the redirect target instead of following
-      // it." The target is never requested, so the per-hop address guard never sees it
-      // and never needs to: a cross-host hop cannot reach anything at all from here.
-      if (crossHost === 'report' && next.hostname.toLowerCase() !== url.hostname.toLowerCase()) return { kind: 'redirect', to: next.href }
-      url = next
+      const hop = redirectTarget(response, url, rawUrl, crossHost)
+      if (hop.kind === 'redirect') return hop
+      url = hop.next
       continue
     }
     if (!response.ok) {

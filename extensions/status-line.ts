@@ -352,8 +352,10 @@ export default function statusLine(pi: ExtensionAPI) {
       // Everything below can touch ctx after an await, and every ctx getter throws
       // once the session is disposed. This promise is started from a timer with no
       // awaiter, so an escaping rejection becomes an uncaughtException and exits pi.
-      const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS, undefined, undefined, (kill) => {
-        killInflight = kill
+      const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS, {
+        onChild: (kill) => {
+          killInflight = kill
+        },
       })
       // Claude: "Your script can output multiple lines to create a richer display."
       // pi has one row for every extension status and replaces newlines with spaces
