@@ -140,6 +140,26 @@ describe('env-settings extension', () => {
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   })
 
+  it('applies an env edit to the running session when the settings file is saved', async () => {
+    // Claude: "Claude Code watches your settings files and reloads them when they change,
+    // so it applies most edits to the running session without a restart". `env` is not on
+    // the restart-only list (model, effortLevel/modelSettings, outputStyle), so an edit
+    // has to reach process.env without a new session.
+    track('ENVTEST_LIVE')
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    usedKeys.add('PI_CODE_SETTINGS_WATCH_INTERVAL_MS')
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_LIVE: 'before' })
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({}, { cwd: tempDir('env-proj-') })
+    expect(process.env.ENVTEST_LIVE).toBe('before')
+
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_LIVE: 'after' })
+    await vi.waitFor(() => {
+      expect(process.env.ENVTEST_LIVE).toBe('after')
+    }, 5000)
+  })
+
   it('applies user and managed env at factory time, but not project env', async () => {
     track('ENVTEST_USER', 'ENVTEST_MANAGED', 'ENVTEST_PROJECT')
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_USER: 'uv' })

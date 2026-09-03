@@ -1,6 +1,6 @@
 # Subagents
 
-Claude renamed its `Task` tool to `Agent` in 2.1.63 and keeps `Task(...)` working as an alias. pi-code registers the tool as `subagent` and maps the `Task` spelling onto it; the `Agent` spelling is not mapped yet, so an `allowed-tools: Agent` entry matches nothing here.
+Claude renamed its `Task` tool to `Agent` in 2.1.63 and keeps `Task(...)` working as an alias. pi-code registers the tool as `subagent` and maps both spellings onto it, so `Agent`, `Agent(Explore)` and the legacy `Task(...)` all resolve. Hook payloads and matchers report the canonical `Agent`.
 
 Claude-style subagents with parallel, chain, and background modes. Source: [`extensions/subagent/`](../extensions/subagent) (see also its [README](../extensions/subagent/README.md)).
 

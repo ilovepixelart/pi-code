@@ -56,8 +56,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.
-    // The stop event fires here too, so SubagentStop hooks see resumed runs end.
-    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id })
+    // The stop event fires here too, so SubagentStop hooks see resumed runs end, and it
+    // carries the run's final assistant text: docs/subagents.md states SubagentStop
+    // receives last_assistant_message unconditionally, and a resumed run is no exception.
+    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, lastAssistantMessage: run.output })
     pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
   }
 

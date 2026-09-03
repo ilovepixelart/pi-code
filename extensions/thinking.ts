@@ -23,15 +23,21 @@ export function thinkingRank(level: ThinkingLevel): number {
   return Math.max(i, 0)
 }
 
-/** The reasoning level a prompt requests through Claude's think keywords, or undefined
- * when it names none. Checked most-specific first so `think harder` does not fall
- * through to the bare-`think` branch, and on word boundaries so `rethink`/`thinking`
- * and the whole word `ultrathink` never trip the bare match. */
+/** The reasoning level a prompt requests, or undefined when it names none.
+ *
+ * `ultrathink` is the only keyword, per Claude: "Include `ultrathink` anywhere in your
+ * prompt to request deeper reasoning on that turn ... Claude Code passes other phrases
+ * such as 'think', 'think hard', and 'think more' through as ordinary prompt text and
+ * doesn't recognize them as keywords." Escalating on those surprised anyone who merely
+ * used the word in a sentence. Matched on a word boundary so `rethink` and `thinking`
+ * never trip it.
+ *
+ * Divergence: Claude adds an in-context instruction and leaves the API effort level
+ * unchanged. pi has no separate in-context channel for this, and its thinking level IS
+ * how deeper reasoning is requested, so the keyword raises the level for the turn and
+ * restores it after. Same intent, the only mechanism pi has. */
 export function requestedThinkingLevel(text: string): ThinkingLevel | undefined {
-  if (/\bultrathink\b/i.test(text)) return 'max'
-  if (/\bthink harder\b/i.test(text) || /\bthink hard\b/i.test(text)) return 'high'
-  if (/\bthink\b/i.test(text)) return 'medium'
-  return undefined
+  return /\bultrathink\b/i.test(text) ? 'max' : undefined
 }
 
 export default function thinkingExtension(pi: ExtensionAPI) {

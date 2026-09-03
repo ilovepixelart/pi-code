@@ -82,7 +82,28 @@ describe('skillDirs', () => {
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: relative(root, outside) }))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    expect(skillDirs(cwd, home, false)).toEqual([])
+    // The outside path is refused; the plugin's own default skills/ is still scanned,
+    // since a declaration adds to that scan rather than replacing it.
+    const dirs = skillDirs(cwd, home, false)
+    expect(dirs).not.toContain(outside)
+    expect(dirs).toEqual([join(root, 'skills')])
+  })
+
+  it('adds a declared skills directory to the default scan rather than replacing it', () => {
+    // Claude: "Adds to the default: `skills`. The default `skills/` directory is always
+    // scanned, and directories listed in `skills` are loaded alongside it." Replacing it
+    // silently dropped every skill in the conventional location.
+    const cwd = tempDir('cs-proj-')
+    const home = tempDir('cs-home-')
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills'), { recursive: true })
+    mkdirSync(join(root, 'extra'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: 'extra' }))
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+
+    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'extra'), join(root, 'skills')])
   })
 
   it('finds project skills at the repository root from a subdirectory session', () => {
