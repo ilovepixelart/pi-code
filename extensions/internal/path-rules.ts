@@ -96,10 +96,23 @@ function bracketEnd(pattern: string, start: number): number {
 
 /** A bracket expression body as a regex character class, escaping regex-relevant
  * characters while keeping `-` ranges; a leading `!` (or `^`) negates. */
-function bracketClass(body: string): string {
+function bracketClass(body: string): string | null {
   const negated = body.startsWith('!') || body.startsWith('^')
   const members = (negated ? body.slice(1) : body).replace(/[\\\]^]/g, (ch) => `\\${ch}`)
-  return `[${negated ? '^' : ''}${members}]`
+  const source = `[${negated ? '^' : ''}${members}]`
+  // A range whose endpoints descend, `["- ]` for instance, is not a character class
+  // JavaScript will build: RegExp throws "Range out of order in character class". The
+  // `-` cannot simply be escaped, since `[a-z]` is the whole point of the syntax, so the
+  // class is validated by construction and an unbuildable one is treated exactly as an
+  // unterminated `[` already is: the pattern is invalid and matches nothing. Without
+  // this the throw escaped compileGlobs, which does not catch, and took the permission
+  // check that called it with it.
+  try {
+    void new RegExp(source)
+  } catch {
+    return null
+  }
+  return source
 }
 
 /** A `*` run starting at `i`: a double star followed by a slash spans whole
@@ -130,7 +143,9 @@ function translateGlob(pattern: string): string | null {
     if (ch === '[') {
       const end = bracketEnd(pattern, i)
       if (end === -1) return null
-      out += bracketClass(pattern.slice(i + 1, end))
+      const cls = bracketClass(pattern.slice(i + 1, end))
+      if (cls === null) return null
+      out += cls
       i = end + 1
       continue
     }
