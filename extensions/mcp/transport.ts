@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import * as fs from 'node:fs'
 import { pathToFileURL } from 'node:url'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
@@ -182,8 +183,8 @@ function helperEnv(name: string, config: HttpServerConfig): NodeJS.ProcessEnv {
 }
 
 /** The env a stdio server process starts with: the SDK allowlist, the config's own
- * env block, and Claude's path variables (CLAUDE_PROJECT_DIR, and CLAUDE_PLUGIN_ROOT
- * for a plugin's server). */
+ * env block, and Claude's three path variables. Claude: "All three are exported as
+ * environment variables to hook processes and to MCP and LSP server subprocesses." */
 function stdioEnv(config: StdioServerConfig, fill: (value: string) => string, session?: SessionDirs): Record<string, string> {
   // CLAUDECODE marks every subprocess; the long-lived server deliberately gets no
   // CLAUDE_CODE_CHILD_SESSION, which Claude reserves for per-call children.
@@ -191,6 +192,16 @@ function stdioEnv(config: StdioServerConfig, fill: (value: string) => string, se
   for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
   if (session) env.CLAUDE_PROJECT_DIR = session.projectDir
   if (config.pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = config.pluginRoot
+  // The data dir is "created on first reference"; handing the path to a server is that
+  // reference, so the server does not have to mkdir it before using it.
+  if (config.pluginDataDir !== undefined) {
+    env.CLAUDE_PLUGIN_DATA = config.pluginDataDir
+    try {
+      fs.mkdirSync(config.pluginDataDir, { recursive: true })
+    } catch {
+      // The server still starts; one that needs the directory reports its own failure.
+    }
+  }
   return env
 }
 
@@ -234,7 +245,12 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     await connectWithTimeout(client, transport, `connect ${name}`)
     return client
   }
-  const url = new URL(fill(config.url))
+  // An absent or blank `url` is a server nobody finished configuring, not a malformed
+  // one. `new URL('')` throws "Invalid URL", which reads as a typo in a real address and
+  // sends people looking for one; name the actual state instead.
+  const rawUrl = fill(config.url ?? '').trim()
+  if (rawUrl === '') throw new Error(`${name} is not configured: it has no url`)
+  const url = new URL(rawUrl)
   if (config.type === 'ws' || config.type === 'websocket') {
     // The SDK's WebSocket transport takes only a url: it carries no headers, bearer
     // token, or headersHelper output. Warn rather than silently dropping configured

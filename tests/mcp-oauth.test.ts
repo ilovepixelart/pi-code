@@ -370,3 +370,24 @@ describe('headless OAuth refusal', () => {
     }
   })
 })
+
+describe('startCallbackServer port requirements', () => {
+  it('falls back to an ephemeral port when a remembered port is taken', async () => {
+    // A port from a prior login is a convenience: losing it only means the IdP sees a
+    // different loopback port, which a dynamically registered client accepts.
+    const blocker = await startCallbackServer()
+    const { server, port } = await startCallbackServer(blocker.port)
+    expect(port).not.toBe(blocker.port)
+    server.close()
+    blocker.server.close()
+  })
+
+  it('fails loudly when a CONFIGURED callbackPort is taken', async () => {
+    // oauth.callbackPort names the redirect_uri the IdP has registered. Silently using
+    // another port sends the user to an opaque redirect_uri mismatch at the IdP instead
+    // of a message naming the real problem.
+    const blocker = await startCallbackServer()
+    await expect(startCallbackServer(blocker.port, true)).rejects.toThrow(`oauth.callbackPort ${blocker.port} is in use`)
+    blocker.server.close()
+  })
+})

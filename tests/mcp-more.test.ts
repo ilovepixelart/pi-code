@@ -322,6 +322,11 @@ const statusLinesOf = async (harness: Harness): Promise<string[]> => {
   return emitted.message.split('\n')
 }
 
+/** The SDK call options every tool call carries, with only the idle timeout varying.
+ * Written once so each test states its subject, the idle tier, rather than repeating
+ * the wall budget and progress wiring that are the same in all of them. */
+const callOptionsWithIdle = (idleMs: number): Record<string, unknown> => ({ timeout: idleMs, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+
 const withTools = (tools: ToolDef[]): void => {
   hoisted.control.listTools = async () => ({ tools })
 }
@@ -1148,7 +1153,7 @@ describe('mcp tool execution', () => {
     // The SDK gets the idle window as its per-quiet-period deadline (reset on progress),
     // capped at the 4h wall; its own 60s default can no longer fire first. registerOne
     // is a stdio server, so the idle tier is Claude's 30-minute stdio window.
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(1_800_000))
   })
 })
 
@@ -1169,7 +1174,7 @@ describe('mcp tool-call idle timeout', () => {
     // per-quiet-period deadline, reset on every progress notification; maxTotalTimeout
     // caps the wall clock; onprogress is required so the server addresses progress
     // here and the SDK resets the timer on it.
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(1_800_000))
   })
 
   it('gives a remote server the 5-minute idle window under the 4h wall budget', async () => {
@@ -1178,7 +1183,7 @@ describe('mcp tool-call idle timeout', () => {
 
     await harness.tools[0].execute('c1', {})
 
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 300_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(300_000))
   })
 
   it('honors CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT for the idle window', async () => {
@@ -1188,7 +1193,7 @@ describe('mcp tool-call idle timeout', () => {
 
     await harness.tools[0].execute('c1', {})
 
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 60_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(60_000))
   })
 
   it('disables the idle window for CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0, leaving only the wall budget', async () => {
@@ -1234,7 +1239,7 @@ describe('mcp tool-call idle timeout', () => {
 
     await harness.tools[0].execute('c1', {})
 
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(1_800_000))
   })
 
   it('uses a plain wall timeout when a per-server budget is tighter than the idle window', async () => {
@@ -1621,7 +1626,7 @@ describe('small MCP parity', () => {
     // falls back to the global default, whose SDK deadline is the idle window (the
     // 30-minute stdio tier) under the 4h wall.
     await harness.tools[1].execute('c2', {})
-    expect(hoisted.callOptions.at(-1)).toEqual({ timeout: 1_800_000, resetTimeoutOnProgress: true, maxTotalTimeout: 14_400_000, onprogress: expect.any(Function) })
+    expect(hoisted.callOptions.at(-1)).toEqual(callOptionsWithIdle(1_800_000))
   })
 
   it('expands environment variables in cwd', async () => {
@@ -2636,5 +2641,52 @@ describe('the registered mcp_tool caller (cross-extension joint)', () => {
     await setupStarted({ user: { db: { command: 'db-server' } } })
 
     await expect(callMcpTool('nosuch', 'query', {})).rejects.toThrow('not connected')
+  })
+})
+
+describe('re-auth after a tool-call 401', () => {
+  it('uses the session UI, so an interactive session is not told it cannot log in', async () => {
+    // reconnectForAuth ran with no authUi, so a session that HAS a UI took the headless
+    // path: the server ended failed with "cannot log in here" advice instead of showing
+    // the login it was perfectly able to show.
+    withTools([{ name: 'go' }])
+    let confirmCount = 0
+    const confirm = async (): Promise<boolean> => {
+      confirmCount++
+      return true
+    }
+    // Connect succeeds while the session starts, so the 401 arrives later, on the call.
+    hoisted.control.connect = async () => {}
+    const harness = await setup({ user: { alpha: { url: 'https://alpha.example/mcp' } }, confirm })
+    await harness.sessionStart()
+    expect(confirmCount).toBe(0)
+
+    // The call 401s; recovery drops the client and reconnects once. That reconnect needs
+    // a login, and an interactive session can serve it.
+    hoisted.control.callTool = async () => {
+      throw Object.assign(new Error('needs login'), { code: 401 })
+    }
+    hoisted.control.connect = async (transport) => {
+      if ((transport.options as { authProvider?: unknown }).authProvider === undefined) {
+        throw Object.assign(new Error('needs login'), { code: 401 })
+      }
+    }
+    const tool = harness.tools[0]
+    if (!tool) throw new Error('the alpha server registered no tool')
+    await tool.execute('call-1', {}).catch(() => {})
+
+    expect(confirmCount).toBeGreaterThan(0)
+  })
+})
+
+describe('an unconfigured remote server', () => {
+  it('reports that it is not configured rather than an invalid URL', async () => {
+    // An empty url is a half-finished config entry. "Invalid URL" reads as a typo in a
+    // real address, so it sends people hunting for one that was never written.
+    const harness = await setupStarted({ user: { blank: { type: 'http', url: '' } } })
+
+    const [line] = await statusLinesOf(harness)
+    expect(line).toContain('not configured')
+    expect(line).not.toContain('Invalid URL')
   })
 })

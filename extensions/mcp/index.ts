@@ -85,6 +85,10 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
 
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
+  // The session's OAuth UI seams, captured at session_start. The reconnect paths below
+  // run outside that handler, and passing undefined there made an INTERACTIVE session
+  // report the headless "cannot log in" advice on a re-auth it could actually perform.
+  let sessionAuthUi: AuthUi | undefined
   const status = new Map<string, { state: string; tools: number }>()
   // Config per server name, kept for call-time timeout tuning: the idle tier follows
   // the transport kind, and a declared per-server timeout governs the wall budget.
@@ -178,14 +182,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   /** Claude's mid-session reconnect for a dropped remote server: five attempts with
    * a delay doubling from one second. connectServers redoes the full bring-up
    * (tools, prompts, subscriptions, a fresh onclose) and its duplicate guard skips
-   * out if another path already reconnected the name. Runs without authUi: a server
-   * that now needs a login ends failed, and after the fifth failure the last
-   * attempt's failed status stands, with a session restart as the manual retry. */
+   * out if another path already reconnected the name. Uses the session's authUi, so a
+   * server that now needs a login can prompt for it in an interactive session; headless
+   * still ends failed, and after the fifth failure the last attempt's failed status
+   * stands, with a session restart as the manual retry. */
   async function reconnectWithBackoff(name: string, config: ServerConfig): Promise<void> {
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt))
       if (shuttingDown || clients.has(name)) return
-      await connectServers({ [name]: config }, undefined, true)
+      await connectServers({ [name]: config }, sessionAuthUi, true)
       if (clients.has(name)) return
     }
   }
@@ -200,7 +205,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       clients.delete(name)
       await withTimeout(old.close(), 3000, 'close').catch(() => {})
     }
-    await connectServers({ [name]: config }, undefined, true)
+    await connectServers({ [name]: config }, sessionAuthUi, true)
   }
 
   /** A tool call with the auth retry: on a 401/403 rejection, reconnect once and
@@ -576,6 +581,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd }
     const authUi = authUiFor(ctx)
+    sessionAuthUi = authUi
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They
     // merge from managed settings plus the trust-gated settings chain, as Claude
     // documents (a repo's file counts only once the project is approved).
