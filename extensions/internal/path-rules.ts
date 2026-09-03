@@ -96,10 +96,29 @@ function bracketEnd(pattern: string, start: number): number {
 
 /** A bracket expression body as a regex character class, escaping regex-relevant
  * characters while keeping `-` ranges; a leading `!` (or `^`) negates. */
-function bracketClass(body: string): string {
+function bracketClass(body: string): string | null {
   const negated = body.startsWith('!') || body.startsWith('^')
   const members = (negated ? body.slice(1) : body).replace(/[\\\]^]/g, (ch) => `\\${ch}`)
-  return `[${negated ? '^' : ''}${members}]`
+  const source = `[${negated ? '^' : ''}${members}]`
+  // A range whose endpoints descend, `["- ]` for instance, is not a character class
+  // JavaScript will build: RegExp throws "Range out of order in character class". The
+  // `-` cannot simply be escaped, since `[a-z]` is the whole point of the syntax, so the
+  // class is validated by construction and an unbuildable one is treated exactly as an
+  // unterminated `[` already is: the pattern is invalid and matches nothing. Without
+  // this the throw escaped compileGlobs, which does not catch, and took the permission
+  // check that called it with it.
+  return isBuildableClass(source) ? source : null
+}
+
+/** Whether JavaScript will build this character class. Asking RegExp is the only
+ * faithful test: the invalid forms are its rules, not ones worth re-deriving here. */
+function isBuildableClass(source: string): boolean {
+  try {
+    new RegExp(source)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** A `*` run starting at `i`: a double star followed by a slash spans whole
@@ -114,39 +133,33 @@ function translateStar(pattern: string, i: number): { source: string; next: numb
   return { source: '[^/]*', next: i + 1 }
 }
 
+/** The regex source for the construct at `i` and the index after it, or null when the
+ * pattern is invalid there and so matches nothing. */
+function translateAt(pattern: string, i: number): { source: string; next: number } | null {
+  const ch = pattern[i]
+  // Claude: to match a literal bracket, escape it; the escape consumes both chars.
+  if (ch === '\\' && (pattern[i + 1] === '[' || pattern[i + 1] === ']')) return { source: escapeRegExp(pattern[i + 1]), next: i + 2 }
+  // Claude: `[` starts a bracket expression such as `[abc]`; a `[` that cannot be read
+  // as one, or a body that is not a buildable class, makes the pattern invalid.
+  if (ch === '[') {
+    const end = bracketEnd(pattern, i)
+    if (end === -1) return null
+    const cls = bracketClass(pattern.slice(i + 1, end))
+    return cls === null ? null : { source: cls, next: end + 1 }
+  }
+  if (ch === '*') return translateStar(pattern, i)
+  if (ch === '?') return { source: '[^/]', next: i + 1 }
+  return { source: escapeRegExp(ch), next: i + 1 }
+}
+
 function translateGlob(pattern: string): string | null {
   let out = ''
   let i = 0
   while (i < pattern.length) {
-    const ch = pattern[i]
-    // Claude: to match a literal bracket, escape it; the escape consumes both chars.
-    if (ch === '\\' && (pattern[i + 1] === '[' || pattern[i + 1] === ']')) {
-      out += escapeRegExp(pattern[i + 1])
-      i += 2
-      continue
-    }
-    // Claude: `[` starts a bracket expression such as `[abc]`; a `[` that cannot be
-    // read as one makes the pattern invalid, matching nothing.
-    if (ch === '[') {
-      const end = bracketEnd(pattern, i)
-      if (end === -1) return null
-      out += bracketClass(pattern.slice(i + 1, end))
-      i = end + 1
-      continue
-    }
-    if (ch === '*') {
-      const star = translateStar(pattern, i)
-      out += star.source
-      i = star.next
-      continue
-    }
-    if (ch === '?') {
-      out += '[^/]'
-      i += 1
-      continue
-    }
-    out += escapeRegExp(ch)
-    i += 1
+    const step = translateAt(pattern, i)
+    if (step === null) return null
+    out += step.source
+    i = step.next
   }
   return out
 }

@@ -167,3 +167,28 @@ describe('stripRuleDrive', () => {
     expect(stripRuleDrive('C:/Users/**', false)).toBe('C:/Users/**')
   })
 })
+
+describe('an unbuildable bracket expression', () => {
+  // Found by the property test on a random seed, so pinned deterministically here: a
+  // seeded property proves nothing about a specific input on the next run.
+  const anchors = { cwd: '/proj/sub', projectRoot: '/proj', home: '/home/u' }
+
+  it.each([
+    ['a descending range', '["- ]'],
+    ['a descending range among literals', 'a[z-a]b'],
+  ])('compiles %s to a pattern that matches nothing instead of throwing', (_label, pattern) => {
+    // compileGlobs constructs the RegExp with no try/catch, so a throw here escaped into
+    // whichever permission check was evaluating the rule.
+    expect(() => new RegExp(globToRegExpSource(pattern))).not.toThrow()
+    expect(globToRegExpSource(pattern)).toBe('(?!)')
+    expect(() => matchesPathRules('/proj/sub/anything', [pattern], anchors)).not.toThrow()
+    expect(matchesPathRules('/proj/sub/anything', [pattern], anchors)).toBe(false)
+  })
+
+  it('still builds an ordinary ascending range', () => {
+    // The guard's other failure mode: rejecting every bracket expression would also pass
+    // the cases above, and `[a-z]` is the syntax's whole point.
+    expect(matchesPathRules('/proj/sub/b.md', ['[a-z].md'], anchors)).toBe(true)
+    expect(matchesPathRules('/proj/sub/9.md', ['[a-z].md'], anchors)).toBe(false)
+  })
+})

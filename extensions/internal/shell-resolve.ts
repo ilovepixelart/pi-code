@@ -37,11 +37,22 @@ const isFile = (file: string): boolean => {
  * Windows spellings on win32, where powershell.exe ships with the OS. */
 const powershellCandidates = (platform: string): string[] => (platform === 'win32' ? ['pwsh', 'pwsh.exe', 'powershell.exe'] : ['pwsh'])
 
-/** First PowerShell binary found on PATH, or undefined when none is installed. */
-export function resolvePowershellBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env): string | undefined {
-  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
+/** First PowerShell binary found on PATH, or undefined when none is installed.
+ *
+ * A PATH entry that is the launch directory, or project tooling below it, is skipped
+ * for the same reason resolveGitBash skips one: a repository that ships `pwsh.exe`
+ * must not become the shell its own hooks and spans run through. Go made this the
+ * default in 1.19 (`os/exec` refuses a program resolved "relative to the current
+ * directory", returning ErrDot), and Windows offers NoDefaultCurrentDirectoryInExePath
+ * for it; node honors neither (nodejs/node#46264), so the check belongs here. */
+export function resolvePowershellBinary(platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): string | undefined {
+  // `env.Path` as well as `env.PATH`, matching resolveGitBash: process.env is
+  // case-insensitive on Windows, but an env object handed in by a caller or a test is
+  // whatever spelling it was built with, and the two resolvers must read it alike.
+  const dirs = (env.PATH ?? env.Path ?? '').split(path.delimiter).filter(Boolean)
   for (const candidate of powershellCandidates(platform)) {
     for (const dir of dirs) {
+      if (isProjectTooling(dir, cwd)) continue
       const full = path.join(dir, candidate)
       try {
         fs.accessSync(full, fs.constants.X_OK)
@@ -111,11 +122,11 @@ const powershellShell = (file: string): ResolvedShell => ({
  */
 export function resolveShell(preferred: string | undefined, platform: string = process.platform, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd(), installRoots?: string[]): ResolvedShell | undefined {
   if (preferred === 'powershell') {
-    const powershell = resolvePowershellBinary(platform, env)
+    const powershell = resolvePowershellBinary(platform, env, cwd)
     if (powershell) return powershellShell(powershell)
   }
   const bash = bashBinary(platform, env, cwd, installRoots)
   if (bash) return bashShell(bash)
-  const powershell = resolvePowershellBinary(platform, env)
+  const powershell = resolvePowershellBinary(platform, env, cwd)
   return powershell ? powershellShell(powershell) : undefined
 }
