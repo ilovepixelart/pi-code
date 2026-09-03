@@ -1226,6 +1226,23 @@ describe('hooks extension notify-style events', () => {
     expect(existsSync(dataDir)).toBe(true)
   })
 
+  it('runs hooks declared inline in plugin.json, not only from hooks/hooks.json', async () => {
+    // The manifest may carry the hooks object itself instead of pointing at a file. That
+    // branch had never executed, so a plugin written the inline way contributed nothing
+    // and looked like a plugin with no hooks.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'inline', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'inline', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'inline-hook' }] }] } }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { inline: true } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['inline-hook'])
+  })
+
   it('refuses a shell-form plugin hook that references user config, keeping its siblings', async () => {
     // Claude: "Fields that run in a shell reject ${user_config.*}: substituting a
     // configured value into a shell command would let the shell run whatever that value

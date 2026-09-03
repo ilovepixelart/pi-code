@@ -183,3 +183,29 @@ describe('thinking extension', () => {
     expect(setThinkingLevel).toHaveBeenLastCalledWith('medium')
   })
 })
+
+describe('the keyword only ever raises the level', () => {
+  it('leaves a session already at max alone, and restores nothing afterwards', () => {
+    // ultrathink targets max. A session already there has nothing to raise, so the
+    // extension must not touch the level and must not arm a restore: arming one would
+    // hand the level back to `max` at settle even if the user changed it mid-turn.
+    const t = wire('max')
+    t.input('please ultrathink this')
+
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+    expect(t.level()).toBe('max')
+
+    t.settle()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+  })
+
+  it('raises from a level below the target and restores that level', () => {
+    // The companion half, so the guard above cannot pass by never escalating at all.
+    const t = wire('low')
+    t.input('please ultrathink this')
+    expect(t.level()).toBe('max')
+
+    t.settle()
+    expect(t.level()).toBe('low')
+  })
+})

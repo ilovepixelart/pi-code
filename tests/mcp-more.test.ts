@@ -2050,6 +2050,34 @@ describe('mcp resource tools', () => {
     expect(entries).toContainEqual(expect.objectContaining({ server: 'one', uriTemplate: 'db://{id}' }))
   })
 
+  it('carries description and mimeType when a server sends them, and omits them when it does not', () => {
+    // Both optional-field arms in one place: a server that sends them must have them
+    // listed, and one that omits them must not gain empty keys, which a model reads as
+    // a resource that really has a blank description.
+    withResourceCapability()
+    hoisted.control.listResources = async () => ({
+      resources: [
+        { uri: 'db://full', name: 'Full', description: 'All fields', mimeType: 'application/json' },
+        { uri: 'db://bare', name: 'Bare' },
+      ],
+    })
+    hoisted.control.listResourceTemplates = async () => ({ resourceTemplates: [{ uriTemplate: 'db://{id}', name: 'ById' }] })
+    return setupStarted({ user: { one: { command: 'x' } } }).then(async (harness) => {
+      const out = await resourceTool(harness, 'list_mcp_resources').execute('c1', {})
+      const entries = JSON.parse(out.content[0].text ?? '') as Array<Record<string, unknown>>
+
+      const full = entries.find((entry) => entry.uri === 'db://full')
+      expect(full).toEqual({ server: 'one', uri: 'db://full', name: 'Full', description: 'All fields', mimeType: 'application/json' })
+
+      const bare = entries.find((entry) => entry.uri === 'db://bare')
+      expect(bare).toEqual({ server: 'one', uri: 'db://bare', name: 'Bare' })
+
+      // Same rule on the template side, whose optional fields are a separate builder.
+      const template = entries.find((entry) => entry.uriTemplate === 'db://{id}')
+      expect(template).toEqual({ server: 'one', uriTemplate: 'db://{id}', name: 'ById' })
+    })
+  })
+
   it('filters the listing to the requested server and rejects an unknown one', async () => {
     withResourceCapability()
     hoisted.control.listResources = async (_args, client) => (client.transport?.options.command === 'x' ? { resources: [{ uri: 'db://a', name: 'A' }] } : { resources: [{ uri: 'db://b', name: 'B' }] })

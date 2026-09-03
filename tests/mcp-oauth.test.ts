@@ -391,3 +391,41 @@ describe('startCallbackServer port requirements', () => {
     blocker.server.close()
   })
 })
+
+describe('the authorization redirect the flow hands the SDK', () => {
+  // This test spawns a browser launch through the same mock the openBrowser suite
+  // asserts call counts on, so it clears the recorder rather than leaving its call
+  // behind for whichever test the shuffled order runs next.
+  afterEach(() => {
+    spawnMock.calls.length = 0
+  })
+
+  it('opens the browser and tells the user where to authorize', async () => {
+    // The SDK calls redirectToAuthorization on the provider it was handed, which is how
+    // the login page opens. makeTransport receives that provider, so a stand-in transport
+    // drives the real callback: this is the flow's own wiring, not a re-implementation.
+    // It had never executed, so neither the browser launch nor the fallback notice that
+    // carries the URL when the browser does not open was covered.
+    const { runInteractiveOAuth } = await import('../extensions/mcp/oauth-flow.ts')
+    const authUrl = 'https://idp.example/authorize?client_id=abc'
+    const notices: string[] = []
+    const authUi = { confirm: async () => true, notify: (message: string) => notices.push(message) }
+    const client = { connect: async () => {}, close: async () => {} }
+
+    await runInteractiveOAuth(
+      'srv',
+      { url: 'https://mcp.example/' },
+      ((provider: { redirectToAuthorization: (url: URL) => void }) => {
+        provider.redirectToAuthorization(new URL(authUrl))
+        return { finishAuth: async () => {} }
+      }) as never,
+      'connect srv',
+      authUi as never,
+      () => client as never,
+    )
+
+    expect(spawnMock.calls).toHaveLength(1)
+    expect(spawnMock.calls[0].args).toContain(authUrl)
+    expect(notices.some((message) => message.includes(authUrl) && message.includes('srv'))).toBe(true)
+  })
+})
