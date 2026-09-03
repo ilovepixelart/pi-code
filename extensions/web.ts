@@ -195,7 +195,24 @@ async function readCapped(response: Response): Promise<string> {
   return text.slice(0, MAX_RAW_CHARS)
 }
 
-async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text: string; contentType: string }> {
+/** Either the page, or the cross-host redirect Claude reports instead of following. */
+type FetchOutcome = { kind: 'body'; text: string; contentType: string } | { kind: 'redirect'; to: string }
+
+/** Claude upgrades an http URL to https before fetching; the rest of the URL is
+ * untouched, so a caller's path, query and fragment survive. */
+function upgradeToHttps(rawUrl: string): string {
+  const url = new URL(rawUrl)
+  if (url.protocol === 'http:') url.protocol = 'https:'
+  return url.href
+}
+
+/** Cross-host redirect policy. `report` is WebFetch's documented behavior; `follow`
+ * keeps the old chase for the internal search fetch, whose endpoint is ours and whose
+ * hops Claude's WebFetch rule does not describe. Stated at every call site rather than
+ * defaulted, so a new caller has to decide which it wants. */
+type CrossHost = 'follow' | 'report'
+
+async function fetchText(rawUrl: string, crossHost: CrossHost, transport = httpFetch): Promise<FetchOutcome> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     // Resolve, validate and pin per hop: a redirect target gets the same guarantee.
@@ -211,23 +228,39 @@ async function fetchText(rawUrl: string, transport = httpFetch): Promise<{ text:
       void response.body?.cancel().catch(() => {})
       const location = response.headers.get('location')
       if (!location) throw new Error(`redirect without location from ${url.hostname}`)
-      url = new URL(location, url)
+      const next = new URL(location, url)
       // Only the caller's URL was scheme-checked; a redirect could hand back data: or
       // file:, which carry no host for the address guard to inspect.
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${url.protocol} from ${rawUrl}`)
+      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`unsupported redirect scheme ${next.protocol} from ${rawUrl}`)
+      // Claude: "When a URL redirects to a different host, WebFetch returns a text
+      // result that names the original URL and the redirect target instead of following
+      // it." The target is never requested, so the per-hop address guard never sees it
+      // and never needs to: a cross-host hop cannot reach anything at all from here.
+      if (crossHost === 'report' && next.hostname.toLowerCase() !== url.hostname.toLowerCase()) return { kind: 'redirect', to: next.href }
+      url = next
       continue
     }
     if (!response.ok) {
       void response.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${response.status} for ${url}`)
     }
-    return { text: await readCapped(response), contentType: response.headers.get('content-type') ?? '' }
+    return { kind: 'body', text: await readCapped(response), contentType: response.headers.get('content-type') ?? '' }
   }
   throw new Error(`too many redirects for ${rawUrl}`)
 }
 
-/** Claude documents a 15-minute per-URL cache for WebFetch. */
-const FETCH_CACHE_TTL_MS = 15 * 60 * 1000
+/** Claude documents a 15-minute per-URL cache for WebFetch, overridable by env:
+ * "set CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS to change how long WebFetch keeps each
+ * response". Read per store so a change takes effect without a restart; an unset,
+ * blank, negative or non-numeric value keeps the documented default. */
+const FETCH_CACHE_TTL_DEFAULT_MS = 15 * 60 * 1000
+
+function fetchCacheTtlMs(): number {
+  const raw = process.env.CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS
+  if (raw === undefined || raw.trim() === '') return FETCH_CACHE_TTL_DEFAULT_MS
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : FETCH_CACHE_TTL_DEFAULT_MS
+}
 const FETCH_CACHE_MAX_ENTRIES = 50
 
 type FetchCache = Map<string, { expires: number; body: string }>
@@ -245,7 +278,7 @@ function rememberFetch(cache: FetchCache, url: string, body: string, now: number
     const oldest = cache.keys().next().value
     if (oldest !== undefined) cache.delete(oldest)
   }
-  cache.set(url, { expires: now + FETCH_CACHE_TTL_MS, body })
+  cache.set(url, { expires: now + fetchCacheTtlMs(), body })
 }
 
 /** Claude's WebFetch runs the prompt over the page with a fast model and returns
@@ -278,7 +311,8 @@ export default function webExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       // Claude documents allowed/blocked domains as mutually exclusive; allowed wins.
-      const { text } = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query))
+      const outcome = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query), 'follow')
+      const text = outcome.kind === 'body' ? outcome.text : ''
       const limit = Math.min(params.count ?? 5, 10)
       const results = filterByDomain(parseSearchResults(text, 10), params.allowed_domains, params.blocked_domains).slice(0, limit)
       if (results.length === 0) {
@@ -292,7 +326,8 @@ export default function webExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'web_fetch',
     label: 'Web fetch',
-    description: 'Fetch a URL and return its content converted to markdown. Pass `prompt` to get a focused answer extracted from the page instead of the raw content. Responses are cached for 15 minutes per URL.',
+    description:
+      'Fetch a URL and return its content converted to markdown. Pass `prompt` to get a focused answer extracted from the page instead of the raw content. http URLs are upgraded to https, a redirect to a different host is reported rather than followed, and responses are cached per URL for 15 minutes by default (CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS).',
     parameters: Type.Object({
       url: Type.String({ description: 'Absolute http(s) URL to fetch' }),
       prompt: Type.Optional(Type.String({ description: 'What to extract or answer from the page; returns the model’s answer instead of the raw markdown' })),
@@ -301,17 +336,26 @@ export default function webExtension(pi: ExtensionAPI) {
       if (!/^https?:\/\//.test(params.url)) {
         return { content: [{ type: 'text' as const, text: 'Only http(s) URLs are supported.' }], details: {} }
       }
+      // Claude: "HTTP URLs are automatically upgraded to HTTPS." Upgrading here rather
+      // than inside the fetch keeps one spelling for the cache key and the prompt text
+      // too, so http:// and https:// of the same page share a single entry.
+      const target = upgradeToHttps(params.url)
       const now = Date.now()
       // The cache holds the raw markdown, so a second fetch with a different prompt
       // still reuses it: retrieval and the optional prompt step are separate.
-      const cached = fetchCache.get(params.url)
+      const cached = fetchCache.get(target)
       let body: string
       if (cached && cached.expires > now) {
         body = cached.body
       } else {
-        const { text, contentType } = await fetchText(params.url)
-        body = capFetchChars(contentType.includes('html') ? htmlToMarkdown(text) : text)
-        rememberFetch(fetchCache, params.url, body, now)
+        const outcome = await fetchText(target, 'report')
+        // A cross-host redirect has no body to cache or summarize: the naming result is
+        // the answer, and Claude fetches the target with a second call if it wants it.
+        if (outcome.kind === 'redirect') {
+          return { content: [{ type: 'text' as const, text: `${target} redirects to a different host: ${outcome.to}\nFetch ${outcome.to} directly to read it.` }], details: {} }
+        }
+        body = capFetchChars(outcome.contentType.includes('html') ? htmlToMarkdown(outcome.text) : outcome.text)
+        rememberFetch(fetchCache, target, body, now)
       }
 
       // Best-effort prompt-over-page: a failure returns null, so web_fetch always
@@ -319,7 +363,7 @@ export default function webExtension(pi: ExtensionAPI) {
       // usage rides on the result either way, so pi counts it in session totals.
       let usage: Usage | undefined
       if (params.prompt && ctx?.model) {
-        const answer = await answerFromPage(ctx.model, params.prompt, params.url, body, signal)
+        const answer = await answerFromPage(ctx.model, params.prompt, target, body, signal)
         if (answer?.text) return { content: [{ type: 'text' as const, text: answer.text }], details: {}, usage: answer.usage }
         // An empty answer still cost the completion; the fallback carries its usage.
         usage = answer?.usage
