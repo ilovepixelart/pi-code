@@ -339,7 +339,13 @@ describe('hookFiles', () => {
     writeFileSync(join(repo, '.claude', 'settings.json'), '{}')
     const sub = join(repo, 'src')
     mkdirSync(sub)
-    expect(hookFiles(sub, '/home', true)).toEqual([join('/home', '.claude', 'settings.json'), join(sub, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json'), join(repo, '.claude', 'settings.local.json')])
+    // Claude keeps the local file beside settings.json on Windows rather than at the
+    // repository root, so the chain is one file shorter there.
+    const expected =
+      process.platform === 'win32'
+        ? [join('/home', '.claude', 'settings.json'), join(sub, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json')]
+        : [join('/home', '.claude', 'settings.json'), join(sub, '.claude', 'settings.json'), join(sub, '.claude', 'settings.local.json'), join(repo, '.claude', 'settings.local.json')]
+    expect(hookFiles(sub, '/home', true)).toEqual(expected)
   })
 })
 

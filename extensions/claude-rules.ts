@@ -111,14 +111,15 @@ export function parseFrontmatter(content: string): Frontmatter {
 }
 
 /**
- * Whether a file path matches at least one of a rule's `paths:` globs. `*` stays in
- * a segment, `**` crosses directories, a slashless pattern (`*.ts`) matches the
- * basename at any depth (gitignore-style), and a trailing slash (`docs/`) scopes to
- * that directory's contents. `./` and a leading `/` are stripped so a project-root
- * anchored glob resolves the same as a bare one. A bare directory name without a
- * trailing slash or `**` matches a file of that name, not the directory's contents;
- * write `dir/**` to scope to a directory. `relPath` is the touched file relative to
- * the rule set's root.
+ * Whether a file path matches at least one of a rule's `paths:` globs. `*` stays in a
+ * segment and `**` crosses directories. A slashless pattern (`*.ts`, `README.md`) is
+ * the project root, per Claude's table; a leading globstar segment is how a rule says
+ * any depth. A trailing slash (`docs/`) scopes to that directory's contents. `./` and
+ * a leading `/` are stripped so a project-root anchored glob resolves the same as a
+ * bare one. A bare directory name without a trailing slash or a globstar matches a
+ * file of that name, not the directory's contents; write `dir` followed by a globstar
+ * to scope to a directory. `relPath` is the touched file relative to the rule set's
+ * root.
  */
 export function pathMatchesGlobs(relPath: string, globs: string[]): boolean {
   return matchesCompiledGlobs(relPath, compileGlobs(globs))

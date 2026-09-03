@@ -13,18 +13,21 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-/** Project root markers ending the walk. `.git` is a file in worktrees and submodules. */
-export const ROOT_MARKERS = ['.git', 'package.json']
+/** The project root marker. `.git` is a file in worktrees and submodules, a directory
+ * in an ordinary clone.
+ *
+ * `package.json` used to count too, which made every package of a monorepo its own
+ * project: its own memory directory, its own settings.local.json, its own
+ * CLAUDE_PROJECT_DIR, its own trust decision. Claude's project is the repository, and
+ * a repository can add a package.json wherever it likes, so a marker it controls was
+ * also a marker it could move. */
+export const ROOT_MARKERS = ['.git']
 
-/** Project root at or above `from`, or undefined when no marker is found. */
+/** Project root at or above `from`, or undefined outside a repository. */
 export function repoRoot(from: string): string | undefined {
-  let currentDir = from
-  while (true) {
-    if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return currentDir
-    const parentDir = path.dirname(currentDir)
-    if (parentDir === currentDir) return undefined
-    currentDir = parentDir
-  }
+  const root = gitRoot(from)
+  if (root === undefined) return undefined
+  return mainCheckout(root)
 }
 
 /** The git checkout at or above `from`, or undefined outside one.
@@ -43,6 +46,38 @@ export function gitRoot(from: string): string | undefined {
     if (parentDir === currentDir) return undefined
     currentDir = parentDir
   }
+}
+
+/** The main checkout for a git directory.
+ *
+ * A worktree carries a `.git` FILE holding `gitdir: <main>/.git/worktrees/<name>`, so
+ * resolving it gives the checkout the repository's state actually belongs to. Claude
+ * reads settings.local.json from "the file at the main checkout's root" and shares one
+ * auto memory directory across "all worktrees and subdirectories within the same repo",
+ * so a worktree is not its own project. An unreadable or unexpected `.git` file leaves
+ * the directory as its own root, which is the safe direction. */
+function mainCheckout(root: string): string {
+  const dotGit = path.join(root, '.git')
+  let pointer: string
+  try {
+    if (!fs.statSync(dotGit).isFile()) return root
+    pointer = fs.readFileSync(dotGit, 'utf-8')
+  } catch {
+    return root
+  }
+  // Parsed rather than matched: the file is one `gitdir: <path>` line, and a regex
+  // over an arbitrary-length path is a backtracking cost for nothing.
+  const [firstLine = ''] = pointer.split('\n')
+  const prefix = 'gitdir:'
+  if (!firstLine.startsWith(prefix)) return root
+  const target = firstLine.slice(prefix.length).trim()
+  if (!target) return root
+  // <main>/.git/worktrees/<name> -> <main>
+  const worktreeDir = path.resolve(root, target)
+  const marker = `${path.sep}.git${path.sep}worktrees${path.sep}`
+  const cut = worktreeDir.lastIndexOf(marker)
+  if (cut === -1) return root
+  return worktreeDir.slice(0, cut)
 }
 
 function statOf(target: string): fs.Stats | null {

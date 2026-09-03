@@ -13,19 +13,46 @@ import { claudeConfigDir } from './config-dir.js'
 import { repoRoot } from './project-root.js'
 import { isRecord } from './values.js'
 
+/** Whether every path given exists and belongs to the user running this process.
+ * A path that is absent is not someone else's, so it does not disqualify the root. */
+function ownedByUser(paths: string[]): boolean {
+  const uid = process.getuid?.()
+  if (uid === undefined) return true
+  return paths.every((target) => {
+    try {
+      return fs.statSync(target).uid === uid
+    } catch {
+      return true
+    }
+  })
+}
+
+/** Where `settings.local.json` lives, per Claude's four exceptions: it sits at the
+ * repository root, except outside a repository, when that root is the home directory,
+ * on Windows, or when the root or its `.git` or `.claude` entry belongs to someone
+ * else. In each of those it stays beside `.claude/settings.json` in the working
+ * directory instead. In a worktree the root is the main checkout, which repoRoot
+ * resolves. */
+function localSettingsDir(cwd: string, home: string, platform: NodeJS.Platform, owned: (paths: string[]) => boolean): string {
+  const root = repoRoot(cwd)
+  if (root === undefined || root === home) return cwd
+  if (platform === 'win32') return cwd
+  if (!owned([root, path.join(root, '.git'), path.join(root, '.claude')])) return cwd
+  return root
+}
+
 /** The user settings.json, then (only when `includeProject`) the project files by
  * Claude's placement rules: the shared `.claude/settings.json` is read from the
  * session's primary working directory (never an ancestor; "to use a file committed
  * at the repository root, start Claude Code there"), while `settings.local.json`
- * lives at the repository root, falling back to the primary directory outside a
- * repository or when the root is the home directory. A legacy local file at the
- * primary directory is still read, with the root's values winning. Later files win. */
-export function claudeSettingsChain(cwd: string, home: string, includeProject: boolean): string[] {
+ * lives at the repository root, subject to the exceptions in localSettingsDir. A
+ * legacy local file at the primary directory is still read, with the root's values
+ * winning. Later files win. */
+export function claudeSettingsChain(cwd: string, home: string, includeProject: boolean, platform: NodeJS.Platform = process.platform, owned: (paths: string[]) => boolean = ownedByUser): string[] {
   const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!includeProject) return files
   files.push(path.join(cwd, '.claude', 'settings.json'))
-  const root = repoRoot(cwd)
-  const localDir = root !== undefined && root !== home ? root : cwd
+  const localDir = localSettingsDir(cwd, home, platform, owned)
   if (localDir !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
   files.push(path.join(localDir, '.claude', 'settings.local.json'))
   return files

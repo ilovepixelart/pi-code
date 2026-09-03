@@ -37,6 +37,42 @@ const ctx = (over: Partial<Parameters<typeof isProjectApproved>[0]> = {}) => ({
  * trust-requiring resources, so a handler never sees the case pi-code cares about.
  */
 describe('pi does not consider claude-shaped config trust-requiring', () => {
+  it('does not stop the walk at a package.json, which a repository chooses where to put', () => {
+    // Only .git ends the walk now. A package.json between cwd and the config that
+    // gates it used to hide that config, and a repository decides where its
+    // package.json files sit.
+    const parent = tempDir()
+    mkdirSync(join(parent, '.claude'), { recursive: true })
+    writeFileSync(join(parent, '.claude', 'settings.json'), '{}')
+    const cwd = join(parent, 'pkg', 'src')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(parent, 'pkg', 'package.json'), '{}')
+
+    expect(hasClaudeShapedConfig(cwd, join(parent, 'nowhere'))).toBe(true)
+  })
+
+  it('stops the walk at the home directory, so user config is never read as a project to gate', () => {
+    // ~/.claude/settings.json is the user's own file. A directory under home that is
+    // not in a repository must not walk up into it and report a project to approve.
+    const home = tempDir()
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), '{}')
+    const cwd = join(home, 'notes')
+    mkdirSync(cwd)
+
+    expect(hasClaudeShapedConfig(cwd, home)).toBe(false)
+  })
+
+  it('still finds project config below home', () => {
+    const home = tempDir()
+    const cwd = join(home, 'repo', 'src')
+    mkdirSync(cwd, { recursive: true })
+    mkdirSync(join(home, 'repo', '.claude'), { recursive: true })
+    writeFileSync(join(home, 'repo', '.claude', 'settings.json'), '{}')
+
+    expect(hasClaudeShapedConfig(cwd, home)).toBe(true)
+  })
+
   it('ignores .claude and .mcp.json, so pi trusts such a project without asking', () => {
     const cwd = tempDir()
     write(cwd, join('.claude', 'settings.json'))

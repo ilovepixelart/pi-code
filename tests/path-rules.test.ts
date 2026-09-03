@@ -95,7 +95,9 @@ describe('compileGlobs', () => {
     const compiled = compileGlobs(['db/**', '*.sql', 'docs/'])
     expect(globCompileStats().compiled - before).toBe(3)
     expect(matchesCompiledGlobs('db/schema.sql', compiled)).toBe(true)
-    expect(matchesCompiledGlobs('lib/deep/x.sql', compiled)).toBe(true)
+    expect(matchesCompiledGlobs('x.sql', compiled)).toBe(true)
+    // *.sql is the project root, not any depth.
+    expect(matchesCompiledGlobs('lib/deep/x.sql', compiled)).toBe(false)
     expect(matchesCompiledGlobs('docs/api/v1.md', compiled)).toBe(true)
     expect(matchesCompiledGlobs('src/app.ts', compiled)).toBe(false)
     expect(globCompileStats().compiled - before).toBe(3)

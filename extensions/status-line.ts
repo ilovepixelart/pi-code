@@ -36,7 +36,7 @@ import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
-import { repoRoot } from './internal/project-root.js'
+import { gitRoot, repoRoot } from './internal/project-root.js'
 import { readSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
@@ -47,7 +47,9 @@ const DEBOUNCE_MS = 300
 /** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
  * checkout there, and a directory in an ordinary clone. */
 function isGitWorktree(cwd: string): boolean {
-  const root = repoRoot(cwd)
+  // gitRoot, not repoRoot: repoRoot resolves a worktree to its main checkout, which is
+  // exactly the thing this needs to see before it is resolved away.
+  const root = gitRoot(cwd)
   if (root === undefined) return false
   try {
     return fs.statSync(path.join(root, '.git')).isFile()
