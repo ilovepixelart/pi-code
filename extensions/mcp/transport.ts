@@ -137,6 +137,9 @@ function isStdio(config: ServerConfig): config is StdioServerConfig {
 export interface SessionDirs {
   projectDir: string
   launchDir: string
+  /** Claude: "An MCP server subprocess retains the ID it was spawned with", so this
+   * is captured once here at connect time rather than re-read per call. */
+  sessionId?: string
 }
 
 /** A client that, like Claude, declares the roots capability and answers roots/list
@@ -191,6 +194,7 @@ function stdioEnv(config: StdioServerConfig, fill: (value: string) => string, se
   const env: Record<string, string> = { ...getDefaultEnvironment(), CLAUDECODE: '1' }
   for (const [key, value] of Object.entries(config.env ?? {})) env[key] = fill(value)
   if (session) env.CLAUDE_PROJECT_DIR = session.projectDir
+  if (session?.sessionId) env.CLAUDE_CODE_SESSION_ID = session.sessionId
   if (config.pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = config.pluginRoot
   // The data dir is "created on first reference"; handing the path to a server is that
   // reference, so the server does not have to mkdir it before using it.

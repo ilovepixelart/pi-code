@@ -305,6 +305,32 @@ describe('context: fork and skillOverrides', () => {
     expect(notes.some((n) => n.includes('skillOverrides'))).toBe(true)
   })
 
+  it('skips the enterprise skills directory when CLAUDE_CODE_DISABLE_POLICY_SKILLS is set', () => {
+    // Claude: "Set to 1 to skip loading skills from the system-wide managed skills
+    // directory. Useful for container or CI sessions that should not load
+    // operator-provisioned skills." The enterprise dir beside managed-settings.json is
+    // that directory here; personal and project skills are untouched.
+    return (async () => {
+      const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+      const managedDir = tempDir('cs-managed-')
+      setManagedSettingsPath(join(managedDir, 'managed-settings.json'))
+      process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS = '1'
+      try {
+        const cwd = tempDir('cs-proj-')
+        const home = tempDir('cs-home-')
+        mkdirSync(join(managedDir, '.claude', 'skills', 'deploy'), { recursive: true })
+        writeFileSync(join(managedDir, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: e\n---\nENTERPRISE BODY')
+        mkdirSync(join(home, '.claude', 'skills'), { recursive: true })
+
+        const dirs = skillDirs(cwd, home, true)
+        expect(dirs).toEqual([join(home, '.claude', 'skills')])
+      } finally {
+        delete process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS
+        setManagedSettingsPath(undefined)
+      }
+    })()
+  })
+
   it('discovers enterprise skills beside the managed settings file, winning a name clash', async () => {
     const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
     const managedDir = tempDir('cs-managed-')

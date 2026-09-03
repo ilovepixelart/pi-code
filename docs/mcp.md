@@ -8,6 +8,8 @@ Connects Claude Code's MCP configuration and registers each server's tools in pi
 - Project: `.mcp.json` and `.pi/mcp.json`, loaded once the project is approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, with consent keys counted only from non-repo settings. Precedence on a name clash is local over project over user.
 - Plugin stdio servers get Claude's three path variables in their environment: `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` (the data directory is created when the path is handed over, which is Claude's "created on first reference").
 - **Divergence:** `CLAUDE_CODE_MCP_ALLOWLIST_ENV` has no effect here. pi-code always passes the SDK's baseline environment to a stdio server, with no opt-out.
+- A stdio server also gets `CLAUDE_CODE_SESSION_ID`, captured once at connect time ("an MCP server subprocess retains the ID it was spawned with") rather than re-read per call.
+- `MCP_OAUTH_CALLBACK_PORT` is a fallback default for any server naming no per-server `oauth.callbackPort`. Claude documents it as "an alternative to `--callback-port` when adding an MCP server with pre-configured credentials"; pi-code has no `mcp add` command, so the fallback applies more broadly.
 - Managed: a `managed-mcp.json` beside `managed-settings.json` takes exclusive control — only its servers load, every other scope and the approval flow suppressed; an empty file disables MCP.
 
 ## Policy

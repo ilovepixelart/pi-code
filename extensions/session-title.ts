@@ -93,6 +93,11 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
   })
 
   pi.on('agent_settled', async (_event, ctx) => {
+    // Claude: "Set to 1 to disable automatic terminal title updates based on conversation
+    // context. In Agent SDK and claude -p sessions, this also skips the background
+    // small/fast-model request that generates the session title." setSessionName is pi's
+    // only title sink, so skipping the call here skips both effects at once.
+    if (process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE === '1') return
     if (titled) return
     // Never clobber an existing name: a user-chosen or resumed name wins.
     if (pi.getSessionName?.()) return

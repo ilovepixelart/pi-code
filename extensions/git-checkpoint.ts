@@ -331,6 +331,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   pi.on('turn_start', async () => {
     if (!runNeedsSnapshot) return
     runNeedsSnapshot = false
+    // Claude: "Set to 1 to disable file checkpointing. The /rewind command will not be
+    // able to restore code changes." No snapshot means turn_end's `if (!snap) return`
+    // always fires, so no checkpoint is ever recorded.
+    if (process.env.CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING === '1') return
     pending = await snapshot()
   })
 

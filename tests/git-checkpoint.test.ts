@@ -316,6 +316,22 @@ describe('shadow-repo checkpoint lifecycle', () => {
   })
 })
 
+describe('CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING', () => {
+  it('takes no snapshot and records no checkpoint when set', async () => {
+    // Claude: "Set to 1 to disable file checkpointing. The /rewind command will not be
+    // able to restore code changes."
+    process.env.CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING = '1'
+    try {
+      const t = setup()
+      await checkpointOneTurn(t)
+      expect(t.appended).toEqual([])
+      expect(t.execLog.some((call) => call[0] === 'git' && call.includes('commit'))).toBe(false)
+    } finally {
+      delete process.env.CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING
+    }
+  })
+})
+
 describe('pruneCheckpointRepos', () => {
   const mkRepo = (root: string, name: string, ageDays: number): string => {
     const dir = join(root, name)

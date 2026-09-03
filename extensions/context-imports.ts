@@ -943,22 +943,25 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     type: 'string',
   })
 
-  pi.on('session_start', async (_event, ctx) => {
-    // pi's ctx.reload() rebuilds extension instances, so this set never survives
-    // a reload anyway; a reload simply re-fires InstructionsLoaded once per file,
-    // which is fine, since a reload re-loads the instruction files.
-    announced.clear()
-    envCache = undefined
-    importMemo = undefined
-    localContexts = []
-    userContext = undefined
-    projectDotClaude = undefined
+  /** The session-scope memory session_start loads: the user's own CLAUDE.md, plus
+   * CLAUDE.local.md and ./.claude/CLAUDE.md from an approved project. Claude:
+   * CLAUDE_CODE_DISABLE_CLAUDE_MDS "prevent[s] loading any CLAUDE.md memory files
+   * into context, including user, project, and auto memory files", so a disabled run
+   * returns empty state and skips isProjectApproved's trust prompt entirely: there is
+   * nothing left for it to gate. Extracted so session_start itself stays a thin
+   * dispatcher; before_agent_start's own excluded() check covers pi's native files,
+   * which this cannot reach since pi loads those itself. */
+  async function loadSessionMemory(ctx: ExtensionContext): Promise<{ userContext?: { path: string; content: string }; localContexts: Array<{ path: string; content: string }>; projectDotClaude?: { path: string; content: string } }> {
+    if (process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1') return { localContexts: [] }
 
     // ~/.claude/CLAUDE.md, Claude's user-scope memory. The user's own file, so no
     // project approval is required; a missing file simply leaves it unset.
     const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
     const userContent = readContextFile(userClaudeMd)
-    if (userContent !== undefined) userContext = { path: userClaudeMd, content: userContent }
+    const memory: { userContext?: { path: string; content: string }; localContexts: Array<{ path: string; content: string }>; projectDotClaude?: { path: string; content: string } } = {
+      userContext: userContent !== undefined ? { path: userClaudeMd, content: userContent } : undefined,
+      localContexts: [],
+    }
 
     // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
     // skips it. A cloned repo can ship one, so it is gated like other project config.
@@ -969,16 +972,30 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // ride the one approval decision.
     const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
     const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
-    if ((candidates.length > 0 || dotClaudeMd !== null) && (await isProjectApproved(ctx))) {
-      for (const candidate of candidates) {
-        const content = readContextFile(candidate)
-        if (content !== undefined) localContexts.push({ path: candidate, content })
-      }
-      if (dotClaudeMd !== null) {
-        const content = readContextFile(dotClaudeMd)
-        if (content !== undefined) projectDotClaude = { path: dotClaudeMd, content }
-      }
+    if ((candidates.length === 0 && dotClaudeMd === null) || !(await isProjectApproved(ctx))) return memory
+
+    for (const candidate of candidates) {
+      const content = readContextFile(candidate)
+      if (content !== undefined) memory.localContexts.push({ path: candidate, content })
     }
+    if (dotClaudeMd !== null) {
+      const content = readContextFile(dotClaudeMd)
+      if (content !== undefined) memory.projectDotClaude = { path: dotClaudeMd, content }
+    }
+    return memory
+  }
+
+  pi.on('session_start', async (_event, ctx) => {
+    // pi's ctx.reload() rebuilds extension instances, so this set never survives
+    // a reload anyway; a reload simply re-fires InstructionsLoaded once per file,
+    // which is fine, since a reload re-loads the instruction files.
+    announced.clear()
+    envCache = undefined
+    importMemo = undefined
+    const memory = await loadSessionMemory(ctx)
+    localContexts = memory.localContexts
+    userContext = memory.userContext
+    projectDotClaude = memory.projectDotClaude
     // Read after the local-context flow so an approval it just recorded is honored.
     projectApproved = isProjectApprovedSilently(ctx)
     gatedFilesApproved = isGatedFileApproved(ctx)
@@ -1014,7 +1031,12 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: repoRoot(cwd) ?? cwd }
     }
     const { managed, excludeGlobs, projectRoot } = envCache
-    const excluded = (absPath: string): boolean => isExcludedPath(absPath, excludeGlobs, home)
+    // CLAUDE_CODE_DISABLE_CLAUDE_MDS also covers pi's own auto-discovered native context
+    // files ("including... auto memory files"), which session_start's gate cannot reach
+    // since pi loads them itself. Routing through the exclusion path already used for
+    // claudeMdExcludes drops the block, strips the InstructionsLoaded event, and skips
+    // import expansion for it, exactly as an excluded file already does.
+    const excluded = (absPath: string): boolean => process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1' || isExcludedPath(absPath, excludeGlobs, home)
 
     // claudeMdExcludes drops an excluded file's block from the assembled prompt and
     // from import expansion; surviving blocks get block-level comments stripped.

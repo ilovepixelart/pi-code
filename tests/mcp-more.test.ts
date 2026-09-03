@@ -267,6 +267,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     // shuffle. The old-runtime path is tested in project-approval.test.ts.
     isProjectTrusted: () => trusted === true,
     isIdle: () => idle,
+    sessionManager: { getSessionId: () => 'sess-mcp-1' },
   })
 
   await mcpExtension({
@@ -2298,6 +2299,10 @@ describe('mcp stdio session context', () => {
     // Claude sets CLAUDECODE=1 in stdio MCP server subprocesses; the long-lived
     // server never gets CLAUDE_CODE_CHILD_SESSION, which marks per-call children.
     expect(env.CLAUDECODE).toBe('1')
+    // Claude: CLAUDE_CODE_SESSION_ID is set in stdio MCP server subprocesses too,
+    // and "an MCP server subprocess retains the ID it was spawned with" - captured
+    // once at connect time, not re-read per call.
+    expect(env.CLAUDE_CODE_SESSION_ID).toBe('sess-mcp-1')
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined()
     // A plugin-provided stdio server also gets CLAUDE_PLUGIN_ROOT, which Claude
     // exports to MCP server subprocesses.

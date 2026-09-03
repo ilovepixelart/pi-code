@@ -2,7 +2,7 @@
 
 Bridges `.claude/skills` into pi's skill discovery. Source: [`extensions/skills.ts`](../extensions/skills.ts).
 
-- Skills load in Claude's precedence order: the enterprise directory beside the managed settings file, then personal `~/.claude/skills`, then (approval-gated) every project `.claude/skills` between the working directory and the repository root.
+- Skills load in Claude's precedence order: the enterprise directory beside the managed settings file, then personal `~/.claude/skills`, then (approval-gated) every project `.claude/skills` between the working directory and the repository root. `CLAUDE_CODE_DISABLE_POLICY_SKILLS` drops the enterprise directory from the scan; personal and project skills are unaffected.
 - pi's loader reads `name`, `description`, and `disable-model-invocation`. Loader-side gaps, documented rather than hidden: other frontmatter fields (including `yes`/`on`/`1` boolean spellings) and the first-paragraph description fallback are pi-loader territory; a description-less skill may be dropped from the listing.
 - `context: fork` runs the skill in a subagent via the agent seam: the expanded content becomes the subagent's prompt (no conversation history), `agent:` picks a discovered agent type. Divergence: pi-code waits for the result in the invoking turn (Claude's `background: false` behavior, and what Claude itself does in `-p`/SDK runs) instead of backgrounding by default.
 - `skillOverrides`: a skill set to `"off"` refuses `/skill:name` with a notice; `"name-only"` listing visibility is pi-loader territory (noted gap).
