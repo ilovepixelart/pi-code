@@ -58,6 +58,12 @@ describe('repoRoot', () => {
     const broken = tempDir()
     writeFileSync(join(broken, '.git'), 'not a gitdir line\n')
     expect(repoRoot(broken)).toBe(broken)
+
+    // A line that is not a gitdir pointer but does name a worktree path: only the
+    // prefix check tells the two apart.
+    const spoofed = tempDir()
+    writeFileSync(join(spoofed, '.git'), `notgitdir: ${join(parent, 'elsewhere', '.git', 'worktrees', 'x')}\n`)
+    expect(repoRoot(spoofed)).toBe(spoofed)
   })
 
   it('gitRoot reports the checkout itself, unresolved', () => {
