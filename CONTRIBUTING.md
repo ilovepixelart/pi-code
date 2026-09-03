@@ -45,6 +45,16 @@ Commit subjects are imperative and specific, one topic per commit, for example `
 
 Maintainers cut a release with a dedicated `release/x.y.z` pull request that bumps only `package.json` and the lockfile, titled `Release x.y.z`. Creating the GitHub release for the tag triggers the publish workflow, which packs, attests, and publishes to npm.
 
+[`scripts/release.sh`](scripts/release.sh) runs that whole sequence, from an open pull request to a verified package:
+
+```bash
+scripts/release.sh <pr-number> <version> "<release notes>"
+```
+
+Prefer it over doing the steps by hand, because the checks it runs are easy to skip and have each let a bad release through before. Every stage is `&&`-chained, so a red one stops what follows. Before either merge it consults three independent sources: `gh pr checks` unpiped, since piping it through `tail` swallows the exit code; the SonarCloud findings API, because a green quality gate can still carry findings; and the quality-gate API itself, because findings can be zero while a condition such as new-code coverage fails. It waits on the CI runs for the exact HEAD commit rather than the newest run, and it confirms the release by asking the npm registry for the version, not by trusting the publish workflow's exit code.
+
+It starts from an unmerged pull request and merges it. A release for work already on `main` has to follow the same steps from the version bump onward.
+
 ## Reporting bugs and security issues
 
 Open an issue for a bug or a feature idea. For anything security-sensitive, do not open a public issue: report it privately through [GitHub Security Advisories](https://github.com/ilovepixelart/pi-code/security/advisories/new), as described in [SECURITY.md](SECURITY.md).
