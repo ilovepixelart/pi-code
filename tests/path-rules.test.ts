@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { compileGlobs, globCompileStats, globToRegExpSource, matchesCompiledGlobs, matchesPathRules } from '../extensions/internal/path-rules.ts'
+import { compileGlobs, globCompileStats, globToRegExpSource, matchesCompiledGlobs, matchesPathRules, stripRuleDrive } from '../extensions/internal/path-rules.ts'
 
 const anchors = { cwd: '/repo/app', projectRoot: '/repo', home: '/home/alex' }
 
@@ -146,5 +146,24 @@ describe('rule list budget', () => {
     // are ignored rather than compiled without bound.
     const globs = Array.from({ length: 1005 }, (_, i) => `dir${i}/*.ts`)
     expect(compileGlobs(globs)).toHaveLength(1000)
+  })
+})
+
+describe('stripRuleDrive', () => {
+  // Claude's own Windows example is `//c/**/.env`, which resolves to `/c/**/.env` while
+  // every target resolves drive-less to `/...`, so the rule matched nothing.
+  it('drops a drive from a resolved rule on Windows, in both spellings', () => {
+    expect(stripRuleDrive('/c/Users/**/.env', true)).toBe('/Users/**/.env')
+    expect(stripRuleDrive('C:/Users/**/.env', true)).toBe('/Users/**/.env')
+  })
+
+  it('leaves a multi-letter first segment alone, so /Users stays /Users', () => {
+    expect(stripRuleDrive('/Users/alice/**', true)).toBe('/Users/alice/**')
+  })
+
+  it('changes nothing off Windows, where /c/foo is an ordinary absolute path', () => {
+    // Stripping here would widen the rule from one directory to the whole filesystem.
+    expect(stripRuleDrive('/c/Users/**/.env', false)).toBe('/c/Users/**/.env')
+    expect(stripRuleDrive('C:/Users/**', false)).toBe('C:/Users/**')
   })
 })

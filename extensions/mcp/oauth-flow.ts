@@ -64,7 +64,7 @@ export async function runInteractiveOAuth(name: string, config: { url: string; o
     config.oauth,
     config.url,
   )
-  const { server, port } = await startCallbackServer(provider.savedRedirectPort())
+  const { server, port } = await startCallbackServer(provider.savedRedirectPort(), provider.configuredRedirectPort() !== undefined)
   provider.bindRedirectPort(port)
   try {
     const transport = makeTransport(provider)

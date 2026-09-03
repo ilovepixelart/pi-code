@@ -10,8 +10,8 @@
  * `allowed-tools`, `argument-hint` and `model` frontmatter (`model` switches the
  * session model for the command's run via `pi.setModel`, restored on agent_end).
  * `shell: powershell` runs a command's injected spans through PowerShell when a
- * pwsh binary is installed, falling back to /bin/sh so the command still works
- * without one.
+ * pwsh binary is installed, falling back to the default shell path so the command
+ * still works without one: /bin/sh on POSIX, Git Bash on Windows.
  *
  * Commands are also exposed to the model through a `slash_command` tool
  * (Claude's SlashCommand tool), listing every discovered command whose file
@@ -33,7 +33,7 @@
  * A project command body is repository-controlled text that can run shell
  * commands and read files, so project commands load only once the project is
  * approved. That closes the "skills / commands are not trust-gated" limitation
- * for commands; skills remain pi-loader territory.
+ * for commands; skills.ts gates project skills on the same approval.
  *
  * Docs: https://code.claude.com/docs/en/slash-commands.md
  */
@@ -54,6 +54,7 @@ import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
+import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from './internal/scope-rules.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { createTurnOverride } from './internal/turn-override.js'
 import { errorMessage, isDirectory } from './internal/values.js'
@@ -83,6 +84,15 @@ function resolveCommandModel(model: string | undefined, available: ReadonlyArray
 function substitutePathRule(rule: string, vars: Record<string, string | undefined>): string {
   const substituted = substituteVars(rule, vars)
   return rule.trimStart().startsWith('${CLAUDE_') && path.isAbsolute(substituted) ? `/${substituted}` : substituted
+}
+
+/** One scalar argument scope checked against one call: undefined when the tool is
+ * unscoped for this run or the call matches, otherwise a block naming the rules in
+ * force and the value that failed them. */
+function scopeVerdict(rules: string[] | undefined, tool: string, subjectLabel: string, subject: string, matches: (rules: string[]) => boolean): { block: true; reason: string } | undefined {
+  if (!rules) return undefined
+  if (matches(rules)) return undefined
+  return { block: true, reason: `allowed-tools: ${tool} is scoped for this command.\nAllowed: ${rules.join(', ')}\n${subjectLabel}: ${subject}` }
 }
 
 /** The path rules that survive an allowed-tools intersection: only the tools the
@@ -310,6 +320,12 @@ export default function commandsExtension(pi: ExtensionAPI) {
   let pendingRestore: string[] | undefined
   /** `Bash(...)` scopes enforced while that run lasts; lifted with the restriction. */
   let pendingBashRules: string[] | undefined
+  /** `WebFetch(domain:...)` scopes enforced the same way. */
+  let pendingDomainRules: string[] | undefined
+  /** `Agent(...)`/`Task(...)` agent-name scopes enforced the same way. */
+  let pendingAgentRules: string[] | undefined
+  /** `Skill(...)` name-pattern scopes enforced the same way. */
+  let pendingSkillRules: string[] | undefined
   /** Read/Edit path scopes enforced the same way, per pi file tool. */
   let pendingPathRules: Partial<Record<PathRuleTool, string[]>> | undefined
   /** The session model to restore after a command's `model:` override drove its run,
@@ -342,6 +358,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // continuation remains, which is the grant's true clearing point.
   pi.on('agent_settled', async () => {
     pendingBashRules = undefined
+    pendingDomainRules = undefined
+    pendingAgentRules = undefined
+    pendingSkillRules = undefined
     pendingPathRules = undefined
     modelOverride.settle()
     effortOverride.settle()
@@ -354,18 +373,27 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // The active-tool set has no argument dimension, so a scoped grant hands the turn
   // the whole tool; the scope is enforced here instead, when the call arrives. Same
   // steering-not-sandbox caveat as plan mode's guard.
+  //
+  // PAIRED WITH hooks/matcher.ts's matchesToolPattern, which dispatches the same tools
+  // to the same matchers for hook `if` filters. Deliberately not merged: bash differs
+  // (here every segment of a compound command must match a rule; there the filter is
+  // best effort and errs toward running the hook). A new scoped tool must be added in
+  // both; the shared roster is ARG_RULE_TOOLS in internal/command-file.ts.
   pi.on('tool_call', async (event, ctx) => {
-    if (pendingBashRules && event.toolName === 'bash') {
-      const command = typeof event.input.command === 'string' ? event.input.command : ''
-      if (matchesBashRules(command, pendingBashRules)) return
-      return {
-        block: true,
-        reason: `allowed-tools: bash is scoped for this command.\nAllowed: ${pendingBashRules.join(', ')}\nCommand: ${command}`,
-      }
+    const input = event.input as Record<string, unknown>
+    const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+    // The four scalar-scope tools share one shape: rules in force, the part of the call
+    // they judge, and the sentence naming both when it blocks. One helper keeps the arms
+    // from drifting; only the subject and the matcher differ.
+    if (event.toolName === 'bash') return scopeVerdict(pendingBashRules, 'bash', 'Command', text(input.command), (rules) => matchesBashRules(text(input.command), rules))
+    if (event.toolName === 'web_fetch') return scopeVerdict(pendingDomainRules, 'web_fetch', 'Url', text(input.url), (rules) => matchesDomainRules(text(input.url), rules))
+    if (event.toolName === 'subagent') {
+      const names = agentNamesIn(input)
+      return scopeVerdict(pendingAgentRules, 'subagent', 'Agents', names.join(', '), (rules) => matchesAgentRules(names, rules))
     }
+    if (event.toolName === 'slash_command') return scopeVerdict(pendingSkillRules, 'slash_command', 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
-    const input = event.input as Record<string, unknown>
     const filePath = typeof input.path === 'string' ? input.path : ''
     const anchors = { cwd: ctx.cwd, projectRoot: repoRoot(ctx.cwd) ?? ctx.cwd, home: os.homedir() }
     if (filePath && matchesPathRules(filePath, rules, anchors)) return
@@ -403,6 +431,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // the same ${CLAUDE_*} substitution as the body, so a rule can name a bundled
     // script by its real path, as the skills docs show.
     pendingBashRules = granted.includes('bash') ? parsed.bashRules?.map((rule) => substituteVars(rule, vars)) : undefined
+    pendingDomainRules = granted.includes('web_fetch') ? parsed.domainRules : undefined
+    pendingAgentRules = granted.includes('subagent') ? parsed.agentRules : undefined
+    pendingSkillRules = granted.includes('slash_command') ? parsed.skillRules : undefined
     pendingPathRules = parsed.pathRules ? scopedPathRules(parsed.pathRules, granted, vars) : undefined
   }
 
@@ -482,6 +513,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // no setActiveTools/setModel/setThinkingLevel, since the new session owns its own state.
     pendingRestore = undefined
     pendingBashRules = undefined
+    pendingDomainRules = undefined
+    pendingAgentRules = undefined
+    pendingSkillRules = undefined
     pendingPathRules = undefined
     modelOverride.reset()
     effortOverride.reset()

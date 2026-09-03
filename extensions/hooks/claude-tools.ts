@@ -10,6 +10,14 @@
  * node_modules/@earendil-works/pi-coding-agent/dist/core/tools and Claude's hooks
  * reference (per-tool input tables, PostToolUse response shapes).
  *
+ * NAMES and SHAPES cover different sets on purpose. Names come from
+ * internal/claude-tool-names.ts and cover every pi tool the tools reference has a
+ * counterpart for, because a hook matcher written in Claude's vocabulary has to fire.
+ * Shapes are translated only for the file and shell tools below, because those are
+ * the only tools the hooks reference gives a per-tool input table for; for the rest
+ * there is no documented Claude shape to conform to, so the pi input passes through
+ * unchanged and a hook reads the fields pi's own schema defines.
+ *
  * Translation choices the shapes force, each documented on its function:
  * - pi's multi-entry `edits[]` maps to Claude's single Edit with the first entry in
  *   `old_string`/`new_string` and the full array carried alongside as `edits`.
@@ -21,13 +29,7 @@
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-/** pi built-in -> Claude tool name for hook payloads and matchers. MCP tools ride
- * the alias bus instead; pi tools with no Claude counterpart (ls) stay untranslated. */
-const CLAUDE_NAMES: Record<string, string> = { bash: 'Bash', edit: 'Edit', write: 'Write', read: 'Read', grep: 'Grep', find: 'Glob' }
-
-export function claudeToolName(piName: string): string | undefined {
-  return CLAUDE_NAMES[piName]
-}
+export { claudeToolName } from '../internal/claude-tool-names.js'
 
 /** Claude file-tool paths are always absolute with `~` expanded before hooks run,
  * so a path guard cannot be bypassed by a relative or `~` spelling of the same path. */

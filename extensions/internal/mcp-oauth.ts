@@ -18,6 +18,7 @@ import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { errorMessage } from './values.js'
 
 interface StoredAuth {
   client?: OAuthClientInformationMixed
@@ -103,6 +104,12 @@ export class FileOAuthProvider implements OAuthClientProvider {
   private persist(): void {
     fs.mkdirSync(path.dirname(this.storePath), { recursive: true })
     fs.writeFileSync(this.storePath, JSON.stringify(this.data), { mode: 0o600 })
+  }
+
+  /** The configured callbackPort alone, absent when only a remembered port exists.
+   * The caller needs the two apart: a configured port is a hard requirement. */
+  configuredRedirectPort(): number | undefined {
+    return this.oauth?.callbackPort
   }
 
   /** The configured callbackPort (Claude: for pre-registered redirect URIs), else
@@ -193,13 +200,19 @@ export class FileOAuthProvider implements OAuthClientProvider {
 /** A one-shot loopback listener for the authorization redirect. Loopback redirect
  * URIs are the RFC 8252 pattern for native apps. A preferred port (from a prior
  * login) is tried first so a re-login keeps the registered redirect_uri; if it is
- * taken, an ephemeral port is used. */
-export async function startCallbackServer(preferredPort?: number): Promise<{ server: http.Server; port: number }> {
+ * taken, an ephemeral port is used.
+ *
+ * `portRequired` marks the port as configured rather than remembered. A configured
+ * `oauth.callbackPort` names the redirect_uri the IdP has registered, so quietly
+ * binding a different one sends the user to an opaque redirect_uri mismatch at the
+ * IdP; the bind failure is reported here instead, where it can name the real cause. */
+export async function startCallbackServer(preferredPort?: number, portRequired = false): Promise<{ server: http.Server; port: number }> {
   const server = http.createServer()
   const listen = (port: number, host: string): Promise<void> => new Promise((resolve, reject) => server.listen(port, host, resolve).once('error', reject))
   try {
     await listen(preferredPort ?? 0, '127.0.0.1')
-  } catch {
+  } catch (error) {
+    if (portRequired) throw new Error(`oauth.callbackPort ${preferredPort} is in use, so the registered redirect URI cannot be served: free that port or change oauth.callbackPort (${errorMessage(error)})`)
     await listen(0, '127.0.0.1')
   }
   const port = (server.address() as { port: number }).port

@@ -2063,7 +2063,9 @@ describe('execute dispatch: resume and cancel arms', () => {
     // path: it must emit the stop phase and wake the model with the outcome.
     const onComplete = resumeBackgroundRunMock.mock.calls[0][2] as (run: unknown) => void
     onComplete({ id: 'bg-1', agent: 'scout', state: 'done', turns: 2, output: 'all clear' })
-    expect(emittedEvents).toContainEqual({ channel: 'pi-code:subagent', data: { phase: 'stop', agentType: 'scout', agentId: 'bg-1' } })
+    // docs/subagents.md states SubagentStop hooks receive last_assistant_message
+    // unconditionally, so a resumed run has to carry it exactly as a foreground run does.
+    expect(emittedEvents).toContainEqual({ channel: 'pi-code:subagent', data: { phase: 'stop', agentType: 'scout', agentId: 'bg-1', lastAssistantMessage: 'all clear' } })
     expect(sendMessageMock).toHaveBeenCalledWith(expect.objectContaining({ customType: 'subagent-background' }), { triggerTurn: true })
   })
 

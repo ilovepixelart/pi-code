@@ -1,5 +1,5 @@
 import type { EventEmitter as Emitter } from 'node:events'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -300,7 +300,7 @@ describe('runHookCommand process wiring', () => {
 
 describe('runHookCommand exec form', () => {
   it('spawns the executable directly with its args and no /bin/sh wrapper', async () => {
-    await runHookCommand('/usr/bin/notify', {}, 5000, undefined, ['--message', 'hi; rm -rf /'])
+    await runHookCommand('/usr/bin/notify', {}, 5000, { args: ['--message', 'hi; rm -rf /'] })
     const record = hoisted.calls.find((call) => call.file === '/usr/bin/notify')
     expect(record).toBeDefined()
     // No `/bin/sh -c`: the executable is spawned directly, so the metacharacters in the
@@ -310,14 +310,14 @@ describe('runHookCommand exec form', () => {
   })
 
   it('delivers the payload as JSON on stdin, like the shell path', async () => {
-    await runHookCommand('/bin/tool', { tool_name: 'bash' }, 5000, undefined, ['run'])
+    await runHookCommand('/bin/tool', { tool_name: 'bash' }, 5000, { args: ['run'] })
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(JSON.parse(record?.stdin ?? '')).toEqual({ tool_name: 'bash' })
   })
 
   it('substitutes $ARGUMENTS per arg with a $$-safe replacer', async () => {
     const payload = { tool_input: { command: 'echo $$ && x $&' } }
-    await runHookCommand('/bin/tool', payload, 5000, undefined, ['--json', '$ARGUMENTS', 'tail-$ARGUMENTS'])
+    await runHookCommand('/bin/tool', payload, 5000, { args: ['--json', '$ARGUMENTS', 'tail-$ARGUMENTS'] })
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.args[0]).toBe('--json')
     // The whole event JSON replaces $ARGUMENTS; the $$ / $& inside it survive verbatim
@@ -331,7 +331,7 @@ describe('runHookCommand exec form', () => {
   it('kills the exec-form child at the timeout, like the shell path', async () => {
     vi.useFakeTimers()
     script('holdopen', { hang: true })
-    void runHookCommand('/bin/tool', {}, 1000, undefined, ['run', 'holdopen'])
+    void runHookCommand('/bin/tool', {}, 1000, { args: ['run', 'holdopen'] })
     await vi.advanceTimersByTimeAsync(1000)
     const record = hoisted.calls.find((call) => call.file === '/bin/tool')
     expect(record?.killSignals).toEqual(['SIGKILL'])
@@ -350,7 +350,7 @@ describe('runHookCommand shell selection', () => {
 
   it('runs a shell: powershell hook through the PowerShell on PATH with the documented argv', async () => {
     const pwsh = pwshOnPath()
-    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, '/proj', undefined, undefined, 'powershell')
+    await runHookCommand('echo ${CLAUDE_PROJECT_DIR}', {}, 5000, { projectDir: '/proj', shell: 'powershell' })
     const record = hoisted.calls[hoisted.calls.length - 1]
     expect(record.file).toBe(pwsh)
     expect(record.args).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo ${env:CLAUDE_PROJECT_DIR}\nexit $LASTEXITCODE'])
@@ -358,7 +358,7 @@ describe('runHookCommand shell selection', () => {
 
   it('ignores shell for an exec-form hook, which spawns its executable directly', async () => {
     pwshOnPath()
-    await runHookCommand('/bin/echo', {}, 5000, undefined, ['x'], undefined, 'powershell')
+    await runHookCommand('/bin/echo', {}, 5000, { args: ['x'], shell: 'powershell' })
     const record = hoisted.calls[hoisted.calls.length - 1]
     expect(record.file).toBe('/bin/echo')
     expect(record.args).toEqual(['x'])
@@ -1181,6 +1181,66 @@ describe('hooks extension notify-style events', () => {
     await ext.toolResult('write', { input: { path: 'a.ts' } })
 
     expect(commandsRun()).toEqual([`${root}/scripts/format.sh`])
+  })
+
+  it('exports all three plugin path variables to a plugin hook process', async () => {
+    // Claude: "All three are exported as environment variables to hook processes and to
+    // MCP and LSP server subprocesses." pi-code gave hook children CLAUDE_PROJECT_DIR
+    // only, so a plugin script reading $CLAUDE_PLUGIN_ROOT or $CLAUDE_PLUGIN_DATA from
+    // the environment (rather than through inline substitution) found nothing.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'envy', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: 'envy-hook' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { envy: true } }))
+
+    const project = tempDir('hooks-proj-')
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    const options = recordFor('envy-hook').options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PLUGIN_ROOT).toBe(root)
+    // Claude: the data dir is keyed by the plugin IDENTIFIER with characters outside
+    // [A-Za-z0-9_-] folded to '-', so `envy@market` becomes `envy-market`.
+    expect(options.env?.CLAUDE_PLUGIN_DATA).toBe(join(hoisted.home, '.claude', 'plugins', 'data', 'envy-market'))
+    expect(options.env?.CLAUDE_PROJECT_DIR).toBe(project)
+  })
+
+  it('creates the plugin data directory on first reference', async () => {
+    // Claude describes CLAUDE_PLUGIN_DATA as "created on first reference". Exporting a
+    // path that does not exist makes every plugin script start with its own mkdir.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'mkd', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: 'mkd-hook' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { mkd: true } }))
+
+    const dataDir = join(hoisted.home, '.claude', 'plugins', 'data', 'mkd-market')
+    expect(existsSync(dataDir)).toBe(false)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('write', { input: { path: 'a.ts' } })
+
+    expect(existsSync(dataDir)).toBe(true)
+  })
+
+  it('runs hooks declared inline in plugin.json, not only from hooks/hooks.json', async () => {
+    // The manifest may carry the hooks object itself instead of pointing at a file. That
+    // branch had never executed, so a plugin written the inline way contributed nothing
+    // and looked like a plugin with no hooks.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'inline', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'inline', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'inline-hook' }] }] } }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { inline: true } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['inline-hook'])
   })
 
   it('refuses a shell-form plugin hook that references user config, keeping its siblings', async () => {
@@ -2682,6 +2742,54 @@ describe('allowManagedHooksOnly', () => {
     // Claude: "Your user, project, local, and plugin hooks are blocked."
     writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-only' }] }] } }))
     writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-blocked' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['managed-only'])
+  })
+
+  it('exempts hooks from a plugin the managed policy force-enables', async () => {
+    // Claude: "Your user, project, local, and plugin hooks are blocked. Hooks from
+    // plugins force-enabled in managed settings `enabledPlugins` are exempt."
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'guard', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'guard-hook' }] }] } }))
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, enabledPlugins: { guard: true }, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-only' }] }] } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun().sort()).toEqual(['guard-hook', 'managed-only'])
+  })
+
+  it('lets a settings-level disableAllHooks still silence a force-enabled plugin', async () => {
+    // The exemption is from allowManagedHooksOnly, not from the user's escape hatch. A
+    // settings-file disableAllHooks turns off every non-managed hook, and a plugin hook
+    // is non-managed however it came to be enabled; only managed policy hooks survive it.
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'noisy', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'noisy-hook' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true }))
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, enabledPlugins: { noisy: true }, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-only' }] }] } }))
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['managed-only'])
+  })
+
+  it('still blocks a plugin the managed policy does not force-enable', async () => {
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'other', '1.0.0')
+    mkdirSync(join(root, 'hooks'), { recursive: true })
+    writeFileSync(join(root, 'hooks', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'other-hook' }] }] } }))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { other: true } }))
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'managed-only' }] }] } }))
+
     const ext = setupExtension()
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     await ext.toolCall('bash', {})

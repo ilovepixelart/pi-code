@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolInput, piToolOutput } from '../extensions/hooks/claude-tools.ts'
+import { normalizeToolName } from '../extensions/internal/command-file.ts'
 
 describe('claudeToolName', () => {
   it('maps the documented built-ins and leaves unknown tools untranslated', () => {
@@ -95,5 +96,36 @@ describe('piToolOutput', () => {
   it('accepts a plain string for other built-ins whose pi output is text', () => {
     expect(piToolOutput('read', 'replaced', false)).toBe('replaced')
     expect(piToolOutput('read', { structured: true }, false)).toBeUndefined()
+  })
+})
+
+describe('claudeToolName covers every pi tool with a Claude counterpart', () => {
+  // Canonical spellings from the tools reference table. A matcher written in Claude's
+  // vocabulary never fired for these, because the payload carried only the pi name.
+  it.each([
+    ['web_fetch', 'WebFetch'],
+    ['web_search', 'WebSearch'],
+    ['subagent', 'Agent'],
+    ['question', 'AskUserQuestion'],
+    ['plan_mode_complete', 'ExitPlanMode'],
+    ['slash_command', 'Skill'],
+    ['todo', 'TodoWrite'],
+  ])('translates %s to %s', (piName, claudeName) => {
+    expect(claudeToolName(piName)).toBe(claudeName)
+  })
+
+  it('leaves a pi tool with no Claude counterpart untranslated', () => {
+    // The tools reference has no Ls tool, so there is no name to report.
+    expect(claudeToolName('ls')).toBeUndefined()
+    expect(claudeToolName('memory')).toBeUndefined()
+  })
+})
+
+describe('todo tool aliases', () => {
+  it.each(['TodoWrite', 'TodoRead', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate'])('resolves %s to pi todo', (name) => {
+    // Claude now prefers TaskCreate/TaskGet/TaskList/TaskUpdate over TodoWrite/TodoRead.
+    // pi has one todo tool serving all of them, so every spelling has to reach it or an
+    // allowed-tools entry naming the current tools silently grants nothing.
+    expect(normalizeToolName(name)).toBe('todo')
   })
 })

@@ -102,7 +102,7 @@ import { readManagedSettings } from '../internal/managed-settings.js'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
 import { resolveModelOverride } from '../internal/model-lookup.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
-import { installedPlugins } from '../internal/plugins.js'
+import { installedPlugins, managedForceEnabled } from '../internal/plugins.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { watchSettingsFiles } from '../internal/settings-watch.js'
@@ -283,7 +283,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
         if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms)
         if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-        return runHookCommand(hook.command, merged, ms, projectDir, hook.args, onChild, hook.shell)
+        return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined })
       }
       // Claude's `once` (skill-frontmatter hooks only): removed after the first
       // successful run; a failure, block, or timeout leaves it in place.
@@ -414,7 +414,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Claude's allowManagedHooksOnly: user, project, local, plugin, and skill
     // hooks are blocked; only the managed set runs.
     managedHooksOnly = managedSettings.allowManagedHooksOnly === true
-    if (managedHooksOnly || readSettingsDisableAllHooks(files)) return
+    // The escape hatch is checked FIRST, and deliberately: a settings-level
+    // disableAllHooks turns off every non-managed hook, and a plugin's hooks are
+    // non-managed however the plugin came to be enabled. Only the managed policy hooks
+    // loaded above survive it. Putting the force-enable exemption ahead of this let an
+    // administrator's enabledPlugins entry defeat the user's own escape hatch.
+    if (readSettingsDisableAllHooks(files)) return
+    if (managedHooksOnly) {
+      // Claude: "Hooks from plugins force-enabled in managed settings `enabledPlugins`
+      // are exempt." That exemption is from allowManagedHooksOnly, not from the hatch.
+      loadPluginHooks(config, managedForceEnabled(installedPlugins(os.homedir())), hookSources)
+      return
+    }
     for (const [eventName, matchers] of Object.entries(loadHooks(files, hookSources))) config[eventName] = [...(config[eventName] ?? []), ...matchers]
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.

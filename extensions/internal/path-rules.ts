@@ -243,6 +243,23 @@ const toPosix = (target: string): string => {
   return withSlashes.replace(/^\/?[A-Za-z]:\//, '/')
 }
 
+/**
+ * Drop a drive from a RESOLVED rule so it can meet a target that toPosix has already
+ * stripped. Claude documents `//path` as an absolute path from the filesystem root,
+ * and on Windows its own example names the drive as the first segment (`//c/` then a
+ * recursive glob), where `c` is the drive; that resolved to `/c/...` while every target
+ * resolved to `/...`, so the rule could never match anything.
+ *
+ * Windows only, and that is the whole point of the flag: on POSIX `/c/foo` is an
+ * ordinary absolute path and stripping its first segment would widen the rule to
+ * everything under the root. Exported and platform-parameterized rather than reading
+ * process.platform inline, so both branches are assertable from either host.
+ */
+export function stripRuleDrive(rule: string, windows: boolean): string {
+  if (!windows) return rule
+  return rule.replace(/^([A-Za-z]):\//, '/').replace(/^\/[A-Za-z]\//, '/')
+}
+
 export function matchesPathRules(filePath: string, rules: string[], anchors: PathAnchors): boolean {
   const target = toPosix(path.resolve(anchors.cwd, filePath))
   return rules.some((rule) => {
@@ -250,7 +267,7 @@ export function matchesPathRules(filePath: string, rules: string[], anchors: Pat
     // An empty specifier (`Read()`) matches nothing, so the tool stays blocked
     // rather than falling open, mirroring `Bash()`.
     if (trimmed === '') return false
-    const resolved = toPosix(resolveRule(trimmed, anchors))
+    const resolved = stripRuleDrive(toPosix(resolveRule(trimmed, anchors)), path.sep === '\\')
     return new RegExp(`^${globToRegExpSource(resolved)}$`).test(target)
   })
 }

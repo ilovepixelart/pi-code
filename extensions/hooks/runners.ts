@@ -5,6 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process'
+import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
@@ -44,7 +45,20 @@ export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number
  * `args` array it becomes the exec path: `command` is spawned directly with those args.
  * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
  * still running at session end can be reaped (Claude kills async hooks at teardown). */
-export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, projectDir?: string, args?: string[], onChild?: (kill: () => void) => void, shell?: string) => Promise<HookRunResult>
+/** How one command hook is spawned, beyond the payload and its budget. Grouped rather
+ * than trailing off the parameter list: the exec form, the shell choice and the
+ * declaring plugin are all per-hook fields that arrive together from one HookCommand. */
+export interface HookSpawnOptions {
+  projectDir?: string
+  /** exec-form argv; shell-form when absent. */
+  args?: string[]
+  onChild?: (kill: () => void) => void
+  shell?: string
+  /** The declaring plugin's paths, exported to the child. */
+  plugin?: { root: string; dataDir: string }
+}
+
+export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, options?: HookSpawnOptions) => Promise<HookRunResult>
 
 /** Above 2^31-1 ms Node clamps a timer to 1ms, which would kill the hook instantly. */
 const MAX_TIMEOUT_S = 2_147_483
@@ -104,6 +118,17 @@ function killTree(child: ChildProcess): void {
   child.kill('SIGKILL')
 }
 
+/** Create the plugin data directory the moment its path is handed to a child. Claude
+ * describes it as "created on first reference"; a best-effort mkdir, since a hook whose
+ * data dir cannot be created should still run. */
+function ensureDir(dir: string): void {
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch {
+    // The hook runs anyway; a script that needs the directory reports its own failure.
+  }
+}
+
 /** The shell invocation for a shell-form command, or undefined when this machine has no
  * shell for it (Windows with neither Git Bash nor PowerShell). */
 function shellInvocation(command: string, shell: string | undefined): { file: string; spawnArgs: string[] } | undefined {
@@ -111,7 +136,7 @@ function shellInvocation(command: string, shell: string | undefined): { file: st
   return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, projectDir, args, onChild, shell) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, { projectDir, args, onChild, shell, plugin } = {}) =>
   new Promise((resolve) => {
     // /bin/sh by absolute path off Windows, so the shell can't be resolved through an
     // attacker-controlled PATH; on Windows the resolver follows Claude's documented Git
@@ -125,6 +150,15 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, p
     // detection cannot see the captured terminal.
     const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
     if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
+    // Claude: "All three are exported as environment variables to hook processes and to
+    // MCP and LSP server subprocesses", so a plugin script can read them rather than
+    // depend on inline substitution. The data directory is "created on first reference",
+    // and exporting the path is that reference: a script should not have to mkdir it.
+    if (plugin) {
+      env.CLAUDE_PLUGIN_ROOT = plugin.root
+      env.CLAUDE_PLUGIN_DATA = plugin.dataDir
+      ensureDir(plugin.dataDir)
+    }
     if (process.stdout.columns) env.COLUMNS = String(process.stdout.columns)
     if (process.stdout.rows) env.LINES = String(process.stdout.rows)
     // An exec-form hook (an `args` array) spawns the executable directly with those args

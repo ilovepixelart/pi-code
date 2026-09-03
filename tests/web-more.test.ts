@@ -140,11 +140,17 @@ describe('web_fetch scheme validation', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it.each(['http://example.com/a', 'https://example.com/a'])('accepts %s', async (url) => {
+  // Both schemes are accepted; http is fetched over https, which the upgrade block
+  // below pins on its own. The requested URL is stated per case rather than echoed,
+  // so an accidental rewrite of the https case would still fail here.
+  it.each([
+    ['http://example.com/a', 'https://example.com/a'],
+    ['https://example.com/a', 'https://example.com/a'],
+  ])('accepts %s and fetches %s', async (url, requested) => {
     fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
     const result = await setup().fetchUrl(url)
     expect(result.content[0].text).toBe('ok')
-    expect(requestUrls()).toEqual([url])
+    expect(requestUrls()).toEqual([requested])
   })
 })
 
@@ -321,11 +327,37 @@ describe('web_fetch redirects', () => {
     expect(result.content[0].text).toBe('arrived')
   })
 
-  it('re-applies the SSRF guard to the redirect target', async () => {
-    fetchMock.mockResolvedValueOnce(respond(null, { status: 301, location: 'http://internal.test/' }))
+  it('re-applies the SSRF guard to a same-host redirect target', async () => {
+    // Retargeted from a cross-host redirect, which is no longer followed at all (see
+    // the cross-host case below), to the rebinding shape the per-hop guard exists for:
+    // the same hostname resolving to a private address on the second lookup.
+    fetchMock.mockResolvedValueOnce(respond(null, { status: 301, location: 'https://example.com/next' }))
     lookupMock.mockResolvedValueOnce(publicAddresses as never).mockResolvedValueOnce([{ address: '192.168.1.9', family: 4 }] as never)
-    await expect(setup().fetchUrl('https://example.com/a')).rejects.toThrow('refusing to fetch private/internal address for internal.test (192.168.1.9)')
+    await expect(setup().fetchUrl('https://example.com/a')).rejects.toThrow('refusing to fetch private/internal address for example.com (192.168.1.9)')
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('names a cross-host redirect instead of following it', async () => {
+    // Claude: "When a URL redirects to a different host, WebFetch returns a text result
+    // that names the original URL and the redirect target instead of following it."
+    fetchMock.mockResolvedValueOnce(respond(null, { status: 301, location: 'https://other.test/landing' }))
+    const result = await setup().fetchUrl('https://example.com/a')
+
+    expect(result.content[0].text).toContain('https://example.com/a')
+    expect(result.content[0].text).toContain('https://other.test/landing')
+    // The target is never fetched: one request, and no second DNS resolution.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(requestUrls()).toEqual(['https://example.com/a'])
+  })
+
+  it('does not cache a cross-host redirect notice as if it were a body', async () => {
+    fetchMock.mockResolvedValueOnce(respond(null, { status: 301, location: 'https://other.test/x' })).mockResolvedValueOnce(respond('<p>real</p>'))
+    const tools = setup()
+    await tools.fetchUrl('https://example.com/a')
+    const second = await tools.fetchUrl('https://example.com/a')
+
+    expect(second.content[0].text).toBe('real')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('errors when a redirect omits the location header', async () => {
@@ -526,5 +558,48 @@ describe('web_fetch releases abandoned bodies', () => {
     await expect(setup().fetchUrl('https://example.com/broken')).rejects.toThrow('HTTP 500')
 
     expect(cancelled).toBe(true)
+  })
+})
+
+describe('web_fetch https upgrade', () => {
+  it('upgrades an http url to https before fetching', async () => {
+    // Claude: "HTTP URLs are automatically upgraded to HTTPS."
+    fetchMock.mockImplementation(async () => respond('<p>ok</p>'))
+    await setup().fetchUrl('http://example.com/page')
+
+    expect(requestUrls()).toEqual(['https://example.com/page'])
+  })
+
+  it('keeps the upgraded url as the cache key, so both spellings share one entry', async () => {
+    fetchMock.mockImplementation(async () => respond('<p>ok</p>'))
+    const tools = setup()
+    await tools.fetchUrl('http://example.com/page')
+    await tools.fetchUrl('https://example.com/page')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('web_fetch cache ttl', () => {
+  it('honors CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS', async () => {
+    // Claude: "set CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS to change how long WebFetch keeps
+    // each response." A zero TTL expires immediately, so the second call refetches.
+    vi.stubEnv('CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS', '0')
+    fetchMock.mockImplementation(async () => respond('<p>x</p>'))
+    const tools = setup()
+    await tools.fetchUrl('https://example.com/ttl')
+    await tools.fetchUrl('https://example.com/ttl')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back to the documented 15-minute default on an unusable value', async () => {
+    vi.stubEnv('CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS', 'soon')
+    fetchMock.mockImplementation(async () => respond('<p>x</p>'))
+    const tools = setup()
+    await tools.fetchUrl('https://example.com/ttl2')
+    await tools.fetchUrl('https://example.com/ttl2')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

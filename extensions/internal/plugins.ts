@@ -215,6 +215,17 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   return plugins
 }
 
+/** The plugins a managed `enabledPlugins` entry force-enables. Claude exempts their
+ * hooks from `allowManagedHooksOnly`: an administrator who turned a plugin on meant its
+ * hooks to run. Keys are matched the way pluginEnabled matches them, by the qualified
+ * `name@marketplace` or the bare directory name, so the two cannot drift apart. */
+export function managedForceEnabled(plugins: InstalledPlugin[]): InstalledPlugin[] {
+  const managedEntry = readManagedSettings().enabledPlugins
+  if (managedEntry === null || typeof managedEntry !== 'object') return []
+  const entries = managedEntry as Record<string, unknown>
+  return plugins.filter((plugin) => Object.entries(entries).some(([key, value]) => value === true && (key === plugin.name || key.startsWith(`${plugin.name}@`))))
+}
+
 /** The plugin's effective enablement per Claude's precedence: a managed
  * enabledPlugins entry force-enables or blocks, then the user's setting, then the
  * manifest's defaultEnabled, which defaults to true ("starts in an enabled state

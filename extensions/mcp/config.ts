@@ -27,6 +27,8 @@ export interface StdioServerConfig {
   baseName?: string
   /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
   pluginRoot?: string
+  /** ${CLAUDE_PLUGIN_DATA} for a plugin's server, exported alongside the root. */
+  pluginDataDir?: string
   /** Loaded from the project scope, whose helpers run credential-stripped. */
   projectScope?: boolean
 }
@@ -52,6 +54,8 @@ export interface HttpServerConfig {
   baseName?: string
   /** Root of the plugin that supplied this server; exported as CLAUDE_PLUGIN_ROOT. */
   pluginRoot?: string
+  /** ${CLAUDE_PLUGIN_DATA} for a plugin's server, exported alongside the root. */
+  pluginDataDir?: string
   /** Loaded from the project scope, whose helpers run credential-stripped. */
   projectScope?: boolean
 }
@@ -225,7 +229,7 @@ export function loadPluginServers(plugins: InstalledPlugin[], projectDir?: strin
       // plugin:<plugin-name>:<server-name>", which is what an mcp_tool hook names and what
       // keeps a same-named user server from replacing a plugin's. The tool alias keeps its
       // own flat spelling, mcp__plugin_<plugin>_<server>__<tool>.
-      if (substituted) servers[`plugin:${plugin.name}:${name}`] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__`, baseName: name, pluginRoot: plugin.root }
+      if (substituted) servers[`plugin:${plugin.name}:${name}`] = { ...substituted, aliasPrefix: `mcp__plugin_${fold(plugin.name)}_${fold(name)}__`, baseName: name, pluginRoot: plugin.root, pluginDataDir: plugin.dataDir }
     }
   }
   return servers

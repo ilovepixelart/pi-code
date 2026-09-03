@@ -5,7 +5,9 @@
  */
 
 import { matchesBashIfFilter } from '../internal/bash-rules.js'
+import { CLAUDE_TOOL_MAP } from '../internal/claude-tool-names.js'
 import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
+import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../internal/scope-rules.js'
 import { errorMessage } from '../internal/values.js'
 import type { HookCommand, HookMatcher } from './config.js'
 
@@ -179,13 +181,39 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
   if (!toolMatches) return false
   const pattern = parsed[2]
   if (pattern === undefined) return true
-  const input = target.input as Record<string, unknown> | null
-  if (fold(target.piName) === 'bash' || (target.claudeName !== undefined && fold(target.claudeName) === 'bash')) {
-    const command = typeof input?.command === 'string' ? input.command : ''
-    return command.length > 0 && matchesBashIfFilter(command, pattern)
+  // Either spelling can arrive; normalize to the pi name the specifier engines take.
+  const tool = CLAUDE_TOOL_MAP[fold(target.piName)] ?? CLAUDE_TOOL_MAP[fold(target.claudeName ?? '')] ?? fold(target.piName)
+  return matchesToolPattern(tool, target.input as Record<string, unknown> | null, pattern, target.anchors)
+}
+
+/** One `if` pattern against a call's arguments. Claude evaluates the rule "against
+ * the tool name and arguments together" in permission-rule syntax, so each tool uses
+ * the same specifier engine its permission rules use:
+ *
+ * PAIRED WITH commands.ts's tool_call guard, which dispatches the same tools to the
+ * same matchers for `allowed-tools` scopes. The two are deliberately NOT merged: bash
+ * differs on purpose (an allow scope requires every segment to match, an `if` filter is
+ * best effort and errs toward running the hook), and merging would hide that. They are
+ * two lists that must agree, so a new scoped tool has to be added in both places; the
+ * shared roster is ARG_RULE_TOOLS in internal/command-file.ts.
+ * a command pattern for Bash, a
+ * `domain:` host for WebFetch, an agent name for Agent, a skill name for Skill, and a
+ * path rule for the file tools. A tool with no specifier syntax matches nothing,
+ * which is also what an unparseable rule does. */
+function matchesToolPattern(piName: string, input: Record<string, unknown> | null, pattern: string, anchors: PathAnchors): boolean {
+  const str = (value: unknown): string => (typeof value === 'string' ? value : '')
+  switch (piName) {
+    case 'bash':
+      return str(input?.command).length > 0 && matchesBashIfFilter(str(input?.command), pattern)
+    case 'web_fetch':
+      return matchesDomainRules(str(input?.url), [pattern])
+    case 'subagent':
+      return matchesAgentRules(agentNamesIn(input), [pattern])
+    case 'slash_command':
+      return matchesSkillRules(str(input?.command), [pattern])
+    default: {
+      const filePath = str(input?.path) || str(input?.file_path)
+      return filePath.length > 0 && matchesPathRules(filePath, [pattern], anchors)
+    }
   }
-  let filePath = ''
-  if (typeof input?.path === 'string') filePath = input.path
-  else if (typeof input?.file_path === 'string') filePath = input.file_path
-  return filePath.length > 0 && matchesPathRules(filePath, [pattern], target.anchors)
 }

@@ -35,12 +35,19 @@ describe('thinkingRank', () => {
 })
 
 describe('requestedThinkingLevel', () => {
-  it('maps ultrathink to max, think hard/harder to high, bare think to medium', () => {
+  it('recognizes ultrathink, the only keyword Claude recognizes', () => {
     expect(requestedThinkingLevel('please ultrathink this')).toBe('max')
     expect(requestedThinkingLevel('ULTRATHINK')).toBe('max')
-    expect(requestedThinkingLevel('think hard about it')).toBe('high')
-    expect(requestedThinkingLevel('think harder here')).toBe('high')
-    expect(requestedThinkingLevel('think about the edge cases')).toBe('medium')
+  })
+
+  it('passes every other think phrase through as ordinary text', () => {
+    // Claude: "Claude Code passes other phrases such as 'think', 'think hard', and
+    // 'think more' through as ordinary prompt text and doesn't recognize them as
+    // keywords." Escalating on them surprised anyone who merely wrote the word.
+    expect(requestedThinkingLevel('think hard about it')).toBeUndefined()
+    expect(requestedThinkingLevel('think harder here')).toBeUndefined()
+    expect(requestedThinkingLevel('think about the edge cases')).toBeUndefined()
+    expect(requestedThinkingLevel('think more')).toBeUndefined()
   })
 
   it('requires a word boundary so rethink/thinking do not trip the bare match', () => {
@@ -61,14 +68,15 @@ describe('thinking extension', () => {
     expect(t.level()).toBe('low')
   })
 
-  it('escalates think hard to high and bare think to medium', () => {
-    const hard = wire('off')
-    hard.input('think hard about this')
-    expect(hard.level()).toBe('high')
-
-    const bare = wire('off')
-    bare.input('think it over')
-    expect(bare.level()).toBe('medium')
+  it('leaves the level alone for a think phrase that is not the keyword', () => {
+    // Replaces a case that asserted the removed escalation. The subject is the same
+    // wiring, now pinning the opposite outcome: these phrases are ordinary text.
+    for (const phrase of ['think hard about this', 'think it over', 'think more']) {
+      const t = wire('off')
+      t.input(phrase)
+      expect(t.setThinkingLevel).not.toHaveBeenCalled()
+      expect(t.level()).toBe('off')
+    }
   })
 
   it('does nothing when the input names no thinking keyword', () => {
@@ -89,9 +97,9 @@ describe('thinking extension', () => {
 
   it('restores the original level once across back-to-back escalations in one turn', () => {
     const t = wire('low')
-    t.input('think hard') // low -> high
-    expect(t.level()).toBe('high')
-    t.input('ultrathink now') // high -> max, pending stays low
+    t.input('ultrathink this') // low -> max, pending captured as low
+    expect(t.level()).toBe('max')
+    t.input('ultrathink again') // already at max, pending must still be low
     expect(t.level()).toBe('max')
     t.settle()
     expect(t.level()).toBe('low')
@@ -173,5 +181,31 @@ describe('thinking extension', () => {
     expect(setThinkingLevel).toHaveBeenLastCalledWith('max')
     handlers.get('agent_settled')?.({}, {})
     expect(setThinkingLevel).toHaveBeenLastCalledWith('medium')
+  })
+})
+
+describe('the keyword only ever raises the level', () => {
+  it('leaves a session already at max alone, and restores nothing afterwards', () => {
+    // ultrathink targets max. A session already there has nothing to raise, so the
+    // extension must not touch the level and must not arm a restore: arming one would
+    // hand the level back to `max` at settle even if the user changed it mid-turn.
+    const t = wire('max')
+    t.input('please ultrathink this')
+
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+    expect(t.level()).toBe('max')
+
+    t.settle()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+  })
+
+  it('raises from a level below the target and restores that level', () => {
+    // The companion half, so the guard above cannot pass by never escalating at all.
+    const t = wire('low')
+    t.input('please ultrathink this')
+    expect(t.level()).toBe('max')
+
+    t.settle()
+    expect(t.level()).toBe('low')
   })
 })

@@ -52,6 +52,13 @@ export function httpFetch(url: URL, opts: TransportOptions): Promise<Response> {
           // (204/205/304) and for status 0. That throw fires here, off the Promise
           // executor, so without this guard it escapes as an uncaughtException and pi
           // exits. Give those statuses a null body; reject anything else that throws.
+          //
+          // The catch below has no test and cannot get one through this function: the
+          // only two throw sources are the null-body statuses, which the line under this
+          // comment handles, and a status outside 200-599, which never reaches this
+          // callback at all (node routes 1xx to the `information` event and rejects a
+          // malformed status line in the parser). It stays as depth, not dead code, but
+          // do not chase its coverage with a test that reaches it some other way.
           const body = NULL_BODY_STATUSES.has(status) ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>)
           resolve(new Response(body, { status, headers }))
         } catch (err) {

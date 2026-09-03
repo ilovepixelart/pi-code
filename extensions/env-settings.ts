@@ -40,6 +40,7 @@ import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
+import { watchSettingsFiles } from './internal/settings-watch.js'
 import { isRecord } from './internal/values.js'
 
 /** The `env` object of one settings scope, coerced to string values. A string is kept
@@ -145,6 +146,8 @@ function projectEnv(cwd: string, home: string): Record<string, string> {
 
 export default function envSettingsExtension(pi: ExtensionAPI) {
   const owned = new Map<string, string | undefined>()
+  /** Stops the watcher of the previous session, as the hooks extension does. */
+  let disposeWatch: () => void = () => {}
 
   const apply = (home: string, project: Record<string, string>): void => {
     applyEnvSettings(mergeEnvScopes(envFromSettings(readManagedSettings()), userEnv(home), project), process.env, owned)
@@ -155,6 +158,21 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
   apply(os.homedir(), {})
 
   pi.on('session_start', async (_event, ctx: ExtensionContext) => {
-    apply(os.homedir(), isProjectApprovedSilently(ctx) ? projectEnv(ctx.cwd, os.homedir()) : {})
+    const home = os.homedir()
+    const approved = isProjectApprovedSilently(ctx)
+    const reapply = (): void => apply(home, approved ? projectEnv(ctx.cwd, home) : {})
+    reapply()
+    // Claude: "Claude Code watches your settings files and reloads them when they change,
+    // so it applies most edits to the running session without a restart." `env` is not
+    // one of the restart-only keys (model, effortLevel/modelSettings, outputStyle), so an
+    // edit has to reach process.env now rather than at the next session. applyEnvSettings
+    // tracks what it owns, so a key removed from the file is restored, not left behind.
+    disposeWatch()
+    disposeWatch = watchSettingsFiles(claudeSettingsChain(ctx.cwd, home, approved), reapply)
+  })
+
+  pi.on('session_shutdown', async () => {
+    disposeWatch()
+    disposeWatch = () => {}
   })
 }

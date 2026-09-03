@@ -33,6 +33,11 @@ export interface HookCommand {
   /** Claude's permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`): evaluated only
    * on tool events; on any other event a hook carrying `if` never runs. */
   if?: string
+  /** The declaring plugin's paths, exported to the hook process. Claude: "All three
+   * are exported as environment variables to hook processes and to MCP and LSP server
+   * subprocesses", so a script can read them instead of relying on inline substitution. */
+  pluginRoot?: string
+  pluginDataDir?: string
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
   headers?: Record<string, string>
@@ -181,7 +186,18 @@ function stampOrigin(entries: HookMatcher[], origin: string): void {
   }
 }
 
-function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>, origin?: string): void {
+/** Stamp the declaring plugin's paths onto every hook it contributes, so the runner
+ * can export them without re-deriving which plugin a hook came from. */
+function stampPluginPaths(entries: HookMatcher[], plugin: { root: string; dataDir: string }): void {
+  for (const entry of entries) {
+    for (const hook of entry.hooks ?? []) {
+      hook.pluginRoot = plugin.root
+      hook.pluginDataDir = plugin.dataDir
+    }
+  }
+}
+
+function mergeHooksJson(config: HooksConfig, raw: string, source: string, sources?: Map<HookMatcher, string>, origin?: string, plugin?: { root: string; dataDir: string }): void {
   let parsed: { hooks?: HooksConfig }
   try {
     parsed = JSON.parse(raw)
@@ -200,6 +216,7 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
     if (origin !== undefined) stampOrigin(usable, origin)
+    if (plugin !== undefined) stampPluginPaths(usable, plugin)
     config[event] = [...(config[event] ?? []), ...usable]
     // Each parse produces fresh entry objects, so object identity keys the /hooks
     // viewer's source attribution without touching the entries themselves.
@@ -261,13 +278,13 @@ export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[],
     // silently registering nothing.
     if (declared !== null && typeof declared === 'object' && !Array.isArray(declared)) {
       const inlineSource = `${plugin.name} (plugin.json)`
-      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(JSON.stringify({ hooks: declared }), inlineSource), plugin, jsonEscape), inlineSource, sources, `plugin:${plugin.name}`)
+      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(JSON.stringify({ hooks: declared }), inlineSource), plugin, jsonEscape), inlineSource, sources, `plugin:${plugin.name}`, plugin)
       continue
     }
     const file = pluginComponentPath(plugin, typeof declared === 'string' ? declared : path.join('hooks', 'hooks.json'))
     if (file === undefined) continue
     try {
-      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(fs.readFileSync(file, 'utf-8'), file), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`)
+      mergeHooksJson(config, substitutePluginVars(withoutUserConfigShellCommands(fs.readFileSync(file, 'utf-8'), file), plugin, jsonEscape), file, sources, `plugin:${plugin.name}`, plugin)
     } catch {
       // a plugin without hooks contributes nothing
     }
