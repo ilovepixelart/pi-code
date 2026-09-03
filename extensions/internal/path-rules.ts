@@ -108,11 +108,10 @@ function bracketClass(body: string): string | null {
   // this the throw escaped compileGlobs, which does not catch, and took the permission
   // check that called it with it.
   try {
-    void new RegExp(source)
+    return new RegExp(source) && source
   } catch {
     return null
   }
-  return source
 }
 
 /** A `*` run starting at `i`: a double star followed by a slash spans whole
@@ -127,41 +126,33 @@ function translateStar(pattern: string, i: number): { source: string; next: numb
   return { source: '[^/]*', next: i + 1 }
 }
 
+/** The regex source for the construct at `i` and the index after it, or null when the
+ * pattern is invalid there and so matches nothing. */
+function translateAt(pattern: string, i: number): { source: string; next: number } | null {
+  const ch = pattern[i]
+  // Claude: to match a literal bracket, escape it; the escape consumes both chars.
+  if (ch === '\\' && (pattern[i + 1] === '[' || pattern[i + 1] === ']')) return { source: escapeRegExp(pattern[i + 1]), next: i + 2 }
+  // Claude: `[` starts a bracket expression such as `[abc]`; a `[` that cannot be read
+  // as one, or a body that is not a buildable class, makes the pattern invalid.
+  if (ch === '[') {
+    const end = bracketEnd(pattern, i)
+    if (end === -1) return null
+    const cls = bracketClass(pattern.slice(i + 1, end))
+    return cls === null ? null : { source: cls, next: end + 1 }
+  }
+  if (ch === '*') return translateStar(pattern, i)
+  if (ch === '?') return { source: '[^/]', next: i + 1 }
+  return { source: escapeRegExp(ch), next: i + 1 }
+}
+
 function translateGlob(pattern: string): string | null {
   let out = ''
   let i = 0
   while (i < pattern.length) {
-    const ch = pattern[i]
-    // Claude: to match a literal bracket, escape it; the escape consumes both chars.
-    if (ch === '\\' && (pattern[i + 1] === '[' || pattern[i + 1] === ']')) {
-      out += escapeRegExp(pattern[i + 1])
-      i += 2
-      continue
-    }
-    // Claude: `[` starts a bracket expression such as `[abc]`; a `[` that cannot be
-    // read as one makes the pattern invalid, matching nothing.
-    if (ch === '[') {
-      const end = bracketEnd(pattern, i)
-      if (end === -1) return null
-      const cls = bracketClass(pattern.slice(i + 1, end))
-      if (cls === null) return null
-      out += cls
-      i = end + 1
-      continue
-    }
-    if (ch === '*') {
-      const star = translateStar(pattern, i)
-      out += star.source
-      i = star.next
-      continue
-    }
-    if (ch === '?') {
-      out += '[^/]'
-      i += 1
-      continue
-    }
-    out += escapeRegExp(ch)
-    i += 1
+    const step = translateAt(pattern, i)
+    if (step === null) return null
+    out += step.source
+    i = step.next
   }
   return out
 }
