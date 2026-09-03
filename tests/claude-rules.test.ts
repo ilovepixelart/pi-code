@@ -88,9 +88,17 @@ describe('pathMatchesGlobs', () => {
     expect(pathMatchesGlobs('src/a/foo.ts', ['**/*.test.ts'])).toBe(false)
   })
 
-  it('matches a slashless glob against the basename at any depth, like gitignore', () => {
-    expect(pathMatchesGlobs('lib/deep/x.ts', ['*.ts'])).toBe(true)
-    expect(pathMatchesGlobs('lib/deep/x.js', ['*.ts'])).toBe(false)
+  // Claude's table: "`*.md` | Markdown files in the project root". A slashless glob
+  // scopes to the root, and `**/` is how a rule says any depth.
+  it('scopes a slashless glob to the project root', () => {
+    expect(pathMatchesGlobs('x.ts', ['*.ts'])).toBe(true)
+    expect(pathMatchesGlobs('lib/deep/x.ts', ['*.ts'])).toBe(false)
+    expect(pathMatchesGlobs('x.js', ['*.ts'])).toBe(false)
+  })
+
+  it('scopes a bare filename to the project root too', () => {
+    expect(pathMatchesGlobs('README.md', ['README.md'])).toBe(true)
+    expect(pathMatchesGlobs('docs/README.md', ['README.md'])).toBe(false)
   })
 
   it('tolerates ./ and leading / anchors and ignores empty globs', () => {

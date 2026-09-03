@@ -188,7 +188,6 @@ function resolveRule(rule: string, anchors: PathAnchors): string {
  * root-relative path. */
 export interface CompiledGlob {
   regex: RegExp
-  matchesBasename: boolean
 }
 
 let globsCompiled = 0
@@ -219,7 +218,7 @@ export function compileGlobs(globs: string[]): CompiledGlob[] {
     // would compile to `^docs/$` and match nothing.
     if (glob.endsWith('/')) glob += '**'
     globsCompiled += 1
-    compiled.push({ regex: new RegExp(`^${globToRegExpSource(glob)}$`), matchesBasename: !glob.includes('/') })
+    compiled.push({ regex: new RegExp(`^${globToRegExpSource(glob)}$`) })
   }
   return compiled
 }
@@ -229,8 +228,7 @@ export function compileGlobs(globs: string[]): CompiledGlob[] {
 export function matchesCompiledGlobs(relPath: string, globs: CompiledGlob[]): boolean {
   globsEvaluated += 1
   const posix = relPath.split(path.sep).join('/')
-  const base = posix.split('/').pop() ?? posix
-  return globs.some((glob) => glob.regex.test(glob.matchesBasename ? base : posix))
+  return globs.some((glob) => glob.regex.test(posix))
 }
 
 /** Whether the accessed file matches at least one rule. No rules means no match:
