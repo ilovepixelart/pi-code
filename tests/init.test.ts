@@ -115,7 +115,7 @@ describe('init extension', () => {
 
   it('detects the context file and rule files at the repository root from a subdirectory', async () => {
     const repo = tempDir()
-    writeFileSync(join(repo, 'package.json'), '{}')
+    mkdirSync(join(repo, '.git'))
     writeFileSync(join(repo, 'CLAUDE.md'), '# existing')
     writeFileSync(join(repo, '.cursorrules'), 'rules')
     mkdirSync(join(repo, '.github'), { recursive: true })

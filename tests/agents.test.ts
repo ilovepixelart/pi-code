@@ -205,7 +205,7 @@ describe('monorepo agent discovery', () => {
     // Claude: "every .claude/agents/ between there and the repository root is
     // scanned ... Claude Code uses the definition closest to the working directory."
     const root = mkdtempSync(join(tmpdir(), 'agents-mono-'))
-    writeFileSync(join(root, 'package.json'), '{}')
+    mkdirSync(join(root, '.git'))
     mkdirSync(join(root, '.claude', 'agents'), { recursive: true })
     writeFileSync(join(root, '.claude', 'agents', 'deployer.md'), '---\nname: deployer\ndescription: root deployer\n---\nroot')
     writeFileSync(join(root, '.claude', 'agents', 'shared.md'), '---\nname: shared\ndescription: root shared\n---\nroot')

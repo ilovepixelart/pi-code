@@ -2201,7 +2201,7 @@ describe('CLAUDE.md beside an AGENTS.md pi loaded instead', () => {
     const repo = tempDir()
     // A root marker, so the ./.claude/CLAUDE.md search walks up out of cwd and the
     // approval flow records a decision.
-    writeFileSync(join(repo, 'package.json'), '{}')
+    mkdirSync(join(repo, '.git'))
     const cwd = join(repo, '.claude')
     mkdirSync(cwd, { recursive: true })
     const agents = join(cwd, 'AGENTS.md')

@@ -57,11 +57,11 @@ describe('config-dir sweep', () => {
 describe('ancestorDirs', () => {
   it('returns every matching directory from cwd up to the repository root, nearest first', async () => {
     const { ancestorDirs } = await import('../extensions/internal/project-root.ts')
-    const { mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+    const { mkdirSync, mkdtempSync } = await import('node:fs')
     const { join } = await import('node:path')
     const { tmpdir } = await import('node:os')
     const root = mkdtempSync(join(tmpdir(), 'walk-'))
-    writeFileSync(join(root, 'package.json'), '{}')
+    mkdirSync(join(root, '.git'))
     mkdirSync(join(root, '.claude', 'agents'), { recursive: true })
     mkdirSync(join(root, 'apps', 'web', '.claude', 'agents'), { recursive: true })
     const cwd = join(root, 'apps', 'web')
@@ -70,14 +70,14 @@ describe('ancestorDirs', () => {
 
   it('does not walk past the repository root', async () => {
     const { ancestorDirs } = await import('../extensions/internal/project-root.ts')
-    const { mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+    const { mkdirSync, mkdtempSync } = await import('node:fs')
     const { join } = await import('node:path')
     const { tmpdir } = await import('node:os')
     const outer = mkdtempSync(join(tmpdir(), 'walk-'))
     mkdirSync(join(outer, '.claude', 'agents'), { recursive: true })
     const root = join(outer, 'repo')
     mkdirSync(root, { recursive: true })
-    writeFileSync(join(root, 'package.json'), '{}')
+    mkdirSync(join(root, '.git'))
     expect(ancestorDirs(root, join('.claude', 'agents'))).toEqual([])
   })
 })

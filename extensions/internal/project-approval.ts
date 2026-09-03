@@ -18,6 +18,7 @@
  */
 
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
@@ -46,11 +47,15 @@ const CLAUDE_SHAPED = [
  * The walk matters: agent discovery already searches upward, so starting pi in a
  * subdirectory of a repository whose `.claude/agents` sits at the root found those
  * agents while a cwd-only check reported nothing to gate, and the short-circuit
- * approved the project without ever asking. The bound is the repository root, so a
- * directory outside any repository never inherits a parent's config. */
-export function hasClaudeShapedConfig(cwd: string): boolean {
+ * approved the project without ever asking. The bound is the repository root and the home
+ * directory, because `~/.claude` is the user's own configuration: a directory under
+ * home that is in no repository would otherwise walk up into it and report the user's
+ * own settings as a project waiting to be approved. */
+export function hasClaudeShapedConfig(cwd: string, home: string = os.homedir()): boolean {
   let currentDir = cwd
   while (true) {
+    // The home check comes first: at home itself the .claude found is the user's own.
+    if (currentDir === home) return false
     if (CLAUDE_SHAPED.some((entry) => fs.existsSync(path.join(currentDir, entry)))) return true
     if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return false
     const parentDir = path.dirname(currentDir)

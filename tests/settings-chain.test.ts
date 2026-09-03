@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { readSettingsChain } from '../extensions/internal/settings-chain.ts'
+import { claudeSettingsChain, readSettingsChain } from '../extensions/internal/settings-chain.ts'
 
 describe('readSettingsChain', () => {
   const write = (dir: string, name: string, body: string): string => {
@@ -52,5 +52,62 @@ describe('readSettingsChain', () => {
       if (seen.length === 1) fs.writeFileSync(second, '{"a":2}')
     }
     expect(seen).toEqual([{ a: 1 }, { a: 2 }])
+  })
+})
+
+describe('claudeSettingsChain local file placement', () => {
+  const owned = () => true
+  const notOwned = () => false
+
+  const repoAt = (): { repo: string; cwd: string } => {
+    const repo = fs.mkdtempSync(join(tmpdir(), 'sc-repo-'))
+    fs.mkdirSync(join(repo, '.git'))
+    const cwd = join(repo, 'src')
+    fs.mkdirSync(cwd)
+    return { repo, cwd }
+  }
+
+  const localFiles = (chain: string[]): string[] => chain.filter((file) => file.endsWith('settings.local.json'))
+
+  it('puts the local file at the repository root, reading a legacy one in the working directory too', () => {
+    const { repo, cwd } = repoAt()
+    expect(localFiles(claudeSettingsChain(cwd, '/home/u', true, 'linux', owned))).toEqual([join(cwd, '.claude', 'settings.local.json'), join(repo, '.claude', 'settings.local.json')])
+  })
+
+  // Claude: the file stays beside .claude/settings.json "outside a git repository,
+  // when the repository root is your home directory, on Windows, or when the
+  // repository root or its .git or .claude entry isn't owned by your user".
+  it('keeps the local file in the working directory on Windows', () => {
+    const { cwd } = repoAt()
+    expect(localFiles(claudeSettingsChain(cwd, '/home/u', true, 'win32', owned))).toEqual([join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('keeps the local file in the working directory when the root belongs to someone else', () => {
+    const { cwd } = repoAt()
+    expect(localFiles(claudeSettingsChain(cwd, '/home/u', true, 'linux', notOwned))).toEqual([join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('keeps the local file in the working directory outside a repository', () => {
+    const cwd = fs.mkdtempSync(join(tmpdir(), 'sc-plain-'))
+    expect(localFiles(claudeSettingsChain(cwd, '/home/u', true, 'linux', owned))).toEqual([join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('keeps the local file in the working directory when the repository root is home', () => {
+    const home = fs.mkdtempSync(join(tmpdir(), 'sc-home-'))
+    fs.mkdirSync(join(home, '.git'))
+    const cwd = join(home, 'src')
+    fs.mkdirSync(cwd)
+    expect(localFiles(claudeSettingsChain(cwd, home, true, 'linux', owned))).toEqual([join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('uses the main checkout in a worktree', () => {
+    const parent = fs.mkdtempSync(join(tmpdir(), 'sc-wt-'))
+    const main = join(parent, 'main')
+    const tree = join(parent, 'feature')
+    fs.mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    fs.mkdirSync(tree)
+    fs.writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+
+    expect(localFiles(claudeSettingsChain(tree, '/home/u', true, 'linux', owned))).toEqual([join(tree, '.claude', 'settings.local.json'), join(main, '.claude', 'settings.local.json')])
   })
 })
