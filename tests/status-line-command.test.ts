@@ -148,7 +148,7 @@ describe('statusLine command contract', () => {
     expect(hoisted.runs.length).toBeGreaterThan(afterReload)
   })
 
-  it('runs the configured command with the session payload and shows its first line, padded', async () => {
+  it('runs the configured command with the session payload and shows every line it printed, padded', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', padding: 1 } })
     hoisted.result = { code: 0, stdout: 'CTX 42% | $0.10\nsecond row\n', stderr: '', timedOut: false }
@@ -167,7 +167,59 @@ describe('statusLine command contract', () => {
     // .model.display_name and rendered the literal string "null" without it.
     expect((payload.model as { display_name: string }).display_name).toBe('GPT-OSS 20B')
     expect((payload.context_window as { used_percentage: number }).used_percentage).toBe(0.8)
-    expect(status.at(-1)).toBe(' CTX 42% | $0.10 ')
+    // Claude: "Your script can output multiple lines to create a richer display."
+    // pi renders every extension status on one row and replaces newlines with spaces
+    // (footer.js sanitizeStatusText), so the rows are joined rather than dropped.
+    expect(status.at(-1)).toBe(' CTX 42% | $0.10 second row ')
+  })
+
+  it('drops a blank line rather than rendering a gap', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'first\n\n   \nlast\n', stderr: '', timedOut: false }
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(status.at(-1)).toBe('first last')
+  })
+
+  it('runs a changed command at once instead of waiting out the debounce', async () => {
+    // Claude re-runs the script when the statusLine settings change. Making the user
+    // wait 300ms to see whether the command they just edited works is the one case
+    // where the debounce has nothing to batch.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'first.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs).toHaveLength(1)
+
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'second.sh' } })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(hoisted.runs).toHaveLength(2)
+    expect(hoisted.runs[1].command).toBe('second.sh')
+  })
+
+  it('still debounces when the settings changed but the command did not', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', padding: 2 } })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(hoisted.runs).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(400)
+    expect(hoisted.runs).toHaveLength(2)
   })
 
   it('carries the documented payload fields: version, event name, durations and counters', async () => {
@@ -231,6 +283,52 @@ describe('statusLine command contract', () => {
 
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
     expect(payload.exceeds_200k_tokens).toBe(true)
+  })
+
+  it('anchors workspace.project_dir at the repository, not the starting directory', async () => {
+    // A script reading .workspace.project_dir to label the repo showed the
+    // subdirectory the session happened to start in.
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(sub)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const workspace = (hoisted.runs[0].payload as { workspace: { current_dir: string; project_dir: string } }).workspace
+    expect(workspace.current_dir).toBe(sub)
+    expect(workspace.project_dir).toBe(repo)
+  })
+
+  it('reports whether the session is in a git worktree', async () => {
+    const repo = tempDir()
+    // A worktree carries a .git file pointing at the main checkout, not a directory.
+    writeFileSync(join(repo, '.git'), 'gitdir: /elsewhere/.git/worktrees/feature\n')
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(repo)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect((hoisted.runs[0].payload as { workspace: { git_worktree: boolean } }).workspace.git_worktree).toBe(true)
+  })
+
+  it('reports the context window as zero-output and no usage before the first response', async () => {
+    // Claude sends total_output_tokens 0 and current_usage null rather than omitting
+    // them, so a script reading .context_window.current_usage gets null, not undefined.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const window = (hoisted.runs[0].payload as { context_window: Record<string, unknown> }).context_window
+    expect(window.total_output_tokens).toBe(0)
+    expect(window.current_usage).toBeNull()
   })
 
   it('keeps the built-in segment when the command prints nothing', async () => {
