@@ -55,6 +55,12 @@ function envTimeout(name: string, fallback: number): number {
 export const connectTimeoutMs = (): number => envTimeout('MCP_TIMEOUT', DEFAULT_CONNECT_TIMEOUT_MS)
 export const callTimeoutMs = (): number => envTimeout('MCP_TOOL_TIMEOUT', DEFAULT_CALL_TIMEOUT_MS)
 
+// Claude: "How long blocking MCP startup waits, in milliseconds, for the connection
+// batch before snapshotting the tool list (default: 5000)." Distinct from MCP_TIMEOUT,
+// which bounds one server's own connect attempt, not the whole startup batch.
+const DEFAULT_MCP_CONNECT_TIMEOUT_MS = 5000
+export const mcpConnectTimeoutMs = (): number => envTimeout('MCP_CONNECT_TIMEOUT_MS', DEFAULT_MCP_CONNECT_TIMEOUT_MS)
+
 /** Per-server inputs to the idle-window choice: the transport kind picks the default
  * tier, and a per-server `timeout` of at least 1000 also floors the idle window. */
 export interface ServerCallTuning {
