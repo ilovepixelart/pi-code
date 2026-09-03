@@ -93,3 +93,29 @@ describe('passesIfFilter', () => {
     expect(passesIfFilter(hookIf('Edit)('), target('edit', { path: '/proj/sub/docs/a.md' }))).toBe(false)
   })
 })
+
+describe('passesIfFilter, tool specifiers beyond Bash and the file tools', () => {
+  // Claude: "`if` uses permission rule syntax to match against the tool name and
+  // arguments together". pi's own tools reach hooks under pi names, so each case
+  // supplies the Claude name the payload now carries alongside.
+  it('runs a WebFetch-scoped hook only for a matching host', () => {
+    expect(passesIfFilter(hookIf('WebFetch(domain:example.com)'), target('web_fetch', { url: 'https://example.com/a' }, 'WebFetch'))).toBe(true)
+    expect(passesIfFilter(hookIf('WebFetch(domain:example.com)'), target('web_fetch', { url: 'https://evil.com/a' }, 'WebFetch'))).toBe(false)
+    expect(passesIfFilter(hookIf('WebFetch(domain:*.example.com)'), target('web_fetch', { url: 'https://api.example.com/' }, 'WebFetch'))).toBe(true)
+  })
+
+  it('runs an Agent-scoped hook only when every agent the call names matches', () => {
+    expect(passesIfFilter(hookIf('Agent(Explore)'), target('subagent', { agent: 'Explore', task: 't' }, 'Agent'))).toBe(true)
+    expect(passesIfFilter(hookIf('Agent(Explore)'), target('subagent', { agent: 'Plan', task: 't' }, 'Agent'))).toBe(false)
+    expect(passesIfFilter(hookIf('Agent(Explore)'), target('subagent', { tasks: [{ agent: 'Explore' }, { agent: 'Plan' }] }, 'Agent'))).toBe(false)
+  })
+
+  it('runs a Skill-scoped hook on the documented exact and prefix forms', () => {
+    expect(passesIfFilter(hookIf('Skill(review-pr *)'), target('slash_command', { command: '/review-pr 12' }, 'Skill'))).toBe(true)
+    expect(passesIfFilter(hookIf('Skill(review-pr *)'), target('slash_command', { command: '/deploy' }, 'Skill'))).toBe(false)
+  })
+
+  it('still matches a scoped rule written under the pi tool name', () => {
+    expect(passesIfFilter(hookIf('web_fetch(domain:example.com)'), target('web_fetch', { url: 'https://example.com/' }, 'WebFetch'))).toBe(true)
+  })
+})

@@ -97,6 +97,54 @@ describe('parseCommandFile', () => {
     expect(parsed.bashRules).toBeUndefined()
   })
 
+  it('keeps a WebFetch domain scope instead of granting the whole tool', () => {
+    // Doc: `WebFetch(domain:example.com)` is a documented allow specifier. Dropping it
+    // granted unrestricted web_fetch, which is the wider grant the author did not write.
+    const parsed = parseCommandFile('---\nallowed-tools: WebFetch(domain:example.com)\n---\nFetch it.')
+    expect(parsed.allowedTools).toEqual(['web_fetch'])
+    expect(parsed.domainRules).toEqual(['domain:example.com'])
+  })
+
+  it('drops the domain scopes when an unscoped WebFetch grant is also present', () => {
+    const parsed = parseCommandFile('---\nallowed-tools: WebFetch, WebFetch(domain:example.com)\n---\nFetch.')
+    expect(parsed.allowedTools).toEqual(['web_fetch'])
+    expect(parsed.domainRules).toBeUndefined()
+  })
+
+  it('resolves the Agent tool name and keeps its agent scope', () => {
+    // `Task` was renamed `Agent`. Without the alias the entry resolved to no pi tool
+    // and the grant vanished; with it, the scope has to survive too.
+    const parsed = parseCommandFile('---\nallowed-tools: Agent(Explore)\n---\nExplore.')
+    expect(parsed.allowedTools).toEqual(['subagent'])
+    expect(parsed.agentRules).toEqual(['Explore'])
+  })
+
+  it('keeps an agent scope written under the legacy Task name', () => {
+    const parsed = parseCommandFile('---\nallowed-tools: Task(Explore)\n---\nExplore.')
+    expect(parsed.allowedTools).toEqual(['subagent'])
+    expect(parsed.agentRules).toEqual(['Explore'])
+  })
+
+  it('resolves the Skill tool name and keeps its skill scope', () => {
+    // Claude folded custom commands into skills and the reference no longer lists a
+    // SlashCommand tool, so `Skill` has to reach pi's slash_command tool.
+    const parsed = parseCommandFile('---\nallowed-tools: Skill(commit)\n---\nCommit.')
+    expect(parsed.allowedTools).toEqual(['slash_command'])
+    expect(parsed.skillRules).toEqual(['commit'])
+  })
+
+  it('drops the skill scopes when an unscoped Skill grant is also present', () => {
+    const parsed = parseCommandFile('---\nallowed-tools: Skill, Skill(commit)\n---\nCommit.')
+    expect(parsed.allowedTools).toEqual(['slash_command'])
+    expect(parsed.skillRules).toBeUndefined()
+  })
+
+  it('drops the agent scopes when an unscoped Agent grant is also present', () => {
+    const parsed = parseCommandFile('---\nallowed-tools: Agent, Agent(Explore)\n---\nExplore.')
+    expect(parsed.allowedTools).toEqual(['subagent'])
+    expect(parsed.agentRules).toBeUndefined()
+  })
+
   it.each([
     ['a flow sequence', 'allowed-tools: [Bash, Read]'],
     ['an indented block list', 'allowed-tools:\n  - Bash\n  - Read'],

@@ -18,6 +18,8 @@ import * as path from 'node:path'
 
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
 
+import { CLAUDE_TOOL_MAP } from './claude-tool-names.js'
+
 /** The pi file tools a Claude path rule can govern. */
 export type PathRuleTool = 'read' | 'edit' | 'write'
 
@@ -27,6 +29,12 @@ export interface ParsedCommand {
   allowedTools?: string[]
   /** Claude `Bash(...)` specifiers, present only when every bash grant is scoped. */
   bashRules?: string[]
+  /** Claude `WebFetch(domain:...)` specifiers, on the same unscoped-wins rule. */
+  domainRules?: string[]
+  /** Claude `Agent(...)`/`Task(...)` agent names, on the same unscoped-wins rule. */
+  agentRules?: string[]
+  /** Claude `Skill(...)` name patterns, on the same unscoped-wins rule. */
+  skillRules?: string[]
   /** Claude path rules per pi file tool, from Read(...)/Edit(...)/Write(...) grants. */
   pathRules?: Partial<Record<PathRuleTool, string[]>>
   /** Names from the `arguments:` frontmatter list, mapped to positions in order. */
@@ -56,34 +64,6 @@ export interface DiscoveredCommand {
   filePath: string
   /** Set for plugin commands, carrying the ${CLAUDE_PLUGIN_*} and ${user_config.*} substitution sources. */
   plugin?: { root: string; dataDir: string; userConfig?: Record<string, string> }
-}
-
-/** Claude tool names are PascalCase and do not all exist in pi: `Glob` is pi's
- * `find`. Lowercasing alone left `glob` in the list, and since pi has no tool by
- * that name the grant was silently dropped when the list was intersected with the
- * active tools. Shared with the subagent's own frontmatter parsing. */
-const CLAUDE_TOOL_MAP: Record<string, string> = {
-  read: 'read',
-  write: 'write',
-  edit: 'edit',
-  bash: 'bash',
-  grep: 'grep',
-  glob: 'find',
-  ls: 'ls',
-  // Claude's names for the tools this package registers itself. Without these a
-  // perfectly ordinary `allowed-tools: WebFetch, WebSearch` matched no pi tool and
-  // the intersection left the turn with nothing.
-  webfetch: 'web_fetch',
-  websearch: 'web_search',
-  todowrite: 'todo',
-  todoread: 'todo',
-  task: 'subagent',
-  askuserquestion: 'question',
-  exitplanmode: 'plan_mode_complete',
-  // Claude's name for the tool this package registers so the model can run user slash
-  // commands; without it `allowed-tools: SlashCommand` matched nothing and the grant
-  // could neither keep nor drop the tool.
-  slashcommand: 'slash_command',
 }
 
 /**
@@ -135,6 +115,14 @@ export interface ToolGrants {
   /** Claude `Bash(...)` specifiers, present only when every bash grant is scoped:
    * an unscoped `Bash` entry is the wider grant and wins over its scoped siblings. */
   bashRules?: string[]
+  /** Claude `WebFetch(domain:host)` specifiers, same unscoped-wins rule as bash.
+   * Dropping them granted unrestricted web_fetch to a command that asked for one host. */
+  domainRules?: string[]
+  /** Claude `Agent(AgentName)` names from `Agent(...)` or the legacy `Task(...)`,
+   * same unscoped-wins rule. Dropping them granted the whole subagent tool. */
+  agentRules?: string[]
+  /** Claude `Skill(name)` / `Skill(name *)` specifiers, same unscoped-wins rule. */
+  skillRules?: string[]
   /** Claude path rules per pi file tool, absent for a tool with an unscoped grant.
    * Edit scopes govern writes too, as Claude documents; Write scopes are honored
    * rather than Claude's accept-and-warn-then-ignore, which would fail open here. */
@@ -150,18 +138,32 @@ const PATH_RULE_TOOLS: Record<string, Array<PathRuleTool>> = {
   write: ['write'],
 }
 
+/** pi tools whose Claude specifier is a scalar argument scope rather than a path
+ * rule: `Bash(cmd)`, `WebFetch(domain:host)` and `Agent(AgentName)`. One list, so a
+ * tool cannot be granted a scope here and quietly miss the unscoped-wins rule. */
+const ARG_RULE_TOOLS = ['bash', 'web_fetch', 'subagent', 'slash_command'] as const
+type ArgRuleTool = (typeof ARG_RULE_TOOLS)[number]
+
+const isArgRuleTool = (name: string): name is ArgRuleTool => (ARG_RULE_TOOLS as readonly string[]).includes(name)
+
 /** The tools, scopes, and path rules accumulated while scanning one grant list. */
 interface GrantAccumulator {
   tools: string[]
   scopedEntries: string[]
-  bashRules: string[]
-  bashUnscoped: boolean
+  argScopes: Record<ArgRuleTool, string[]>
+  argUnscoped: Set<ArgRuleTool>
   pathScopes: Record<PathRuleTool, string[]>
   pathUnscoped: Set<PathRuleTool>
 }
 
 function createGrantAccumulator(): GrantAccumulator {
-  return { tools: [], scopedEntries: [], bashRules: [], bashUnscoped: false, pathScopes: { read: [], edit: [], write: [] }, pathUnscoped: new Set() }
+  return { tools: [], scopedEntries: [], argScopes: { bash: [], web_fetch: [], subagent: [], slash_command: [] }, argUnscoped: new Set(), pathScopes: { read: [], edit: [], write: [] }, pathUnscoped: new Set() }
+}
+
+/** The scopes for one argument-ruled tool, or undefined when it has none or when an
+ * unscoped grant for it makes it wide. The wider grant wins, as it does for bash. */
+function argRules(acc: GrantAccumulator, tool: ArgRuleTool): string[] | undefined {
+  return !acc.argUnscoped.has(tool) && acc.argScopes[tool].length > 0 ? acc.argScopes[tool] : undefined
 }
 
 /** Coerce a raw grant value to its string entries: a YAML list stays a list, a
@@ -186,7 +188,7 @@ function addGrantEntry(acc: GrantAccumulator, item: string): void {
   if (!acc.tools.includes(name)) acc.tools.push(name)
   const open = entry.indexOf('(')
   if (open === -1) {
-    if (name === 'bash') acc.bashUnscoped = true
+    if (isArgRuleTool(name)) acc.argUnscoped.add(name)
     for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathUnscoped.add(tool)
     return
   }
@@ -195,7 +197,7 @@ function addGrantEntry(acc: GrantAccumulator, item: string): void {
   // An empty specifier (`Bash()`, `Read()`) matches nothing and must not read as
   // the unscoped grant it explicitly is not: it is recorded so the tool stays
   // restricted, and the matchers treat an empty rule as matching no input.
-  if (name === 'bash') acc.bashRules.push(scope)
+  if (isArgRuleTool(name)) acc.argScopes[name].push(scope)
   for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathScopes[tool].push(scope)
 }
 
@@ -217,10 +219,14 @@ function buildPathRules(acc: GrantAccumulator): ToolGrants['pathRules'] {
  *
  * Claude scopes a grant to arguments: `Bash(git add:*)` allows exactly those commands.
  * pi's active-tool list is per tool, with no argument dimension, so the base tool is
- * granted and the scope is kept: commands.ts enforces bash scopes at tool_call time,
- * and the subagent's frontmatter parsing rejects a scoped grant it cannot express.
- * A scope on any other tool is dropped, which widens that grant; bash is the one
- * whose widening reaches everything, so it is the one enforced.
+ * granted and the scope is kept for commands.ts to enforce at tool_call time. Every
+ * specifier Claude documents for an allow rule is kept: `Bash(cmd)`, the Read/Edit
+ * path rules, `WebFetch(domain:host)` and `Agent(AgentName)`. The subagent's own
+ * frontmatter parsing still rejects a scoped grant outright, since it has no
+ * call-time seam to enforce one in.
+ *
+ * Claude's `Tool(param:value)` form is not among them: the permissions reference
+ * confines it to deny and ask rules, and `allowed-tools` is an allow surface.
  */
 export function parseToolGrants(raw: unknown): ToolGrants | undefined {
   const items = coerceGrantItems(raw)
@@ -230,7 +236,10 @@ export function parseToolGrants(raw: unknown): ToolGrants | undefined {
   return {
     tools: acc.tools,
     scopedEntries: acc.scopedEntries,
-    bashRules: !acc.bashUnscoped && acc.bashRules.length > 0 ? acc.bashRules : undefined,
+    bashRules: argRules(acc, 'bash'),
+    domainRules: argRules(acc, 'web_fetch'),
+    agentRules: argRules(acc, 'subagent'),
+    skillRules: argRules(acc, 'slash_command'),
     pathRules: buildPathRules(acc),
   }
 }
@@ -293,6 +302,9 @@ export function parseCommandFile(content: string): ParsedCommand {
     argumentHint: hint(frontmatter['argument-hint']) || undefined,
     allowedTools: grants?.tools,
     bashRules: grants?.bashRules,
+    domainRules: grants?.domainRules,
+    agentRules: grants?.agentRules,
+    skillRules: grants?.skillRules,
     pathRules: grants?.pathRules,
     argumentNames: parseArgumentNames(frontmatter.arguments),
     // A scope on a disallow entry only denies more than asked, so the drop is safe.

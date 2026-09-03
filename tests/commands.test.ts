@@ -102,7 +102,7 @@ interface RegisteredTool {
   execute: (id: string, params: { command: string }, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>
 }
 
-const setup = (cwd: string, trusted = true) => {
+const setup = (cwd: string, trusted = true, initialTools = ['bash', 'read', 'edit', 'write']) => {
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
   const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
   const tools = new Map<string, RegisteredTool>()
@@ -113,7 +113,7 @@ const setup = (cwd: string, trusted = true) => {
   const execCalls: Array<{ file: string; args: string[]; shell: string; timeout?: number; env?: Record<string, string> }> = []
   const execResult = { stderr: '', code: 0, killed: false }
   let setModelRejection: string | undefined
-  let active = ['bash', 'read', 'edit', 'write']
+  let active = [...initialTools]
   const pi = {
     on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
     registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
@@ -845,6 +845,67 @@ describe('allowed-tools argument scopes', () => {
     const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'bash', input: { command: 'rm -rf /' } }, s.ctx)) as { block?: boolean; reason?: string }
     expect(blocked?.block).toBe(true)
     expect(blocked?.reason).toContain('git add:*')
+  })
+
+  it('grants web_fetch but enforces the domain scope at call time', async () => {
+    // `WebFetch(domain:example.com)` is a documented allow specifier. Dropping it
+    // granted unrestricted web_fetch to a command that asked for one host.
+    const cwd = tempDir()
+    writeCommand(cwd, 'docs.md', '---\nallowed-tools: WebFetch(domain:example.com)\n---\nRead the docs.')
+    const s = setup(cwd, true, ['bash', 'read', 'web_fetch'])
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('docs')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['web_fetch'])
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'web_fetch', input: { url: 'https://example.com/guide' } }, s.ctx)).toBeUndefined()
+    const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'web_fetch', input: { url: 'https://evil.com/' } }, s.ctx)) as { block?: boolean; reason?: string }
+    expect(blocked?.block).toBe(true)
+    expect(blocked?.reason).toContain('domain:example.com')
+  })
+
+  it('enforces an agent scope on every agent a subagent call names', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'dig.md', '---\nallowed-tools: Agent(Explore)\n---\nDig in.')
+    const s = setup(cwd, true, ['bash', 'read', 'subagent'])
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('dig')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['subagent'])
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'subagent', input: { agent: 'Explore', task: 't' } }, s.ctx)).toBeUndefined()
+    const single = (await s.handlers.get('tool_call')?.({ toolName: 'subagent', input: { agent: 'Plan', task: 't' } }, s.ctx)) as { block?: boolean; reason?: string }
+    expect(single?.block).toBe(true)
+    expect(single?.reason).toContain('Explore')
+    // parallel and chain carry their own agent names; gating only `agent` would let
+    // either mode route around the rule.
+    const parallel = (await s.handlers.get('tool_call')?.(
+      {
+        toolName: 'subagent',
+        input: {
+          tasks: [
+            { agent: 'Explore', task: 't' },
+            { agent: 'Plan', task: 't' },
+          ],
+        },
+      },
+      s.ctx,
+    )) as { block?: boolean }
+    expect(parallel?.block).toBe(true)
+    const chain = (await s.handlers.get('tool_call')?.({ toolName: 'subagent', input: { chain: [{ agent: 'Plan', task: 't' }] } }, s.ctx)) as { block?: boolean }
+    expect(chain?.block).toBe(true)
+  })
+
+  it('grants slash_command but enforces the skill scope at call time', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'wrap.md', '---\nallowed-tools: Skill(review-pr *)\n---\nWrap up.')
+    const s = setup(cwd, true, ['bash', 'read', 'slash_command'])
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('wrap')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['slash_command'])
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'slash_command', input: { command: '/review-pr 12' } }, s.ctx)).toBeUndefined()
+    const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'slash_command', input: { command: '/deploy prod' } }, s.ctx)) as { block?: boolean; reason?: string }
+    expect(blocked?.block).toBe(true)
+    expect(blocked?.reason).toContain('review-pr *')
   })
 
   it('leaves other granted tools alone while a bash scope is enforced', async () => {
