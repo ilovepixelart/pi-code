@@ -629,6 +629,22 @@ describe('background mode', () => {
 })
 
 describe('runSingleAgent process handling', () => {
+  it('reports a synchronous spawn failure gracefully instead of throwing', async () => {
+    // Some spawn failures (confirmed on Linux for E2BIG: posix_spawn detects it
+    // immediately) throw at the spawn() call site rather than emitting the async
+    // 'error' event the rest of run.ts already handles gracefully. Without a catch
+    // around the call, this escaped the run as an unhandled rejection.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({})], projectAgentsDir: null })
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).not.toBe('')
+    expect(results(result)[0]).toMatchObject({ exitCode: 1, stderr: 'spawn E2BIG' })
+  })
+
   it('reports an unknown agent without spawning anything', async () => {
     const result = await execute('c1', { agent: 'ghost', task: 'find it' }, undefined, undefined, trustedCtx)
 
