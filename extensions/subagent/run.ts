@@ -6,11 +6,12 @@
  * worktree; everything about how the child was configured lives in child.ts.
  */
 
-import { spawn } from 'node:child_process'
+import { type ChildProcessByStdio, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import type { Readable } from 'node:stream'
 
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
@@ -121,6 +122,29 @@ function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void
  * with the output. A no-op for uncapped runs. */
 function appendPartialNote(result: SingleResult): void {
   if (result.partial) appendResultNote(result, '[Output is partial: the subagent stopped at its maxTurns limit.]')
+}
+
+/** The pi child, or the error spawning it threw synchronously. Node normally
+ * reports a spawn failure through the child's async 'error' event, but some
+ * failures (confirmed on Linux: posix_spawn detects E2BIG immediately) throw at
+ * the spawn() call site instead; catching it here, in one place with an explicit
+ * return type, keeps the caller's non-null stdout/stderr narrowing that a bare
+ * try/catch around an inline spawn() call loses. */
+function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
+  try {
+    return {
+      proc: spawn(command, args, {
+        ...options,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Its own group, so an abort reaches grandchildren too: killing only the
+        // direct child orphans a build or dev server the agent started.
+        detached: true,
+      }),
+    }
+  } catch (error) {
+    return { error: error as Error }
+  }
 }
 
 export async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
@@ -244,16 +268,17 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
 
     const exitCode = await new Promise<number>((resolve) => {
       const invocation = getPiInvocation(args)
-      const proc = spawn(invocation.command, invocation.args, {
+      const spawned = spawnChild(invocation.command, invocation.args, {
         cwd: worktree?.dir ?? runCwd,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        // Its own group, so an abort reaches grandchildren too: killing only the
-        // direct child orphans a build or dev server the agent started.
-        detached: true,
         // The marker lets the child's subagent tool refuse to nest further.
         env: { ...process.env, PI_CODE_SUBAGENT: '1', ...agentHooksEnv(agent, options.agentId ?? '') },
       })
+      if ('error' in spawned) {
+        if (!currentResult.stderr) currentResult.stderr = spawned.error.message
+        resolve(1)
+        return
+      }
+      const proc = spawned.proc
       let buffer = ''
       let assistantTurns = 0
 

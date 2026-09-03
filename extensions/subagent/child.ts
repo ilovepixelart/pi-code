@@ -12,6 +12,7 @@ import * as path from 'node:path'
 
 import type { AgentRunRequest } from '../internal/agent-run.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
+import { sliceBytes } from '../internal/output-guard.js'
 import { repoRoot } from '../internal/project-root.js'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
 import { type AgentConfig, type AgentMemoryScope, expandMcpToolPatterns, withPreloadedSkills } from './agents.js'
@@ -188,10 +189,24 @@ export function agentHooksEnv(agent: AgentConfig, agentId: string): Record<strin
   return { PI_CODE_AGENT_HOOKS: JSON.stringify({ agent: agent.name, id: agentId, hooks }) }
 }
 
+/** This string becomes the whole of one argv element to the spawned child
+ * (run.ts, `spawn(..., { shell: false })`). Linux's MAX_ARG_STRLEN, a per-argument
+ * limit distinct from the much larger total ARG_MAX, is 128KiB; confirmed on a real
+ * Linux host that a single argv string over it fails execve with E2BIG. Neither the
+ * model's task text nor a SubagentStart hook's additionalContext is capped
+ * upstream, so this is where the assembled string caps itself. The budget leaves
+ * headroom under the hard limit for the "Task: " prefix, the notice below, and
+ * platforms whose limit differs from Linux's. */
+const TASK_ARGV_MAX_BYTES = 96 * 1024
+
 /** The task argument with any SubagentStart hook context ahead of it, per Claude:
  * "added to the subagent's context at the start of its conversation, before its
- * first prompt". */
+ * first prompt". Capped as one combined string, since either the context or the
+ * task alone can already be oversized. */
 export function taskWithStartContext(task: string, contexts: string[]): string {
   const context = contexts.filter(Boolean).join('\n')
-  return context ? `${context}\n\nTask: ${task}` : `Task: ${task}`
+  const assembled = context ? `${context}\n\nTask: ${task}` : `Task: ${task}`
+  if (Buffer.byteLength(assembled, 'utf-8') <= TASK_ARGV_MAX_BYTES) return assembled
+  const kept = sliceBytes(assembled, TASK_ARGV_MAX_BYTES)
+  return `${kept}\n\n[truncated: too long for the child process to receive]`
 }
