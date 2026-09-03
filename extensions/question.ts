@@ -81,7 +81,7 @@ export const shortHeader = (header: string | undefined): string | undefined => (
  * milliseconds. Anything else, including unset, means no auto-continue. */
 export function parseAskUserQuestionTimeout(value: unknown): number | undefined {
   if (typeof value !== 'string') return undefined
-  const match = /^(\d+)(s|m)$/.exec(value.trim())
+  const match = /^(\d+)([sm])$/.exec(value.trim())
   if (!match) return undefined
   const amount = Number(match[1])
   return match[2] === 's' ? amount * 1000 : amount * 60 * 1000
