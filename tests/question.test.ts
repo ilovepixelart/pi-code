@@ -1,7 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Text } from '@earendil-works/pi-tui'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import questionExtension, { QuestionParams, shortHeader } from '../extensions/question.ts'
+import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import questionExtension, { askUserQuestionTimeoutMs, askViaOverlay, parseAskUserQuestionTimeout, QuestionParams, shortHeader } from '../extensions/question.ts'
 
 interface Option {
   label: string
@@ -144,6 +148,24 @@ describe('question execute', () => {
     expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'Beta', wasCustom: false })
   })
 
+  it('reports a timed-out single-select distinctly from a cancel, with an empty answer', async () => {
+    // Claude: the auto-continue "tells Claude you may be away from your keyboard,
+    // so Claude proceeds on its own judgment and can re-ask later" — not the same
+    // outcome as the user declining, so it must not read as answer: null either.
+    const timedOut = { answer: '', wasCustom: false, timedOut: true }
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, uiCtx(timedOut))
+    expect(result.content[0].text).toContain('No response after the configured idle timeout')
+    expect(result.content[0].text).not.toContain('Already selected')
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: '', timedOut: true })
+  })
+
+  it('names what was already checked in a timed-out multiSelect', async () => {
+    const timedOut = { answer: 'Alpha, Beta', wasCustom: false, timedOut: true }
+    const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS, multiSelect: true } as never, undefined, undefined, uiCtx(timedOut) as never)
+    expect(result.content[0].text).toContain('Already selected: Alpha, Beta.')
+    expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], multiSelect: true, answer: 'Alpha, Beta', timedOut: true })
+  })
+
   it('reports a typed answer as custom', async () => {
     const typed = { answer: 'something else', wasCustom: true }
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, uiCtx(typed))
@@ -272,6 +294,16 @@ describe('question renderResult', () => {
   it('renders a null answer as cancelled', () => {
     const result = { content: [], details: { question: 'Pick one', options: ['Alpha'], answer: null } }
     expect(lines(setup().renderResult(result, undefined, theme))).toEqual(['Cancelled'])
+  })
+
+  it('marks a timed-out answer distinctly from a cancel', () => {
+    const result = { content: [], details: { question: 'Pick one', options: ['Alpha'], answer: '', timedOut: true } }
+    expect(lines(setup().renderResult(result, undefined, theme))).toEqual(['⏱ Auto-continued (no response)'])
+  })
+
+  it('names what was already selected in a timed-out render', () => {
+    const result = { content: [], details: { question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'Alpha', timedOut: true, multiSelect: true } }
+    expect(lines(setup().renderResult(result, undefined, theme))).toEqual(['⏱ Auto-continued (no response) (already selected: Alpha)'])
   })
 
   it('marks a custom answer as written', () => {
@@ -540,5 +572,142 @@ describe('multiple questions per call', () => {
   it('still accepts the single-question shape', async () => {
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS } as never, undefined, undefined, uiCtx({ answer: 'Alpha', wasCustom: false, index: 1 }) as never)
     expect(result.content[0].text).toBe('User selected: 1. Alpha')
+  })
+})
+
+describe('parseAskUserQuestionTimeout', () => {
+  it('reads the three documented spellings', () => {
+    expect(parseAskUserQuestionTimeout('60s')).toBe(60_000)
+    expect(parseAskUserQuestionTimeout('5m')).toBe(5 * 60_000)
+    expect(parseAskUserQuestionTimeout('10m')).toBe(10 * 60_000)
+  })
+
+  it('rejects anything else, including unset', () => {
+    for (const bad of [undefined, null, 60, '', '60', '60x', '1h']) {
+      expect(parseAskUserQuestionTimeout(bad)).toBeUndefined()
+    }
+  })
+
+  it('tolerates surrounding whitespace, the forgiving read', () => {
+    expect(parseAskUserQuestionTimeout(' 60s ')).toBe(60_000)
+  })
+})
+
+describe('askUserQuestionTimeoutMs', () => {
+  const dirs: string[] = []
+  const tempDir = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'q-timeout-'))
+    dirs.push(dir)
+    return dir
+  }
+  afterEach(() => {
+    setManagedSettingsPath(undefined)
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads the value from the user settings.json', () => {
+    const home = tempDir()
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ askUserQuestionTimeout: '5m' }))
+    expect(askUserQuestionTimeoutMs(home)).toBe(5 * 60_000)
+  })
+
+  it('returns undefined with no settings file, and does not throw', () => {
+    expect(askUserQuestionTimeoutMs(tempDir())).toBeUndefined()
+  })
+
+  it('prefers the managed value over the user file, as every managed setting does', () => {
+    const home = tempDir()
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ askUserQuestionTimeout: '5m' }))
+    const managedDir = tempDir()
+    writeFileSync(join(managedDir, 'managed-settings.json'), JSON.stringify({ askUserQuestionTimeout: '60s' }))
+    setManagedSettingsPath(join(managedDir, 'managed-settings.json'))
+    expect(askUserQuestionTimeoutMs(home)).toBe(60_000)
+  })
+})
+
+describe('askViaOverlay idle timeout', () => {
+  /** Drives askViaOverlay directly (exported for exactly this), capturing the live
+   * overlay the way openOverlay does for the full tool, plus the still-pending
+   * result promise so a test can await it once the timer fires. */
+  const openTimed = (options: Option[], multiSelect: boolean, timeoutMs: number | undefined) => {
+    let overlay: Overlay | undefined
+    const ctx = {
+      hasUI: true,
+      mode: 'tui',
+      ui: {
+        custom: (factory: CustomFactory) =>
+          new Promise((resolve) => {
+            overlay = factory(fakeTui(), theme, {}, resolve)
+          }),
+      },
+    }
+    const result = askViaOverlay({ question: 'Pick one', options: options as never }, ctx as never, options as never, multiSelect, timeoutMs)
+    if (!overlay) throw new Error('ui.custom factory was never invoked')
+    return { overlay, result }
+  }
+
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('never fires when no timeout is configured', async () => {
+    const { overlay } = openTimed(OPTIONS, false, undefined)
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    // No countdown line ever appears; the render staying countdown-free for ten
+    // full simulated minutes is the proof nothing ticks.
+    expect(overlay.render(40).some((line) => line.includes('Auto-continuing'))).toBe(false)
+  })
+
+  it('auto-continues a single-select with an empty answer after the idle period', async () => {
+    const { overlay, result } = openTimed(OPTIONS, false, 60_000)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await result).toEqual({ answer: '', wasCustom: false, timedOut: true })
+    void overlay
+  })
+
+  it('auto-continues a multiSelect with only what was already checked, not every option', async () => {
+    // Checking one of the two, not both: an implementation that submitted every
+    // option regardless of what was checked would pass a two-for-two fixture too.
+    const { overlay, result } = openTimed(OPTIONS, true, 60_000)
+    overlay.handleInput(RAW.space) // check Alpha only
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await result).toEqual({ answer: 'Alpha', wasCustom: false, timedOut: true })
+  })
+
+  it('a keypress resets the timer, so it does not fire on the original schedule', async () => {
+    const { overlay, result } = openTimed(OPTIONS, false, 60_000)
+    let settled = false
+    void result.then(() => {
+      settled = true
+    })
+
+    await vi.advanceTimersByTimeAsync(50_000)
+    overlay.handleInput(RAW.down) // resets the 60s window from here
+    await vi.advanceTimersByTimeAsync(50_000) // 100s of wall time, only 50s since the reset
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(10_000) // now 60s since the reset
+    expect(settled).toBe(true)
+  })
+
+  it('shows a countdown only in the last 20 seconds', async () => {
+    const { overlay } = openTimed(OPTIONS, false, 60_000)
+    await vi.advanceTimersByTimeAsync(39_000) // 21s remaining: still outside the window
+    expect(overlay.render(40).some((line) => line.includes('Auto-continuing'))).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_000) // 20s remaining: window opens
+    expect(overlay.render(40).some((line) => line.includes('Auto-continuing in 20s'))).toBe(true)
+  })
+
+  it('clears the idle interval once resolved through a normal path', async () => {
+    const { overlay } = openTimed(OPTIONS, false, 60_000)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    // Resolving a promise a second time is a spec-level no-op, so counting `.then()`
+    // calls can never tell a cleared interval from a leaked one that keeps firing
+    // into an already-settled result; whether the timer itself is still scheduled
+    // is the only oracle that actually distinguishes the two.
+    overlay.handleInput(RAW.enter) // resolves via the normal Enter path, not the timeout
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

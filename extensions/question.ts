@@ -6,9 +6,14 @@
  * Multiple questions per call are not batched; ask sequentially.
  */
 
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
+import { claudeConfigDir } from './internal/config-dir.js'
+import { readManagedSettings } from './internal/managed-settings.js'
 
 interface OptionWithDesc {
   label: string
@@ -24,6 +29,8 @@ interface QuestionDetails {
   answer: string | null
   wasCustom?: boolean
   multiSelect?: boolean
+  /** Auto-continued on askUserQuestionTimeout rather than answered or cancelled. */
+  timedOut?: boolean
 }
 
 // Options with labels and optional descriptions
@@ -70,6 +77,33 @@ function questionList(params: Partial<QuestionSpec> & { questions?: QuestionSpec
 const HEADER_MAX = 12
 export const shortHeader = (header: string | undefined): string | undefined => (header === undefined ? undefined : header.slice(0, HEADER_MAX))
 
+/** Claude's three accepted askUserQuestionTimeout spellings (`60s`, `5m`, `10m`), as
+ * milliseconds. Anything else, including unset, means no auto-continue. */
+export function parseAskUserQuestionTimeout(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined
+  const match = /^(\d+)(s|m)$/.exec(value.trim())
+  if (!match) return undefined
+  const amount = Number(match[1])
+  return match[2] === 's' ? amount * 1000 : amount * 60 * 1000
+}
+
+/** Claude scopes askUserQuestionTimeout to "User or managed": a project's own
+ * settings.json cannot set it, so a checked-out repository can never make the
+ * user's own dialogs auto-answer themselves. Managed wins over the user's file, as
+ * every managed setting does. `home` defaults to the real one and is a parameter
+ * only so a test can point it at a fixture without mocking node:os. */
+export function askUserQuestionTimeoutMs(home: string = os.homedir()): number | undefined {
+  const managed = readManagedSettings() as { askUserQuestionTimeout?: unknown }
+  const fromManaged = parseAskUserQuestionTimeout(managed.askUserQuestionTimeout)
+  if (fromManaged !== undefined) return fromManaged
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8')) as { askUserQuestionTimeout?: unknown }
+    return parseAskUserQuestionTimeout(parsed.askUserQuestionTimeout)
+  } catch {
+    return undefined
+  }
+}
+
 function checkbox(checked: boolean | undefined): string {
   if (checked === undefined) return ''
   return checked ? '[x] ' : '[ ] '
@@ -98,10 +132,13 @@ interface QuestionView {
   checked: boolean[]
   editor: Editor
   theme: Theme
+  /** Claude: "You see a countdown for the last 20 seconds." Undefined the rest of
+   * the idle window, and always when there is no configured timeout at all. */
+  countdownSeconds?: number
 }
 
 function buildQuestionLines(view: QuestionView): string[] {
-  const { width, question, header, options, optionIndex, editMode, multiSelect, checked, editor, theme } = view
+  const { width, question, header, options, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds } = view
   const lines: string[] = []
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
@@ -129,6 +166,9 @@ function buildQuestionLines(view: QuestionView): string[] {
 
   lines.push('')
   add(theme.fg('dim', navHint(editMode, multiSelect)))
+  if (countdownSeconds !== undefined) {
+    add(theme.fg('warning', ` Auto-continuing in ${countdownSeconds}s if idle · press any key to stay`))
+  }
   add(theme.fg('accent', '─'.repeat(width)))
 
   return lines
@@ -202,6 +242,11 @@ export default function question(pi: ExtensionAPI) {
         return new Text(theme.fg('warning', 'Cancelled'), 0, 0)
       }
 
+      if (details.timedOut) {
+        const already = details.answer ? theme.fg('muted', ` (already selected: ${details.answer})`) : ''
+        return new Text(theme.fg('warning', '⏱ Auto-continued (no response)') + already, 0, 0)
+      }
+
       if (details.wasCustom) {
         return new Text(theme.fg('success', '✓ ') + theme.fg('muted', '(wrote) ') + theme.fg('accent', details.answer), 0, 0)
       }
@@ -240,8 +285,10 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
 
   // ui.custom() is terminal-only: with a UI but no terminal (RPC mode) it resolves
   // undefined immediately, which would read as a cancel without ever asking. Ask
-  // through the dialog primitives there instead.
-  const result = ctx.mode === 'tui' ? await askViaOverlay(params, ctx, allOptions, multiSelect) : await askViaDialogs(params, ctx, allOptions, multiSelect)
+  // through the dialog primitives there instead. askUserQuestionTimeout is a TUI
+  // concept (a countdown, a keypress resetting it): the dialog-primitive fallback
+  // has no keyboard or visible countdown to drive it, so it is not applied there.
+  const result = ctx.mode === 'tui' ? await askViaOverlay(params, ctx, allOptions, multiSelect, askUserQuestionTimeoutMs()) : await askViaDialogs(params, ctx, allOptions, multiSelect)
 
   // Build simple options list for details; header/multiSelect appear only when set,
   // so single-select details are unchanged.
@@ -252,6 +299,18 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
     return {
       content: [{ type: 'text', text: 'User cancelled the selection' }],
       details: { ...base, answer: null } as QuestionDetails,
+    }
+  }
+
+  if (result.timedOut) {
+    // Claude: "tells Claude you may be away from your keyboard, so Claude proceeds
+    // on its own judgment and can re-ask later." Not framed as a cancel: `answer` is
+    // '' rather than null, so renderResult and a batch's own null-check both read it
+    // as "answered nothing, but not declined" rather than the user having said no.
+    const already = multiSelect && result.answer ? ` Already selected: ${result.answer}.` : ''
+    return {
+      content: [{ type: 'text', text: `No response after the configured idle timeout; the user may be away from the keyboard.${already} Proceed on your own judgment; you can ask again later if needed.` }],
+      details: { ...base, answer: result.answer, timedOut: true } as QuestionDetails,
     }
   }
 
@@ -268,14 +327,81 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext): Promise<{ co
   }
 }
 
-/** Terminal path: the full custom overlay (options list, checkboxes, inline editor). */
-function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean): Promise<{ answer: string; wasCustom: boolean; index?: number } | null> {
-  return ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number } | null>((tui: Parameters<Parameters<ExtensionContext['ui']['custom']>[0]>[0], theme: Theme, _kb: unknown, done: (value: { answer: string; wasCustom: boolean; index?: number } | null) => void) => {
+/** Claude: "You see a countdown for the last 20 seconds." */
+const COUNTDOWN_WINDOW_MS = 20_000
+/** Granularity of the idle-timer tick: fine enough that the countdown's displayed
+ * second changes on time, coarse enough not to re-render needlessly often. */
+const IDLE_TICK_MS = 250
+
+/** Terminal path: the full custom overlay (options list, checkboxes, inline editor).
+ *
+ * `timeoutMs`, when set, is Claude's askUserQuestionTimeout: "After a question sits
+ * that long with no input, the dialog closes on its own: it submits any options
+ * you'd already selected and tells Claude you may be away from your keyboard, so
+ * Claude proceeds on its own judgment and can re-ask later. You see a countdown for
+ * the last 20 seconds. Press any key to restart the timer." Terminal focus-in
+ * restarting the timer, the other documented reset trigger, is not implemented:
+ * pi's TUI input stream is not confirmed to carry the terminal's own focus-report
+ * escape sequences, and guessing at that risks misreading ordinary input as a
+ * focus event on a terminal that reports it differently. Exported so the timer
+ * mechanics are testable directly, independent of where timeoutMs itself is read
+ * from (askUserQuestionTimeoutMs, tested separately).
+ */
+export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean, timeoutMs?: number): Promise<{ answer: string; wasCustom: boolean; index?: number; timedOut?: boolean } | null> {
+  return ctx.ui.custom<{ answer: string; wasCustom: boolean; index?: number; timedOut?: boolean } | null>((tui: Parameters<Parameters<ExtensionContext['ui']['custom']>[0]>[0], theme: Theme, _kb: unknown, done: (value: { answer: string; wasCustom: boolean; index?: number; timedOut?: boolean } | null) => void) => {
     let optionIndex = 0
     let editMode = false
     const checked: boolean[] = allOptions.map(() => false)
     let cachedLines: string[] | undefined
     let cachedWidth: number | undefined
+
+    // deadline stays undefined for the whole overlay life when no timeout is
+    // configured, so every idle-timer branch below is a no-op in that case.
+    let deadline: number | undefined = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined
+    let idleTimer: ReturnType<typeof setInterval> | undefined
+    let lastCountdown: number | undefined
+
+    function stopIdleTimer(): void {
+      if (idleTimer !== undefined) clearInterval(idleTimer)
+      idleTimer = undefined
+    }
+
+    /** Every exit path (an answer, a cancel, or the timeout itself) goes through
+     * here, so the interval can never outlive the overlay it belongs to. */
+    function finish(value: { answer: string; wasCustom: boolean; index?: number; timedOut?: boolean } | null): void {
+      stopIdleTimer()
+      done(value)
+    }
+
+    function resetIdleTimer(): void {
+      if (timeoutMs === undefined) return
+      deadline = Date.now() + timeoutMs
+    }
+
+    function fireTimeout(): void {
+      // Claude: "submits any options you'd already selected". Single-select has
+      // nothing pre-committed (a selection only exists once Enter confirms it), so
+      // its timeout answer is empty rather than whatever option merely had focus.
+      const answer = multiSelect ? selectedLabels(allOptions, checked) : ''
+      finish({ answer, wasCustom: false, timedOut: true })
+    }
+
+    if (timeoutMs !== undefined) {
+      idleTimer = setInterval(() => {
+        if (deadline === undefined) return
+        const remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) {
+          fireTimeout()
+          return
+        }
+        const remainingSeconds = Math.ceil(remainingMs / 1000)
+        const nextCountdown = remainingMs <= COUNTDOWN_WINDOW_MS ? remainingSeconds : undefined
+        if (nextCountdown !== lastCountdown) {
+          lastCountdown = nextCountdown
+          refresh()
+        }
+      }, IDLE_TICK_MS)
+    }
 
     const editorTheme: EditorTheme = {
       borderColor: (s) => theme.fg('accent', s),
@@ -292,7 +418,7 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
     editor.onSubmit = (value) => {
       const trimmed = value.trim()
       if (trimmed) {
-        done({ answer: trimmed, wasCustom: true })
+        finish({ answer: trimmed, wasCustom: true })
       } else {
         editMode = false
         editor.setText('')
@@ -306,6 +432,11 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
     }
 
     function handleInput(data: string) {
+      // Claude: "Press any key to restart the timer." Every branch below returns
+      // through this function, so resetting unconditionally on entry covers all of
+      // them, including the ones (arrow keys, space) that never reach `finish`.
+      resetIdleTimer()
+
       if (editMode) {
         if (matchesKey(data, Key.escape)) {
           editMode = false
@@ -337,7 +468,7 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
 
       if (matchesKey(data, Key.enter)) {
         if (multiSelect) {
-          done({ answer: selectedLabels(allOptions, checked), wasCustom: false })
+          finish({ answer: selectedLabels(allOptions, checked), wasCustom: false })
           return
         }
         const selected = allOptions[optionIndex]
@@ -345,20 +476,20 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
           editMode = true
           refresh()
         } else {
-          done({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
+          finish({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
         }
         return
       }
 
       if (matchesKey(data, Key.escape)) {
-        done(null)
+        finish(null)
       }
     }
 
     function render(width: number): string[] {
       if (cachedLines && cachedWidth === width) return cachedLines
       cachedWidth = width
-      cachedLines = buildQuestionLines({ width, question: params.question, header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme })
+      cachedLines = buildQuestionLines({ width, question: params.question, header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds: lastCountdown })
       return cachedLines
     }
 
@@ -369,6 +500,10 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
         cachedLines = undefined
       },
       handleInput,
+      // Belt and suspenders alongside finish()'s own stopIdleTimer: if the host ever
+      // tears the overlay down through a path that does not go through `done`
+      // (finish's only caller), the interval still gets cleared here.
+      dispose: stopIdleTimer,
     }
   })
 }
@@ -376,7 +511,7 @@ function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOptions: 
 /** Dialog-primitive fallback for UI without a terminal (RPC mode supports
  * select/input/notify but not custom components). Mirrors the overlay's result
  * shape; a dismissed dialog reads as a cancel, same as Escape in the overlay. */
-async function askViaDialogs(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean): Promise<{ answer: string; wasCustom: boolean; index?: number } | null> {
+async function askViaDialogs(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean): Promise<{ answer: string; wasCustom: boolean; index?: number; timedOut?: boolean } | null> {
   const header = shortHeader(params.header)
   const title = header ? `[${header}] ${params.question}` : params.question
   // Number the labels: ctx.ui.select returns the chosen label string, so duplicate
