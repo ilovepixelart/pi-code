@@ -216,7 +216,7 @@ interface Harness {
   sentOptions: unknown[]
   home: string
   cwd: string
-  sessionStart: (trusted?: boolean | undefined, approve?: boolean) => Promise<void>
+  sessionStart: (trusted?: boolean | undefined, approve?: boolean, hasUI?: boolean) => Promise<void>
   shutdown: () => Promise<void>
   mcpCommand: () => Promise<void>
   toolNames: () => string[]
@@ -254,9 +254,9 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
 
   // Project config now needs approval as well as trust: pi reports a .claude-shaped repo
   // as trusted without ever asking, so project-approval prompts at the point of use.
-  const makeCtx = (trusted?: boolean, approve = true, idle = true): unknown => ({
+  const makeCtx = (trusted?: boolean, approve = true, idle = true, hasUI = true): unknown => ({
     cwd,
-    hasUI: true,
+    hasUI,
     ui: {
       notify: (message: string, level: string) => notifications.push({ message, level }),
       confirm: opts.confirm ?? (async () => approve),
@@ -290,8 +290,8 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     sentOptions,
     home,
     cwd,
-    sessionStart: async (trusted?: boolean, approve = true) => {
-      await handlers.get('session_start')?.({ reason: 'startup' }, makeCtx(trusted, approve))
+    sessionStart: async (trusted?: boolean, approve = true, hasUI = true) => {
+      await handlers.get('session_start')?.({ reason: 'startup' }, makeCtx(trusted, approve, true, hasUI))
     },
     shutdown: async () => {
       await handlers.get('session_shutdown')?.({}, makeCtx(true))
@@ -1325,6 +1325,75 @@ describe('mcp failure reporting', () => {
     await booting
 
     expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 2000ms (0 tools)'])
+  })
+
+  it('returns from session_start without waiting for a hung server, in an interactive session', async () => {
+    // Claude: "MCP startup is non-blocking by default: servers connect in the
+    // background and their tools become available as they finish." Before this,
+    // session_start awaited the full connect batch, so one unreachable server cost
+    // the whole session's startup its own MCP_TIMEOUT (30s default) x retries.
+    hoisted.control.connect = () => new Promise<void>(() => {})
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { hung: { command: 'sleep' } } })
+    let settled = false
+    const booting = harness.sessionStart().then(() => {
+      settled = true
+    })
+    // MCP_CONNECT_TIMEOUT_MS default (5s) is well under the connect's own 30s
+    // deadline: session_start must have returned by here even though the server is
+    // still "connecting" and will not fail for another 25 simulated seconds.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(settled).toBe(true)
+    expect(await statusLinesOf(harness)).toEqual(['hung: connecting (0 tools)'])
+
+    // The still-connecting server is not miscounted as failed while it is pending.
+    await vi.advanceTimersByTimeAsync(25_000)
+    await booting
+  })
+
+  it('publishes a second summary once a server past the startup deadline finishes late', async () => {
+    let resolveConnect: (() => void) | undefined
+    hoisted.control.connect = () => new Promise<void>((r) => (resolveConnect = r))
+    withTools([{ name: 'go' }])
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const before = harness.notifications.length
+    const booting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await booting
+    // Nothing to report yet at the deadline: the one server is still "connecting",
+    // neither connected nor failed, so the startup summary's guard skips the notify.
+    expect(harness.notifications.length).toBe(before)
+
+    resolveConnect?.()
+    // Fake timers active: nothing further is scheduled on a real clock, so a
+    // microtask-queue flush (no simulated time passing) is enough for the rest of
+    // the now-unblocked connect chain, and the deferred publish after it, to settle.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.notifications.length).toBe(before + 1)
+    expect(harness.notifications.at(-1)?.message).toBe('MCP: 1 tools from 1 servers')
+  })
+
+  it('still waits for every server in a headless (no UI) session, as Claude documents for -p', async () => {
+    // Claude: non-interactive mode "waits for still-pending servers before the first
+    // turn regardless of this variable", since a -p run has no later turn to react to
+    // a tool that arrives after the fact.
+    hoisted.control.connect = () => new Promise<void>(() => {})
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { hung: { command: 'sleep' } } })
+    let settled = false
+    const booting = harness.sessionStart(true, true, false).then(() => {
+      settled = true
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(25_000)
+    await booting
+    expect(settled).toBe(true)
   })
 
   it('accepts a scientific-notation MCP_TIMEOUT spelling, reading 2e3 as 2000', async () => {

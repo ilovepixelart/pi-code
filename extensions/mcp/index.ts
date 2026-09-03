@@ -49,7 +49,7 @@ import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, 
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
-import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isUnauthorized, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
+import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
@@ -563,6 +563,23 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
   }
 
+  /** Publishes the current alias set and the connection banner. `'connecting'`
+   * servers are excluded from both connected and failed counts: they are neither,
+   * and while the non-blocking startup race below is still in flight some legitimately
+   * are. Called once right after startup (whether or not every server settled by
+   * then) and again when a still-connecting tail finishes, so a server that connects
+   * late still gets its aliases published and counted. */
+  function publishConnectionSummary(ctx: ExtensionContext): void {
+    pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
+    const connected = [...status.values()].filter((s) => s.state === 'connected')
+    const failed = [...status.entries()].filter(([, s]) => s.state !== 'connected' && s.state !== 'connecting')
+    if (connected.length > 0 || failed.length > 0) {
+      const total = connected.reduce((sum, s) => sum + s.tools, 0)
+      const failNote = failed.length > 0 ? `, ${failed.length} failed` : ''
+      ctx.ui.notify(`MCP: ${total} tools from ${connected.length} servers${failNote}`, failed.length > 0 ? 'warning' : 'info')
+    }
+  }
+
   pi.on('session_start', async (_event, ctx) => {
     // Reset the status map so /mcp and the banner reflect only this session's config: a
     // server present last session but not this one must not linger as "connected". The
@@ -592,21 +609,27 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // file leaves the normal scopes untouched; a present but corrupt file fails closed to an
     // empty set (see loadManagedMcpServers).
     const managed = loadManagedMcpServers()
-    if (managed !== null) {
-      await connectManagedExclusive(managed, policy, authUi)
-    } else {
-      await connectNormalScopes(ctx, policy, authUi)
-    }
-
-    pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
-
-    const connected = [...status.values()].filter((s) => s.state === 'connected')
-    const failed = [...status.entries()].filter(([, s]) => s.state !== 'connected')
-    if (connected.length > 0 || failed.length > 0) {
-      const total = connected.reduce((sum, s) => sum + s.tools, 0)
-      const failNote = failed.length > 0 ? `, ${failed.length} failed` : ''
-      ctx.ui.notify(`MCP: ${total} tools from ${connected.length} servers${failNote}`, failed.length > 0 ? 'warning' : 'info')
-    }
+    const connecting = managed !== null ? connectManagedExclusive(managed, policy, authUi) : connectNormalScopes(ctx, policy, authUi)
+    // Claude: "MCP startup is non-blocking by default: servers connect in the
+    // background and their tools become available as they finish." A slow or
+    // unreachable server no longer costs the whole session's startup its own
+    // MCP_TIMEOUT x retries; alwaysLoad-style forced waiting and the ToolSearch/
+    // WaitForMcpServers mechanism that lets the model itself wait on a pending
+    // server's tools are not implemented, so a call to a tool that has not
+    // registered yet still just finds no such tool, same as before it connected.
+    //
+    // Claude also states non-interactive mode "waits for still-pending servers
+    // before the first turn regardless of this variable", because a -p run has no
+    // later turn to react to late-arriving tools; a headless ctx (no UI) keeps the
+    // prior fully-blocking wait for the same reason.
+    const settled = !ctx.hasUI
+      ? await connecting.then(() => true)
+      : await withTimeout(connecting, mcpConnectTimeoutMs(), 'mcp startup').then(
+          () => true,
+          () => false,
+        )
+    publishConnectionSummary(ctx)
+    if (!settled) void connecting.then(() => publishConnectionSummary(ctx))
   })
 
   pi.on('session_shutdown', async () => {
