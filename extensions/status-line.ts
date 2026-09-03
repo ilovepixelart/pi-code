@@ -36,12 +36,25 @@ import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { repoRoot } from './internal/project-root.js'
 import { readSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
 
 const COMMAND_TIMEOUT_MS = 5_000
 const DEBOUNCE_MS = 300
+
+/** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
+ * checkout there, and a directory in an ordinary clone. */
+function isGitWorktree(cwd: string): boolean {
+  const root = repoRoot(cwd)
+  if (root === undefined) return false
+  try {
+    return fs.statSync(path.join(root, '.git')).isFile()
+  } catch {
+    return false
+  }
+}
 
 /** Claude sends its CLI version; pi-code's own version is the honest analogue. */
 const PACKAGE_VERSION = (() => {
@@ -235,6 +248,16 @@ export default function statusLine(pi: ExtensionAPI) {
     ctx.ui.setStatus('pi-code-status', commandLine ?? builtIn)
   }
 
+  /** The --add-dir directories, the flag pi-code registers for Claude's additional
+   * working directories. Empty when none were given, which is the documented shape. */
+  function addedDirs(): string[] {
+    const raw = String(pi.getFlag?.('add-dir') ?? '')
+    return raw
+      .split(',')
+      .map((dir) => dir.trim())
+      .filter(Boolean)
+  }
+
   /** The stdin payload per Claude's documented statusline contract. */
   function buildPayload(ctx: ExtensionContext): Record<string, unknown> {
     const usage = ctx.getContextUsage() ?? { tokens: null, contextWindow: 0, percent: null }
@@ -249,9 +272,16 @@ export default function statusLine(pi: ExtensionAPI) {
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
       version: PACKAGE_VERSION,
-      // added_dirs is always empty: pi has no /add-dir; the field stays present
-      // because Claude documents "Empty array if none have been added".
-      workspace: { current_dir: ctx.cwd, project_dir: ctx.cwd, added_dirs: [] },
+      // project_dir is the repository, not the directory the session started in: a
+      // script labelling the project showed whichever subdirectory it was launched
+      // from. git_worktree reports the .git file a worktree carries in place of a
+      // directory. added_dirs comes from the --add-dir flag pi-code registers.
+      workspace: {
+        current_dir: ctx.cwd,
+        project_dir: repoRoot(ctx.cwd) ?? ctx.cwd,
+        git_worktree: isGitWorktree(ctx.cwd),
+        added_dirs: addedDirs(),
+      },
       // Both fields, per Claude's documented contract: published statusline scripts
       // read .model.display_name and render the literal "null" when it is missing.
       model: { id: model?.id ?? '', display_name: model?.name ?? model?.id ?? '' },
@@ -269,17 +299,17 @@ export default function statusLine(pi: ExtensionAPI) {
         total_input_tokens: usage.tokens,
         // The per-component breakdown from the last message's usage, which
         // ctx.getContextUsage() (input-side estimate only) cannot provide.
-        ...(lastUsage
+        // Present before the first response too, as Claude sends them: a script
+        // reading current_usage gets null rather than undefined.
+        total_output_tokens: lastUsage?.output ?? 0,
+        current_usage: lastUsage
           ? {
-              total_output_tokens: lastUsage.output,
-              current_usage: {
-                input_tokens: lastUsage.input,
-                output_tokens: lastUsage.output,
-                cache_read_input_tokens: lastUsage.cacheRead,
-                cache_creation_input_tokens: lastUsage.cacheWrite,
-              },
+              input_tokens: lastUsage.input,
+              output_tokens: lastUsage.output,
+              cache_read_input_tokens: lastUsage.cacheRead,
+              cache_creation_input_tokens: lastUsage.cacheWrite,
             }
-          : {}),
+          : null,
       },
       // The true combined total when a message usage is known, else the input-side estimate.
       exceeds_200k_tokens: (lastUsage?.totalTokens ?? usage.tokens ?? 0) > 200_000,
@@ -323,9 +353,17 @@ export default function statusLine(pi: ExtensionAPI) {
       const result = await runHookCommand(config.command, buildPayload(ctx), COMMAND_TIMEOUT_MS, undefined, undefined, (kill) => {
         killInflight = kill
       })
-      const first = result.stdout.split('\n')[0].trimEnd()
+      // Claude: "Your script can output multiple lines to create a richer display."
+      // pi has one row for every extension status and replaces newlines with spaces
+      // before rendering it (footer.js sanitizeStatusText), so the rows are joined
+      // here rather than dropped; taking only the first silently lost the rest.
+      const rows = result.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join(' ')
       const pad = ' '.repeat(config.padding)
-      commandLine = first ? `${pad}${first}${pad}` : undefined
+      commandLine = rows ? `${pad}${rows}${pad}` : undefined
       show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
     } catch {
       // A replaced or reloaded session invalidates ctx while the command is in
@@ -463,9 +501,13 @@ export default function statusLine(pi: ExtensionAPI) {
     // command change re-resolves and re-runs.
     disposeSettingsWatch()
     disposeSettingsWatch = watchSettingsFiles(files, () => {
+      const previousCommand = config?.command
       config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
       armRefresh()
-      scheduleRefresh()
+      // The debounce batches rapid triggers, but a command the user just edited has
+      // nothing to batch with: run it now so the result of the edit is immediate.
+      if (config?.command !== previousCommand) void runCommand(ctx)
+      else scheduleRefresh()
     })
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
     scheduleRefresh()
