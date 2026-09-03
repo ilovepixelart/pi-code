@@ -362,6 +362,107 @@ describe('import budget', () => {
   })
 })
 
+describe('CLAUDE_CODE_DISABLE_CLAUDE_MDS', () => {
+  // Claude: "Set to 1 to prevent loading any CLAUDE.md memory files into context,
+  // including user, project, and auto memory files."
+  afterEach(() => {
+    delete process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS
+  })
+
+  it('drops a native (pi auto-discovered) context file from the prompt', async () => {
+    const dir = tempDir()
+    const claudeMd = join(dir, 'CLAUDE.md')
+    writeFileSync(claudeMd, 'AUTO MEMORY CONTENT')
+    process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+
+    const handlers = new Map<string, (event: unknown) => Promise<unknown>>()
+    contextImports({ on: (name: string, fn: (event: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+    // pi wraps each native context file in this block before handing the prompt over;
+    // rewriteNativeBlocks matches on that exact wrapper to remove or keep one.
+    const wrapped = instructionsBlock(claudeMd, 'AUTO MEMORY CONTENT')
+    const event = { systemPrompt: `BASE\n\n${wrapped}`, systemPromptOptions: { cwd: dir, contextFiles: [{ path: claudeMd, content: 'AUTO MEMORY CONTENT' }] } }
+    const result = (await handlers.get('before_agent_start')?.(event)) as { systemPrompt: string } | undefined
+
+    expect(result?.systemPrompt ?? event.systemPrompt).not.toContain('AUTO MEMORY CONTENT')
+  })
+
+  it('skips user CLAUDE.md and CLAUDE.local.md loading in session_start, without asking to trust the project', async () => {
+    // The final prompt already excludes this content through before_agent_start's own
+    // excluded() gate (added alongside this one, for pi's native files), so asserting on
+    // the prompt alone cannot tell this gate apart from that one: either gate alone
+    // produces the same rendered output. What is unique to gating session_start is that
+    // the load, and the isProjectApproved trust prompt it would otherwise raise for an
+    // unfamiliar project (CLAUDE.local.md is itself in the CLAUDE_SHAPED list, so a fresh
+    // directory containing only that file still triggers the prompt), never happens.
+    const savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+    process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+    try {
+      const cwd = tempDir()
+      writeFileSync(join(cwd, 'CLAUDE.local.md'), 'LOCAL NOTES SHOULD NOT LOAD')
+      let confirmCalls = 0
+
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+      contextImports({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+      await handlers.get('session_start')?.(
+        {},
+        {
+          cwd,
+          isProjectTrusted: () => true,
+          hasUI: true,
+          ui: {
+            notify: () => {},
+            confirm: async () => {
+              confirmCalls++
+              return true
+            },
+          },
+        },
+      )
+      const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: [] } }, {})) as { systemPrompt: string } | undefined
+
+      expect(confirmCalls).toBe(0)
+      expect(result?.systemPrompt ?? 'BASE').not.toContain('LOCAL NOTES SHOULD NOT LOAD')
+    } finally {
+      if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+    }
+  })
+
+  it('DOES ask to trust the project for the same fixture without the disable flag, confirming the spy is meaningful', async () => {
+    const savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'ci-agent-'))
+    try {
+      const cwd = tempDir()
+      writeFileSync(join(cwd, 'CLAUDE.local.md'), 'LOCAL NOTES')
+      let confirmCalls = 0
+
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+      contextImports({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
+      await handlers.get('session_start')?.(
+        {},
+        {
+          cwd,
+          isProjectTrusted: () => true,
+          hasUI: true,
+          ui: {
+            notify: () => {},
+            confirm: async () => {
+              confirmCalls++
+              return true
+            },
+          },
+        },
+      )
+
+      expect(confirmCalls).toBe(1)
+    } finally {
+      if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+    }
+  })
+})
+
 describe('extension wiring', () => {
   it('appends only imported content within the project root', async () => {
     const dir = tempDir()

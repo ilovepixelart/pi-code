@@ -954,29 +954,35 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     userContext = undefined
     projectDotClaude = undefined
 
-    // ~/.claude/CLAUDE.md, Claude's user-scope memory. The user's own file, so no
-    // project approval is required; a missing file simply leaves it unset.
-    const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
-    const userContent = readContextFile(userClaudeMd)
-    if (userContent !== undefined) userContext = { path: userClaudeMd, content: userContent }
+    // Claude: "Set to 1 to prevent loading any CLAUDE.md memory files into context,
+    // including user, project, and auto memory files." The state cleared above stays
+    // empty, so before_agent_start's assembly finds nothing to add; the trust prompt
+    // below is skipped too, since there is nothing left for it to gate.
+    if (process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS !== '1') {
+      // ~/.claude/CLAUDE.md, Claude's user-scope memory. The user's own file, so no
+      // project approval is required; a missing file simply leaves it unset.
+      const userClaudeMd = path.join(claudeConfigDir(os.homedir()), 'CLAUDE.md')
+      const userContent = readContextFile(userClaudeMd)
+      if (userContent !== undefined) userContext = { path: userClaudeMd, content: userContent }
 
-    // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
-    // skips it. A cloned repo can ship one, so it is gated like other project config.
-    // Claude loads local context from the whole hierarchy above the working
-    // directory, ordered root down to cwd; the walk is bounded at the repository
-    // root like every other project-config search here. The project-scope alternate
-    // ./.claude/CLAUDE.md (nearest at or above cwd) is repo-controlled too, so both
-    // ride the one approval decision.
-    const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
-    const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
-    if ((candidates.length > 0 || dotClaudeMd !== null) && (await isProjectApproved(ctx))) {
-      for (const candidate of candidates) {
-        const content = readContextFile(candidate)
-        if (content !== undefined) localContexts.push({ path: candidate, content })
-      }
-      if (dotClaudeMd !== null) {
-        const content = readContextFile(dotClaudeMd)
-        if (content !== undefined) projectDotClaude = { path: dotClaudeMd, content }
+      // CLAUDE.local.md is Claude Code's personal sidecar of CLAUDE.md; pi's own loader
+      // skips it. A cloned repo can ship one, so it is gated like other project config.
+      // Claude loads local context from the whole hierarchy above the working
+      // directory, ordered root down to cwd; the walk is bounded at the repository
+      // root like every other project-config search here. The project-scope alternate
+      // ./.claude/CLAUDE.md (nearest at or above cwd) is repo-controlled too, so both
+      // ride the one approval decision.
+      const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
+      const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+      if ((candidates.length > 0 || dotClaudeMd !== null) && (await isProjectApproved(ctx))) {
+        for (const candidate of candidates) {
+          const content = readContextFile(candidate)
+          if (content !== undefined) localContexts.push({ path: candidate, content })
+        }
+        if (dotClaudeMd !== null) {
+          const content = readContextFile(dotClaudeMd)
+          if (content !== undefined) projectDotClaude = { path: dotClaudeMd, content }
+        }
       }
     }
     // Read after the local-context flow so an approval it just recorded is honored.
@@ -1014,7 +1020,12 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
       envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: repoRoot(cwd) ?? cwd }
     }
     const { managed, excludeGlobs, projectRoot } = envCache
-    const excluded = (absPath: string): boolean => isExcludedPath(absPath, excludeGlobs, home)
+    // CLAUDE_CODE_DISABLE_CLAUDE_MDS also covers pi's own auto-discovered native context
+    // files ("including... auto memory files"), which session_start's gate cannot reach
+    // since pi loads them itself. Routing through the exclusion path already used for
+    // claudeMdExcludes drops the block, strips the InstructionsLoaded event, and skips
+    // import expansion for it, exactly as an excluded file already does.
+    const excluded = (absPath: string): boolean => process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1' || isExcludedPath(absPath, excludeGlobs, home)
 
     // claudeMdExcludes drops an excluded file's block from the assembled prompt and
     // from import expansion; surviving blocks get block-level comments stripped.

@@ -50,7 +50,12 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
   // Claude's precedence: enterprise (the skills directory beside the managed
   // settings file) overrides personal, and personal overrides project; discovery
   // here is first-match, so higher precedence goes first.
-  const candidates = [path.join(path.dirname(managedSettingsFile()), '.claude', 'skills'), path.join(claudeConfigDir(home), 'skills')]
+  // Claude: "Set to 1 to skip loading skills from the system-wide managed skills
+  // directory. Useful for container or CI sessions that should not load
+  // operator-provisioned skills." The enterprise dir beside managed-settings.json is
+  // that directory here; personal and project skills are unaffected.
+  const enterprise = process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS === '1' ? [] : [path.join(path.dirname(managedSettingsFile()), '.claude', 'skills')]
+  const candidates = [...enterprise, path.join(claudeConfigDir(home), 'skills')]
   // Enabled plugins contribute their skills directories. pi's loader names a
   // skill by its directory, so a plugin skill registers without Claude's
   // /plugin: prefix; a rename-free approximation, disclosed in the README.

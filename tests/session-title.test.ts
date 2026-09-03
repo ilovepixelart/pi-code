@@ -79,6 +79,28 @@ describe('session auto-titling', () => {
     expect(t.getName()).toBe('User Chosen Name')
   })
 
+  it('does nothing when CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set', async () => {
+    // Claude: "disable automatic terminal title updates based on conversation context.
+    // In Agent SDK and claude -p sessions, this also skips the background small/fast-model
+    // request that generates the session title." setSessionName is pi's only title sink
+    // (it "refreshes the terminal/tab title natively"), so skipping it skips both.
+    process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE = '1'
+    let called = false
+    setCompleteBackend(async () => {
+      called = true
+      return assistantMsg('Model Title')
+    })
+    try {
+      const t = setup()
+      await t.settle([userEntry('some message')])
+      expect(called).toBe(false)
+      expect(t.namesSet).toEqual([])
+      expect(t.getName()).toBeUndefined()
+    } finally {
+      delete process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+    }
+  })
+
   it('skips titling and never throws when the completion fails', async () => {
     const t = setup()
     setCompleteBackend(async () => {
