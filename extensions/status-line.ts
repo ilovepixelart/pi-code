@@ -44,6 +44,18 @@ import { readActiveStyleName, settingsFiles } from './output-styles.js'
 const COMMAND_TIMEOUT_MS = 5_000
 const DEBOUNCE_MS = 300
 
+/** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
+ * checkout there, and a directory in an ordinary clone. */
+function isGitWorktree(cwd: string): boolean {
+  const root = repoRoot(cwd)
+  if (root === undefined) return false
+  try {
+    return fs.statSync(path.join(root, '.git')).isFile()
+  } catch {
+    return false
+  }
+}
+
 /** Claude sends its CLI version; pi-code's own version is the honest analogue. */
 const PACKAGE_VERSION = (() => {
   try {
@@ -234,18 +246,6 @@ export default function statusLine(pi: ExtensionAPI) {
 
   function show(ctx: ExtensionContext, builtIn: string): void {
     ctx.ui.setStatus('pi-code-status', commandLine ?? builtIn)
-  }
-
-  /** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
-   * checkout there, and a directory in an ordinary clone. */
-  function isGitWorktree(cwd: string): boolean {
-    const root = repoRoot(cwd)
-    if (root === undefined) return false
-    try {
-      return fs.statSync(path.join(root, '.git')).isFile()
-    } catch {
-      return false
-    }
   }
 
   /** The --add-dir directories, the flag pi-code registers for Claude's additional
