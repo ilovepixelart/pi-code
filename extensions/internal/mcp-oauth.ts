@@ -72,6 +72,14 @@ function storeFileFor(serverName: string, endpoint?: string): string {
   return path.join(getAgentDir(), 'mcp-oauth', `${safe}-${digest}.json`)
 }
 
+/** MCP_OAUTH_CALLBACK_PORT parsed, or undefined when unset or not a plain integer. */
+function envCallbackPort(): number | undefined {
+  const raw = process.env.MCP_OAUTH_CALLBACK_PORT
+  if (raw === undefined || raw.trim() === '') return undefined
+  const parsed = Number(raw)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
 export class FileOAuthProvider implements OAuthClientProvider {
   private readonly storePath: string
   private readonly data: StoredAuth
@@ -107,15 +115,19 @@ export class FileOAuthProvider implements OAuthClientProvider {
   }
 
   /** The configured callbackPort alone, absent when only a remembered port exists.
-   * The caller needs the two apart: a configured port is a hard requirement. */
+   * The caller needs the two apart: a configured port is a hard requirement. Falls
+   * back to MCP_OAUTH_CALLBACK_PORT, Claude's "alternative to --callback-port when
+   * adding an MCP server with pre-configured credentials"; pi-code has no `mcp add`
+   * command, so the env var applies as a default for any server naming no port of
+   * its own rather than only ones added that way. */
   configuredRedirectPort(): number | undefined {
-    return this.oauth?.callbackPort
+    return this.oauth?.callbackPort ?? envCallbackPort()
   }
 
   /** The configured callbackPort (Claude: for pre-registered redirect URIs), else
    * the port a prior login registered, so a re-login can bind the same one. */
   savedRedirectPort(): number | undefined {
-    return this.oauth?.callbackPort ?? this.data.redirectPort
+    return this.oauth?.callbackPort ?? envCallbackPort() ?? this.data.redirectPort
   }
 
   /** Record the loopback port the callback server actually bound; the redirect

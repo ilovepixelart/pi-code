@@ -56,6 +56,10 @@ export interface HookSpawnOptions {
   shell?: string
   /** The declaring plugin's paths, exported to the child. */
   plugin?: { root: string; dataDir: string }
+  /** Claude: "set automatically to the current session ID in ... hook command
+   * subprocesses ... this matches the session_id field in the hook JSON input and
+   * is updated on /clear." Absent in a stub context with no session manager. */
+  sessionId?: string
 }
 
 export type HookCommandRunner = (command: string, payload: unknown, timeoutMs: number, options?: HookSpawnOptions) => Promise<HookRunResult>
@@ -136,7 +140,7 @@ function shellInvocation(command: string, shell: string | undefined): { file: st
   return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
 }
 
-export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, { projectDir, args, onChild, shell, plugin } = {}) =>
+export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, { projectDir, args, onChild, shell, plugin, sessionId } = {}) =>
   new Promise((resolve) => {
     // /bin/sh by absolute path off Windows, so the shell can't be resolved through an
     // attacker-controlled PATH; on Windows the resolver follows Claude's documented Git
@@ -150,6 +154,11 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, {
     // detection cannot see the captured terminal.
     const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
     if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
+    // Claude: "Claude Code sets this to its own process ID in the subprocesses it
+    // spawns: Bash and PowerShell tool commands and hook commands." Set unconditionally,
+    // since every hook child qualifies.
+    env.CLAUDE_PID = String(process.pid)
+    if (sessionId) env.CLAUDE_CODE_SESSION_ID = sessionId
     // Claude: "All three are exported as environment variables to hook processes and to
     // MCP and LSP server subprocesses", so a plugin script can read them rather than
     // depend on inline substitution. The data directory is "created on first reference",

@@ -283,7 +283,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
         if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms)
         if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-        return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined })
+        return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined, sessionId: merged.session_id as string | undefined })
       }
       // Claude's `once` (skill-frontmatter hooks only): removed after the first
       // successful run; a failure, block, or timeout leaves it in place.

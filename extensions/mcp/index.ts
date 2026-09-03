@@ -579,7 +579,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     projectConnected = false
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
-    sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd }
+    sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
     const authUi = authUiFor(ctx)
     sessionAuthUi = authUi
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They

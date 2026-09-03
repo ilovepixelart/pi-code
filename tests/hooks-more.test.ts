@@ -230,9 +230,11 @@ describe('runHookCommand process wiring', () => {
     expect(record.args).toEqual(['-c', 'guard.sh'])
     // `detached` is what makes the shell a process-group leader, so a timeout can kill
     // the grandchildren a compound command forks. Claude marks every subprocess it
-    // spawns with CLAUDECODE=1 and per-call children with CLAUDE_CODE_CHILD_SESSION=1;
-    // COLUMNS/LINES ride along only when the parent terminal reports dimensions.
-    const expectedEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
+    // spawns with CLAUDECODE=1 and per-call children with CLAUDE_CODE_CHILD_SESSION=1
+    // and its own CLAUDE_PID; COLUMNS/LINES ride along only when the parent terminal
+    // reports dimensions. No sessionId was passed here, so CLAUDE_CODE_SESSION_ID
+    // is absent, covered by its own test below.
+    const expectedEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_PID: String(process.pid) }
     if (process.stdout.columns) expectedEnv.COLUMNS = String(process.stdout.columns)
     if (process.stdout.rows) expectedEnv.LINES = String(process.stdout.rows)
     expect(record.options).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env: expectedEnv })
@@ -787,6 +789,23 @@ describe('hooks extension session_start', () => {
     expect(options.env?.CLAUDE_PROJECT_DIR).toBe(project)
     expect(options.env?.CLAUDECODE).toBe('1')
     expect(options.env?.PATH).toBe(process.env.PATH)
+  })
+
+  it('exports CLAUDE_CODE_SESSION_ID and CLAUDE_PID to hook commands', async () => {
+    // Claude: CLAUDE_CODE_SESSION_ID is "set automatically to the current session ID in
+    // Bash and PowerShell tool subprocesses, hook command subprocesses, and stdio MCP
+    // server subprocesses"; CLAUDE_PID is "Claude Code's own process ID in the
+    // subprocesses it spawns: Bash and PowerShell tool commands and hook commands."
+    const project = tempDir('hooks-proj-')
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: project })
+    await ext.toolCall('bash', {})
+
+    const options = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_CODE_SESSION_ID).toBe('sess-1')
+    expect(options.env?.CLAUDE_PID).toBe(String(process.pid))
   })
 
   it('loads project settings after user settings when the project is trusted', async () => {

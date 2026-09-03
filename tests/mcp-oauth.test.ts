@@ -95,6 +95,33 @@ describe('FileOAuthProvider', () => {
     if (viaIpv6 === 200) expect(await code).toBe('v6-code')
   })
 
+  it('falls back to MCP_OAUTH_CALLBACK_PORT when no per-server oauth.callbackPort is set', () => {
+    // Claude: "Fixed port for the OAuth redirect callback, as an alternative to
+    // --callback-port when adding an MCP server with pre-configured credentials."
+    // pi-code has no `mcp add` command, so the env var applies as a default for any
+    // server that names no port of its own; a per-server setting still wins.
+    process.env.MCP_OAUTH_CALLBACK_PORT = '9100'
+    try {
+      const bare = new FileOAuthProvider('linear', () => {})
+      expect(bare.configuredRedirectPort()).toBe(9100)
+      expect(bare.savedRedirectPort()).toBe(9100)
+
+      const named = new FileOAuthProvider('linear', () => {}, { callbackPort: 7000 })
+      expect(named.configuredRedirectPort()).toBe(7000)
+    } finally {
+      delete process.env.MCP_OAUTH_CALLBACK_PORT
+    }
+  })
+
+  it('ignores an unparseable MCP_OAUTH_CALLBACK_PORT', () => {
+    process.env.MCP_OAUTH_CALLBACK_PORT = 'not-a-port'
+    try {
+      expect(new FileOAuthProvider('linear', () => {}).configuredRedirectPort()).toBeUndefined()
+    } finally {
+      delete process.env.MCP_OAUTH_CALLBACK_PORT
+    }
+  })
+
   it('persists the redirect port so a re-login can reuse it', () => {
     const first = new FileOAuthProvider('linear', () => {})
     expect(first.savedRedirectPort()).toBeUndefined()
