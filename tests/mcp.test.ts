@@ -293,8 +293,17 @@ describe('mcp adapter helpers', () => {
   })
 
   it('separates always-loaded user config from trust-gated project config', () => {
-    expect(userConfigPaths('/home')).toEqual([join('/home', '.claude.json'), join('/home', '.pi', 'agent', 'mcp.json')])
+    expect(userConfigPaths('/home')).toEqual([join('/home', '.claude.json'), join(process.env.PI_CODING_AGENT_DIR as string, 'mcp.json')])
     expect(projectConfigPaths('/proj')).toEqual([join('/proj', '.mcp.json'), join('/proj', '.pi', 'mcp.json')])
+  })
+
+  it('relocates mcp.json with PI_CODING_AGENT_DIR, like every other agent-directory reader', () => {
+    // memory, checkpoints and mcp.json hardcoded ~/.pi/agent while the trust store,
+    // OAuth tokens and user agents followed getAgentDir(): with the variable set, half
+    // of pi-code's state moved and half stayed.
+    const agentDir = mkdtempSync(join(tmpdir(), 'agent-dir-'))
+    process.env.PI_CODING_AGENT_DIR = agentDir
+    expect(userConfigPaths('/home')[1]).toBe(join(agentDir, 'mcp.json'))
   })
 
   it('resolves HOME-scope config under CLAUDE_CONFIG_DIR while leaving project scope alone', () => {
@@ -305,7 +314,7 @@ describe('mcp adapter helpers', () => {
     process.env.CLAUDE_CONFIG_DIR = cfg
     try {
       // .claude.json now lives inside the config dir; .pi is pi's own tree, untouched.
-      expect(userConfigPaths('/home')).toEqual([join(cfg, '.claude.json'), join('/home', '.pi', 'agent', 'mcp.json')])
+      expect(userConfigPaths('/home')).toEqual([join(cfg, '.claude.json'), join(process.env.PI_CODING_AGENT_DIR as string, 'mcp.json')])
       // The per-project local scope is read from the relocated .claude.json too.
       writeFileSync(join(cfg, '.claude.json'), JSON.stringify({ projects: { '/work/p': { mcpServers: { local: { command: 'l' } } } } }))
       expect(Object.keys(loadUserScope('/home', '/work/p'))).toEqual(['local'])

@@ -4,7 +4,7 @@ Connects Claude Code's MCP configuration and registers each server's tools in pi
 
 ## Configuration scopes
 
-- User: `~/.claude.json` (including the per-project `projects[cwd].mcpServers` local scope) and `~/.pi/agent/mcp.json`. The per-project `disabledMcpServers` toggle list mutes a user or plugin server without removing it.
+- User: `~/.claude.json` (including the per-project `projects[cwd].mcpServers` local scope) and `mcp.json` in pi's agent directory (`~/.pi/agent`, relocated by `PI_CODING_AGENT_DIR`). The per-project `disabledMcpServers` toggle list mutes a user or plugin server without removing it.
 - Project: `.mcp.json` and `.pi/mcp.json`, loaded once the project is approved; `enabledMcpjsonServers`/`disabledMcpjsonServers`/`enableAllProjectMcpServers` honored, with consent keys counted only from non-repo settings. Precedence on a name clash is local over project over user.
 - Plugin stdio servers get Claude's three path variables in their environment: `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` (the data directory is created when the path is handed over, which is Claude's "created on first reference").
 - **Divergence:** `CLAUDE_CODE_MCP_ALLOWLIST_ENV` has no effect here. pi-code always passes the SDK's baseline environment to a stdio server, with no opt-out.

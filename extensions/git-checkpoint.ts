@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { contentText, errorMessage } from './internal/values.js'
 
@@ -175,7 +175,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   async function ensureShadow(ctx: ExtensionContext): Promise<void> {
     workTree = ctx.cwd
     const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.()
-    const checkpointsRoot = path.join(os.homedir(), '.pi', 'agent', 'checkpoints')
+    const checkpointsRoot = path.join(getAgentDir(), 'checkpoints')
     shadowDir = path.join(checkpointsRoot, sessionSlug(sessionFile))
     // A resumed session can arrive from a different directory than the one the shadow
     // snapshotted; restoring those commits here would silently overwrite unrelated
