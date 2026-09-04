@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // overriding the backend and leaving realBackend() itself unexercised.
 const runtimeMock = vi.hoisted(() => ({
   createCalls: 0,
+  failNextCreate: false,
   completeCalls: [] as Array<{ model: unknown; context: { systemPrompt?: string; messages: Array<{ content: unknown }> }; options: { maxTokens?: number; signal?: AbortSignal } }>,
   reply: { role: 'assistant', content: [{ type: 'text', text: 'real answer' }], api: 'x', provider: 'x', model: 'm', usage: { input: 3, output: 5, totalTokens: 8 }, stopReason: 'stop', timestamp: 0 },
 }))
@@ -15,6 +16,10 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
     ModelRuntime: {
       create: async () => {
         runtimeMock.createCalls += 1
+        if (runtimeMock.failNextCreate) {
+          runtimeMock.failNextCreate = false
+          throw new Error('runtime unavailable')
+        }
         return {
           completeSimple: async (model: unknown, context: unknown, options: unknown) => {
             runtimeMock.completeCalls.push({ model, context, options } as never)
@@ -43,6 +48,22 @@ describe('assistantText', () => {
 })
 
 describe('completeText', () => {
+  it('retries runtime creation after a rejected first attempt instead of caching the failure', async () => {
+    // ModelRuntime.create can reject once (a credential store read that fails on a
+    // transient error). Caching that rejected promise turned one bad moment into a
+    // process-lifetime outage for every model-backed feature.
+    runtimeMock.createCalls = 0
+    setCompleteBackend(null) // the real backend, so realBackend() actually runs create()
+    runtimeMock.failNextCreate = true
+    try {
+      await expect(completeText({} as never, 'p')).rejects.toThrow('runtime unavailable')
+      await expect(completeText({} as never, 'p')).resolves.toMatchObject({ text: 'real answer' })
+      expect(runtimeMock.createCalls).toBe(2)
+    } finally {
+      runtimeMock.failNextCreate = false
+    }
+  })
+
   it('sends the prompt as a user turn with the system prompt and returns the reply', async () => {
     let seen: { system?: string; user?: unknown; maxTokens?: number } = {}
     setCompleteBackend(async (_model, context, options) => {

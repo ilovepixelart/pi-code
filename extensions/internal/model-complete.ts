@@ -59,7 +59,13 @@ export interface CompleteOptions {
  * tool call, only assistant text.
  */
 export async function completeText(model: Model<Api>, prompt: string, options: CompleteOptions = {}): Promise<{ text: string; usage: Usage }> {
-  backend ??= realBackend()
+  // A rejected creation must not stay cached: ModelRuntime.create can fail on a
+  // transient (a credential store read), and caching that promise made every later
+  // call rethrow the same stale error for the life of the process.
+  backend ??= realBackend().catch((error: unknown) => {
+    backend = null
+    throw error
+  })
   const complete = await backend
   const context: Context = {
     systemPrompt: options.system,
