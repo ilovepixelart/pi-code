@@ -743,9 +743,6 @@ function additionalDirsAddition(extras: Array<{ path: string; content: string; d
   return addition
 }
 
-/** The `## Imported context (@)` section for every resolved @import, with the
- * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
- * was imported. */
 /** The refusal notice: every existing file an @import named that its importer may not
  * reach. Claude asks about these through an approval dialog and loads the ones you
  * allow; pi-code refuses them, and this is what says so. Silence was the real defect:
@@ -759,6 +756,9 @@ function refusedImportsAddition(refused: Set<string>): string {
   return `\n\n## Imports not loaded (@)\n\nThese files resolve outside what the file importing them may read, so their contents are not in context:\n\n${list}`
 }
 
+/** The `## Imported context (@)` section for every resolved @import, with the
+ * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
+ * was imported. */
 function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
   if (imported.length === 0) return ''
   const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')

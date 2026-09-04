@@ -118,13 +118,6 @@ function runtimeLacksProjectTrust(ctx: { isProjectTrusted?: () => boolean; ui?: 
   return true
 }
 
-/**
- * Whether project-controlled config may be acted on.
- *
- * Refuses without a UI rather than deferring: pi reached this point without consulting
- * `defaultProjectTrust` at all, so there is no user preference to fall back on. A run
- * that cannot ask has not been approved.
- */
 /** The same decision as isProjectApproved, but never prompts: an undecided project
  * reads as unapproved. For surfaces that only display project config, like the
  * subagent roster, where a mid-turn dialog would be wrong. */
@@ -150,6 +143,13 @@ export function isGatedFileApproved(ctx: Pick<ApprovalContext, 'cwd' | 'isProjec
   return isProjectApprovedSilently(ctx, { ...deps, hasClaudeShaped: () => true })
 }
 
+/**
+ * Whether project-controlled config may be acted on.
+ *
+ * Refuses without a UI rather than deferring: pi reached this point without consulting
+ * `defaultProjectTrust` at all, so there is no user preference to fall back on. A run
+ * that cannot ask has not been approved.
+ */
 export async function isProjectApproved(ctx: ApprovalContext, deps: ApprovalDeps = defaultDeps): Promise<boolean> {
   if (runtimeLacksProjectTrust(ctx)) return false // pi predates project-trust support
   if (ctx.isProjectTrusted?.() !== true) return false // pi declined trust for this project

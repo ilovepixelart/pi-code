@@ -224,9 +224,6 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
   }
 }
 
-/** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
- * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
- * hook can name its bundled scripts by real path. */
 /** The substitution here lands inside raw JSON, so values must arrive escaped:
  * an unescaped Windows root injected \U-style sequences, the parse threw, and
  * every hook the plugin declared silently vanished. */
@@ -270,6 +267,9 @@ function withoutUserConfigShellCommands(raw: string, source: string): string {
   return dropped ? JSON.stringify(parsed) : raw
 }
 
+/** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
+ * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
+ * hook can name its bundled scripts by real path. */
 export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks
