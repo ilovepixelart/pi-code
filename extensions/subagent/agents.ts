@@ -30,7 +30,7 @@ import { errorMessage } from '../internal/values.js'
 function parseToolsField(raw: unknown, granting: boolean): string[] | undefined | null {
   if (raw === undefined) return undefined
   // Shares the command parser's splitting, so a comma inside an argument scope stays
-  // inside it here too: `Bash(mv, write, cp)` used to hand the child pi's real `write`.
+  // inside it here too: split naively, `Bash(mv, write, cp)` grants the child pi's real `write`.
   if (raw !== null && !Array.isArray(raw) && typeof raw !== 'string') return null
   if (Array.isArray(raw) && raw.some((item) => typeof item !== 'string')) return null
   const grants = parseToolGrants(raw)

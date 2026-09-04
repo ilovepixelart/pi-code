@@ -17,7 +17,7 @@ import { isRecord } from './values.js'
 /** The OS managed-settings.json path Claude Code documents per platform. */
 export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json'
-  // The legacy C:\ProgramData\ClaudeCode path was dropped in Claude Code v2.1.75.
+  // Claude reads the Windows file from Program Files; the older ProgramData location is not consulted.
   if (platform === 'win32') return String.raw`C:\Program Files\ClaudeCode\managed-settings.json`
   return '/etc/claude-code/managed-settings.json'
 }

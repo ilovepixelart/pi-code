@@ -194,18 +194,17 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
 
 /** One `if` pattern against a call's arguments. Claude evaluates the rule "against
  * the tool name and arguments together" in permission-rule syntax, so each tool uses
- * the same specifier engine its permission rules use:
+ * the same specifier engine its permission rules use: a command pattern for Bash, a
+ * `domain:` host for WebFetch, an agent name for Agent, a skill name for Skill, and a
+ * path rule for the file tools. A tool with no specifier syntax matches nothing,
+ * which is also what an unparseable rule does.
  *
  * PAIRED WITH commands.ts's tool_call guard, which dispatches the same tools to the
  * same matchers for `allowed-tools` scopes. The two are deliberately NOT merged: bash
  * differs on purpose (an allow scope requires every segment to match, an `if` filter is
  * best effort and errs toward running the hook), and merging would hide that. They are
  * two lists that must agree, so a new scoped tool has to be added in both places; the
- * shared roster is ARG_RULE_TOOLS in internal/command-file.ts.
- * a command pattern for Bash, a
- * `domain:` host for WebFetch, an agent name for Agent, a skill name for Skill, and a
- * path rule for the file tools. A tool with no specifier syntax matches nothing,
- * which is also what an unparseable rule does. */
+ * shared roster is ARG_RULE_TOOLS in internal/command-file.ts. */
 function matchesToolPattern(piName: string, input: Record<string, unknown> | null, pattern: string, anchors: PathAnchors): boolean {
   const str = (value: unknown): string => (typeof value === 'string' ? value : '')
   switch (piName) {

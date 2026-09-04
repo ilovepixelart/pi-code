@@ -36,7 +36,7 @@ export function setAgentRunner(fn: AgentRunner | undefined): void {
   runner = fn
 }
 
-/** Whether a runner is registered, so agent hooks can be reported as runnable. */
+/** Test seam: whether a runner is registered. */
 export function hasAgentRunner(): boolean {
   return runner !== undefined
 }

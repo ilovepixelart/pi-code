@@ -36,7 +36,7 @@ export function externalImportKey(cwd: string): string {
   }
 }
 
-/** The store file. A seam: the tests point it at a temp directory. */
+/** The store file, inside pi's agent directory (tests relocate that through PI_CODING_AGENT_DIR). */
 export function externalImportStorePath(agentDir: string = getAgentDir()): string {
   return path.join(agentDir, 'pi-code-external-imports.json')
 }

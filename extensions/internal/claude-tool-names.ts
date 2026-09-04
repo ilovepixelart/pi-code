@@ -1,13 +1,10 @@
 /**
  * The one place pi tool names and Claude tool names are paired.
  *
- * Two independent tables used to encode this: a Claude->pi map for resolving
- * `allowed-tools` entries, and a pi->Claude map for hook payloads and matchers.
- * They disagreed. The second one listed six tools, so a hook matcher written in
- * Claude's vocabulary never fired for `web_fetch`, `subagent`, `question`, `todo`,
- * `slash_command`, `web_search` or `plan_mode_complete`, even though the first table
- * had known those pairings all along. Both directions now derive from this list, so
- * a tool cannot be nameable in one direction and invisible in the other.
+ * Both directions (the Claude->pi map that resolves `allowed-tools` entries, and the
+ * pi->Claude map behind hook payloads and matchers) derive from this one list, so a
+ * tool cannot be nameable in one direction and invisible in the other: two separate
+ * tables let a hook matcher written in Claude's vocabulary miss seven tools.
  *
  * Canonical names are the tools reference's own spellings. `claude: null` marks a pi
  * tool the reference has no counterpart for: it stays untranslated in payloads, and

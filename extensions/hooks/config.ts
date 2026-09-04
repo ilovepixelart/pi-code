@@ -209,10 +209,9 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
   }
   for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {
     if (!Array.isArray(matchers)) continue
-    // Entries are validated here rather than where they run: a hand-edited settings
-    // file that writes `hooks` as an object instead of a list used to throw out of
-    // the tool_call handler, and pi turns that into an error result, so every tool
-    // call for the rest of the session failed with an opaque type error.
+    // Entries are validated here rather than where they run: a malformed entry that
+    // throws from the tool_call handler becomes an error result there, so every tool
+    // call for the rest of the session fails with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
     if (origin !== undefined) stampOrigin(usable, origin)

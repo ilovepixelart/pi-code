@@ -113,7 +113,7 @@ function skillAt(root: string, dirName: string): { name: string; filePath: strin
 
 /** A Claude-contributed skill by the name pi's loader gives it. One directory
  * level, the standard layout. */
-export function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
+function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
   for (const root of roots) {
     let entries: fs.Dirent[]
     try {

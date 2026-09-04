@@ -61,8 +61,8 @@ function storeFileFor(serverName: string, endpoint?: string): string {
     .digest('hex')
     .slice(0, 8)
   // Collapse disallowed runs to a single hyphen, then strip leading and trailing
-  // hyphens by index. The old /^-+|-+$/g trim rescanned on every hyphen of a long run
-  // (its trailing-anchored branch backtracks per start position), which is quadratic.
+  // hyphens by index: a trailing-anchored regex trim rescans per hyphen of a long run
+  // (quadratic).
   const collapsed = serverName.replace(/[^A-Za-z0-9_-]+/g, '-')
   let start = 0
   let end = collapsed.length

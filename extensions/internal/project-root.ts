@@ -16,11 +16,10 @@ import * as path from 'node:path'
 /** The project root marker. `.git` is a file in worktrees and submodules, a directory
  * in an ordinary clone.
  *
- * `package.json` used to count too, which made every package of a monorepo its own
- * project: its own memory directory, its own settings.local.json, its own
- * CLAUDE_PROJECT_DIR, its own trust decision. Claude's project is the repository, and
- * a repository can add a package.json wherever it likes, so a marker it controls was
- * also a marker it could move. */
+ * Only `.git`: a package.json marker would make every package of a monorepo its own
+ * project (its own memory directory, settings.local.json, CLAUDE_PROJECT_DIR and trust
+ * decision), and a repository can add a package.json wherever it likes, so a marker it
+ * controls is a marker it can move. Claude's project is the repository. */
 export const ROOT_MARKERS = ['.git']
 
 /** Project root at or above `from`, or undefined outside a repository. */
