@@ -13,11 +13,12 @@ export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals, pla
   if (platform === 'win32') {
     // Windows has no process groups: taskkill /T ends the whole tree, and it has no
     // graceful signal, so SIGTERM and SIGKILL both force. By absolute path, so a
-    // writable PATH entry cannot stand in for it. If taskkill itself cannot start,
-    // the direct kill is all that is left.
+    // writable PATH entry cannot stand in for it. If taskkill itself cannot start, or
+    // there is no pid to hand it, the direct kill with the requested signal is all
+    // that is left (Node maps either signal to TerminateProcess there).
     const taskkill = path.join(process.env.SystemRoot ?? String.raw`C:\Windows`, 'System32', 'taskkill.exe')
-    if (child.pid) spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
-    else child.kill('SIGKILL')
+    if (child.pid) spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill(signal))
+    else child.kill(signal)
     return
   }
   try {

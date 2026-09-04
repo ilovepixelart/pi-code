@@ -58,10 +58,17 @@ describe('killProcessTree', () => {
     expect(child.kill).not.toHaveBeenCalled()
   })
 
-  it('force-kills the direct child on Windows when taskkill itself cannot start', () => {
+  it('kills the direct child with the requested signal on Windows when taskkill itself cannot start', () => {
     const child = fakeChild(777)
     killProcessTree(child, 'SIGTERM', 'win32')
     spawned.child?.emit('error', new Error('ENOENT'))
-    expect(child.kill).toHaveBeenCalledWith('SIGKILL')
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it('kills a pid-less child directly with the requested signal on Windows too', () => {
+    const child = fakeChild(undefined)
+    killProcessTree(child, 'SIGTERM', 'win32')
+    expect(spawned.calls).toEqual([])
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
   })
 })
