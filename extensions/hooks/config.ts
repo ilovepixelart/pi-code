@@ -182,7 +182,7 @@ export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): 
  * stays separate, so plugin entries carry their origin into the dedup key. */
 function stampOrigin(entries: HookMatcher[], origin: string): void {
   for (const entry of entries) {
-    for (const hook of entry.hooks ?? []) hook.origin = origin
+    for (const hook of entry.hooks ?? []) if (isRecord(hook)) hook.origin = origin
   }
 }
 
@@ -303,6 +303,13 @@ function isUsableMatcher(entry: unknown, file: string, event: string): entry is 
   if (candidate.hooks !== undefined && !Array.isArray(candidate.hooks)) {
     console.warn(`pi-code-hooks: ignoring ${event} entry in ${file}: "hooks" must be a list`)
     return false
+  }
+  // The list's entries too: the dispatcher reads `.type` of each, so one `null` (a
+  // hand-edit that removed an entry's body) failed every tool call for the session.
+  if (Array.isArray(candidate.hooks)) {
+    const objects = candidate.hooks.filter((hook: unknown) => isRecord(hook))
+    if (objects.length !== candidate.hooks.length) console.warn(`pi-code-hooks: ignoring ${candidate.hooks.length - objects.length} non-object hook(s) in a ${event} entry in ${file}`)
+    candidate.hooks = objects as HookCommand[]
   }
   if (candidate.matcher !== undefined && typeof candidate.matcher !== 'string') {
     console.warn(`pi-code-hooks: ignoring ${event} entry in ${file}: "matcher" must be a string`)
