@@ -6,9 +6,8 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { claudeConfigDir } from '../internal/config-dir.js'
 import { managedSettingsFile } from '../internal/managed-settings.js'
-import { findNearestFile } from '../internal/project-root.js'
+import { claudeSettingsChain } from '../internal/settings-chain.js'
 import { errorMessage } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
@@ -38,11 +37,17 @@ export function projectServerPolicy(cwd: string, home: string, projectApproved: 
     }
   }
   const names = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [])
-  const userSettings = read(path.join(claudeConfigDir(home), 'settings.json'))
-  const projectSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.json')) ?? path.join(cwd, '.claude', 'settings.json'))
-  const localSettings = read(findNearestFile(cwd, path.join('.claude', 'settings.local.json')) ?? path.join(cwd, '.claude', 'settings.local.json'))
-  const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...names(localSettings.disabledMcpjsonServers)])
-  const consentSources = projectApproved ? [userSettings, localSettings] : [userSettings]
+  // The files come from the one settings chain, so placement follows Claude's rules
+  // everywhere: the project's settings.json is read from cwd only (never an ancestor),
+  // and settings.local.json from the main checkout, with the chain's legacy cwd copy
+  // read too. Resolving them by nearest-file here gave a subdirectory session an
+  // ancestor's project file and a worktree session its own local file instead.
+  const [userFile, projectFile, ...localFiles] = claudeSettingsChain(cwd, home, true)
+  const userSettings = read(userFile)
+  const projectSettings = read(projectFile)
+  const localSettings = localFiles.map(read)
+  const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...localSettings.flatMap((settings) => names(settings.disabledMcpjsonServers))])
+  const consentSources = projectApproved ? [userSettings, ...localSettings] : [userSettings]
   const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
   const consentAll = consentSources.some((settings) => settings.enableAllProjectMcpServers === true)
   return { disabled, consented, consentAll }

@@ -1832,6 +1832,19 @@ describe('isolation: worktree execution', () => {
     expect(JSON.stringify(result.content)).not.toContain('worktree kept')
   })
 
+  it('removes the worktree it created when the background cap refuses the run', async () => {
+    // The worktree was created before the atomic cap check inside startBackgroundRun,
+    // and a refusal removed only the temp prompt: the directory and its agent/<name>-<id>
+    // branch stayed on disk with nothing referencing them.
+    discoverAgentsMock.mockReturnValue({ agents: [isoAgent()], projectAgentsDir: null })
+    startBackgroundRunMock.mockReturnValueOnce(null)
+    const repo = makeRepo()
+    const result = await execute('c1', { background: true, agent: 'iso', task: 'one too many' }, undefined, undefined, { ...trustedCtx, cwd: repo })
+    expect(text(result)).toContain('Too many background runs')
+    expect(execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo }).toString()).not.toContain('agent/iso')
+    expect(execFileSync('git', ['branch', '--list', 'agent/iso-*'], { cwd: repo }).toString().trim()).toBe('')
+  })
+
   it('keeps a dirty worktree and reports where the changes live', async () => {
     discoverAgentsMock.mockReturnValue({ agents: [isoAgent()], projectAgentsDir: null })
     const repo = makeRepo()

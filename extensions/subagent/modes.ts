@@ -152,18 +152,6 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
     return backgroundCapResult(makeDetails)
   }
   const runCwd = params.cwd ?? defaultCwd
-  // The same isolation boundary as the foreground path: no worktree, no run.
-  let worktree: AgentWorktree | undefined
-  if (agent.isolation === 'worktree') {
-    const created = await createAgentWorktree(runCwd, agent.name)
-    if ('error' in created) {
-      return {
-        content: [{ type: 'text', text: `isolation: worktree could not be created for ${agent.name}: ${created.error}` }],
-        details: makeDetails('single')([]),
-      }
-    }
-    worktree = created
-  }
   // Anchor project/local memory at the session project (defaultCwd), which is the one
   // projectApproved gated; see the foreground path for why runCwd must not be used.
   const memorySection = agentMemoryPromptSection(agent, defaultCwd, projectApproved)
@@ -175,6 +163,21 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
     // Claude: the agent body replaces the default system prompt (see the
     // foreground path).
     args.push('--system-prompt', tmpPrompt.filePath)
+  }
+  // The same isolation boundary as the foreground path: no worktree, no run. Created
+  // after the temp prompt, so a prompt write that throws has nothing to leak; the cap
+  // refusal below removes it again.
+  let worktree: AgentWorktree | undefined
+  if (agent.isolation === 'worktree') {
+    const created = await createAgentWorktree(runCwd, agent.name)
+    if ('error' in created) {
+      removeTmpPrompt(tmpPrompt)
+      return {
+        content: [{ type: 'text', text: `isolation: worktree could not be created for ${agent.name}: ${created.error}` }],
+        details: makeDetails('single')([]),
+      }
+    }
+    worktree = created
   }
   // The id is preset so SubagentStart hooks run pre-spawn with the id the run
   // will actually carry, and their context lands before the child's first prompt.
@@ -216,8 +219,10 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
     presetId,
   )
   if (id === null) {
-    // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun refused.
+    // Lost the cap race to a parallel batch: the atomic check inside startBackgroundRun
+    // refused. A pristine worktree is removed by the same cleanup a finished run uses.
     removeTmpPrompt(tmpPrompt)
+    if (worktree) await cleanupAgentWorktree(runCwd, worktree).catch(() => {})
     return backgroundCapResult(makeDetails)
   }
   pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: agent.name, agentId: id })
