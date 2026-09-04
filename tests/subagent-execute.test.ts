@@ -255,6 +255,14 @@ beforeEach(() => {
   execute = getExecute()
 })
 
+// Close every child a test left open. An aborted run's SIGTERM-to-SIGKILL escalation is
+// an unref'd 5s timer cleared only by the child's close; left armed it fires during a
+// later test, and on Windows that kill is a taskkill spawn the mock records into that
+// test's spawnCalls (two calls where it expected one, under shuffle).
+afterEach(() => {
+  for (const child of spawnedChildren) child.emit('close', 143)
+})
+
 // ---------------------------------------------------------------------------
 
 describe('agent hook runner', () => {
@@ -1852,7 +1860,8 @@ describe('isolation: worktree execution', () => {
     const repo = makeRepo()
     script('make changes', { stdout: [say('done editing')], delay: 150 })
     const pending = execute('c1', { agent: 'iso', task: 'make changes' }, undefined, undefined, { ...trustedCtx, cwd: repo })
-    await vi.waitFor(() => expect(spawnCalls.length).toBe(1))
+    // A real `git worktree add` precedes the spawn; a slow runner needs more than the 1s default.
+    await vi.waitFor(() => expect(spawnCalls.length).toBe(1), { timeout: 10_000 })
     fs.writeFileSync(join(spawnCalls[0].options.cwd as string, 'dirty.txt'), 'work\n')
     const result = await pending
     expect(fs.existsSync(spawnCalls[0].options.cwd as string)).toBe(true)
