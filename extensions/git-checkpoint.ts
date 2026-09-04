@@ -3,10 +3,13 @@
  *
  * Claude Code style /rewind built on a per-session shadow git repo.
  *
- * Snapshots commit the entire working tree (untracked files included, the
- * project's .gitignore is honored) into a bare repo under
+ * Snapshots commit the files this session's edit tools touched (the project's
+ * .gitignore and .git/info/exclude are honored) into a bare repo under
  * ~/.pi/agent/checkpoints/<session>, using --git-dir/--work-tree so the
- * project's own git state is never touched. Each user prompt gets one
+ * project's own git state is never touched. Scope is the edit set, not the
+ * working tree: Claude tracks "only files that have been edited within the
+ * current session", and a whole-tree snapshot instead sizes every checkpoint
+ * by cwd, which has no bound when cwd is $HOME. Each user prompt gets one
  * checkpoint persisted as {entryId, ref, prompt, createdAt} in the session
  * file, so /rewind works across restarts, resumes, and forks. Code restore
  * checks the snapshot out over the working tree, resetting file contents to
@@ -20,11 +23,19 @@ import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readSettingsFile } from './internal/settings-chain.js'
+import { fileToolTarget } from './internal/tool-target.js'
 import { contentText, errorMessage } from './internal/values.js'
 
 const CUSTOM_TYPE = 'git-checkpoint'
 /** Sidecar inside the bare shadow repo recording the work tree it snapshots. */
 const WORK_TREE_FILE = 'pi-work-tree'
+/** pi's tools that change a file. `read` is deliberately absent: checkpoint scope is
+ * the set of files the session edited, and that set is what bounds the snapshot. */
+const EDIT_TOOLS: ReadonlySet<string> = new Set(['edit', 'write'])
+/** A run's checkpoint commit is published under a ref rather than recorded as a raw
+ * sha, so a file first edited in a later turn of the same run can still fold its
+ * pre-edit baseline into that run's checkpoint by moving the ref. */
+const CHECKPOINT_REF_PREFIX = 'refs/pi-code/checkpoints'
 const PROMPT_SNIPPET_LENGTH = 60
 const RESTORE_MODES = ['Code and conversation', 'Conversation only', 'Code only']
 
@@ -35,9 +46,9 @@ interface Checkpoint {
   createdAt: string
 }
 
-/** Claude deletes checkpoints after 30 days (cleanupPeriodDays). Shadow repos hold
- * full snapshots of every non-ignored file, so unbounded retention grows under $HOME
- * for the life of the machine. */
+/** Claude deletes checkpoints after 30 days (cleanupPeriodDays). Shadow repos hold a
+ * snapshot per edited file, so unbounded retention grows under $HOME for the life of
+ * the machine. */
 export const CHECKPOINT_RETENTION_DAYS = 30
 
 /** The retention period in effect: Claude keeps checkpoints for 30 days and says to
@@ -159,6 +170,13 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   let runNeedsSnapshot = true
   let shadowDir: string | undefined
   let workTree: string | undefined
+  // Absolute paths this session's edit tools targeted: the whole of what a checkpoint
+  // captures. Seeded on resume from the last commit, so a resumed session keeps
+  // snapshotting the files it was already tracking.
+  const touched = new Set<string>()
+  // The ref holding the in-flight run's checkpoint, moved as later baselines arrive.
+  let runRef: string | undefined
+  let refSeq = 0
 
   function gitShadow(args: string[]): ReturnType<ExtensionAPI['exec']> {
     if (!shadowDir || !workTree) return Promise.resolve({ stdout: '', stderr: 'shadow repo not initialized', code: 1, killed: false })
@@ -229,6 +247,79 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** A tracked file as git names it: a work-tree-relative slash-separated path, or
+   * undefined for anything outside the work tree, which git refuses as a pathspec.
+   * Paths are compared in this form throughout, never as absolutes: git echoes a
+   * pathspec back verbatim, while the same file can spell its absolute path two ways
+   * on Windows (a short 8.3 temp directory against its long form). */
+  function workTreePath(file: string): string | undefined {
+    if (!workTree) return undefined
+    const rel = path.relative(workTree, file)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined
+    return rel.split(path.sep).join('/')
+  }
+
+  /** The paths the last checkpoint commit holds. A tracked file deleted since then still
+   * matches a pathspec through this, so its removal is staged instead of the stale index
+   * entry silently riding along into the next checkpoint. */
+  async function committedPaths(): Promise<Set<string>> {
+    const listed = await gitShadow(['ls-tree', '-r', '--name-only', 'HEAD'])
+    if (listed.code !== 0) return new Set()
+    return new Set(listed.stdout.split('\n').filter(Boolean))
+  }
+
+  /** git rejects the whole pathspec when one entry is ignored, so the ignored paths are
+   * dropped before the add rather than costing the run its checkpoint. */
+  async function withoutIgnored(files: string[]): Promise<string[]> {
+    const checked = await gitShadow(['-c', 'core.quotePath=false', 'check-ignore', '--', ...files])
+    if (checked.code !== 0) return files
+    const ignored = new Set(checked.stdout.split('\n').filter(Boolean))
+    return files.filter((file) => !ignored.has(file))
+  }
+
+  /** The tracked files git will accept: inside the work tree, and either on disk or in
+   * the last commit. A pathspec matching neither aborts the entire add, taking the
+   * checkpoint with it. */
+  async function addablePaths(): Promise<string[]> {
+    const inside: Array<{ file: string; rel: string }> = []
+    for (const file of touched) {
+      const rel = workTreePath(file)
+      if (rel !== undefined) inside.push({ file, rel })
+    }
+    if (inside.length === 0) return []
+    const committed = await committedPaths()
+    const live = inside.filter(({ file, rel }) => fs.existsSync(file) || committed.has(rel)).map(({ rel }) => rel)
+    return live.length === 0 ? [] : withoutIgnored(live)
+  }
+
+  /** Point this run's ref at the commit. Publishing a ref rather than the raw sha lets a
+   * baseline captured later in the run move the checkpoint forward without rewriting a
+   * commit that an earlier checkpoint may share. */
+  async function publishRun(sha: string, createdAt: string): Promise<{ ref: string; createdAt: string }> {
+    const ref = `${CHECKPOINT_REF_PREFIX}/${Date.now().toString(36)}-${++refSeq}`
+    const update = await gitShadow(['update-ref', ref, sha])
+    if (update.code !== 0) return { ref: sha, createdAt }
+    runRef = ref
+    return { ref, createdAt }
+  }
+
+  /** Fold a file's pre-edit content into the run's checkpoint. A file first edited part
+   * way through a run is absent from that run's pre-run snapshot, so without this its
+   * checkpoint holds no baseline and /rewind cannot undo that first edit. */
+  async function captureBaseline(file: string): Promise<void> {
+    const rel = workTreePath(file)
+    if (!runRef || rel === undefined || !fs.existsSync(file)) return
+    if ((await withoutIgnored([rel])).length === 0) return
+    const add = await gitShadow(['add', '--', rel])
+    if (add.code !== 0) return
+    // A commit, never an amend: the run's checkpoint can be a commit an earlier
+    // checkpoint also points at, and rewriting it would strand that one.
+    const commit = await commitShadow([])
+    if (commit.code !== 0) return
+    const sha = await gitShadow(['rev-parse', 'HEAD'])
+    if (sha.code === 0) await gitShadow(['update-ref', runRef, sha.stdout.trim()])
+  }
+
   /** `checkout -f <ref> -- .` errors when the ref's tree holds no files, so an empty
    * snapshot restores as a no-op rather than vetoing the whole rewind. */
   async function snapshotIsEmpty(ref: string): Promise<boolean> {
@@ -238,16 +329,21 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
 
   async function snapshot(): Promise<{ ref: string; createdAt: string } | undefined> {
     const createdAt = new Date().toISOString()
-    const add = await gitShadow(['add', '-A'])
-    if (add.code !== 0) return undefined
+    const paths = await addablePaths()
+    if (paths.length > 0) {
+      const add = await gitShadow(['add', '--', ...paths])
+      if (add.code !== 0) return undefined
+    }
     // Decide "nothing changed" from the index, not from the commit exit code: a commit can
     // also fail on the user's global signing or hooks config, and reusing HEAD then would
     // record a ref that predates the current tree, so /rewind restores the wrong state.
-    const status = await gitShadow(['status', '--porcelain'])
+    // Untracked files are excluded because the work tree is full of files this session
+    // never edited; counting them would make every run look changed.
+    const status = await gitShadow(['status', '--porcelain', '--untracked-files=no'])
     const nothingChanged = status.code === 0 && status.stdout.trim() === ''
     if (nothingChanged) {
       const head = await gitShadow(['rev-parse', 'HEAD'])
-      if (head.code === 0) return { ref: head.stdout.trim(), createdAt }
+      if (head.code === 0) return publishRun(head.stdout.trim(), createdAt)
       const empty = await commitShadow(['--allow-empty'])
       if (empty.code !== 0) return undefined
     } else {
@@ -255,7 +351,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       if (commit.code !== 0) return undefined // real failure: do not record a stale ref
     }
     const sha = await gitShadow(['rev-parse', 'HEAD'])
-    return sha.code === 0 ? { ref: sha.stdout.trim(), createdAt } : undefined
+    return sha.code === 0 ? publishRun(sha.stdout.trim(), createdAt) : undefined
   }
 
   /** Commit in the shadow repo, isolated from the user's global signing and hook config. */
@@ -296,7 +392,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     // own tree even though the prior run left it false.
     pending = undefined
     runNeedsSnapshot = true
+    runRef = undefined
     await ensureShadow(ctx)
+    touched.clear()
+    for (const rel of await committedPaths()) touched.add(path.resolve(ctx.cwd, rel))
     checkpoints.clear()
     const stored: Checkpoint[] = []
     for (const entry of ctx.sessionManager.getEntries()) {
@@ -334,13 +433,34 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     pending = await snapshot()
   })
 
+  // A checkpoint covers the files the session edited, so the tracked set grows as the
+  // model works. The baseline is taken here, before the tool writes, because once the
+  // tool has run the pre-edit content is gone.
+  pi.on('tool_call', async (event, ctx) => {
+    if (!EDIT_TOOLS.has(event.toolName)) return
+    const target = fileToolTarget(event)
+    if (target === undefined) return
+    const file = path.resolve(ctx.cwd, target)
+    if (touched.has(file)) return
+    touched.add(file)
+    await captureBaseline(file)
+  })
+
   pi.on('turn_end', async (_event, ctx) => {
     const snap = pending
     pending = undefined
     if (!snap) return
 
     const target = findLastUserMessage(ctx)
-    if (!target || checkpoints.has(target.entryId)) return
+    if (!target) return
+    const recorded = checkpoints.get(target.entryId)
+    if (recorded) {
+      // A retry or follow-up re-ran agent_start and took a fresh snapshot, but this user
+      // message already has its checkpoint. Discard the new one and keep folding later
+      // baselines into the checkpoint that is actually recorded.
+      runRef = recorded.ref
+      return
+    }
 
     const checkpoint: Checkpoint = { entryId: target.entryId, ref: snap.ref, prompt: target.prompt, createdAt: snap.createdAt }
     checkpoints.set(checkpoint.entryId, checkpoint)

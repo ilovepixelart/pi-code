@@ -121,10 +121,29 @@ function setup() {
 
 type Harness = ReturnType<typeof setup>
 
-/** Drive one full turn so a real snapshot ref exists; shadowDir is only initialized by session_start. */
+/** Announce a file edit the way pi does: tool_call fires before the tool touches disk,
+ * which is what puts the file in the checkpoint's scope. */
+function announceEdit(t: Harness, file: string, root?: string): Promise<unknown> | undefined {
+  return t.handlers.get('tool_call')?.({ type: 'tool_call', toolCallId: `tc-${file}`, toolName: 'edit', input: { path: join(root ?? t.repo, file) } }, t.makeCtx())
+}
+
+/** The sha a recorded checkpoint ref resolves to, or '' when it does not resolve. */
+function resolveCheckpoint(t: Harness, ref: string): string {
+  try {
+    const shadow = join(process.env.PI_CODING_AGENT_DIR ?? join(t.shadowHome, '.pi', 'agent'), 'checkpoints', SESSION_FILE_NAME)
+    return execFileSync('git', ['--git-dir', shadow, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+  } catch {
+    return ''
+  }
+}
+
+/** Drive one full turn so a real snapshot ref exists; shadowDir is only initialized by
+ * session_start. The fixture file is announced as an edit, because a checkpoint only
+ * covers the files the session's edit tools touched. */
 async function checkpointOneTurn(t: Harness, branch: any[] = [userEntry]): Promise<void> {
   await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
   await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx())
+  await announceEdit(t, 'tracked.txt')
   await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx({ branch }))
 }
 
@@ -245,7 +264,7 @@ describe('snapshotting', () => {
     await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx({ cwd: empty, branch: [userEntry] }))
 
     expect(t.appended).toHaveLength(1)
-    expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
+    expect(resolveCheckpoint(t, t.appended[0].data.ref)).toMatch(/^[0-9a-f]{40}$/)
   })
 
   it('keys the checkpoint on the last user message of the branch', async () => {
@@ -696,6 +715,7 @@ describe('resume from a different working directory', () => {
 
     await t.handlers.get('agent_start')?.({}, t.makeCtx({ cwd: other }))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other }))
+    await announceEdit(t, 'tracked.txt', other)
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx({ cwd: other, branch: [messageEntry('user0002', 'work here')] }))
     expect(t.appended).toHaveLength(2)
     writeFileSync(join(other, 'tracked.txt'), 'edited after the move\n')
