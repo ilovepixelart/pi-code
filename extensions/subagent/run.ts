@@ -17,6 +17,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
 import { withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 
+import { killProcessTree } from '../internal/process-tree.js'
 import { runSubagentStartHooks } from '../internal/subagent-hooks.js'
 import { type AgentConfig, resolveModelAlias } from './agents.js'
 import { agentHooksEnv, agentInvocationArgs, agentMemoryPromptSection, childPromptBody, taskWithStartContext, unresolvedToolsError, withMemoryTools } from './child.js'
@@ -348,19 +349,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         resolve(1)
       })
 
-      const killGroup = (sig: NodeJS.Signals): void => {
-        try {
-          // A child that never spawned has no pid and no group; the direct kill is all there is.
-          if (proc.pid) process.kill(-proc.pid, sig)
-          else proc.kill(sig)
-        } catch {
-          try {
-            proc.kill(sig)
-          } catch {
-            /* already gone */
-          }
-        }
-      }
+      const killGroup = (sig: NodeJS.Signals): void => killProcessTree(proc, sig)
       if (signal) {
         onAbort = () => {
           wasAborted = true
