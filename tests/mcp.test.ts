@@ -281,11 +281,15 @@ describe('mcp adapter helpers', () => {
     expect((merged.b as { command: string }).command).toBe('override')
   })
 
-  it('skips missing and invalid config files', () => {
+  it('skips missing and invalid config files, warning only about the invalid one', () => {
+    // One catch swallowed ENOENT and a parse error alike, so a trailing comma in a
+    // project .mcp.json disabled every server in it with nothing in the log.
     const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'))
     const broken = join(dir, 'broken.json')
     writeFileSync(broken, '{not json')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(loadConfigFrom([join(dir, 'absent.json'), broken])).toEqual({})
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([expect.stringContaining(broken)])
   })
 
   it('separates always-loaded user config from trust-gated project config', () => {

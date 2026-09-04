@@ -10,6 +10,7 @@ import { claudeConfigDir } from '../internal/config-dir.js'
 import type { OAuthServerConfig } from '../internal/mcp-oauth.js'
 import { type InstalledPlugin, pluginComponentPath } from '../internal/plugins.js'
 import { findNearestFile } from '../internal/project-root.js'
+import { errorMessage } from '../internal/values.js'
 
 export interface StdioServerConfig {
   type?: 'stdio'
@@ -107,8 +108,10 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
       Object.assign(servers, parsed.mcpServers ?? {})
-    } catch {
-      // missing or invalid file: skip silently, /mcp reports what loaded
+    } catch (error) {
+      // A missing file is the normal case. A present file that does not parse is
+      // not: one trailing comma silently disabled every server in it.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn(`pi-code-mcp: ignoring ${file}: ${errorMessage(error)}`)
     }
   }
   return servers
@@ -132,7 +135,8 @@ function projectRecord(home: string, cwd: string): { mcpServers?: Record<string,
   try {
     const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath(home), 'utf-8'))
     return claudeJson.projects?.[cwd] ?? {}
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn(`pi-code-mcp: ignoring ${claudeJsonPath(home)}: ${errorMessage(error)}`)
     return {}
   }
 }
