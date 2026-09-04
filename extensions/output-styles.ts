@@ -45,7 +45,9 @@ export interface OutputStyle {
 /** A frontmatter field as text, or '' when absent or not scalar. */
 function field(frontmatter: Record<string, unknown>, key: string): string {
   const value = frontmatter[key]
-  return typeof value === 'string' ? value.trim() : typeof value === 'number' || typeof value === 'boolean' ? String(value) : ''
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
 }
 
 /** Parse an output-style markdown file into its name, description, and body. pi's

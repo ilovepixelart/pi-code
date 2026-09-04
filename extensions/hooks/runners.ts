@@ -6,7 +6,6 @@
 
 import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
-import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
