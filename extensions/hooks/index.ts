@@ -109,7 +109,7 @@ import { watchSettingsFiles } from '../internal/settings-watch.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
 import { setSubagentStartHookRunner } from '../internal/subagent-hooks.js'
-import { contentText } from '../internal/values.js'
+import { contentText, parseNumericEnv } from '../internal/values.js'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.js'
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeAgentEnvHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.js'
 import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.js'
@@ -142,9 +142,9 @@ const DEFAULT_STOP_HOOK_BLOCK_CAP = 8
  * zero-cap that would suppress the very first block), else the default for a negative
  * or malformed value. */
 export function stopHookBlockCap(env: Record<string, string | undefined> = process.env): number {
-  const override = Number.parseInt(env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP ?? '', 10)
+  const override = parseNumericEnv(env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP)
   if (override === 0) return Number.POSITIVE_INFINITY
-  return Number.isInteger(override) && override > 0 ? override : DEFAULT_STOP_HOOK_BLOCK_CAP
+  return override !== undefined && Number.isInteger(override) && override > 0 ? override : DEFAULT_STOP_HOOK_BLOCK_CAP
 }
 
 async function runNotifyHooks(commands: HookCommand[], payload: unknown, runner: HookRunner): Promise<HookRunResult[]> {

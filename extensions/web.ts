@@ -16,6 +16,7 @@ import { Type } from 'typebox'
 import { htmlToMarkdown, removeTags } from './internal/html-markdown.js'
 import { completeText } from './internal/model-complete.js'
 import { capForContext } from './internal/output-guard.js'
+import { parseNumericEnv } from './internal/values.js'
 import { httpFetch } from './internal/web-transport.js'
 
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
@@ -265,10 +266,8 @@ async function fetchText(rawUrl: string, crossHost: CrossHost, transport = httpF
 const FETCH_CACHE_TTL_DEFAULT_MS = 15 * 60 * 1000
 
 function fetchCacheTtlMs(): number {
-  const raw = process.env.CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS
-  if (raw === undefined || raw.trim() === '') return FETCH_CACHE_TTL_DEFAULT_MS
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : FETCH_CACHE_TTL_DEFAULT_MS
+  const parsed = parseNumericEnv(process.env.CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS)
+  return parsed !== undefined && parsed >= 0 ? parsed : FETCH_CACHE_TTL_DEFAULT_MS
 }
 const FETCH_CACHE_MAX_ENTRIES = 50
 

@@ -6,6 +6,8 @@
  * so goal.ts stays the lifecycle wiring and each contract is pinned on its own.
  */
 
+import { parseNumericEnv } from './values.js'
+
 /** Claude caps a goal condition at 4,000 characters. */
 export const GOAL_CONDITION_MAX_CHARS = 4000
 
@@ -238,9 +240,8 @@ export const MAX_IDLE_CHECKINS = 3
  * goal: CLAUDE_CODE_GOAL_CHECKIN_MINUTES (0 turns check-ins off, junk falls back to
  * the default) scaled by Claude's doubling. */
 export function checkinIntervalMs(env: Record<string, string | undefined>, delivered: number): number {
-  const raw = env.CLAUDE_CODE_GOAL_CHECKIN_MINUTES
-  const parsed = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw)
-  const minutes = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CHECKIN_MINUTES
+  const parsed = parseNumericEnv(env.CLAUDE_CODE_GOAL_CHECKIN_MINUTES)
+  const minutes = parsed !== undefined && parsed >= 0 ? parsed : DEFAULT_CHECKIN_MINUTES
   return minutes * 60_000 * 2 ** Math.min(delivered, MAX_CHECKIN_DOUBLINGS)
 }
 

@@ -96,6 +96,9 @@ describe('runPromptHook', () => {
 describe('stopHookBlockCap', () => {
   it('defaults to 8 and honors a positive integer CLAUDE_CODE_STOP_HOOK_BLOCK_CAP override', () => {
     expect(stopHookBlockCap({})).toBe(8)
+    // The same grammar every other numeric env var accepts: exponent and underscores.
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '1e1' })).toBe(10)
+    expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '1_2' })).toBe(12)
     expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '3' })).toBe(3)
     // Negative or malformed values fall back to the default rather than capping at 0.
     expect(stopHookBlockCap({ CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '-2' })).toBe(8)

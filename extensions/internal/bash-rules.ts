@@ -11,8 +11,7 @@
  */
 
 import { hasSubstitution, splitSegments } from './shell-split.js'
-
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+import { escapeRegExp } from './values.js'
 
 /**
  * One rule against one command segment, per Claude's permission table:

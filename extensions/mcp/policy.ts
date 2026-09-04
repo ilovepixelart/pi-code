@@ -8,7 +8,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { managedSettingsFile } from '../internal/managed-settings.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
-import { errorMessage } from '../internal/values.js'
+import { errorMessage, escapeRegExp } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
 export interface ProjectServerPolicy {
@@ -132,10 +132,7 @@ export function mcpAllowDeny(scopeFiles: string[] = [], managedFile: string = ma
 
 /** `*` in a policy URL pattern matches any run of characters; everything else is literal. */
 function wildcardRegExp(pattern: string): RegExp {
-  const source = pattern
-    .split('*')
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`))
-    .join('.*')
+  const source = pattern.split('*').map(escapeRegExp).join('.*')
   return new RegExp(`^${source}$`)
 }
 

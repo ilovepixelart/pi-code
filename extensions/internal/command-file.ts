@@ -19,6 +19,7 @@ import * as path from 'node:path'
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
 
 import { CLAUDE_TOOL_MAP } from './claude-tool-names.js'
+import { escapeRegExp } from './values.js'
 
 /** The pi file tools a Claude path rule can govern. */
 export type PathRuleTool = 'read' | 'edit' | 'write'
@@ -331,8 +332,6 @@ function splitArgs(args: string): string[] {
   }
   return out
 }
-
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 
 /** One alternation covering every argument placeholder plus the two escape forms.
  * Alternation order is load-bearing: escapes first (so `\$1` never expands), the

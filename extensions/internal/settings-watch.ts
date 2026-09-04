@@ -6,6 +6,7 @@
  */
 
 import * as fs from 'node:fs'
+import { parseNumericEnv } from './values.js'
 
 // Captured at module load: the poll must run on real time even under a test's
 // fake timers (the stat watcher it replaced lived in libuv and was immune too);
@@ -29,7 +30,8 @@ function snapshot(file: string): string | undefined {
  * small, so re-reading them on the poll is negligible. The interval is
  * env-tunable for tests. */
 export function watchSettingsFiles(files: string[], reload: () => void): () => void {
-  const interval = Number(process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS) || 2000
+  const configured = parseNumericEnv(process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS)
+  const interval = configured !== undefined && configured > 0 ? configured : 2000
   let last = files.map(snapshot)
   const timer = realSetInterval(() => {
     const next = files.map(snapshot)
