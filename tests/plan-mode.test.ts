@@ -695,6 +695,8 @@ describe('execution mode stall exit', () => {
     expect(await s.emit('before_agent_start')).toBeUndefined()
     const notice = s.sent.at(-1)
     expect(notice?.content).toContain('2. Second step')
+    // The notice, not just the injection, filters out the step already marked done.
+    expect(notice?.content).not.toContain('1. First step')
   })
 
   it('keeps executing while every run makes progress', async () => {

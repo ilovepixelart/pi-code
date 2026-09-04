@@ -104,6 +104,12 @@ describe('checkpoint retention', () => {
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ cleanupPeriodDays: 7 }))
 
     expect(checkpointRetentionDays(home)).toBe(7)
+    // A non-positive value keeps the default: with 0 honored, every non-live repo would
+    // be swept at the next session start.
+    for (const bad of [0, -3, 'seven', null]) {
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ cleanupPeriodDays: bad }))
+      expect(checkpointRetentionDays(home)).toBe(CHECKPOINT_RETENTION_DAYS)
+    }
     expect(checkpointRetentionDays(mkdtempSync(join(tmpdir(), 'gcs-empty-home-')))).toBe(CHECKPOINT_RETENTION_DAYS)
   })
 })
@@ -352,6 +358,22 @@ describe('pruneCheckpointRepos', () => {
     expect(existsSync(old)).toBe(false)
     expect(existsSync(fresh)).toBe(true)
     rmSync(root, { recursive: true, force: true })
+  })
+
+  it('prunes with the configured cleanupPeriodDays at session start, not the constant', async () => {
+    // The reader is unit-tested and the pruner takes the days as an argument; nothing
+    // proved session_start hands one to the other.
+    const t = setup()
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ cleanupPeriodDays: 1 }))
+    const root = join(process.env.PI_CODING_AGENT_DIR as string, 'checkpoints')
+    const stale = mkRepo(root, 'stale-session', 2)
+    const fresh = mkRepo(root, 'fresh-session', 0)
+
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
   })
 
   it('never removes the repo of the live session and tolerates a missing root', () => {

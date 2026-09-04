@@ -1443,6 +1443,19 @@ describe('chain mode', () => {
 describe('parallel mode', () => {
   const tasksOf = (...names: string[]) => names.map((task) => ({ agent: 'scout', task }))
 
+  it('runs at most four of eight tasks at once', async () => {
+    // The helper is pinned with literal limits elsewhere; this pins the wiring, which a
+    // Promise.all or a raised MAX_CONCURRENCY would both break.
+    const tasks = Array.from({ length: 8 }, (_, i) => ({ agent: 'scout', task: `t${i}` }))
+    for (const { task } of tasks) script(task, { stdout: [say('ok')], delay: 300 })
+
+    const pending = execute('c1', { tasks }, undefined, undefined, trustedCtx)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(spawnCalls).toHaveLength(4)
+    await pending
+    expect(spawnCalls).toHaveLength(8)
+  })
+
   it('refuses more than eight parallel tasks before spawning anything', async () => {
     const tasks = Array.from({ length: 9 }, (_, i) => ({ agent: 'scout', task: `t${i}` }))
 

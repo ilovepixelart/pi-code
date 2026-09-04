@@ -117,6 +117,10 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     }
     close(): Promise<void> {
       hoisted.closed.push(this)
+      // The real StreamableHTTP transport fires onclose synchronously from close();
+      // production relies on that ordering (the map delete precedes the close so the
+      // onclose guard skips a backoff reconnect), so the fake must too.
+      ;(this as { onclose?: () => void }).onclose?.()
       return hoisted.control.close(this)
     }
     setNotificationHandler(schema: unknown, handler: () => void | Promise<void>): void {
@@ -638,6 +642,16 @@ describe('mcp transport selection', () => {
     expect(harness.toolNames()).toEqual(['keep_go'])
   })
 
+  it('matches an allow entry after ${VAR} expansion of its serverUrl', async () => {
+    // No policy fixture carried a variable, so the expansion on the allow side was
+    // droppable without a test noticing.
+    setEnv('MCP_HOST', 'https://api.example')
+    withManaged({ allowedMcpServers: [{ serverUrl: '${MCP_HOST}/mcp' }] })
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { keep: { type: 'http', url: 'https://api.example/mcp' }, drop: { type: 'http', url: 'https://other.example/mcp' } } })
+    expect(harness.toolNames()).toEqual(['keep_go'])
+  })
+
   it('interpolates env vars in the command and args', async () => {
     setEnv('MCP_BIN', '/opt/bin/server')
     withTools([{ name: 'go' }])
@@ -841,6 +855,46 @@ describe('mcp transport selection', () => {
     const [line] = await statusLinesOf(harness)
     expect(line.startsWith('remote: failed: ')).toBe(true)
     expect(line.endsWith(' (0 tools)')).toBe(true)
+  })
+})
+
+describe('auth reconnect ordering', () => {
+  it('does not pop a second login dialog from the backoff path after a declined re-login', async () => {
+    // reconnectForAuth deletes the client from the map before closing it, so the
+    // transport's synchronous onclose does not schedule a backoff reconnect. With the
+    // order swapped, a declined re-login is followed one second later by another
+    // interactive attempt: a second confirm the user already answered.
+    withTools([{ name: 'go' }])
+    hoisted.control.connect = async (transport) => {
+      if ((transport.options as { authProvider?: unknown }).authProvider === undefined) {
+        throw Object.assign(new Error('needs login'), { code: 401 })
+      }
+    }
+    let confirmCount = 0
+    const confirm = async (): Promise<boolean> => {
+      confirmCount++
+      return confirmCount === 1 // the first login is accepted, the re-login declined
+    }
+    const harness = await setup({ user: { remote: { url: 'https://remote.example/mcp' } }, confirm })
+    await harness.sessionStart()
+    expect(await statusLinesOf(harness)).toEqual(['remote: connected (1 tools)'])
+    expect(confirmCount).toBe(1)
+    vi.useFakeTimers()
+
+    let first = true
+    hoisted.control.callTool = async () => {
+      if (first) {
+        first = false
+        throw Object.assign(new Error('token expired'), { code: 401 })
+      }
+      return { content: [{ type: 'text', text: 'ok' }] } as never
+    }
+    // The re-login is declined, so the retried call finds no client: the tool call fails.
+    await expect(harness.tools[0].execute('call-1', {})).rejects.toThrow('not connected')
+    expect(confirmCount).toBe(2)
+
+    await vi.advanceTimersByTimeAsync(40_000)
+    expect(confirmCount).toBe(2)
   })
 })
 
@@ -2673,10 +2727,21 @@ describe('mcp automatic reconnection', () => {
     vi.useFakeTimers()
 
     dropLastClient()
-    // Delays 1+2+4+8+16 = 31s cover all five attempts.
-    await vi.advanceTimersByTimeAsync(31_000)
+    // Each attempt waits twice as long as the last: 1, 2, 4, 8 and 16 seconds. Asserted
+    // at each boundary, so a constant delay (five attempts inside five seconds) or a
+    // shortened one cannot pass by reaching the same total.
+    for (const [elapsed, attempts] of [
+      [999, 0],
+      [1, 1],
+      [2_000, 2],
+      [4_000, 3],
+      [8_000, 4],
+      [16_000, 5],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(elapsed)
+      expect(hoisted.transports.length - before).toBe(attempts)
+    }
     const afterFive = hoisted.transports.length
-    expect(afterFive - before).toBe(5)
 
     // No sixth attempt, and the server reports failed.
     await vi.advanceTimersByTimeAsync(120_000)

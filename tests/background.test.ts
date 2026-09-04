@@ -161,6 +161,9 @@ describe('background run lifecycle', () => {
     expect(done?.state).toBe('done')
     expect(done?.exitCode).toBe(0)
     expect(done?.turns).toBe(2)
+    // Claude marks a maxTurns-capped run's output as partial; the only place the flag is
+    // asserted true, so dropping the assignment was invisible.
+    expect(done?.partial).toBe(true)
   })
 
   it('holds the cap slot for a cancelled child until it dies, then escalates to SIGKILL', () => {
