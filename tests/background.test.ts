@@ -92,6 +92,25 @@ const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ comman
 const assistantTurn = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
 
 describe('background run lifecycle', () => {
+  it('records a synchronous spawn failure as failed instead of leaving a phantom running run', () => {
+    // On Linux spawn() throws synchronously for E2BIG (posix_spawn detects it before
+    // returning). The run was already registered as running, so the throw escaped the
+    // tool call and the record held a cap slot forever: no kill, no eviction, and
+    // "Too many background runs" for the life of the process once it happened enough.
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+    let done: BackgroundRun | undefined
+    const id = startBackgroundRun('scout', 'find', spec(), (run) => {
+      done = run
+    })
+
+    expect(id).not.toBeNull()
+    expect(done?.state).toBe('failed')
+    expect(done?.stderr).toBe('spawn E2BIG')
+    expect(activeBackgroundRuns()).toBe(0)
+  })
+
   it('reports the final text of a stdout stream whose chunks split lines', () => {
     let done: BackgroundRun | undefined
     startBackgroundRun('scout', 'find', spec(), (run) => {

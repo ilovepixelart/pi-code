@@ -6,12 +6,12 @@
  * across a same-process session switch keeps going under the new session.
  */
 
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { errorMessage } from '../internal/values.js'
+import { spawnChild } from './run.js'
 
 export interface BackgroundRun {
   id: string
@@ -281,15 +281,39 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
 
 /** Spawn the child for a run and wire its lifecycle back onto the record. */
 function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): void {
-  const proc = spawn(invocation.command, invocation.args, {
-    cwd: invocation.cwd,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Its own group, so cancelling reaches any grandchild the agent spawned.
-    detached: true,
-    // The marker lets the child's subagent tool refuse to nest further.
-    env: { ...process.env, PI_CODE_SUBAGENT: '1', ...invocation.env },
-  })
+  // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
+  let completed = false
+  const complete = (): void => {
+    if (completed) return
+    completed = true
+    run.finishedAt = ++finishSequence
+    evictFinishedRuns()
+    // A run outlives the session that started it, and pi's loader wires assertActive()
+    // into every runtime call, so notifying a disposed session throws. This fires from
+    // the child's 'close'/'error' listener, where nothing upstream catches: an escaping
+    // error reaches Node as an uncaughtException and takes pi down with it. The run
+    // state is already recorded by this point, so there is nothing to do but drop the
+    // notification for a session that is no longer there to receive it.
+    try {
+      onComplete(run)
+    } catch {
+      // the session that asked for this run is gone
+    }
+  }
+  // The marker in env lets the child's subagent tool refuse to nest further. The run is
+  // already registered as running by the caller, so a spawn that throws synchronously
+  // (see spawnChild) must settle the record here: left as it was, the phantom held a cap
+  // slot with no kill and no eviction for the life of the process.
+  const spawned = spawnChild(invocation.command, invocation.args, { cwd: invocation.cwd, env: { ...process.env, PI_CODE_SUBAGENT: '1', ...invocation.env } })
+  if ('error' in spawned) {
+    run.live = false
+    run.state = 'failed'
+    run.exitCode = 1
+    run.stderr = spawned.error.message
+    complete()
+    return
+  }
+  const proc = spawned.proc
   run.live = true
   const killGroup = (signal: NodeJS.Signals): void => {
     try {
@@ -330,25 +354,6 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
       : undefined,
   )
   let stderrTail = ''
-  // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
-  let completed = false
-  const complete = (): void => {
-    if (completed) return
-    completed = true
-    run.finishedAt = ++finishSequence
-    evictFinishedRuns()
-    // A run outlives the session that started it, and pi's loader wires assertActive()
-    // into every runtime call, so notifying a disposed session throws. This fires from
-    // the child's 'close'/'error' listener, where nothing upstream catches: an escaping
-    // error reaches Node as an uncaughtException and takes pi down with it. The run
-    // state is already recorded by this point, so there is nothing to do but drop the
-    // notification for a session that is no longer there to receive it.
-    try {
-      onComplete(run)
-    } catch {
-      // the session that asked for this run is gone
-    }
-  }
   proc.stdout.on('data', (data) => parser.push(data.toString()))
   // An 'error' on a stream with no listener is rethrown by EventEmitter, and this one
   // belongs to a detached child, so a pipe read failure would exit pi the same way an
