@@ -631,6 +631,17 @@ describe('matchingCommands edge shapes', () => {
 })
 
 describe('loadHooks malformed config shapes', () => {
+  it('drops a null entry inside a hooks list and keeps its siblings, so tool calls keep working', () => {
+    // A hand-edit that removed an entry's body leaves `null` in the list. The container
+    // was validated but not its entries, so the first tool call read `.type` of null and
+    // every tool call for the rest of the session failed with that TypeError.
+    const dir = tempDir('hooks-cfg-')
+    const file = join(dir, 'settings.json')
+    writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [null, { command: 'guard' }, 7] }] } }))
+    const config = loadHooks([file])
+    expect(matchingCommands(config.PreToolUse, 'Bash').map((c) => c.command)).toEqual(['guard'])
+  })
+
   it('ignores an event whose matchers are not an array', () => {
     const dir = tempDir('hooks-cfg-')
     const file = join(dir, 'settings.json')

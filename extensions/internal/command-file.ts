@@ -256,7 +256,7 @@ const text = (value: unknown): string => {
  * number rather than a boolean. A flag that gates a command off from the model has to
  * honor them, or a command the user marked off-limits is silently offered to it. */
 const YAML_TRUE = new Set(['true', 'yes', 'on', 'y', '1'])
-const isFlagEnabled = (value: unknown): boolean => value === true || YAML_TRUE.has(text(value).toLowerCase())
+export const isFlagEnabled = (value: unknown): boolean => value === true || YAML_TRUE.has(text(value).toLowerCase())
 
 /** YAML's negative boolean spellings, the mirror of YAML_TRUE. A flag that defaults to
  * true (user-invocable) is turned off only by one of these; any other value, absent

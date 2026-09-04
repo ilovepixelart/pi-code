@@ -130,7 +130,7 @@ function appendPartialNote(result: SingleResult): void {
  * the spawn() call site instead; catching it here, in one place with an explicit
  * return type, keeps the caller's non-null stdout/stderr narrowing that a bare
  * try/catch around an inline spawn() call loses. */
-function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
+export function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
   try {
     return {
       proc: spawn(command, args, {

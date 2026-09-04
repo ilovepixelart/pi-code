@@ -990,6 +990,22 @@ describe('allowed-tools argument scopes', () => {
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'src/secret.ts' } }, s.ctx)).toBeUndefined()
   })
 
+  it('reads the file_path alias at the path-scope guard, as the shared target reader does', async () => {
+    // pi's read/edit/write accept `file_path` as an alias for `path`; a guard reading only
+    // `path` blocked every aliased call with an empty Path in the reason.
+    const cwd = tempDir()
+    writeCommand(cwd, 'docs.md', '---\nallowed-tools: Read(docs/**), Edit(docs/**)\n---\nDocs only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('docs')?.handler('', s.ctx)
+
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { file_path: 'docs/a.md' } }, s.ctx)).toBeUndefined()
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'edit', input: { file_path: 'docs/a.md' } }, s.ctx)).toBeUndefined()
+    const read = (await s.handlers.get('tool_call')?.({ toolName: 'read', input: { file_path: 'src/secret.ts' } }, s.ctx)) as { block?: boolean; reason?: string }
+    expect(read?.block).toBe(true)
+    expect(read?.reason).toContain('src/secret.ts')
+  })
+
   it('expands a brace glob in an Edit path scope at the tool_call guard', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'edit.md', '---\nallowed-tools: Edit(src/{x,y}/**)\n---\nEdit x or y.')

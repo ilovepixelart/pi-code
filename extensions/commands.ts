@@ -56,6 +56,7 @@ import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
 import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from './internal/scope-rules.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
+import { fileToolTarget } from './internal/tool-target.js'
 import { createTurnOverride } from './internal/turn-override.js'
 import { errorMessage, isDirectory } from './internal/values.js'
 
@@ -394,7 +395,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
     if (event.toolName === 'slash_command') return scopeVerdict(pendingSkillRules, 'slash_command', 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
-    const filePath = typeof input.path === 'string' ? input.path : ''
+    // pi's read/edit/write accept `file_path` as an alias for `path`; the shared reader
+    // handles both, and the paired guard in hooks/matcher.ts reads both too.
+    const filePath = fileToolTarget(event) ?? ''
     const anchors = { cwd: ctx.cwd, projectRoot: repoRoot(ctx.cwd) ?? ctx.cwd, home: os.homedir() }
     if (filePath && matchesPathRules(filePath, rules, anchors)) return
     return {
