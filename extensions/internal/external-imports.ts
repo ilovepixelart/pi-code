@@ -11,10 +11,9 @@
  * root, or the resolved working directory outside a repository.
  *
  * The key is the git root and not the project root because a repository must not be
- * able to move its own key. The project root also stops at package.json, so declining
- * at the top of a monorepo and starting the next session inside a package produced a
- * different key and asked again, which is not a decision that was kept. A separate
- * worktree of one repository is a separate checkout and is asked separately.
+ * able to move its own key: `.git` cannot be committed, so nothing a repository ships
+ * changes where its own decisions are stored. A separate worktree of one repository
+ * is a separate checkout and is asked separately.
  */
 
 import * as fs from 'node:fs'

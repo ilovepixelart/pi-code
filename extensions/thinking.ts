@@ -1,9 +1,9 @@
 /**
  * Thinking Keyword Escalation
  *
- * Claude Code raises reasoning effort for a single turn when the prompt carries a
- * think keyword: `ultrathink` asks for the maximum, `think hard`/`think harder` for
- * a high level, and a bare `think` for a medium one. The word stays in the prompt
+ * Claude Code raises reasoning effort for a single turn when the prompt carries
+ * `ultrathink`, the only keyword: `think`, `think hard` and similar phrases pass
+ * through as ordinary prompt text. The word stays in the prompt
  * (the input is observed, never consumed or transformed), the escalation only ever
  * raises the level, and the prior level is restored once the turn settles, mirroring
  * how commands.ts restores a per-command model override on agent_settled.

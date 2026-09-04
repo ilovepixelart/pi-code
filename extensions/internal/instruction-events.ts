@@ -49,11 +49,11 @@ export function memoryTypeForPath(filePath: string, home: string, projectRoot: s
   if (path.basename(filePath) === 'CLAUDE.local.md') return 'Local'
   const isUnder = (root: string): boolean => root.length > 0 && (filePath === root || filePath.startsWith(root + path.sep))
   if (isUnder(projectRoot)) return 'Project'
-  // Monorepo: repoRoot stops at the nearest .git OR package.json, so a git-root
-  // CLAUDE.md can sit above the projectRoot a subpackage session reports. A file
-  // whose directory is a strict ancestor of the project root is still project
-  // memory. The home directory itself stays User: a home-level context file is
-  // user config even when the project lives under home.
+  // Nested repositories: repoRoot stops at the nearest .git, so a session inside a
+  // nested checkout reports it as the project root while the outer repository's
+  // CLAUDE.md sits above it. A file whose directory is a strict ancestor of the
+  // project root is still project memory. The home directory itself stays User: a
+  // home-level context file is user config even when the project lives under home.
   const dir = path.dirname(filePath)
   if (dir !== home && (projectRoot === dir || projectRoot.startsWith(dir + path.sep))) return 'Project'
   if (isUnder(home)) return 'User'

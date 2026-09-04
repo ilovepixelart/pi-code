@@ -9,7 +9,7 @@ Key-free web tools. Source: [`extensions/web.ts`](../extensions/web.ts).
 ## Aligned with Claude
 
 - **http is upgraded to https** before the request, as Claude documents. The upgraded URL is also the cache key, so both spellings of a page share one entry.
-- **A redirect to a different host is reported, not followed**: the result names the original URL and the target, and Claude fetches the target with a second call if it wants it. Same-host redirects are still followed, up to 6 hops, with the address guard re-applied per hop. Because a cross-host target is never requested, it cannot be reached from here at all.
+- **A redirect to a different host is reported, not followed**: the result names the original URL and the target, and Claude fetches the target with a second call if it wants it. Same-host redirects are still followed, up to 5 of them, with the address guard re-applied per hop. Because a cross-host target is never requested, it cannot be reached from here at all.
 - **Cache TTL** is 15 minutes per URL by default and honors `CLAUDE_CODE_WEBFETCH_CACHE_TTL_MS`. An unset, blank, negative or non-numeric value keeps the default.
 
 The cross-host rule is WebFetch's. The internal search fetch still follows its own endpoint's redirects: those hops are ours, and Claude's rule does not describe them.

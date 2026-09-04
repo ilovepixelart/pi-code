@@ -337,10 +337,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
   // Claude's InstructionsLoaded hook has NO decision control: exit codes are
   // ignored and every JSON output field (systemMessage included) is discarded, so
-  // dispatch is fire-and-forget on all paths. Two documented load reasons can
-  // never fire honestly and are deliberate gaps, not approximations:
-  // `nested_traversal` (pi does not lazily load a nested CLAUDE.md on subdirectory
-  // entry) and `compact` (pi does not re-load instruction files after compaction).
+  // dispatch is fire-and-forget on all paths. `nested_traversal` arrives from
+  // context-imports when a CLAUDE.md below cwd is attached on a file touch. The
+  // `compact` reason can never fire honestly and is a deliberate gap, not an
+  // approximation: pi does not re-load instruction files after compaction.
   const fireInstructionsLoaded = (payload: Record<string, unknown>): void => {
     if (!sessionCtx) return
     const commands = matchingCommands(config.InstructionsLoaded, String(payload.load_reason))
