@@ -68,6 +68,15 @@ export function localSettingsFile(cwd: string, home: string, platform: NodeJS.Pl
   return path.join(localSettingsDir(cwd, home, platform, owned), '.claude', 'settings.local.json')
 }
 
+/** One settings file as a JSON object, or undefined when missing, unparseable or not
+ * an object: the single-file case of the chain, for the user-only settings a
+ * repository must not influence (a notification channel, a question timeout, a
+ * retention period). */
+export function readSettingsFile(file: string): Record<string, unknown> | undefined {
+  const first = readSettingsChain([file]).next()
+  return first.done ? undefined : first.value
+}
+
 /** Every readable settings object in the chain, in order, so the last one a caller
  * sees for a key is the one that wins. A file that is missing, unparseable, or not a
  * JSON object is skipped: a corrupt settings.json must not end the chain, or the

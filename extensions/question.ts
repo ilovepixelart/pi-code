@@ -13,7 +13,7 @@ import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from
 import { Type } from 'typebox'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
-import { readSettingsChain } from './internal/settings-chain.js'
+import { readSettingsFile } from './internal/settings-chain.js'
 
 interface OptionWithDesc {
   label: string
@@ -96,8 +96,7 @@ export function askUserQuestionTimeoutMs(home: string = os.homedir()): number | 
   const managed = readManagedSettings() as { askUserQuestionTimeout?: unknown }
   const fromManaged = parseAskUserQuestionTimeout(managed.askUserQuestionTimeout)
   if (fromManaged !== undefined) return fromManaged
-  for (const parsed of readSettingsChain([path.join(claudeConfigDir(home), 'settings.json')])) return parseAskUserQuestionTimeout(parsed.askUserQuestionTimeout)
-  return undefined
+  return parseAskUserQuestionTimeout(readSettingsFile(path.join(claudeConfigDir(home), 'settings.json'))?.askUserQuestionTimeout)
 }
 
 function checkbox(checked: boolean | undefined): string {
