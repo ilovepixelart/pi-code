@@ -12,7 +12,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import { type ExtensionAPI, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { atomicWriteFile } from './internal/atomic-write.js'
 import { claudeConfigDir } from './internal/config-dir.js'
@@ -63,7 +63,7 @@ function memoryProject(cwd: string): string {
 }
 
 export function memoryDir(cwd: string): string {
-  return path.join(os.homedir(), '.pi', 'agent', 'memory', projectSlug(memoryProject(cwd)))
+  return path.join(getAgentDir(), 'memory', projectSlug(memoryProject(cwd)))
 }
 
 /** The store location, honoring an `autoMemoryDirectory` override. Claude requires
@@ -142,7 +142,7 @@ export function stripNonLoaded(text: string): string {
 export function migrateLegacyStore(cwd: string): void {
   const current = memoryDir(cwd)
   if (fs.existsSync(current)) return
-  const base = path.join(os.homedir(), '.pi', 'agent', 'memory')
+  const base = path.join(getAgentDir(), 'memory')
   // projectSlug(cwd) differs from current only for a subdirectory session (current is
   // keyed on the repo root); for a repo-root session it equals current and is skipped.
   const candidates = [path.join(base, projectSlug(cwd)), path.join(base, legacySlug(cwd))]

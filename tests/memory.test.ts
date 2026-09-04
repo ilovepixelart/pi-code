@@ -55,7 +55,9 @@ describe('memory helpers', () => {
     // Readable dashed path plus a short digest that keeps distinct paths distinct.
     expect(projectSlug('/Users/alex/Documents/pi-code')).toMatch(/^-Users-alex-Documents-pi-code-[0-9a-f]{8}$/)
     expect(projectSlug('C:\\Users\\alex\\Documents\\pi-code')).toMatch(/^C-Users-alex-Documents-pi-code-[0-9a-f]{8}$/)
-    expect(memoryDir('/tmp/x')).toContain(path.join('.pi', 'agent', 'memory', projectSlug('/tmp/x')))
+    // Under pi's agent directory, which PI_CODING_AGENT_DIR relocates (tests/setup.ts
+    // pins it to a temp root, so the developer's real ~/.pi/agent is never touched).
+    expect(memoryDir('/tmp/x')).toBe(path.join(process.env.PI_CODING_AGENT_DIR as string, 'memory', projectSlug('/tmp/x')))
   })
 
   it('keys the store on the repository root so subdirectory sessions share it', () => {
@@ -454,6 +456,7 @@ describe('migrateLegacyStore', () => {
     // having lost them.
     const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
     hoisted.home = home
+    process.env.PI_CODING_AGENT_DIR = join(home, '.pi', 'agent')
     const cwd = '/proj/blocked'
     const legacy = join(home, '.pi', 'agent', 'memory', '-proj-blocked')
     mkdirSync(legacy, { recursive: true })
@@ -475,6 +478,7 @@ describe('migrateLegacyStore', () => {
   it('renames a pre-digest store to the current slug, once, without clobbering', () => {
     const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
     hoisted.home = home
+    process.env.PI_CODING_AGENT_DIR = join(home, '.pi', 'agent')
     const cwd = '/proj/app'
     const legacy = join(home, '.pi', 'agent', 'memory', '-proj-app')
     mkdirSync(legacy, { recursive: true })
@@ -496,6 +500,7 @@ describe('migrateLegacyStore', () => {
   it('migrates a released digest-of-cwd store to the repo-root slug for a subdir session', () => {
     const home = mkdtempSync(join(tmpdir(), 'mem-home-'))
     hoisted.home = home
+    process.env.PI_CODING_AGENT_DIR = join(home, '.pi', 'agent')
     // A released version keyed the store on the raw subdirectory cwd; the current one
     // keys on the repository root, so the subdir session would otherwise orphan it.
     const repo = mkdtempSync(join(tmpdir(), 'mem-repo-'))

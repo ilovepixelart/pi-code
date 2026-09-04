@@ -6,6 +6,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from '../internal/config-dir.js'
 import type { OAuthServerConfig } from '../internal/mcp-oauth.js'
 import { type InstalledPlugin, pluginComponentPath } from '../internal/plugins.js'
@@ -92,7 +93,9 @@ function claudeJsonPath(home: string): string {
 /** User-scoped MCP config (the user's own; safe to load without project trust). The .pi
  * tree is pi's own and is not relocated by CLAUDE_CONFIG_DIR. */
 export function userConfigPaths(home: string): string[] {
-  return [claudeJsonPath(home), path.join(home, '.pi', 'agent', 'mcp.json')]
+  // mcp.json lives in pi's agent directory, which PI_CODING_AGENT_DIR relocates; the
+  // other agent-directory readers (trust store, OAuth tokens) already follow it.
+  return [claudeJsonPath(home), path.join(getAgentDir(), 'mcp.json')]
 }
 
 /** Project-scoped MCP config, each file the nearest of its name at or above cwd

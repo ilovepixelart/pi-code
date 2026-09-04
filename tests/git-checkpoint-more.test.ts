@@ -69,6 +69,7 @@ function setup() {
 
   const repo = mkdtempSync(join(tmpdir(), 'gcm-test-'))
   hoisted.home = mkdtempSync(join(tmpdir(), 'gcm-home-'))
+  process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
   tempDirs.push(repo, hoisted.home)
 
   const shadowHome = hoisted.home
@@ -130,12 +131,17 @@ async function checkpointOneTurn(t: Harness, branch: any[] = [userEntry]): Promi
 const rewind = (t: Harness, options: CtxOptions) => t.commands.get('rewind')?.handler('', t.makeCtx(options))
 
 describe('shadow repo initialization', () => {
-  it('creates the bare repo under the session slug in the home directory', async () => {
+  it("creates the bare repo under the session slug in pi's agent directory, wherever PI_CODING_AGENT_DIR puts it", async () => {
+    // A distinct directory, not the fake home's ~/.pi/agent: the path used to be
+    // hardcoded there while the trust store and OAuth tokens followed the variable.
     const t = setup()
+    const agentDir = mkdtempSync(join(tmpdir(), 'gcm-agent-'))
+    process.env.PI_CODING_AGENT_DIR = agentDir
 
     await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
 
-    expect(existsSync(join(t.shadowHome, '.pi', 'agent', 'checkpoints', SESSION_FILE_NAME, 'HEAD'))).toBe(true)
+    expect(existsSync(join(agentDir, 'checkpoints', SESSION_FILE_NAME, 'HEAD'))).toBe(true)
+    expect(existsSync(join(t.shadowHome, '.pi', 'agent', 'checkpoints'))).toBe(false)
   })
 
   it('configures the checkpoint committer identity on a freshly created shadow repo', async () => {

@@ -46,6 +46,7 @@ function setup() {
 
   const repo = mkdtempSync(join(tmpdir(), 'gcs-test-'))
   hoisted.home = mkdtempSync(join(tmpdir(), 'gcs-home-'))
+  process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
   tempDirs.push(repo, hoisted.home)
 
   const sessionFile = join(repo, 'session-test.jsonl')

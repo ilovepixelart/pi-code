@@ -60,6 +60,11 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-code-tests-'))
 process.env.TMPDIR = tmpRoot
 process.env.TEMP = tmpRoot
 process.env.TMP = tmpRoot
+// pi's agent directory (memory, checkpoints, mcp.json, trust decisions, OAuth tokens)
+// resolves through the SDK's getAgentDir(), which a node:os mock in a test file does
+// not reach. Pointed at the per-file root unconditionally, so no suite can write into
+// the developer's real ~/.pi/agent whichever home it fakes.
+process.env.PI_CODING_AGENT_DIR = path.join(tmpRoot, 'pi-agent')
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true })
