@@ -85,11 +85,31 @@ function setup() {
 
 type Harness = ReturnType<typeof setup>
 
-/** Drive one full turn so a checkpoint exists; shadowDir is only initialized by session_start. */
+/** Announce a file edit the way pi does: tool_call fires before the tool touches disk,
+ * which is what puts the file in the checkpoint's scope. */
+function announceEdit(t: Harness, file: string, toolName = 'edit'): Promise<unknown> | undefined {
+  return t.handlers.get('tool_call')?.({ type: 'tool_call', toolCallId: `tc-${file}`, toolName, input: { path: join(t.repo, file) } }, t.makeCtx([], [], []))
+}
+
+/** Drive one full turn so a checkpoint exists; shadowDir is only initialized by
+ * session_start. Both fixture files are announced as edits, because a checkpoint only
+ * covers the files the session's edit tools touched. */
 async function checkpointOneTurn(t: Harness, turnIndex = 0): Promise<void> {
   await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
   await t.handlers.get('turn_start')?.({ turnIndex }, t.makeCtx([], [], []))
+  await announceEdit(t, 'tracked.txt')
+  await announceEdit(t, 'untracked.txt')
   await t.handlers.get('turn_end')?.({ turnIndex }, t.makeCtx([], [userEntry], []))
+}
+
+/** The sha a recorded checkpoint ref resolves to, or '' when it does not resolve. */
+function resolveCheckpoint(ref: string): string {
+  const shadow = join(hoisted.home, '.pi', 'agent', 'checkpoints', 'session-test.jsonl')
+  try {
+    return execFileSync('git', ['--git-dir', shadow, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+  } catch {
+    return ''
+  }
 }
 
 const rewindLabel = (data: { createdAt: string; prompt: string }) => `1. ${new Date(data.createdAt).toLocaleTimeString()}  ${data.prompt}`
@@ -122,26 +142,37 @@ describe('sessionSlug', () => {
 })
 
 describe('shadow-repo checkpoint lifecycle', () => {
-  it('snapshots the whole tree including untracked files', async () => {
+  it('snapshots the files the session edited, untracked ones included', async () => {
     const t = setup()
     await checkpointOneTurn(t)
 
     expect(t.appended).toHaveLength(1)
-    expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
+    // The ref must name a real commit: a recorded ref that does not resolve is a
+    // checkpoint /rewind cannot restore.
+    expect(resolveCheckpoint(t.appended[0].data.ref)).toMatch(/^[0-9a-f]{40}$/)
+    const shadow = join(hoisted.home, '.pi', 'agent', 'checkpoints', 'session-test.jsonl')
+    const listed = execFileSync('git', ['--git-dir', shadow, 'ls-tree', '-r', '--name-only', t.appended[0].data.ref], { encoding: 'utf8' }).split('\n')
+    expect(listed).toContain('untracked.txt')
   })
 
   it('leaves files listed in the repo-local .git/info/exclude out of the snapshot', async () => {
     // The shadow reads ignore rules from its own git dir, so the repo-local exclude
     // file (where users hide secrets and scratch that must not be committed) would
-    // otherwise be copied under $HOME and restored by /rewind.
+    // otherwise be copied under $HOME and restored by /rewind. Editing the excluded
+    // file is the case that matters: being in the edit set must not override the
+    // exclude.
     const t = setup()
     writeFileSync(join(t.repo, '.git', 'info', 'exclude'), 'secret.txt\n')
     writeFileSync(join(t.repo, 'secret.txt'), 'token\n')
-    await checkpointOneTurn(t)
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
+    await announceEdit(t, 'tracked.txt')
+    await announceEdit(t, 'secret.txt', 'write')
+    await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
 
     const shadow = join(hoisted.home, '.pi', 'agent', 'checkpoints', 'session-test.jsonl')
     const listed = execFileSync('git', ['--git-dir', shadow, 'ls-tree', '-r', '--name-only', t.appended[0].data.ref], { encoding: 'utf8' }).split('\n')
-    expect(listed).toContain('untracked.txt')
+    expect(listed).toContain('tracked.txt')
     expect(listed).not.toContain('secret.txt')
   })
 
@@ -175,7 +206,7 @@ describe('shadow-repo checkpoint lifecycle', () => {
       await checkpointOneTurn(t)
 
       expect(t.appended).toHaveLength(1)
-      expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
+      expect(resolveCheckpoint(t.appended[0].data.ref)).toMatch(/^[0-9a-f]{40}$/)
       // The recorded ref's tree must actually contain the working-tree file.
       writeFileSync(join(t.repo, 'tracked.txt'), 'changed after checkpoint\n')
       await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [rewindLabel(t.appended[0].data), 'Code only']))
@@ -215,7 +246,7 @@ describe('shadow-repo checkpoint lifecycle', () => {
     // The snapshot must capture the tree before the model's first edit, so turn_start
     // awaits it to completion rather than deferring the git work to turn_end. By the
     // time turn_start resolves, the commit has run; an un-awaited kickoff would still
-    // be mid-flight, having reached only `git add -A`.
+    // be mid-flight, having reached only the staging step.
     const t = setup()
     await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
@@ -224,7 +255,7 @@ describe('shadow-repo checkpoint lifecycle', () => {
   })
 
   it('snapshots once per run, not once per turn, and still records the checkpoint', async () => {
-    // A `git add -A` before every assistant turn (awaited, so it blocks the model call)
+    // A snapshot before every assistant turn (awaited, so it blocks the model call)
     // is wasted when the run has already checkpointed the pre-run tree; snapshot once per
     // run (gated by agent_start) instead.
     const t = setup()
@@ -235,8 +266,8 @@ describe('shadow-repo checkpoint lifecycle', () => {
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
 
-    const addCalls = t.execLog.filter((c) => c[0] === 'git' && c.includes('add') && c.includes('-A')).length
-    expect(addCalls).toBe(1)
+    const snapshots = t.execLog.filter((c) => c[0] === 'git' && c.includes('status')).length
+    expect(snapshots).toBe(1)
     expect(t.appended).toHaveLength(1)
   })
 
@@ -255,10 +286,10 @@ describe('shadow-repo checkpoint lifecycle', () => {
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
 
     expect(t.appended).toHaveLength(1)
-    // Two real snapshots ran: the second `git add -A` proves the re-snapshot happened and
+    // Two real snapshots ran: the second `git status` proves the re-snapshot happened and
     // was discarded by the guard, not merely skipped, so the test cannot pass by accident.
-    const addCalls = t.execLog.filter((c) => c[0] === 'git' && c.includes('add') && c.includes('-A')).length
-    expect(addCalls).toBe(2)
+    const snapshots = t.execLog.filter((c) => c[0] === 'git' && c.includes('status')).length
+    expect(snapshots).toBe(2)
   })
 
   it('reuses the existing HEAD ref when the tree has not changed', async () => {
@@ -273,7 +304,10 @@ describe('shadow-repo checkpoint lifecycle', () => {
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, secondPrompt], []))
 
     expect(t.appended).toHaveLength(2)
-    expect(t.appended[1].data.ref).toBe(t.appended[0].data.ref)
+    // Each run publishes its own ref so a later baseline can move it, but with nothing
+    // edited in between both refs must name the same commit.
+    expect(resolveCheckpoint(t.appended[1].data.ref)).toBe(resolveCheckpoint(t.appended[0].data.ref))
+    expect(resolveCheckpoint(t.appended[1].data.ref)).toMatch(/^[0-9a-f]{40}$/)
   })
 
   it('warns on an unknown ref instead of crashing', async () => {
