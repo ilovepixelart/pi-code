@@ -1356,6 +1356,32 @@ describe('mcp failure reporting', () => {
     expect(harness.notifications.length).toBe(before + 1)
   })
 
+  it('reads project settings from cwd only and the local file from the main checkout, as the settings chain does', async () => {
+    // projectServerPolicy resolved both files with findNearestFile: a subdirectory
+    // session picked up an ancestor's settings.json (the chain reads cwd only, per
+    // Claude's "start Claude Code there"), and a worktree session read its own
+    // settings.local.json where the chain reads the main checkout's.
+    const { projectServerPolicy } = await import('../extensions/mcp/policy.ts')
+    const { mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const parent = mkdtempSync(join(tmpdir(), 'policy-'))
+    const main = join(parent, 'main')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(join(main, '.claude'), { recursive: true })
+    writeFileSync(join(main, '.claude', 'settings.json'), JSON.stringify({ disabledMcpjsonServers: ['root-only'] }))
+    writeFileSync(join(main, '.claude', 'settings.local.json'), JSON.stringify({ enabledMcpjsonServers: ['consented-at-root'] }))
+    const sub = join(main, 'packages', 'app')
+    mkdirSync(sub, { recursive: true })
+    const tree = join(parent, 'feature')
+    mkdirSync(tree)
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+
+    const home = mkdtempSync(join(tmpdir(), 'policy-home-'))
+    expect(projectServerPolicy(sub, home, true).disabled.has('root-only')).toBe(false)
+    if (process.platform !== 'win32') expect(projectServerPolicy(tree, home, true).consented.has('consented-at-root')).toBe(true)
+  })
+
   it('returns from session_start without waiting for a hung server, in an interactive session', async () => {
     // Claude: "MCP startup is non-blocking by default: servers connect in the
     // background and their tools become available as they finish." Before this,

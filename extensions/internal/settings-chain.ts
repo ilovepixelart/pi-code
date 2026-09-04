@@ -52,10 +52,17 @@ export function claudeSettingsChain(cwd: string, home: string, includeProject: b
   const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!includeProject) return files
   files.push(path.join(cwd, '.claude', 'settings.json'))
-  const localDir = localSettingsDir(cwd, home, platform, owned)
-  if (localDir !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
-  files.push(path.join(localDir, '.claude', 'settings.local.json'))
+  const local = localSettingsFile(cwd, home, platform, owned)
+  if (path.dirname(path.dirname(local)) !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
+  files.push(local)
   return files
+}
+
+/** The settings.local.json the chain reads last, which is also where a setting a
+ * command persists (an output-style choice, an MCP consent) must be written for the
+ * chain to read it back: a file at any other level is never consulted. */
+export function localSettingsFile(cwd: string, home: string, platform: NodeJS.Platform = process.platform, owned: (paths: string[]) => boolean = ownedByUser): string {
+  return path.join(localSettingsDir(cwd, home, platform, owned), '.claude', 'settings.local.json')
 }
 
 /** Every readable settings object in the chain, in order, so the last one a caller

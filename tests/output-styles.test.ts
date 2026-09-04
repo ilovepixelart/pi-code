@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -236,6 +236,31 @@ describe('extension wiring', () => {
     writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ outputStyle: name }))
     return cwd
   }
+
+  it.skipIf(process.platform === 'win32')('persists the choice to the main checkout, where the settings chain reads it back', async () => {
+    // Persisting to the nearest settings.local.json (or the nearest .claude dir) could
+    // write a file at an intermediate ancestor that claudeSettingsChain never reads.
+    const parent = tempDir()
+    const main = join(parent, 'main')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(join(main, '.claude'), { recursive: true })
+    const tree = join(parent, 'feature')
+    mkdirSync(join(tree, '.claude', 'output-styles'), { recursive: true })
+    writeFileSync(join(tree, '.claude', 'output-styles', 'style.md'), '---\nname: Explain\n---\nExplain everything.')
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    outputStyles({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, opts),
+    } as never)
+    const ctx = { cwd: tree, hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {}, confirm: async () => true, select: async () => 'Explain' } }
+    await handlers.get('session_start')?.({}, ctx)
+    await commands.get('output-style')?.handler('', ctx)
+
+    expect(existsSync(join(tree, '.claude', 'settings.local.json'))).toBe(false)
+    expect(JSON.parse(readFileSync(join(main, '.claude', 'settings.local.json'), 'utf-8')).outputStyle).toBe('Explain')
+  })
 
   it('reports non-interactive mode and an empty style list from the picker', async () => {
     const cwd = tempDir()

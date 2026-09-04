@@ -29,8 +29,8 @@ import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { ancestorDirs, findNearestDir, findNearestFile } from './internal/project-root.js'
-import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
+import { ancestorDirs } from './internal/project-root.js'
+import { claudeSettingsChain, localSettingsFile, readSettingsChain } from './internal/settings-chain.js'
 import { isDirectory } from './internal/values.js'
 
 export interface OutputStyle {
@@ -205,11 +205,10 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     // Precedence low to high: builtin, plugin, then the user's and project's own
     // dirs, so a same-named user or project style overrides a plugin's.
     styles = loadStyles([BUILTIN_STYLES_DIR, ...pluginStyleDirs(home), ...styleDirs(ctx.cwd, home, trusted)])
-    // Persist the choice where the read chain will find it again: the nearest local
-    // settings file, else inside the nearest .claude directory, else at cwd.
-    const nearestLocal = findNearestFile(ctx.cwd, path.join('.claude', 'settings.local.json'))
-    const claudeDir = findNearestDir(ctx.cwd, '.claude') ?? path.join(ctx.cwd, '.claude')
-    localSettingsPath = nearestLocal ?? path.join(claudeDir, 'settings.local.json')
+    // Persist the choice to the file the read chain reads last, so it is read back:
+    // the nearest local file or .claude directory could sit at an intermediate
+    // ancestor the chain never consults.
+    localSettingsPath = localSettingsFile(ctx.cwd, home)
     // Claude's force-for-plugin: the first loaded forced plugin style applies
     // automatically, overriding the outputStyle setting.
     const forced = forcedPluginStyle(loadStyles(pluginStyleDirs(home)))
