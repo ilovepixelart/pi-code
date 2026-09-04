@@ -323,6 +323,57 @@ describe('shadow-repo checkpoint lifecycle', () => {
   })
 })
 
+describe('checkpointing at $HOME', () => {
+  it('warns and still checkpoints when cwd is the home directory', async () => {
+    const t = setup()
+    const homeCtx = t.makeCtx([], [], [])
+    ;(homeCtx as { cwd: string }).cwd = hoisted.home
+
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, homeCtx)
+
+    expect(t.notifications.some((n) => n.startsWith('[warning]') && n.includes('home directory'))).toBe(true)
+  })
+
+  it('does not warn when cwd is a project directory', async () => {
+    const t = setup()
+    await checkpointOneTurn(t)
+
+    expect(t.notifications.some((n) => n.includes('home directory'))).toBe(false)
+  })
+
+  it('disables checkpointing at $HOME under PI_CODE_DISABLE_HOME_CHECKPOINTING, with no warning', async () => {
+    process.env.PI_CODE_DISABLE_HOME_CHECKPOINTING = '1'
+    try {
+      const t = setup()
+      const homeCtx = t.makeCtx([], [], [])
+      ;(homeCtx as { cwd: string }).cwd = hoisted.home
+
+      await t.handlers.get('session_start')?.({ reason: 'startup' }, homeCtx)
+      await t.handlers.get('turn_start')?.({ turnIndex: 0 }, homeCtx)
+      await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
+
+      expect(t.notifications.some((n) => n.includes('home directory'))).toBe(false)
+      expect(t.appended).toEqual([])
+      expect(t.execLog.some((call) => call[0] === 'git' && call.includes('commit'))).toBe(false)
+    } finally {
+      delete process.env.PI_CODE_DISABLE_HOME_CHECKPOINTING
+    }
+  })
+
+  it('still checkpoints a project directory when PI_CODE_DISABLE_HOME_CHECKPOINTING is set', async () => {
+    process.env.PI_CODE_DISABLE_HOME_CHECKPOINTING = '1'
+    try {
+      const t = setup()
+      await checkpointOneTurn(t)
+
+      expect(t.appended).toHaveLength(1)
+      expect(t.appended[0].data.ref).toMatch(/^[0-9a-f]{40}$/)
+    } finally {
+      delete process.env.PI_CODE_DISABLE_HOME_CHECKPOINTING
+    }
+  })
+})
+
 describe('CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING', () => {
   it('takes no snapshot and records no checkpoint when set', async () => {
     // Claude: "Set to 1 to disable file checkpointing. The /rewind command will not be

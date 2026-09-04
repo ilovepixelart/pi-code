@@ -170,6 +170,20 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
 
   async function ensureShadow(ctx: ExtensionContext): Promise<void> {
     workTree = ctx.cwd
+    // The shadow repo snapshots the entire work tree on every turn: pointed at the
+    // home directory, that is every file under $HOME, not a project, and the shadow
+    // repo grows without bound as a result. Warn every time, and honor the opt-out
+    // by never creating a shadow repo at all.
+    if (path.resolve(workTree) === path.resolve(os.homedir())) {
+      if (process.env.PI_CODE_DISABLE_HOME_CHECKPOINTING === '1') {
+        workTree = undefined
+        return
+      }
+      ctx.ui.notify(
+        'Checkpoints snapshot the entire working directory on every turn. Running pi in your home directory will keep committing your whole $HOME into ~/.pi/agent/checkpoints, which can grow without bound. Run pi from inside a project directory instead, or set PI_CODE_DISABLE_HOME_CHECKPOINTING=1 to disable checkpointing here.',
+        'warning',
+      )
+    }
     const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.()
     const checkpointsRoot = path.join(getAgentDir(), 'checkpoints')
     shadowDir = path.join(checkpointsRoot, sessionSlug(sessionFile))
