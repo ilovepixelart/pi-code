@@ -247,25 +247,25 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
   }
 
-  function insideWorkTree(file: string): boolean {
-    if (!workTree) return false
+  /** A tracked file as git names it: a work-tree-relative slash-separated path, or
+   * undefined for anything outside the work tree, which git refuses as a pathspec.
+   * Paths are compared in this form throughout, never as absolutes: git echoes a
+   * pathspec back verbatim, while the same file can spell its absolute path two ways
+   * on Windows (a short 8.3 temp directory against its long form). */
+  function workTreePath(file: string): string | undefined {
+    if (!workTree) return undefined
     const rel = path.relative(workTree, file)
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined
+    return rel.split(path.sep).join('/')
   }
 
-  /** Absolute paths the last checkpoint commit holds. A tracked file deleted since then
-   * still matches a pathspec through this, so its removal is staged instead of the
-   * stale index entry silently riding along into the next checkpoint. */
+  /** The paths the last checkpoint commit holds. A tracked file deleted since then still
+   * matches a pathspec through this, so its removal is staged instead of the stale index
+   * entry silently riding along into the next checkpoint. */
   async function committedPaths(): Promise<Set<string>> {
     const listed = await gitShadow(['ls-tree', '-r', '--name-only', 'HEAD'])
-    if (listed.code !== 0 || !workTree) return new Set()
-    const root = workTree
-    return new Set(
-      listed.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((rel) => path.join(root, rel)),
-    )
+    if (listed.code !== 0) return new Set()
+    return new Set(listed.stdout.split('\n').filter(Boolean))
   }
 
   /** git rejects the whole pathspec when one entry is ignored, so the ignored paths are
@@ -273,12 +273,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   async function withoutIgnored(files: string[]): Promise<string[]> {
     const checked = await gitShadow(['-c', 'core.quotePath=false', 'check-ignore', '--', ...files])
     if (checked.code !== 0) return files
-    const ignored = new Set(
-      checked.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => path.resolve(line)),
-    )
+    const ignored = new Set(checked.stdout.split('\n').filter(Boolean))
     return files.filter((file) => !ignored.has(file))
   }
 
@@ -286,10 +281,14 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * the last commit. A pathspec matching neither aborts the entire add, taking the
    * checkpoint with it. */
   async function addablePaths(): Promise<string[]> {
-    const inside = [...touched].filter(insideWorkTree)
+    const inside: Array<{ file: string; rel: string }> = []
+    for (const file of touched) {
+      const rel = workTreePath(file)
+      if (rel !== undefined) inside.push({ file, rel })
+    }
     if (inside.length === 0) return []
     const committed = await committedPaths()
-    const live = inside.filter((file) => fs.existsSync(file) || committed.has(file))
+    const live = inside.filter(({ file, rel }) => fs.existsSync(file) || committed.has(rel)).map(({ rel }) => rel)
     return live.length === 0 ? [] : withoutIgnored(live)
   }
 
@@ -308,9 +307,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * way through a run is absent from that run's pre-run snapshot, so without this its
    * checkpoint holds no baseline and /rewind cannot undo that first edit. */
   async function captureBaseline(file: string): Promise<void> {
-    if (!runRef || !insideWorkTree(file) || !fs.existsSync(file)) return
-    if ((await withoutIgnored([file])).length === 0) return
-    const add = await gitShadow(['add', '--', file])
+    const rel = workTreePath(file)
+    if (!runRef || rel === undefined || !fs.existsSync(file)) return
+    if ((await withoutIgnored([rel])).length === 0) return
+    const add = await gitShadow(['add', '--', rel])
     if (add.code !== 0) return
     // A commit, never an amend: the run's checkpoint can be a commit an earlier
     // checkpoint also points at, and rewriting it would strand that one.
@@ -395,7 +395,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     runRef = undefined
     await ensureShadow(ctx)
     touched.clear()
-    for (const file of await committedPaths()) touched.add(file)
+    for (const rel of await committedPaths()) touched.add(path.resolve(ctx.cwd, rel))
     checkpoints.clear()
     const stored: Checkpoint[] = []
     for (const entry of ctx.sessionManager.getEntries()) {
