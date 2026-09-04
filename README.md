@@ -56,7 +56,7 @@ Each topic links to its own doc with the full contract and any divergences from 
 - **[Goal](docs/goal.md)**: `/goal <condition>` keeps the session working until a separate model check confirms the condition holds, with status, clear, block cap, background-work deferral, and resume.
 - **[Session extras](docs/session-extras.md)** — project trust, plan mode, todos, checkpoints/rewind, AskUserQuestion, notifications, think keywords, session titles, `/context`, `/init`.
 
-Slash commands: `/init`, `/context`, `/goal`, `/memory`, `/todos`, `/rewind`, `/tasks`, `/agents`, `/plan`, `/mcp`, `/hooks`, and `/output-style`, alongside your own `/dir:name` commands, `/skill:name` skills, `/plugin:name` plugin commands, and each connected server's `/mcp__server__prompt` prompts.
+Slash commands: `/init`, `/context`, `/goal`, `/memory`, `/todos`, `/rewind`, `/tasks`, `/agents`, `/plan`, `/plan-todos`, `/mcp`, `/hooks`, and `/output-style`, alongside your own `/dir:name` commands, `/skill:name` skills, `/plugin:name` plugin commands, and each connected server's `/mcp__server__prompt` prompts.
 
 pi has no general permission system, so most of what Claude routes through a permission prompt maps to hard behavior here: `allowed-tools` restricts the turn's tool set instead of pre-approving calls, and a hook that times out on PreToolUse or UserPromptSubmit fails closed. A hook's `permissionDecision: "ask"` is the exception: it shows a confirm dialog and lets the call through when you approve (a headless run has no dialog, so it blocks). Where a Claude restriction cannot be expressed at all (an argument-scoped grant in an agent's `tools:`), the definition is rejected rather than widened.
 
