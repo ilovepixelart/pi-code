@@ -1327,6 +1327,35 @@ describe('mcp failure reporting', () => {
     expect(await statusLinesOf(harness)).toEqual(['hung: failed: connect hung timed out after 2000ms (0 tools)'])
   })
 
+  it('drops a late startup summary once the session that scheduled it has been replaced', async () => {
+    // A late-connecting server's deferred publish captured the session_start ctx. After
+    // /new that ctx is disposed (pi throws on any use of it) and a fresh session owns the
+    // status map, so the old session's publish must not run: it would notify through a
+    // dead ctx, and from a bare `.then` that throw would be an unhandled rejection.
+    const resolvers: Array<() => void> = []
+    hoisted.control.connect = () => new Promise<void>((r) => resolvers.push(r))
+    withTools([{ name: 'go' }])
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const first = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await first
+    await harness.shutdown()
+    const second = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await second
+    const before = harness.notifications.length
+
+    resolvers[0]?.() // the first session's connect finishes after that session is gone
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.notifications.length).toBe(before)
+
+    resolvers[1]?.() // the live session's own late connect still publishes
+    await vi.advanceTimersByTimeAsync(0)
+    expect(harness.notifications.length).toBe(before + 1)
+  })
+
   it('returns from session_start without waiting for a hung server, in an interactive session', async () => {
     // Claude: "MCP startup is non-blocking by default: servers connect in the
     // background and their tools become available as they finish." Before this,

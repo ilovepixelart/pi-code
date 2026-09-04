@@ -99,6 +99,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // Shutdown closes clients while they are still in the map; the onclose handlers
   // must not schedule reconnects for that deliberate teardown.
   let shuttingDown = false
+  // Bumped by every session_start and session_shutdown. A late-connecting server's
+  // deferred summary captured the ctx of the session that started it; pi disposes that
+  // ctx on /new, /resume, /fork and reload (any use of it throws), so the publish must
+  // check it still belongs to the live session before touching ctx.
+  let sessionGeneration = 0
   const callTuning = (name: string): ServerCallTuning => {
     const config = serverConfigs.get(name)
     return config ? serverCallTuning(config) : {}
@@ -587,6 +592,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // withdrawn tool keeps its registration and surfaces the server's own error), which
     // is why serverToolCount reads from `registered` to recover the true count here.
     status.clear()
+    const generation = ++sessionGeneration
     // A same-process session switch (/new, /resume) shut the last session down;
     // this one may reconnect again. projectConnected guards against connecting the project
     // scope twice within one session, so it belongs to the session that set it: leaving it
@@ -629,13 +635,23 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           () => false,
         )
     publishConnectionSummary(ctx)
-    if (!settled) void connecting.then(() => publishConnectionSummary(ctx))
+    if (!settled) {
+      // The rejection path exists for the throw a disposed ctx would raise if the
+      // generation check were ever wrong: from a bare `.then` it would be an unhandled
+      // rejection, and pi installs no handler, so Node would take the process down.
+      void connecting
+        .then(() => {
+          if (generation === sessionGeneration) publishConnectionSummary(ctx)
+        })
+        .catch(() => {})
+    }
   })
 
   pi.on('session_shutdown', async () => {
     // Closing fires each client's onclose while it is still in the map; the flag
     // stops those handlers (and any in-flight backoff loop) from reconnecting.
     shuttingDown = true
+    sessionGeneration++
     // Close in parallel with a per-client timeout so one hung server can't stall pi's exit.
     await Promise.all([...clients.values()].map((client) => withTimeout(client.close(), 3000, 'close').catch(() => {})))
     // Drop the closed clients and their status now rather than waiting on each client's
