@@ -1,8 +1,7 @@
 /**
- * The shapes every extension here needed its own copy of: an error's message, a plain
- * object check, whether a path is a directory, and the text of a message content. Each
- * was written three to five times with the same body, and the error one appeared in
- * seventeen files.
+ * The small shared shapes: an error's message, a plain-object check, whether a path
+ * is a directory, the text of a message content, a regex escape, a numeric env
+ * value. One copy each; a private copy in an extension is the drift to look for.
  */
 
 import * as fs from 'node:fs'

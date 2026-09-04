@@ -170,15 +170,6 @@ export interface PreToolUseOutcome extends HookDecision {
   context?: string[]
 }
 
-/** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
- * verdict in config order wins. The payload reports the Claude vocabulary: the MCP
- * alias for MCP tools, and the documented name and tool_input shape for pi's
- * built-ins (see claude-tools). Every hook sees the original tool input;
- * hookSpecificOutput.updatedInput replaces the input in place as each hook
- * completes, translated back to the pi shape for a built-in (an incomplete rewrite
- * keeps the original input rather than corrupting it), so with several rewrites
- * the last to finish takes effect (the docs leave multi-rewrite ordering
- * unspecified). */
 /** Apply a hook's updatedInput rewrite in place, translating a built-in rewrite
  * back to the pi shape; an incomplete built-in rewrite keeps the original input
  * rather than corrupting it. */
@@ -215,6 +206,15 @@ function preToolContexts(results: HookRunResult[]): string[] {
   })
 }
 
+/** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
+ * verdict in config order wins. The payload reports the Claude vocabulary: the MCP
+ * alias for MCP tools, and the documented name and tool_input shape for pi's
+ * built-ins (see claude-tools). Every hook sees the original tool input;
+ * hookSpecificOutput.updatedInput replaces the input in place as each hook
+ * completes, translated back to the pi shape for a built-in (an incomplete rewrite
+ * keeps the original input rather than corrupting it), so with several rewrites
+ * the last to finish takes effect (the docs leave multi-rewrite ordering
+ * unspecified). */
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink, anchors?: PathAnchors): Promise<PreToolUseOutcome> {
   const cwd = anchors?.cwd ?? process.cwd()
   const translatedName = claudeName ?? claudeToolName(toolName)

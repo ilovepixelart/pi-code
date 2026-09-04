@@ -27,8 +27,6 @@ export const AGENT_HOOK_SYSTEM = [
   'Use "allow" to let the action proceed, "deny" to block it, "ask" to require the user to confirm.',
 ].join('\n')
 
-/** A throwaway agent config for one agent-hook run: read-only inspection tools, the
- * hook's model (a fast default when unset), and the decision-returning system prompt. */
 /** The agent a context: fork skill runs as when it names none: full toolset, no
  * extra system prompt (the child keeps pi's default), the skill content as the
  * task. */
@@ -43,6 +41,8 @@ export function forkAgent(request: Pick<AgentRunRequest, 'model' | 'systemPrompt
   }
 }
 
+/** A throwaway agent config for one agent-hook run: read-only inspection tools, the
+ * hook's model (a fast default when unset), and the decision-returning system prompt. */
 export function buildHookAgent(request: Pick<AgentRunRequest, 'model' | 'systemPrompt'>): AgentConfig {
   return {
     name: 'agent-hook',

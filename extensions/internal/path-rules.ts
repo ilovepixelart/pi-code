@@ -103,9 +103,9 @@ function bracketClass(body: string): string | null {
   // JavaScript will build: RegExp throws "Range out of order in character class". The
   // `-` cannot simply be escaped, since `[a-z]` is the whole point of the syntax, so the
   // class is validated by construction and an unbuildable one is treated exactly as an
-  // unterminated `[` already is: the pattern is invalid and matches nothing. Without
-  // this the throw escaped compileGlobs, which does not catch, and took the permission
-  // check that called it with it.
+  // unterminated `[` already is: the pattern is invalid and matches nothing. It must
+  // not throw: compileGlobs does not catch, and the permission check that called it
+  // would fail with it.
   return isBuildableClass(source) ? source : null
 }
 
@@ -195,9 +195,7 @@ function resolveRule(rule: string, anchors: PathAnchors): string {
   return path.join(anchors.cwd, rel)
 }
 
-/** One rule glob precompiled for repeated matching: its anchored regex, and whether
- * it applies to the basename (a slashless pattern, gitignore-style) or the full
- * root-relative path. */
+/** One rule glob precompiled for repeated matching: its anchored regex. */
 export interface CompiledGlob {
   regex: RegExp
 }
@@ -211,13 +209,13 @@ export function globCompileStats(): { compiled: number; evaluated: number } {
   return { compiled: globsCompiled, evaluated: globsEvaluated }
 }
 
-/** Rule `paths:` globs compiled once for repeated matching, with claude-rules'
- * pathMatchesGlobs semantics: `./` and leading `/` anchors are stripped, a trailing
- * slash scopes to the directory's contents, and blank entries drop out. */
 /** Claude's shared list budget: rule patterns past ~1000 compiled entries are
  * ignored rather than compiled without bound. */
 const LIST_PATTERN_BUDGET = 1000
 
+/** Rule `paths:` globs compiled once for repeated matching, with claude-rules'
+ * pathMatchesGlobs semantics: `./` and leading `/` anchors are stripped, a trailing
+ * slash scopes to the directory's contents, and blank entries drop out. */
 export function compileGlobs(globs: string[]): CompiledGlob[] {
   const compiled: CompiledGlob[] = []
   for (const raw of globs) {
@@ -243,8 +241,6 @@ export function matchesCompiledGlobs(relPath: string, globs: CompiledGlob[]): bo
   return globs.some((glob) => glob.regex.test(posix))
 }
 
-/** Whether the accessed file matches at least one rule. No rules means no match:
- * a granted-but-scoped tool with an empty scope set stays blocked, never open. */
 /** Both comparison sides in posix form. On Windows, resolve stamps the drive on
  * the target while join-built rules stay drive-less, and backslash separators
  * collide with glob syntax, so unnormalized rules could never match. */
@@ -272,6 +268,8 @@ export function stripRuleDrive(rule: string, windows: boolean): string {
   return rule.replace(/^([A-Za-z]):\//, '/').replace(/^\/[A-Za-z]\//, '/')
 }
 
+/** Whether the accessed file matches at least one rule. No rules means no match:
+ * a granted-but-scoped tool with an empty scope set stays blocked, never open. */
 export function matchesPathRules(filePath: string, rules: string[], anchors: PathAnchors): boolean {
   const target = toPosix(path.resolve(anchors.cwd, filePath))
   return rules.some((rule) => {

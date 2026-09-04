@@ -35,10 +35,6 @@ import { claudeSettingsChain, readSettingsChain } from './internal/settings-chai
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.js'
 import { errorMessage, isDirectory, isRecord } from './internal/values.js'
 
-/** Existing `.claude/skills` directories, user first then project. The project
- * directory is included only for approved projects: pi's loader surfaces every skill's
- * name and description to the model, so an untrusted repository would otherwise get
- * text into the prompt without the user ever agreeing to load its config. */
 /** The extra skill directories a manifest declares, as a list. A string is one entry,
  * a list is itself, anything else declares none. */
 function declaredSkillDirs(declared: unknown): string[] {
@@ -46,6 +42,10 @@ function declaredSkillDirs(declared: unknown): string[] {
   return typeof declared === 'string' ? [declared] : []
 }
 
+/** Existing `.claude/skills` directories, user first then project. The project
+ * directory is included only for approved projects: pi's loader surfaces every skill's
+ * name and description to the model, so an untrusted repository would otherwise get
+ * text into the prompt without the user ever agreeing to load its config. */
 export function skillDirs(cwd: string, home: string, trusted: boolean): string[] {
   // Claude's precedence: enterprise (the skills directory beside the managed
   // settings file) overrides personal, and personal overrides project; discovery
@@ -113,7 +113,7 @@ function skillAt(root: string, dirName: string): { name: string; filePath: strin
 
 /** A Claude-contributed skill by the name pi's loader gives it. One directory
  * level, the standard layout. */
-export function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
+function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
   for (const root of roots) {
     let entries: fs.Dirent[]
     try {

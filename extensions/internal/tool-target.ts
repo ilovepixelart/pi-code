@@ -1,11 +1,10 @@
 /**
  * Which file a tool call touched.
  *
- * Two extensions attach instruction files when a file tool touches a path they cover
- * (claude-rules for a path-scoped rule, context-imports for a nested CLAUDE.md), and
- * both got the same detail wrong: pi's edit and write tools accept `file_path` as an
- * alias for `path`, so a handler reading only `path` did nothing for a model that used
- * the alias. One reader, one place to be wrong.
+ * pi's read, edit and write tools accept `file_path` as an alias for `path`, so every
+ * reader of a file tool's target must accept both, and a handler reading only `path`
+ * does nothing for a model that used the alias. This is the one reader (claude-rules,
+ * context-imports and the command path-scope guard all go through it).
  */
 
 /** The tools that name a file pi-code acts on. */

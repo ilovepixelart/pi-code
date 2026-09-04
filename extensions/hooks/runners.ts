@@ -41,10 +41,6 @@ export interface HookRunResult {
 }
 /** Runs one configured hook entry, whatever its type; boundRunner dispatches. */
 export type HookRunner = (hook: HookCommand, payload: unknown, timeoutMs: number) => Promise<HookRunResult>
-/** The shell path specifically; the statusline reuses it for its own command. With an
- * `args` array it becomes the exec path: `command` is spawned directly with those args.
- * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
- * still running at session end can be reaped (Claude kills async hooks at teardown). */
 /** How one command hook is spawned, beyond the payload and its budget. Grouped rather
  * than trailing off the parameter list: the exec form, the shell choice and the
  * declaring plugin are all per-hook fields that arrive together from one HookCommand. */
@@ -119,6 +115,10 @@ function shellInvocation(command: string, shell: string | undefined): { file: st
   return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
 }
 
+/** The shell path specifically; the statusline reuses it for its own command. With an
+ * `args` array it becomes the exec path: `command` is spawned directly with those args.
+ * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
+ * still running at session end can be reaped (Claude kills async hooks at teardown). */
 export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, { projectDir, args, onChild, shell, plugin, sessionId } = {}) =>
   new Promise((resolve) => {
     // /bin/sh by absolute path off Windows, so the shell can't be resolved through an

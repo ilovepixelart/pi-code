@@ -53,8 +53,7 @@ import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeout
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
-// (imported by the test suite) reachable from this entry point unchanged. The managed
-// settings path helpers now live in the shared internal module.
+// (imported by the test suite) reachable from this entry point unchanged.
 export type { HttpServerConfig, ServerConfig, StdioServerConfig } from './config.js'
 export { expandCwd, interpolateEnv, loadConfigFrom, loadPluginServers, loadUserScope, projectConfigPaths, userConfigPaths, warnOnTypelessUrl } from './config.js'
 export type { McpToolInfo } from './listing.js'

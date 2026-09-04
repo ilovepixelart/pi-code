@@ -177,7 +177,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
 /** Where the index stands against the read limits, measured on the loaded content
  * (frontmatter and comments stripped): 'over' past either bound, 'near' within
  * 10% of one, else 'ok'. Claude reminds near a limit and errors over it. */
-export function indexReadState(index: string): 'ok' | 'near' | 'over' {
+function indexReadState(index: string): 'ok' | 'near' | 'over' {
   const loaded = stripNonLoaded(index)
   const lines = loaded.split('\n').length
   const bytes = Buffer.byteLength(loaded, 'utf-8')

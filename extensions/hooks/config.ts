@@ -209,10 +209,9 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
   }
   for (const [event, matchers] of Object.entries(parsed?.hooks ?? {})) {
     if (!Array.isArray(matchers)) continue
-    // Entries are validated here rather than where they run: a hand-edited settings
-    // file that writes `hooks` as an object instead of a list used to throw out of
-    // the tool_call handler, and pi turns that into an error result, so every tool
-    // call for the rest of the session failed with an opaque type error.
+    // Entries are validated here rather than where they run: a malformed entry that
+    // throws from the tool_call handler becomes an error result there, so every tool
+    // call for the rest of the session fails with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
     if (origin !== undefined) stampOrigin(usable, origin)
@@ -224,9 +223,6 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
   }
 }
 
-/** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
- * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
- * hook can name its bundled scripts by real path. */
 /** The substitution here lands inside raw JSON, so values must arrive escaped:
  * an unescaped Windows root injected \U-style sequences, the parse threw, and
  * every hook the plugin declared silently vanished. */
@@ -270,6 +266,9 @@ function withoutUserConfigShellCommands(raw: string, source: string): string {
   return dropped ? JSON.stringify(parsed) : raw
 }
 
+/** Each enabled plugin's hooks (hooks/hooks.json, or wherever the manifest points),
+ * with ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} substituted before parsing so a
+ * hook can name its bundled scripts by real path. */
 export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks

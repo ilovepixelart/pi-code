@@ -258,11 +258,6 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
   return { name, root, dataDir: path.join(claudeConfigDir(home), 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
 }
 
-/** The two plugin path variables, textually substituted into plugin-shipped
- * config (hook commands, MCP server definitions, command bodies). A caller
- * substituting into text that is still raw JSON must pass an escapeValue that
- * JSON-escapes: a Windows root (C:\Users\...) inserted verbatim injects invalid
- * escape sequences and the subsequent parse throws. */
 /** A plugin component path, resolved inside the plugin root. Claude "rejects a component
  * path that resolves outside the plugin root, such as `../shared-utils`", so an escaping
  * entry yields undefined and its caller skips that component. The check is lexical, which
@@ -277,6 +272,11 @@ export function pluginComponentPath(plugin: Pick<InstalledPlugin, 'name' | 'root
   return resolved
 }
 
+/** The two plugin path variables, textually substituted into plugin-shipped
+ * config (hook commands, MCP server definitions, command bodies). A caller
+ * substituting into text that is still raw JSON must pass an escapeValue that
+ * JSON-escapes: a Windows root (C:\Users\...) inserted verbatim injects invalid
+ * escape sequences and the subsequent parse throws. */
 export function substitutePluginVars(value: string, plugin: InstalledPlugin, escapeValue: (substituted: string) => string = (substituted) => substituted): string {
   return value
     .replaceAll('${CLAUDE_PLUGIN_ROOT}', escapeValue(plugin.root))
