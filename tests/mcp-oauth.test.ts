@@ -80,6 +80,29 @@ describe('FileOAuthProvider', () => {
     expect(provider.clientMetadata.token_endpoint_auth_method).toBe('none')
   })
 
+  it('answers a malformed request target with 400 instead of throwing out of the listener', async () => {
+    // Node's parser passes an absolute-form target through unvalidated; `new URL` on
+    // one with an out-of-range port throws, and a throw from a 'request' listener is
+    // not caught by node:http: it was an uncaughtException during the login window.
+    const { server, port } = await startCallbackServer()
+    const code = waitForAuthCode(server, 2000)
+    code.catch(() => {})
+    const status = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1', () => {
+        socket.write('GET http://x:99999/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+      })
+      let raw = ''
+      socket.on('data', (chunk) => {
+        raw += chunk.toString()
+      })
+      socket.on('end', () => resolve(raw.split('\r\n')[0] ?? ''))
+      socket.on('error', reject)
+    })
+    server.close()
+
+    expect(status).toContain(' 400 ')
+  })
+
   it('answers the callback on both loopback families, since localhost may resolve to either', async () => {
     // The redirect URL names localhost. On a host with IPv6 the browser may reach ::1
     // while the listener sat on 127.0.0.1 alone, and the login would hang on a connection
