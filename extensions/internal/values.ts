@@ -36,3 +36,20 @@ export function contentText(content: unknown, separator = ''): string {
     .map((part) => part.text)
     .join(separator)
 }
+
+/** Escape a string for literal use inside a RegExp. One copy: five private ones had
+ * the same body and would have drifted the first time one of them was fixed. */
+export function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+}
+
+/** A numeric environment value, or undefined when blank or not a number. Accepts the
+ * spellings docs/mcp.md promises (`2e3`, `64_000`); the caller decides the range and
+ * whether fractions are meaningful, so no flooring here. */
+export function parseNumericEnv(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined
+  const cleaned = raw.replaceAll('_', '')
+  if (cleaned.trim() === '') return undefined
+  const value = Number(cleaned)
+  return Number.isFinite(value) ? value : undefined
+}

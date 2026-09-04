@@ -11,6 +11,7 @@ import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works
 // is not merely ignored, it narrows the child's registry.
 import { parseToolGrants } from '../internal/command-file.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
+import { findModel } from '../internal/model-lookup.js'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
 import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
 import { errorMessage } from '../internal/values.js'
@@ -65,10 +66,9 @@ function parseModelAlias(raw: unknown): string | undefined {
 /** Resolve a Claude tier alias to a concrete model id the user can actually run.
  * Returning undefined leaves the child on the session model, which is what the
  * unresolvable case degraded to before and still does. */
-export function resolveModelAlias(alias: string | undefined, available: ReadonlyArray<{ id: string; provider?: string }>): string | undefined {
+export function resolveModelAlias(alias: string | undefined, available: ReadonlyArray<{ id: string; name?: string; provider?: string }>): string | undefined {
   if (!alias || alias === 'inherit') return undefined
-  const needle = alias.toLowerCase()
-  return available.find((model) => model.id.toLowerCase().includes(needle))?.id
+  return findModel(alias, available)?.id
 }
 
 /** pi's extended thinking levels; Claude's effort values are a subset, so they map 1:1. */

@@ -1103,6 +1103,8 @@ describe('slashCommandBudget', () => {
     expect(slashCommandBudget(200_000, { SLASH_COMMAND_TOOL_CHAR_BUDGET: '4000' })).toBe(4000)
     // 1% of the window's tokens at ~4 chars per token is window / 25.
     expect(slashCommandBudget(200_000, {})).toBe(8000)
+    expect(slashCommandBudget(undefined, { SLASH_COMMAND_TOOL_CHAR_BUDGET: '64_000' })).toBe(64_000)
+    expect(slashCommandBudget(undefined, { SLASH_COMMAND_TOOL_CHAR_BUDGET: '2e3' })).toBe(2000)
     expect(slashCommandBudget(undefined, {})).toBe(15_000)
   })
 

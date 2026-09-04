@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import { readManagedSettings } from '../internal/managed-settings.js'
 import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
 import { claudeSettingsChain, readSettingsChain } from '../internal/settings-chain.js'
-import { errorMessage, isRecord } from '../internal/values.js'
+import { errorMessage, escapeRegExp, isRecord } from '../internal/values.js'
 
 export interface HookCommand {
   type?: string
@@ -159,7 +159,7 @@ export function readAllowedHttpHookUrls(files: string[], managed: Record<string,
 export function httpUrlAllowed(url: string, allowlist: string[] | undefined): boolean {
   if (allowlist === undefined) return true
   return allowlist.some((pattern) => {
-    const literal = pattern.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`))
+    const literal = pattern.split('*').map(escapeRegExp)
     return new RegExp(`^${literal.join('.*')}$`).test(url)
   })
 }

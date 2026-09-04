@@ -14,14 +14,13 @@
  */
 
 import * as path from 'node:path'
+import { escapeRegExp } from './values.js'
 
 export interface PathAnchors {
   cwd: string
   projectRoot: string
   home: string
 }
-
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 
 /** Cap on brace-expanded alternatives per pattern, mirroring Claude's ~1000
  * budget; an over-budget pattern is used unexpanded. */

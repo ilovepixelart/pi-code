@@ -70,7 +70,9 @@ export function resolvePowershellBinary(platform: string = process.platform, env
 function isProjectTooling(dir: string, cwd: string): boolean {
   const relative = path.relative(cwd, dir)
   if (relative === '') return true
-  if (relative.startsWith('..') || path.isAbsolute(relative)) return false
+  // Lexical containment: `..tools/...` is a directory inside cwd, only `..` itself or
+  // `../...` leaves it (the shape claude-rules.ts's containment check spells out).
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false
   return relative.split(path.sep).some((segment) => PROJECT_TOOLING_DIRS.has(segment))
 }
 

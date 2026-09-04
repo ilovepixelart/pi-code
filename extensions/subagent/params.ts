@@ -23,8 +23,7 @@ export const ChainItem = Type.Object({
 })
 
 const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
-  description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
-  default: 'user',
+  description: 'Which agent directories to use. Omitted, an approved project resolves to "both" and an unapproved one to "user"; "both" includes project-local agents.',
 })
 
 export const SubagentParams = Type.Object({

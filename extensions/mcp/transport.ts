@@ -18,6 +18,7 @@ import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/webso
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
 import { resolveShell } from '../internal/shell-resolve.js'
+import { parseNumericEnv } from '../internal/values.js'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
 
@@ -36,19 +37,12 @@ const DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS = 1_800_000
 
 /** Claude's numeric env vars accept scientific notation and digit-separator spellings
  * (2e3 as 2000, 64_000 as 64000). A non-numeric value is undefined, not zero. */
-function parseNumericEnv(raw: string): number | undefined {
-  const cleaned = raw.replaceAll('_', '')
-  if (cleaned.trim() === '') return undefined
-  const value = Number(cleaned)
-  return Number.isFinite(value) ? Math.floor(value) : undefined
-}
-
 /** A positive-integer env override, or the default when unset or unparseable. */
 function envTimeout(name: string, fallback: number): number {
   const raw = process.env[name]
   if (raw === undefined) return fallback
   const value = parseNumericEnv(raw)
-  return value !== undefined && value > 0 ? value : fallback
+  return value !== undefined && value > 0 ? Math.floor(value) : fallback
 }
 
 // Claude honors MCP_TIMEOUT (connect) and MCP_TOOL_TIMEOUT (per-call), both in ms.
