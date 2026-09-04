@@ -19,6 +19,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { readSettingsChain } from './internal/settings-chain.js'
 import { contentText, errorMessage } from './internal/values.js'
 
 const CUSTOM_TYPE = 'git-checkpoint'
@@ -44,12 +45,9 @@ export const CHECKPOINT_RETENTION_DAYS = 30
  * setting about the user's own disk belongs; a non-positive or unreadable value keeps the
  * default rather than sweeping everything away. */
 export function checkpointRetentionDays(home: string = os.homedir()): number {
-  try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8'))
-    const declared = (parsed as { cleanupPeriodDays?: unknown }).cleanupPeriodDays
+  for (const parsed of readSettingsChain([path.join(claudeConfigDir(home), 'settings.json')])) {
+    const declared = parsed.cleanupPeriodDays
     if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) return declared
-  } catch {
-    // No user settings, or unreadable: the default period stands.
   }
   return CHECKPOINT_RETENTION_DAYS
 }

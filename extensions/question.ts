@@ -6,7 +6,6 @@
  * Multiple questions per call are not batched; ask sequentially.
  */
 
-import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
@@ -14,6 +13,7 @@ import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from
 import { Type } from 'typebox'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
+import { readSettingsChain } from './internal/settings-chain.js'
 
 interface OptionWithDesc {
   label: string
@@ -96,12 +96,8 @@ export function askUserQuestionTimeoutMs(home: string = os.homedir()): number | 
   const managed = readManagedSettings() as { askUserQuestionTimeout?: unknown }
   const fromManaged = parseAskUserQuestionTimeout(managed.askUserQuestionTimeout)
   if (fromManaged !== undefined) return fromManaged
-  try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8')) as { askUserQuestionTimeout?: unknown }
-    return parseAskUserQuestionTimeout(parsed.askUserQuestionTimeout)
-  } catch {
-    return undefined
-  }
+  for (const parsed of readSettingsChain([path.join(claudeConfigDir(home), 'settings.json')])) return parseAskUserQuestionTimeout(parsed.askUserQuestionTimeout)
+  return undefined
 }
 
 function checkbox(checked: boolean | undefined): string {

@@ -16,12 +16,12 @@
  */
 
 import { execFile } from 'node:child_process'
-import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
 import { claudeConfigDir } from './internal/config-dir.js'
+import { readSettingsChain } from './internal/settings-chain.js'
 
 /** How a finished turn is announced, from Claude's `preferredNotifChannel`. */
 export type NotifChannel = 'desktop' | 'bell' | 'both' | 'off'
@@ -56,12 +56,8 @@ export function isAway(lastInputAt: number | undefined, now: number, thresholdMs
  * preference, so only user scope is read; a checked-out repo does not get to silence
  * or change your notifications. */
 function readPreferredNotifChannel(home: string): unknown {
-  try {
-    const settings = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(home), 'settings.json'), 'utf-8'))
-    return settings?.preferredNotifChannel
-  } catch {
-    return undefined
-  }
+  for (const settings of readSettingsChain([path.join(claudeConfigDir(home), 'settings.json')])) return settings.preferredNotifChannel
+  return undefined
 }
 
 function windowsToastScript(title: string, body: string): string {

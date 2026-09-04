@@ -138,6 +138,15 @@ describe.each(RESOLVERS)('%s refuses a binary planted in the project', (_name, p
     expect(resolve({ PATH: [local, venv].join(delimiter) }, cwd)).toBeUndefined()
   })
 
+  it('skips one under a project directory whose name begins with two dots', () => {
+    // `relative.startsWith('..')` read `..tools/node_modules/...` as outside the
+    // launch directory, so a copy planted there was accepted as the user's install.
+    const cwd = tempDir()
+    const inside = entryIn(join(cwd, '..tools', 'node_modules', 'bin'))
+    plant(inside)
+    expect(resolve({ PATH: inside }, cwd)).toBeUndefined()
+  })
+
   it('walks past a planted one to a genuine install further along PATH', () => {
     // The planted copy comes FIRST: a resolver that abandoned the lookup on seeing one,
     // rather than skipping that entry, would fail here. The launch directory IS the
