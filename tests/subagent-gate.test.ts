@@ -11,6 +11,12 @@ describe('projectAgentGate', () => {
     expect(projectAgentGate(1, false, false, true)).toBe('refuse')
   })
 
+  it('still refuses them headless when the caller declines the prompt: a model parameter cannot grant trust', () => {
+    // confirmProjectAgents is model-supplied; the only cell that distinguishes
+    // "trusted" from "trusted or the model said not to ask".
+    expect(projectAgentGate(1, false, false, false)).toBe('refuse')
+  })
+
   it('confirms untrusted project agents interactively, even if the caller tried to skip the prompt', () => {
     expect(projectAgentGate(1, false, true, true)).toBe('confirm')
     expect(projectAgentGate(1, false, true, false)).toBe('confirm')

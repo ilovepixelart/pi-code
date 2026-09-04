@@ -1145,6 +1145,9 @@ describe('slash_command tool', () => {
     expect(tool?.label).toBe('SlashCommand')
     expect(tool?.description).toContain('/deploy - Deploy it ([env])')
     expect(tool?.description).not.toContain('/secret')
+    // Hidden from the model only: the user's own /secret still runs.
+    await s.commands.get('secret')?.handler('', s.ctx)
+    expect(s.sent).toEqual(['Secret steps.'])
   })
 
   it('does not register the tool when every command is user-only, or none exist', async () => {

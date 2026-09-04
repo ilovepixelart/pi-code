@@ -484,6 +484,16 @@ describe('formatStatus', () => {
 
 describe('cancelBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
+  // The fake child carries pid 4242, so an unspied cancel runs a real
+  // process.kill(-4242) against the host; every test here spies it. Any child left
+  // without a close is closed afterwards so the unref'd SIGKILL escalation timer
+  // cannot fire after the spy is restored.
+  beforeEach(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => true)
+  })
+  afterEach(() => {
+    for (const child of spawned.children) child.emit('close', 143)
+  })
 
   it('signals the run, reports cancelled state, and keeps it after the child exits', async () => {
     const { startBackgroundRun, cancelBackgroundRun, backgroundStatusText } = await loadBackground()
@@ -493,7 +503,7 @@ describe('cancelBackgroundRun', () => {
     })
 
     expect(cancelBackgroundRun(id as string)).toBe('cancelled')
-    expect(spawned.children[0].kill).toHaveBeenCalled()
+    expect(process.kill).toHaveBeenCalledWith(-4242, 'SIGTERM')
     expect(backgroundStatusText()).toContain('cancelled')
 
     // The child's non-zero exit is the cancellation; it must not read as a failure.
@@ -512,6 +522,15 @@ describe('cancelBackgroundRun', () => {
 })
 
 describe('cancelAllBackgroundRuns', () => {
+  // Same host guard as cancelBackgroundRun above: the fake pid would otherwise reach a
+  // real process.kill(-4242), and an unclosed child would leave the SIGKILL escalation
+  // timer armed past the spy's restore.
+  beforeEach(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => true)
+  })
+  afterEach(() => {
+    for (const child of spawned.children) child.emit('close', 143)
+  })
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
 
   it('signals every live child, marks them cancelled, and reports the count', async () => {
@@ -522,7 +541,7 @@ describe('cancelAllBackgroundRuns', () => {
     expect(activeBackgroundRuns()).toBe(2)
 
     expect(cancelAllBackgroundRuns()).toBe(2)
-    for (const child of spawned.children) expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(vi.mocked(process.kill).mock.calls.filter(([pid, signal]) => pid === -4242 && signal === 'SIGTERM')).toHaveLength(2)
     expect(backgroundStatusText()).not.toContain('running')
 
     // A cancelled child still holds its slot until it actually dies (SIGTERM may be ignored).
@@ -539,7 +558,7 @@ describe('cancelAllBackgroundRuns', () => {
     startBackgroundRun('scout', 'live-run', invocation, () => {})
 
     expect(cancelAllBackgroundRuns()).toBe(1)
-    expect(spawned.children[1].kill).toHaveBeenCalledWith('SIGTERM')
+    expect(vi.mocked(process.kill).mock.calls.filter(([pid, signal]) => pid === -4242 && signal === 'SIGTERM')).toHaveLength(1)
   })
 
   it('signals the process group, not just the direct child', async () => {

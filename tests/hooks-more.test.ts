@@ -1511,7 +1511,9 @@ describe('hooks extension notify-style events', () => {
 
   it('does not treat a timed-out Stop hook as a block', async () => {
     const ext = await withHooks({ Stop: [{ matcher: undefined, hooks: [{ command: 'hung', timeout: 1 }] }] })
-    script('hung', { hang: true })
+    // The block decision is on stdout BEFORE the hang: a hook that emits nothing cannot
+    // block with or without the timed-out filter, so only this shape proves the filter.
+    script('hung', { stdout: [JSON.stringify({ decision: 'block', reason: 'not yet' })], hang: true })
     vi.useFakeTimers()
     const pending = ext.agentEnd()
     await vi.advanceTimersByTimeAsync(1500)
@@ -1756,7 +1758,10 @@ describe('hooks subagent lifecycle', () => {
     // The bus outlives the session: an event landing between /new disposing the ctx
     // and the next session_start hits disposed getters, and nothing awaits a bus
     // listener, so a throw here used to escape as an unhandled rejection.
-    writeSettings(hoisted.home, 'settings.json', { SubagentStart: [{ hooks: [{ command: 'sub-start' }] }] })
+    // The stop phase is the one the bus listener handles (start is returned before the
+    // guarded block), so only a SubagentStop config with a stop event reaches the
+    // getters this test is about.
+    writeSettings(hoisted.home, 'settings.json', { SubagentStop: [{ hooks: [{ command: 'sub-stop' }] }] })
     const ext = setupExtension()
     const disposed = () => {
       throw new Error('session disposed')
@@ -1766,7 +1771,7 @@ describe('hooks subagent lifecycle', () => {
       sessionManager: { getSessionId: disposed, getSessionFile: disposed },
       ui: { notify: disposed },
     })
-    const pending = ext.emitSubagent({ phase: 'start', agentType: 'scout', agentId: 'fg-1' }) as unknown as Promise<void>
+    const pending = ext.emitSubagent({ phase: 'stop', agentType: 'scout', agentId: 'fg-1' }) as unknown as Promise<void>
     await expect(pending).resolves.toBeUndefined()
   })
 })
