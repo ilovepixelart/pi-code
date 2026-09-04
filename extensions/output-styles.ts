@@ -22,7 +22,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, parseFrontmatter } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.js'
 import { isFlagEnabled } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
@@ -42,16 +42,19 @@ export interface OutputStyle {
   forceForPlugin: boolean
 }
 
-function field(frontmatter: string, key: string): string {
-  const match = new RegExp(String.raw`^\s*${key}\s*:\s*(.+)$`, 'm').exec(frontmatter)
-  return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+/** A frontmatter field as text, or '' when absent or not scalar. */
+function field(frontmatter: Record<string, unknown>, key: string): string {
+  const value = frontmatter[key]
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
 }
 
-/** Parse an output-style markdown file into its name, description, and body. */
+/** Parse an output-style markdown file into its name, description, and body. pi's
+ * own YAML frontmatter parser, as the command loader uses: a line regex captured to
+ * end of line, so `"Terse" # short` came back as `Terse" # short`. */
 export function parseStyle(content: string, fallbackName: string): OutputStyle {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  const frontmatter = match ? match[1] : ''
-  const body = match ? content.slice(match[0].length) : content
+  const { frontmatter, body } = parseFrontmatter(content)
   return {
     name: field(frontmatter, 'name') || fallbackName,
     description: field(frontmatter, 'description'),

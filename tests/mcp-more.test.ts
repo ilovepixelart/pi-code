@@ -1350,10 +1350,52 @@ describe('mcp failure reporting', () => {
     resolvers[0]?.() // the first session's connect finishes after that session is gone
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.notifications.length).toBe(before)
+  })
 
-    resolvers[1]?.() // the live session's own late connect still publishes
+  it('does not connect a name a second time when a session switch lands during its connect', async () => {
+    // Only a resolved connect put a name in `clients`, and shutdown cleared the map
+    // without awaiting anything in flight, so the next session_start saw a free name
+    // and spawned a second server. The first connect then resolved into a map entry the
+    // second overwrote: never closed, its process alive until pi exited.
+    const resolvers: Array<() => void> = []
+    hoisted.control.connect = () => new Promise<void>((r) => resolvers.push(r))
+    withTools([{ name: 'go' }])
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const first = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await first
+    await harness.shutdown()
+    const second = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await second
+    expect(resolvers).toHaveLength(1)
+
+    resolvers[0]?.() // the one connect finishes into the live session
     await vi.advanceTimersByTimeAsync(0)
-    expect(harness.notifications.length).toBe(before + 1)
+    expect(await statusLinesOf(harness)).toEqual(['slow: connected (1 tools)'])
+    expect(hoisted.closed).toHaveLength(0)
+  })
+
+  it('closes a client whose connect resolves after pi began shutting down', async () => {
+    // With no next session to adopt it, the late client is invisible to the shutdown
+    // handler that already ran; left alone it would idle its process past pi's exit.
+    const resolvers: Array<() => void> = []
+    hoisted.control.connect = () => new Promise<void>((r) => resolvers.push(r))
+    withTools([{ name: 'go' }])
+    vi.useFakeTimers()
+
+    const harness = await setup({ user: { slow: { command: 'x' } } })
+    const booting = harness.sessionStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await booting
+    await harness.shutdown()
+
+    resolvers[0]?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(hoisted.closed).toHaveLength(1)
+    expect(await statusLinesOf(harness)).not.toContain('slow: connected (1 tools)')
   })
 
   it('reads project settings from cwd only and the local file from the main checkout, as the settings chain does', async () => {

@@ -703,7 +703,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Claude's custom_instructions: the /compact arguments on a manual run, empty
     // on an automatic one; pi carries them on the event directly.
     const payload = { hook_event_name: 'PreCompact', trigger: trigger.value, custom_instructions: event.customInstructions ?? '' }
-    const results = await runNotifyHooks(matchingCommands(config.PreCompact, trigger.names), payload, boundRunner(ctx))
+    // Filtered here the way runNotifyHooks filters, so `results[index]` and
+    // `commands[index]` name the same hook: indexing the unfiltered list named the
+    // wrong command in the notice whenever an `if`-carrying hook preceded the blocker.
+    const commands = matchingCommands(config.PreCompact, trigger.names).filter((command) => passesIfFilter(command, undefined))
+    const results = await runNotifyHooks(commands, payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     // Claude: "Exit with code 2 to block compaction. For a manual /compact, the stderr
     // message is shown to the user. You can also block by returning JSON with
@@ -713,7 +717,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const parsed = tryParseJson(result.stdout)
       const blocked = result.code === 2 && !result.timedOut ? { reason: result.stderr.trim() || 'Compaction blocked by hook' } : jsonBlockVerdict(parsed, 'Compaction blocked by hook')
       if (!blocked) continue
-      ctx.ui.notify(`Compaction blocked by ${matchingCommands(config.PreCompact, trigger.names)[index]?.command ?? 'hook'}: ${blocked.reason}`, 'warning')
+      ctx.ui.notify(`Compaction blocked by ${commands[index]?.command ?? 'hook'}: ${blocked.reason}`, 'warning')
       return { cancel: true }
     }
   })

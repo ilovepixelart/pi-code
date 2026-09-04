@@ -1787,7 +1787,9 @@ describe('foreground abort process group', () => {
       ;(spawnedChildren[0] as { pid?: number }).pid = 424242
       controller.abort()
       await expect(pending).rejects.toThrow('Subagent was aborted')
-      expect(groupKills).toContainEqual([-424242, 'SIGTERM'])
+      // Windows has no process groups: the tree ends through taskkill /T instead.
+      if (process.platform === 'win32') expect(spawnCalls.map((c) => c.args)).toContainEqual(['/pid', '424242', '/T', '/F'])
+      else expect(groupKills).toContainEqual([-424242, 'SIGTERM'])
     } finally {
       killSpy.mockRestore()
     }

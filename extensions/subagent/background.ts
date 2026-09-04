@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { killProcessTree } from '../internal/process-tree.js'
 import { errorMessage } from '../internal/values.js'
 import { spawnChild } from './run.js'
 
@@ -315,19 +316,7 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   }
   const proc = spawned.proc
   run.live = true
-  const killGroup = (signal: NodeJS.Signals): void => {
-    try {
-      // A child that never spawned has no pid and no group; the direct kill is all there is.
-      if (proc.pid) process.kill(-proc.pid, signal)
-      else proc.kill(signal)
-    } catch {
-      try {
-        proc.kill(signal)
-      } catch {
-        // already gone
-      }
-    }
-  }
+  const killGroup = (signal: NodeJS.Signals): void => killProcessTree(proc, signal)
   run.kill = () => {
     killGroup('SIGTERM')
     // A child ignoring SIGTERM would hold its cap slot and process forever.

@@ -6,11 +6,11 @@
 
 import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
-import * as path from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
 import { completeText } from '../internal/model-complete.js'
+import { killProcessTree } from '../internal/process-tree.js'
 import { resolveShell } from '../internal/shell-resolve.js'
 import { errorMessage } from '../internal/values.js'
 import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
@@ -96,30 +96,9 @@ const MAX_HOOK_OUTPUT = 1_000_000
 /** Conventional exit code for a killed-on-timeout command, as `timeout(1)` reports it. */
 const TIMEOUT_EXIT_CODE = 124
 
-/**
- * Kill the shell and everything it spawned. `sh -c 'a; b'` forks, so signalling the
- * direct child alone leaves a grandchild alive holding stdout/stderr.
- */
+/** Kill the shell and everything it spawned; see internal/process-tree. */
 function killTree(child: ChildProcess): void {
-  if (process.platform === 'win32') {
-    // Windows has no process groups: taskkill /T ends the shell's whole tree. By
-    // absolute path, so a writable PATH entry cannot stand in for it. If taskkill itself
-    // cannot start, the direct kill is all that is left.
-    const taskkill = path.join(process.env.SystemRoot ?? String.raw`C:\Windows`, 'System32', 'taskkill.exe')
-    if (child.pid) spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill('SIGKILL'))
-    else child.kill('SIGKILL')
-    return
-  }
-  try {
-    // Negative pid targets the whole process group, which `detached` gave the shell.
-    if (child.pid) {
-      process.kill(-child.pid, 'SIGKILL')
-      return
-    }
-  } catch {
-    // Group already reaped, or the platform refused it; fall through to the direct kill.
-  }
-  child.kill('SIGKILL')
+  killProcessTree(child, 'SIGKILL')
 }
 
 /** Create the plugin data directory the moment its path is handed to a child. Claude

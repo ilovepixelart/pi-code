@@ -93,7 +93,13 @@ function isRunnableHook(hook: HookCommand): boolean {
   if (hook.type === 'http') return typeof hook.url === 'string' && /^https?:\/\//.test(hook.url)
   if (hook.type === 'prompt' || hook.type === 'agent') return typeof hook.prompt === 'string' && hook.prompt.length > 0
   if (hook.type === 'mcp_tool') return typeof hook.server === 'string' && typeof hook.tool === 'string'
-  return typeof hook.command === 'string' && (hook.type === undefined || hook.type === 'command')
+  // A command hook needs a non-empty command, and exec-form args must all be strings:
+  // spawn('') throws ERR_INVALID_ARG_VALUE and a number has no replaceAll for argument
+  // substitution, both inside the runner's Promise executor, so the event's handler
+  // rejected instead of the hook reporting spawnFailed.
+  if (typeof hook.command !== 'string' || hook.command.length === 0) return false
+  if (hook.args !== undefined && !(Array.isArray(hook.args) && hook.args.every((arg) => typeof arg === 'string'))) return false
+  return hook.type === undefined || hook.type === 'command'
 }
 
 /** The synthetic identity of a non-shell hook entry: an http/prompt/agent/mcp_tool

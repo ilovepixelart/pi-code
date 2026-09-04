@@ -85,6 +85,12 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
 
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
+  // Names with a connect in flight. A name enters `clients` only once its connect
+  // resolves, and shutdown clears that map without awaiting anything in flight, so
+  // without this set a session switch during a slow connect (or a backoff sleep) let
+  // the next session_start connect the same name again; the first client then resolved
+  // into an entry the second overwrote and was never closed.
+  const connecting = new Set<string>()
   // The session's OAuth UI seams, captured at session_start. The reconnect paths below
   // run outside that handler, and passing undefined there made an INTERACTIVE session
   // report the headless "cannot log in" advice on a re-auth it could actually perform.
@@ -194,7 +200,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   async function reconnectWithBackoff(name: string, config: ServerConfig): Promise<void> {
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt))
-      if (shuttingDown || clients.has(name)) return
+      if (shuttingDown || clients.has(name) || connecting.has(name)) return
       await connectServers({ [name]: config }, sessionAuthUi, true)
       if (clients.has(name)) return
     }
@@ -415,10 +421,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
+      // The one guard for every connect path (session_start scopes, backoff, auth
+      // reconnect): a name still connecting from the previous session is adopted when
+      // that connect resolves, not connected again.
+      if (connecting.has(name)) continue
       // Seed in config order before connecting: parallel connects settle in completion
       // order, and /mcp plus the session summary iterate the map's insertion order.
       status.set(name, { state: 'connecting', tools: 0 })
       serverConfigs.set(name, config)
+      connecting.add(name)
       pending.push([name, config])
     }
     await Promise.all(
@@ -428,6 +439,14 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           // First connections retry transient failures (Claude: up to three times for
           // HTTP/SSE); the backoff reconnect below carries its own schedule instead.
           const client = noRetry ? await connect(name, config, authUi, sessionDirs) : await connectWithRetries(name, config, authUi, sessionDirs)
+          // A session switch resets shuttingDown before this resolves and adopts the
+          // client; still set, pi is exiting and the shutdown handler already closed
+          // every client it could see, so this late one must close itself.
+          if (shuttingDown) {
+            await withTimeout(client.close(), 3000, 'close').catch(() => {})
+            status.delete(name)
+            return
+          }
           clients.set(name, client)
           const tools = await withTimeout(listAllTools(client), connectTimeoutMs(), `list tools ${name}`)
           registerTools(name, config, tools)
@@ -465,6 +484,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
             clients.delete(name)
             void leaked.close().catch(() => {})
           }
+        } finally {
+          connecting.delete(name)
         }
       }),
     )

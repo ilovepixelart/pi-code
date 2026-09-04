@@ -248,7 +248,17 @@ export function waitForAuthCode(server: http.Server, timeoutMs: number, expected
     // abandoned or resolved out of band, the event loop can still drain.
     timer.unref?.()
     server.on('request', (request, response) => {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      // Node's parser passes an absolute-form target through unvalidated, and a throw
+      // from a 'request' listener is not caught by node:http: it was an
+      // uncaughtException during the login window, from any local process that could
+      // reach the port.
+      let url: URL
+      try {
+        url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      } catch {
+        response.writeHead(400).end()
+        return
+      }
       // Only the redirect path settles the login. A stray request (a favicon fetch, a
       // local port scan, or a forged redirect from another process or an open web page)
       // is answered but ignored, so it can neither inject a code nor abort the login by

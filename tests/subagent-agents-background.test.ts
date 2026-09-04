@@ -482,6 +482,10 @@ describe('formatStatus', () => {
   })
 })
 
+/** How many times the fake child's whole tree was signalled: the POSIX group kill,
+ * or on Windows (no process groups) a taskkill /T spawn for its pid. */
+const treeSignals = (signal: NodeJS.Signals): number => (process.platform === 'win32' ? spawned.calls.filter((call) => call.args.join(' ') === '/pid 4242 /T /F').length : vi.mocked(process.kill).mock.calls.filter(([pid, sig]) => pid === -4242 && sig === signal).length)
+
 describe('cancelBackgroundRun', () => {
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
   // The fake child carries pid 4242, so an unspied cancel runs a real
@@ -503,7 +507,7 @@ describe('cancelBackgroundRun', () => {
     })
 
     expect(cancelBackgroundRun(id as string)).toBe('cancelled')
-    expect(process.kill).toHaveBeenCalledWith(-4242, 'SIGTERM')
+    expect(treeSignals('SIGTERM')).toBe(1)
     expect(backgroundStatusText()).toContain('cancelled')
 
     // The child's non-zero exit is the cancellation; it must not read as a failure.
@@ -541,7 +545,7 @@ describe('cancelAllBackgroundRuns', () => {
     expect(activeBackgroundRuns()).toBe(2)
 
     expect(cancelAllBackgroundRuns()).toBe(2)
-    expect(vi.mocked(process.kill).mock.calls.filter(([pid, signal]) => pid === -4242 && signal === 'SIGTERM')).toHaveLength(2)
+    expect(treeSignals('SIGTERM')).toBe(2)
     expect(backgroundStatusText()).not.toContain('running')
 
     // A cancelled child still holds its slot until it actually dies (SIGTERM may be ignored).
@@ -558,7 +562,7 @@ describe('cancelAllBackgroundRuns', () => {
     startBackgroundRun('scout', 'live-run', invocation, () => {})
 
     expect(cancelAllBackgroundRuns()).toBe(1)
-    expect(vi.mocked(process.kill).mock.calls.filter(([pid, signal]) => pid === -4242 && signal === 'SIGTERM')).toHaveLength(1)
+    expect(treeSignals('SIGTERM')).toBe(1)
   })
 
   it('signals the process group, not just the direct child', async () => {
@@ -570,7 +574,7 @@ describe('cancelAllBackgroundRuns', () => {
     try {
       startBackgroundRun('scout', 'grp', invocation, () => {})
       cancelAllBackgroundRuns()
-      expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGTERM')
+      expect(treeSignals('SIGTERM')).toBe(1)
     } finally {
       killSpy.mockRestore()
     }

@@ -642,6 +642,32 @@ describe('loadHooks malformed config shapes', () => {
     expect(matchingCommands(config.PreToolUse, 'Bash').map((c) => c.command)).toEqual(['guard'])
   })
 
+  it('drops an exec-form hook with an empty command or a non-string arg instead of throwing per call', () => {
+    // spawn('') throws ERR_INVALID_ARG_VALUE and substituteArguments(42) has no
+    // replaceAll; both threw inside the runner's Promise executor, so the event's
+    // handler rejected instead of the hook reporting spawnFailed.
+    const dir = tempDir('hooks-cfg-')
+    const file = join(dir, 'settings.json')
+    writeFileSync(
+      file,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [
+                { command: '', args: ['x'] },
+                { command: 'ok', args: [42] },
+                { command: 'fine', args: ['a'] },
+              ],
+            },
+          ],
+        },
+      }),
+    )
+    const config = loadHooks([file])
+    expect(matchingCommands(config.PreToolUse, 'Bash').map((c) => c.command)).toEqual(['fine'])
+  })
+
   it('ignores an event whose matchers are not an array', () => {
     const dir = tempDir('hooks-cfg-')
     const file = join(dir, 'settings.json')
@@ -1530,6 +1556,15 @@ describe('hooks extension notify-style events', () => {
     await vi.advanceTimersByTimeAsync(1500)
     await pending
     expect(ext.sent).toEqual([])
+  })
+
+  it('names the blocking PreCompact hook, not the if-carrying one that was skipped before it', async () => {
+    // runNotifyHooks drops `if`-carrying hooks, so results index the filtered list; the
+    // notice indexed the unfiltered one and named the skipped hook instead.
+    const ext = await withHooks({ PreCompact: [{ hooks: [{ command: 'skipped', if: 'Bash(x)' }, { command: 'blocker' }] }] })
+    script('blocker', { code: 2, stderr: ['context still needed'] })
+    await ext.beforeCompact('manual')
+    expect(ext.notes).toEqual([{ msg: 'Compaction blocked by blocker: context still needed', level: 'warning' }])
   })
 
   it('runs PreCompact hooks matching the compaction trigger', async () => {

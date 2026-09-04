@@ -40,6 +40,13 @@ describe('parseStyle', () => {
     expect(parseStyle('---\nkeep-coding-instructions: maybe\n---\nB', 'x').keepCodingInstructions).toBe(false)
   })
 
+  it('parses the frontmatter as YAML, so a trailing comment does not leak into a value', () => {
+    // The regex reader captured to end of line and stripped one quote from each end:
+    // `"Terse" # short` came back as `Terse" # short`.
+    const style = parseStyle('---\nname: Diagrams\ndescription: "Terse" # keep it short\n---\nBody', 'x')
+    expect(style.description).toBe('Terse')
+  })
+
   it('parses CRLF frontmatter (Windows-authored files)', () => {
     const md = '---\r\nname: Terse\r\ndescription: Few words\r\n---\r\nBe terse.\r\n'
     expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.', keepCodingInstructions: false, forceForPlugin: false })
