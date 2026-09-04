@@ -191,6 +191,19 @@ describe('collectImports', () => {
     expect(collectImports('@missing.md and user@example.com', dir, dir, [dir], new Set())).toEqual([])
   })
 
+  it('blocks an import into a sibling whose name merely extends the root', () => {
+    // Every other "outside" fixture is an unrelated temp dir, which a prefix check
+    // without the separator would also reject; `proj` versus `proj-private` is the
+    // shape that check lets through.
+    const parent = tempDir()
+    const dir = join(parent, 'proj')
+    const sibling = join(parent, 'proj-private')
+    mkdirSync(dir)
+    mkdirSync(sibling)
+    writeFileSync(join(sibling, 'notes.md'), 'PRIVATE')
+    expect(collectImports(`@${join(sibling, 'notes.md')}`, dir, dir, [dir], new Set())).toEqual([])
+  })
+
   it('blocks an absolute import that escapes the allowed roots', () => {
     const dir = tempDir()
     const outside = tempDir()

@@ -379,6 +379,11 @@ describe('statusLine command contract', () => {
     busHandlers.get('pi-code:plan-mode')?.({ active: true })
     await vi.advanceTimersByTimeAsync(400)
     expect(hoisted.runs.length).toBe(initial + 1)
+    // The re-run is worthless unless the script can see why: permission_mode is the
+    // field a status line reads to show plan mode.
+    const raw = hoisted.runs.at(-1)?.payload
+    const payload = typeof raw === 'string' ? JSON.parse(raw) : raw
+    expect(payload.permission_mode).toBe('plan')
   })
 })
 

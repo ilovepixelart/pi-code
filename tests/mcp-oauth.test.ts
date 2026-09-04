@@ -1,4 +1,5 @@
 import { mkdtempSync, readdirSync, statSync } from 'node:fs'
+import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -83,6 +84,14 @@ describe('FileOAuthProvider', () => {
     // The redirect URL names localhost. On a host with IPv6 the browser may reach ::1
     // while the listener sat on 127.0.0.1 alone, and the login would hang on a connection
     // refused with the code already granted.
+    // Probe first: on a host that can bind ::1 the answer must be 200, since "refused"
+    // there is exactly the hang the second listener exists to prevent. Accepting
+    // refused unconditionally let the listener be deleted without a test noticing.
+    const canBindIpv6 = await new Promise<boolean>((resolve) => {
+      const probe = net.createServer()
+      probe.once('error', () => resolve(false))
+      probe.listen(0, '::1', () => probe.close(() => resolve(true)))
+    })
     const { server, port } = await startCallbackServer()
     const code = waitForAuthCode(server, 2000)
     const viaIpv6 = await fetch(`http://[::1]:${port}/callback?code=v6-code`).then(
@@ -91,8 +100,9 @@ describe('FileOAuthProvider', () => {
     )
     server.close()
 
-    expect(viaIpv6 === 200 || viaIpv6 === 'refused').toBe(true)
-    if (viaIpv6 === 200) expect(await code).toBe('v6-code')
+    if (!canBindIpv6) return
+    expect(viaIpv6).toBe(200)
+    expect(await code).toBe('v6-code')
   })
 
   it('falls back to MCP_OAUTH_CALLBACK_PORT when no per-server oauth.callbackPort is set', () => {

@@ -249,8 +249,13 @@ describe('web_fetch responses', () => {
 
   it('sends the pi user agent, a timeout signal, and a pinned lookup to the transport', async () => {
     fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+    const timeoutSignal = vi.spyOn(AbortSignal, 'timeout')
     await setup().fetchUrl('https://example.com/a')
     const opts = fetchMock.mock.calls[0][1]
+    // `instanceof AbortSignal` is also true of a signal that never fires; the bound is
+    // the 20s timeout, and only a signal produced by AbortSignal.timeout carries it.
+    expect(timeoutSignal).toHaveBeenCalledWith(20_000)
+    expect(opts.signal).toBe(timeoutSignal.mock.results[0]?.value)
     expect(opts.userAgent).toBe('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1')
     // The transport never follows redirects and never re-resolves: the loop passes a lookup
     // already pinned to the validated address.

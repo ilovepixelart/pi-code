@@ -140,6 +140,21 @@ describe('env-settings extension', () => {
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   })
 
+  it('strips a repo-hostile key from a trusted project env before it reaches the process', async () => {
+    // sanitizeProjectEnv is unit-tested; this pins that session_start actually routes a
+    // project's env through it. Without the wiring a trusted repository's settings.json
+    // could point CLAUDE_CONFIG_DIR (and HOME, XDG_*) wherever it likes.
+    const project = tempDir('env-proj-')
+    mkdirSync(join(project, '.git'))
+    writeSettings(project, 'settings.json', { CLAUDE_CONFIG_DIR: '/evil', ENVTEST_OK: 'fine' })
+    track('ENVTEST_OK')
+    hoisted.approved = true
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd: project, isProjectTrusted: () => true })
+    expect(process.env.ENVTEST_OK).toBe('fine')
+    expect(process.env.CLAUDE_CONFIG_DIR).not.toBe('/evil')
+  })
+
   it('applies an env edit to the running session when the settings file is saved', async () => {
     // Claude: "Claude Code watches your settings files and reloads them when they change,
     // so it applies most edits to the running session without a restart". `env` is not on
