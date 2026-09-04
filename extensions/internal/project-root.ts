@@ -32,11 +32,12 @@ export function repoRoot(from: string): string | undefined {
 
 /** The git checkout at or above `from`, or undefined outside one.
  *
- * Narrower than repoRoot on purpose, and used where a key must be stable rather than
- * merely near: repoRoot also stops at package.json, which every package of a monorepo
- * ships, so a decision keyed on it changes the moment the session starts one directory
- * deeper. `.git` cannot be committed into a repository, so it is not a marker the
- * repository can add to move its own key.
+ * Narrower than repoRoot on purpose: repoRoot resolves a worktree to its main checkout,
+ * which is the right key for shared state (settings.local.json, auto memory) but is a
+ * sibling of the worktree, never an ancestor. The upward walks above bound themselves
+ * here instead, since a boundary that is not on the path from cwd to / is never reached
+ * and the walk would run on to the filesystem root. `.git` cannot be committed into a
+ * repository, so it is not a marker the repository can add to move its own key.
  */
 export function gitRoot(from: string): string | undefined {
   let currentDir = from
@@ -89,7 +90,7 @@ function statOf(target: string): fs.Stats | null {
 }
 
 function findNearest(cwd: string, relative: string, wantDir: boolean): string | null {
-  const boundary = repoRoot(cwd) ?? cwd
+  const boundary = gitRoot(cwd) ?? cwd
   let currentDir = cwd
   while (true) {
     const candidate = path.join(currentDir, relative)
@@ -117,7 +118,7 @@ export function findNearestFile(cwd: string, relative: string): string | null {
  * matching Claude's "every .claude/<kind> between the working directory and the
  * repository root" discovery where the entry closest to cwd wins a name clash. */
 export function ancestorDirs(cwd: string, relative: string): string[] {
-  const boundary = repoRoot(cwd) ?? cwd
+  const boundary = gitRoot(cwd) ?? cwd
   const found: string[] = []
   let currentDir = cwd
   while (true) {
@@ -134,7 +135,7 @@ export function ancestorDirs(cwd: string, relative: string): string[] {
 /** Every `relative` file between the repository root and cwd, ordered root first,
  * matching Claude's root-down ordering for hierarchy-loaded context. */
 export function ancestorFiles(cwd: string, relative: string): string[] {
-  const boundary = repoRoot(cwd) ?? cwd
+  const boundary = gitRoot(cwd) ?? cwd
   const found: string[] = []
   let currentDir = cwd
   while (true) {

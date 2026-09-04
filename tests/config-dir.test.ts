@@ -68,6 +68,28 @@ describe('ancestorDirs', () => {
     expect(ancestorDirs(cwd, join('.claude', 'agents'))).toEqual([join(cwd, '.claude', 'agents'), join(root, '.claude', 'agents')])
   })
 
+  it("stops at a worktree's own root, not the filesystem root", async () => {
+    // A worktree's repoRoot is the main checkout, which is a sibling, never an ancestor,
+    // so a boundary set to it is never reached and the walk ran on to /: config planted
+    // in the worktree's parent (the world-writable case the module exists to refuse)
+    // was discovered.
+    const { ancestorDirs, findNearestFile } = await import('../extensions/internal/project-root.ts')
+    const { mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const parent = mkdtempSync(join(tmpdir(), 'walk-'))
+    const main = join(parent, 'main')
+    const tree = join(parent, 'feature')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(tree)
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    mkdirSync(join(parent, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(parent, 'CLAUDE.local.md'), 'planted')
+
+    expect(ancestorDirs(tree, join('.claude', 'agents'))).toEqual([])
+    expect(findNearestFile(tree, 'CLAUDE.local.md')).toBeNull()
+  })
+
   it('does not walk past the repository root', async () => {
     const { ancestorDirs } = await import('../extensions/internal/project-root.ts')
     const { mkdirSync, mkdtempSync } = await import('node:fs')
