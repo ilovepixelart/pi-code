@@ -52,9 +52,12 @@ export function claudeSettingsChain(cwd: string, home: string, includeProject: b
   const files = [path.join(claudeConfigDir(home), 'settings.json')]
   if (!includeProject) return files
   files.push(path.join(cwd, '.claude', 'settings.json'))
-  const local = localSettingsFile(cwd, home, platform, owned)
-  if (path.dirname(path.dirname(local)) !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
-  files.push(local)
+  // Compared as the directory the placement rule returned, not re-derived from a
+  // joined path: path.join normalizes separators, so a cwd given POSIX-style on
+  // Windows would never equal its own joined form and the legacy entry would repeat.
+  const localDir = localSettingsDir(cwd, home, platform, owned)
+  if (localDir !== cwd) files.push(path.join(cwd, '.claude', 'settings.local.json'))
+  files.push(path.join(localDir, '.claude', 'settings.local.json'))
   return files
 }
 
