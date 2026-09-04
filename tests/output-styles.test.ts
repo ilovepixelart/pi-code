@@ -31,6 +31,15 @@ describe('parseStyle', () => {
     expect(parseStyle(md, 'fallback').keepCodingInstructions).toBe(true)
   })
 
+  it('reads the YAML boolean spellings for both flags, not only the literal true', () => {
+    // Claude documents the fields as booleans; YAML spells true as yes/on/True too, and a
+    // style author writing `keep-coding-instructions: yes` meant to keep them.
+    expect(parseStyle('---\nkeep-coding-instructions: yes\n---\nB', 'x').keepCodingInstructions).toBe(true)
+    expect(parseStyle('---\nforce-for-plugin: True\n---\nB', 'x').forceForPlugin).toBe(true)
+    expect(parseStyle('---\nkeep-coding-instructions: no\n---\nB', 'x').keepCodingInstructions).toBe(false)
+    expect(parseStyle('---\nkeep-coding-instructions: maybe\n---\nB', 'x').keepCodingInstructions).toBe(false)
+  })
+
   it('parses CRLF frontmatter (Windows-authored files)', () => {
     const md = '---\r\nname: Terse\r\ndescription: Few words\r\n---\r\nBe terse.\r\n'
     expect(parseStyle(md, 'fallback')).toEqual({ name: 'Terse', description: 'Few words', body: 'Be terse.', keepCodingInstructions: false, forceForPlugin: false })

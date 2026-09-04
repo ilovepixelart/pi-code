@@ -24,6 +24,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.js'
+import { isFlagEnabled } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
@@ -55,8 +56,10 @@ export function parseStyle(content: string, fallbackName: string): OutputStyle {
     name: field(frontmatter, 'name') || fallbackName,
     description: field(frontmatter, 'description'),
     body: body.trim(),
-    keepCodingInstructions: field(frontmatter, 'keep-coding-instructions') === 'true',
-    forceForPlugin: field(frontmatter, 'force-for-plugin') === 'true',
+    // Both are YAML booleans (Claude: default `false`), so `yes`/`on`/`True` count as
+    // set, the same reading commands give their own frontmatter flags.
+    keepCodingInstructions: isFlagEnabled(field(frontmatter, 'keep-coding-instructions')),
+    forceForPlugin: isFlagEnabled(field(frontmatter, 'force-for-plugin')),
   }
 }
 
