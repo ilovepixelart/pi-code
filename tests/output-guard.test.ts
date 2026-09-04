@@ -52,6 +52,9 @@ describe('capForContext', () => {
 
     expect(capped.startsWith('\u4f60')).toBe(true)
     expect(Buffer.byteLength(capped, 'utf-8')).toBeLessThan(DEFAULT_MAX_BYTES * 1.1)
+    // The cut lands mid-character; the streaming decoder holds the partial sequence
+    // back instead of emitting a replacement character.
+    expect(capped).not.toContain('\uFFFD')
   })
 
   it('reports the original size and line count in the notice', () => {

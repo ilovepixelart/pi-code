@@ -48,6 +48,18 @@ describe('assistantText', () => {
 })
 
 describe('completeText', () => {
+  it('returns every text part of the reply joined, not only the first', async () => {
+    // Every other reply fixture is a single text part, so content[0].text would pass them.
+    setCompleteBackend(async () =>
+      msg([
+        { type: 'text', text: 'first, ' },
+        { type: 'thinking', text: 'x' },
+        { type: 'text', text: 'second' },
+      ]),
+    )
+    await expect(completeText({} as never, 'p')).resolves.toMatchObject({ text: 'first, second' })
+  })
+
   it('retries runtime creation after a rejected first attempt instead of caching the failure', async () => {
     // ModelRuntime.create can reject once (a credential store read that fails on a
     // transient error). Caching that rejected promise turned one bad moment into a

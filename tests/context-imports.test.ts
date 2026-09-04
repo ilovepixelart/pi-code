@@ -188,6 +188,9 @@ describe('collectImports', () => {
 
   it('ignores an unreadable import and does not treat emails as imports', () => {
     const dir = tempDir()
+    // The file the email's domain would name exists, so a regex that accepted a
+    // non-whitespace character before the @ would import it and fail here.
+    writeFileSync(join(dir, 'example.com'), 'MAIL SERVER NOTES')
     expect(collectImports('@missing.md and user@example.com', dir, dir, [dir], new Set())).toEqual([])
   })
 

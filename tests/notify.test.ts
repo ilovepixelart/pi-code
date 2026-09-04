@@ -139,6 +139,27 @@ describe('notify', () => {
     hoisted.home = ''
   })
 
+  it('sends both the bell and the desktop notification for iterm2_with_bell', async () => {
+    hoisted.home = mkdtempSync(join(tmpdir(), 'notify-home-'))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ preferredNotifChannel: 'iterm2_with_bell' }))
+    process.stdout.isTTY = true
+    delete process.env.WT_SESSION
+    delete process.env.KITTY_WINDOW_ID
+    const writes = captureWrites()
+
+    const d = drive()
+    await d.sessionStart({ cwd: hoisted.home })
+    await d.agentEnd()
+    const out = writes.join('')
+    expect(out).toContain('\x1b]777')
+    // The OSC 777 sequence is terminated by a BEL byte of its own, so a plain
+    // toContain cannot see the bell; two BELs means the sequence's terminator plus the
+    // explicit bell the 'both' channel adds.
+    expect(out.split('\x07').length - 1).toBe(2)
+    hoisted.home = ''
+  })
+
   it('emits nothing when notifications are disabled', async () => {
     hoisted.home = mkdtempSync(join(tmpdir(), 'notify-home-'))
     mkdirSync(join(hoisted.home, '.claude'), { recursive: true })

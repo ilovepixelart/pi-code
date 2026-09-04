@@ -569,6 +569,27 @@ describe('multiple questions per call', () => {
     expect(result.content[0].text).toContain('cancelled')
   })
 
+  it('keeps asking after a blank typed answer: only a cancel ends the batch', async () => {
+    // askOne documents that a submitted empty answer is an (empty) answer, not a
+    // cancel, so one accidental blank Enter must not drop questions 2-4.
+    const answers = [
+      { answer: '', wasCustom: true },
+      { answer: 'Beta', wasCustom: false, index: 2 },
+    ]
+    let calls = 0
+    const ctx = { hasUI: true, mode: 'tui', ui: { custom: async () => answers[calls++] } }
+    const params = {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    }
+    const result = await setup().execute('call-1', params as never, undefined, undefined, ctx as never)
+
+    expect(calls).toBe(2)
+    expect(result.content[0].text).toContain('Second?')
+  })
+
   it('still accepts the single-question shape', async () => {
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS } as never, undefined, undefined, uiCtx({ answer: 'Alpha', wasCustom: false, index: 1 }) as never)
     expect(result.content[0].text).toBe('User selected: 1. Alpha')

@@ -142,6 +142,17 @@ describe('thinking extension', () => {
     expect(t.level()).toBe('low')
   })
 
+  it('leaves a level the user changed meanwhile alone when the next input arrives', () => {
+    // The restore fires only while this extension still owns the level (it equals the
+    // escalation target). A user who moved it elsewhere after a blocked prompt keeps
+    // their choice; without the guard it would be reset to the pre-escalation level.
+    const t = wire('low')
+    t.input('please ultrathink') // low -> max, prompt then blocked: no settle
+    t.setThinkingLevel('high') // the user picks a level of their own
+    t.input('a plain prompt')
+    expect(t.level()).toBe('high')
+  })
+
   it('restores a blocked escalation on the next input, without waiting for a settle', () => {
     // A hook can block the prompt that escalated: no turn runs, so no agent_settled ever
     // fires to restore the level. The next input is the signal the prior prompt is gone;
