@@ -49,6 +49,7 @@ import { type CommandExec, expandDynamicContent, resolvePowershellBinary, spanEx
 import { claudeConfigDir } from './internal/config-dir.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { managedSettingsFile, readManagedSettings } from './internal/managed-settings.js'
+import { findModel } from './internal/model-lookup.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
 import { type InstalledPlugin, installedPlugins, pluginComponentPath } from './internal/plugins.js'
@@ -58,7 +59,7 @@ import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules 
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { fileToolTarget } from './internal/tool-target.js'
 import { createTurnOverride } from './internal/turn-override.js'
-import { errorMessage, isDirectory } from './internal/values.js'
+import { errorMessage, isDirectory, parseNumericEnv } from './internal/values.js'
 
 /** Just enough of pi's Model to match and restore; getAvailable returns these. */
 interface ModelLike {
@@ -73,8 +74,7 @@ interface ModelLike {
  * subagent uses). `inherit` and an unresolvable name leave the model unchanged. */
 function resolveCommandModel(model: string | undefined, available: ReadonlyArray<ModelLike>): ModelLike | undefined {
   if (!model || model.toLowerCase() === 'inherit') return undefined
-  const needle = model.toLowerCase()
-  return available.find((m) => m.id.toLowerCase() === needle) ?? available.find((m) => m.id.toLowerCase().includes(needle) || (m.name ?? '').toLowerCase().includes(needle))
+  return findModel(model, available)
 }
 
 /** Substitute ${CLAUDE_*} into a path rule. A variable that expands to an absolute
@@ -277,8 +277,8 @@ const DEFAULT_TOOL_CHAR_BUDGET = 15_000
  * 1% of the model's context window (1% of the tokens at ~4 characters per token
  * is window / 25), else Claude's documented default. */
 export function slashCommandBudget(contextWindow: number | undefined, env: Record<string, string | undefined> = process.env): number {
-  const override = Number.parseInt(env.SLASH_COMMAND_TOOL_CHAR_BUDGET ?? '', 10)
-  if (Number.isInteger(override) && override > 0) return override
+  const override = parseNumericEnv(env.SLASH_COMMAND_TOOL_CHAR_BUDGET)
+  if (override !== undefined && Number.isInteger(override) && override > 0) return override
   if (contextWindow && contextWindow > 0) return Math.floor(contextWindow / 25)
   return DEFAULT_TOOL_CHAR_BUDGET
 }

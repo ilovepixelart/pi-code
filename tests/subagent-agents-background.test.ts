@@ -910,6 +910,16 @@ describe('resolveModelAlias', () => {
     { id: 'gpt-oss:20b', provider: 'ollama' },
   ]
 
+  it('advertises no agentScope default, since an approved project resolves to both', async () => {
+    // The schema said default "user"; execute resolves an omitted scope to "both" for an
+    // approved project, and pi does not apply schema defaults, so the description was
+    // the only thing the model saw and it was wrong.
+    const { SubagentParams } = await import('../extensions/subagent/params.ts')
+    const scope = (SubagentParams as unknown as { properties: { agentScope: { default?: unknown; description: string } } }).properties.agentScope
+    expect(scope.default).toBeUndefined()
+    expect(scope.description).toContain('approved project')
+  })
+
   it('resolves a Claude tier alias to an authenticated model id', () => {
     expect(resolveModelAlias('sonnet', available)).toBe('claude-sonnet-4-5')
     expect(resolveModelAlias('Opus', available)).toBe('claude-opus-4-1')
@@ -918,6 +928,19 @@ describe('resolveModelAlias', () => {
   it('returns undefined when the tier is not available, so the session model is used', () => {
     expect(resolveModelAlias('haiku', available)).toBeUndefined()
     expect(resolveModelAlias('sonnet', [{ id: 'gpt-oss:20b', provider: 'ollama' }])).toBeUndefined()
+  })
+
+  it('prefers an exact id over an id that merely contains the alias, and matches on the display name', () => {
+    // The three model resolvers had diverged: this one matched by id substring only, so
+    // `claude-opus-4-1` could resolve to `claude-opus-4-1-mini` by list order, and a
+    // name-only match (`model: opus` against a provider id) never resolved.
+    const models = [
+      { id: 'claude-opus-4-1-mini', provider: 'anthropic' },
+      { id: 'claude-opus-4-1', provider: 'anthropic' },
+      { id: 'vendor/x-7', name: 'Claude Sonnet 4.5', provider: 'vendor' },
+    ]
+    expect(resolveModelAlias('claude-opus-4-1', models)).toBe('claude-opus-4-1')
+    expect(resolveModelAlias('sonnet', models)).toBe('vendor/x-7')
   })
 
   it('treats inherit as the session model rather than a tier to look up', () => {
