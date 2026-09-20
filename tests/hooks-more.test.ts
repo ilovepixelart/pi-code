@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import contextImports from '../extensions/context-imports.ts'
+import { loadPluginHooks } from '../extensions/hooks/config.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
@@ -731,6 +732,17 @@ describe('loadHooks malformed config shapes', () => {
 })
 
 describe('malformed hook config', () => {
+  it('skips a null entry in a plugin manifest instead of throwing out of the load', () => {
+    // The pre-pass that drops shell-form user_config references ran before any shape
+    // check and dereferenced each entry. The inline-manifest path has no catch, so a
+    // plugin enabled mid-session threw from the settings watcher's poll and pi exited.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = (hooks: unknown) => ({ name: 'broken', root: '/p', dataDir: '/d', manifest: { hooks } })
+    const config: Record<string, unknown[]> = {}
+    expect(() => loadPluginHooks(config as never, [plugin({ PreToolUse: [null, { matcher: 'Bash', hooks: [null, { type: 'command', command: 'kept.sh' }] }] })] as never)).not.toThrow()
+    expect(JSON.stringify(config)).toContain('kept.sh')
+  })
+
   it('skips an entry whose hooks is not a list, keeping the rest of the event usable', () => {
     const dir = tempDir('hooks-cfg-')
     const file = join(dir, 'settings.json')

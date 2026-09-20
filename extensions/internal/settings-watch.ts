@@ -6,7 +6,7 @@
  */
 
 import * as fs from 'node:fs'
-import { parseNumericEnv } from './values.js'
+import { errorMessage, parseNumericEnv } from './values.js'
 
 // Captured at module load: the poll must run on real time even under a test's
 // fake timers (the stat watcher it replaced lived in libuv and was immune too);
@@ -37,7 +37,13 @@ export function watchSettingsFiles(files: string[], reload: () => void): () => v
     const next = files.map(snapshot)
     if (next.some((content, index) => content !== last[index])) {
       last = next
-      reload()
+      // The poll has no awaiter: a throw here is an uncaughtException, and pi exits on
+      // one. A reload that cannot cope with what it read costs that reload, not the session.
+      try {
+        reload()
+      } catch (error) {
+        console.warn(`pi-code: settings reload failed: ${errorMessage(error)}`)
+      }
     }
   }, interval)
   // A watcher alone must never keep a one-shot run alive.
