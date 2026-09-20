@@ -239,6 +239,13 @@ describe('loadUserScope', () => {
     expect((servers.shared as { command: string }).command).toBe('local-shared')
   })
 
+  it('drops a local-scope entry that is not an object', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ projects: { '/work/project': { mcpServers: { '//': 'local note', local: { command: 'l' } } } } }))
+    expect(loadUserScope(home, '/work/project')).toEqual({ local: { command: 'l' } })
+  })
+
   it('returns the global user servers when the project has no local scope', () => {
     const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
     writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { g: { command: 'g' } } }))
@@ -290,6 +297,19 @@ describe('mcp adapter helpers', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(loadConfigFrom([join(dir, 'absent.json'), broken])).toEqual({})
     expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([expect.stringContaining(broken)])
+  })
+
+  it('drops an mcpServers entry that is not an object, naming it', () => {
+    // A JSON "comment" key or a nulled-out server reached the connect batch as a string or
+    // null. The first probe of it threw outside the per-server catch and rejected the whole
+    // batch: that entry sat at "connecting" forever, and the project trust prompt and every
+    // project server were silently skipped.
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-test-'))
+    const file = join(dir, 'mcp.json')
+    writeFileSync(file, JSON.stringify({ mcpServers: { '//': 'my servers', old: null, list: [], good: { command: 'server' } } }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(loadConfigFrom([file])).toEqual({ good: { command: 'server' } })
+    expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).toMatch(/"\/\/".*\n.*"old".*\n.*"list"/)
   })
 
   it('separates always-loaded user config from trust-gated project config', () => {
