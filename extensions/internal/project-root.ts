@@ -77,7 +77,24 @@ function mainCheckout(root: string): string {
   const marker = `${path.sep}.git${path.sep}worktrees${path.sep}`
   const cut = worktreeDir.lastIndexOf(marker)
   if (cut === -1) return root
+  // The .git file is attacker-writable: an unpacked archive can ship one naming any
+  // directory, and following it as text moved the repository root, and with it the
+  // CLAUDE.md import boundary, to wherever it pointed.
+  if (!pointsBackAt(worktreeDir, dotGit)) return root
   return worktreeDir.slice(0, cut)
+}
+
+/** Whether a worktree's admin directory names `dotGit` as its worktree. git writes
+ * `<main>/.git/worktrees/<name>/gitdir` holding the path of the worktree's `.git` file
+ * (relative to that directory since git 2.48), and nothing outside an archive can be made
+ * to. Compared by realpath: git records the real path, a session cwd may be a symlink. */
+function pointsBackAt(worktreeDir: string, dotGit: string): boolean {
+  try {
+    const [line = ''] = fs.readFileSync(path.join(worktreeDir, 'gitdir'), 'utf-8').split('\n')
+    return fs.realpathSync(path.resolve(worktreeDir, line.trim())) === fs.realpathSync(dotGit)
+  } catch {
+    return false
+  }
 }
 
 function statOf(target: string): fs.Stats | null {

@@ -1472,6 +1472,7 @@ describe('mcp failure reporting', () => {
     const tree = join(parent, 'feature')
     mkdirSync(tree)
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
 
     const home = mkdtempSync(join(tmpdir(), 'policy-home-'))
     expect(projectServerPolicy(sub, home, true).disabled.has('root-only')).toBe(false)

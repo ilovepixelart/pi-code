@@ -83,6 +83,7 @@ describe('ancestorDirs', () => {
     mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
     mkdirSync(tree)
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
     mkdirSync(join(parent, '.claude', 'agents'), { recursive: true })
     writeFileSync(join(parent, 'CLAUDE.local.md'), 'planted')
 

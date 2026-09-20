@@ -41,9 +41,39 @@ describe('repoRoot', () => {
     mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
     mkdirSync(tree)
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
 
     expect(repoRoot(tree)).toBe(main)
     expect(repoRoot(join(tree, 'src'))).toBe(main)
+  })
+
+  it('does not follow a worktree pointer the main checkout does not point back from', () => {
+    // The .git FILE is attacker-writable: an unpacked archive can ship one. Followed as
+    // text, `gitdir: ../../.git/worktrees/x` made two directories up the repository root,
+    // which widened the CLAUDE.md import boundary to it: `@../../.ssh/id_rsa` was read
+    // into the prompt. git always writes <main>/.git/worktrees/<name>/gitdir pointing
+    // back at the worktree's .git, and nothing outside the archive can be made to.
+    const parent = tempDir()
+    const main = join(parent, 'main')
+    const tree = join(parent, 'unpacked')
+    mkdirSync(join(main, '.git', 'worktrees', 'x'), { recursive: true })
+    mkdirSync(tree)
+    writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'x')}\n`)
+    expect(repoRoot(tree)).toBe(tree)
+
+    writeFileSync(join(main, '.git', 'worktrees', 'x', 'gitdir'), `${join(parent, 'some-other-tree', '.git')}\n`)
+    expect(repoRoot(tree)).toBe(tree)
+  })
+
+  it('follows a relative back-pointer, which git 2.48 and later can write', () => {
+    const parent = tempDir()
+    const main = join(parent, 'main')
+    const tree = join(parent, 'feature')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(tree)
+    writeFileSync(join(tree, '.git'), 'gitdir: ../main/.git/worktrees/feature\n')
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), '../../../../feature/.git\n')
+    expect(repoRoot(tree)).toBe(main)
   })
 
   it('leaves the checkout as its own root when the .git file says something else', () => {
@@ -74,6 +104,7 @@ describe('repoRoot', () => {
     mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
     mkdirSync(tree)
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
 
     expect(gitRoot(tree)).toBe(tree)
     expect(repoRoot(tree)).toBe(main)

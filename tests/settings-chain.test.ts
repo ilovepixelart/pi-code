@@ -107,6 +107,7 @@ describe('claudeSettingsChain local file placement', () => {
     fs.mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
     fs.mkdirSync(tree)
     fs.writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    fs.writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
 
     expect(localFiles(claudeSettingsChain(tree, '/home/u', true, 'linux', owned))).toEqual([join(tree, '.claude', 'settings.local.json'), join(main, '.claude', 'settings.local.json')])
   })

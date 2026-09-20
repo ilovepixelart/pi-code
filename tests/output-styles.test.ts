@@ -267,6 +267,7 @@ describe('extension wiring', () => {
     mkdirSync(join(tree, '.claude', 'output-styles'), { recursive: true })
     writeFileSync(join(tree, '.claude', 'output-styles', 'style.md'), '---\nname: Explain\n---\nExplain everything.')
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
     outputStyles({
