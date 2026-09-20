@@ -433,6 +433,20 @@ describe('statusLine concurrency and compaction', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(hoisted.runs.length).toBe(afterShutdown)
   })
+
+  it('stops the settings watcher at shutdown', async () => {
+    // pi's CLI loads a fresh extension instance for every session replacement, so the next
+    // session_start cannot dispose this watcher: left armed, each replaced session
+    // leaks one more poll for the life of the process.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    await handlers.get('session_start')?.({}, ctx)
+    expect(hoisted.settingsChanged).toBeDefined()
+
+    await handlers.get('session_shutdown')?.({}, ctx)
+    expect(hoisted.settingsChanged).toBeUndefined()
+  })
 })
 
 describe('statusLine disableAllHooks', () => {
