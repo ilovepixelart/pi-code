@@ -1983,6 +1983,19 @@ describe('subagent run semantics conformance', () => {
     expect(text(result)).toContain('partial')
   })
 
+  it('reports a maxTurns-capped foreground run as a result, not a failed agent', async () => {
+    // The cap SIGTERMs the child, and pi's print mode answers SIGTERM with exit 143, not a
+    // null code. Read as the agent's own exit status, every capped run came back as
+    // "Agent toolUse: ..." with the failure icon, and a chain stopped at that step.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 1 })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('first turn'), say('second turn')], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('partial')
+    expect(text(result)).not.toMatch(/^Agent /)
+    expect((result as { isError?: boolean }).isError).not.toBe(true)
+  })
+
   it('does not mark an uncapped clean run as partial', async () => {
     script('inspect', { stdout: [say('all done')] })
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)

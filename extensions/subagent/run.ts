@@ -338,7 +338,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       proc.on('close', (code) => {
         cleanup()
         if (buffer.trim()) processLine(buffer)
-        resolve(code ?? 0)
+        // A capped run was stopped by this module's own SIGTERM, which pi's print mode
+        // answers with exit 143: that is not the agent failing, as background.ts also holds.
+        resolve(currentResult.partial ? 0 : (code ?? 0))
       })
 
       proc.on('error', (error: Error) => {
