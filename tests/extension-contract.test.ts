@@ -3,7 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, type ExtensionContext, SessionManager } from '@earendil-works/pi-coding-agent'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 // pi's loader treats every extensions/*.ts, extensions/*.js (symlinked or not) and
 // extensions/*/index.ts|index.js as an entry point and refuses to start when one does
@@ -33,6 +33,52 @@ describe('pi extension loader contract', () => {
   it.each(scannedEntries())('%s default-exports a factory function', async (_name, file) => {
     const mod = await import(file)
     expect(typeof mod.default).toBe('function')
+  })
+})
+
+// pi loads every extension entry through its own module graph (pi dist/core/extensions/loader
+// builds one jiti instance per entry with moduleCache off), so an `internal/` module imported
+// by two extensions is evaluated twice and a module-level `let` is a different variable in
+// each. A seam where one extension registers a function and another calls it has to meet
+// somewhere both graphs share. Two imports around resetModules model the two graphs.
+describe('cross-extension seams meet across module graphs', () => {
+  const twoGraphs = async <T>(file: string): Promise<[T, T]> => {
+    const first = (await import(file)) as T
+    vi.resetModules()
+    return [first, (await import(file)) as T]
+  }
+
+  it('an agent hook reaches the runner the subagent extension registered', async () => {
+    type Seam = typeof import('../extensions/internal/agent-run.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/agent-run.ts')
+    registrar.setAgentRunner(async (request) => `ran: ${request.prompt}`)
+    try {
+      await expect(consumer.runAgent({ prompt: 'verify' })).resolves.toBe('ran: verify')
+    } finally {
+      registrar.setAgentRunner(undefined)
+    }
+  })
+
+  it('an mcp_tool hook reaches the caller the mcp extension registered', async () => {
+    type Seam = typeof import('../extensions/internal/mcp-call.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/mcp-call.ts')
+    registrar.setMcpToolCaller(async (server, tool) => ({ text: `${server}/${tool}`, isError: false }))
+    try {
+      await expect(consumer.callMcpTool('github', 'search', {})).resolves.toMatchObject({ text: 'github/search' })
+    } finally {
+      registrar.setMcpToolCaller(undefined)
+    }
+  })
+
+  it('a subagent spawn reaches the SubagentStart runner the hooks extension registered', async () => {
+    type Seam = typeof import('../extensions/internal/subagent-hooks.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/subagent-hooks.ts')
+    registrar.setSubagentStartHookRunner(async (agentType) => [`context for ${agentType}`])
+    try {
+      await expect(consumer.runSubagentStartHooks('explore', 'id-1')).resolves.toEqual(['context for explore'])
+    } finally {
+      registrar.setSubagentStartHookRunner(undefined)
+    }
   })
 })
 
