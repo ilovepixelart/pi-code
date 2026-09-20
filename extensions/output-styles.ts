@@ -139,8 +139,14 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
       } catch {
         continue // a directory named *.md or an unreadable file must not take down session start
       }
-      const style = parseStyle(content, entry.replace(/\.md$/, ''))
-      byName.set(style.name, style)
+      // pi's frontmatter parser is strict YAML and throws; one unparseable file must cost
+      // that style, not every style of the session.
+      try {
+        const style = parseStyle(content, entry.replace(/\.md$/, ''))
+        byName.set(style.name, style)
+      } catch (error) {
+        console.warn(`pi-code-output-styles: skipping ${path.join(dir, entry)}: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`)
+      }
     }
   }
   return [...byName.values()]
