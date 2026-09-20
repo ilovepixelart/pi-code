@@ -18,6 +18,7 @@ vi.mock('node:os', async (importOriginal) => {
 // so approval is stubbed to a per-test flag rather than exercising the trust store here.
 vi.mock('../extensions/internal/project-approval.js', () => ({
   isProjectApprovedSilently: () => hoisted.approved,
+  approvalRecheck: () => () => hoisted.approved,
 }))
 
 describe('envFromSettings', () => {
@@ -207,6 +208,30 @@ describe('env-settings extension', () => {
     await handlers.get('session_shutdown')?.({}, {})
   })
 
+  it('asks again before a reload folds in the project env', async () => {
+    // session_start's approval cannot be reused by the watcher: a repository with nothing
+    // claude-shaped reads as approved without a question, and a settings.json that appears
+    // later (a branch checkout) exported its env, ANTHROPIC_BASE_URL included, unasked.
+    track('ENVTEST_UNASKED', 'ENVTEST_USER_EDIT')
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    usedKeys.add('PI_CODE_SETTINGS_WATCH_INTERVAL_MS')
+    hoisted.approved = true
+    const project = tempDir('env-proj-')
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({}, { cwd: project })
+    hoisted.approved = false
+
+    writeSettings(project, 'settings.json', { ENVTEST_UNASKED: 'from-the-repo' })
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_USER_EDIT: 'landed' })
+    // The user edit landing proves the reload ran; the project env must not ride along.
+    await vi.waitFor(() => {
+      expect(process.env.ENVTEST_USER_EDIT).toBe('landed')
+    }, 5000)
+    expect(process.env.ENVTEST_UNASKED).toBeUndefined()
+    await handlers.get('session_shutdown')?.({}, {})
+  })
+
   it('stops watching at session_shutdown', async () => {
     // pi's CLI loads a fresh extension instance for every session replacement, so the next
     // session_start cannot dispose this watcher: left armed, each replaced session
@@ -220,10 +245,12 @@ describe('env-settings extension', () => {
     await handlers.get('session_start')?.({}, { cwd: tempDir('env-proj-') })
     await handlers.get('session_shutdown')?.({}, {})
 
+    expect(process.env.ENVTEST_STOPPED).toBeUndefined()
+
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_STOPPED: 'after' })
     // A dozen poll intervals: a watcher still armed would have re-applied by now.
     await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(process.env.ENVTEST_STOPPED).toBe('before')
+    expect(process.env.ENVTEST_STOPPED).toBeUndefined()
   })
 
   it('applies user and managed env at factory time, but not project env', async () => {
@@ -325,6 +352,29 @@ describe('env-settings extension', () => {
     const other = tempDir('env-proj-')
     await handlers.get('session_start')?.({ reason: 'startup' }, { cwd: other, isProjectTrusted: () => true })
     expect(process.env.ENVTEST_PROJECT).toBeUndefined()
+  })
+
+  it('hands the environment back at session_shutdown, since the next session gets a fresh instance', async () => {
+    // pi's CLI loads a fresh extension instance for every session replacement, and its
+    // empty ownership record cannot restore what the previous instance set: an approved
+    // project's env stayed live in process.env after /resume into another project.
+    track('ENVTEST_LEAK')
+    setReal('ENVTEST_SHELL', 'from-shell')
+    const projectA = tempDir('env-proj-a-')
+    writeSettings(projectA, 'settings.json', { ENVTEST_LEAK: 'from-project-a', ENVTEST_SHELL: 'from-project-a' })
+    hoisted.approved = true
+
+    const first = setup()
+    await first.handlers.get('session_start')?.({ reason: 'startup' }, { cwd: projectA })
+    expect(process.env.ENVTEST_LEAK).toBe('from-project-a')
+    expect(process.env.ENVTEST_SHELL).toBe('from-project-a')
+    await first.handlers.get('session_shutdown')?.({ reason: 'resume' }, {})
+
+    const second = setup()
+    await second.handlers.get('session_start')?.({ reason: 'resume' }, { cwd: tempDir('env-proj-b-') })
+    expect(process.env.ENVTEST_LEAK).toBeUndefined()
+    expect(process.env.ENVTEST_SHELL).toBe('from-shell')
+    await second.handlers.get('session_shutdown')?.({ reason: 'quit' }, {})
   })
 
   it('lets every settings scope override a preexisting shell export', async () => {

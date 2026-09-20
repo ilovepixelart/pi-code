@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import contextImports from '../extensions/context-imports.ts'
+import { loadPluginHooks } from '../extensions/hooks/config.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
@@ -611,6 +612,36 @@ describe('matchingCommands edge shapes', () => {
     expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh' }, { command: 'other.sh' }])
   })
 
+  it('keeps handlers that share a command but differ in args, if or input: they are not the same handler', () => {
+    // Deduping on the command alone dropped the second of two exec-form hooks sharing an
+    // interpreter, and of one guard registered under two `if` filters kept only the first:
+    // the survivor was then filtered out for the other tool call, so no guard ran at all.
+    const execForm = [
+      {
+        matcher: 'Bash',
+        hooks: [
+          { command: 'node', args: ['a.js'] },
+          { command: 'node', args: ['b.js'] },
+        ],
+      },
+    ]
+    expect(matchingCommands(execForm, 'bash').map((hook) => hook.args)).toEqual([['a.js'], ['b.js']])
+
+    const filtered = [
+      {
+        matcher: 'Bash',
+        hooks: [
+          { command: 'guard.sh', if: 'Bash(git *)' },
+          { command: 'guard.sh', if: 'Bash(npm *)' },
+        ],
+      },
+    ]
+    expect(matchingCommands(filtered, 'bash').map((hook) => hook.if)).toEqual(['Bash(git *)', 'Bash(npm *)'])
+
+    const mcpTools = [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 's', tool: 't', input: { level: 'a' } } as never, { type: 'mcp_tool', server: 's', tool: 't', input: { level: 'b' } } as never] }]
+    expect(matchingCommands(mcpTools, 'bash')).toHaveLength(2)
+  })
+
   it('falls back to case-insensitive literal equality when the matcher is an invalid regex', () => {
     const hook = { matcher: 'Bash(', hooks: [{ command: 'lit' }] }
     expect(matchingCommands([hook], 'bash(')).toEqual([{ command: 'lit' }])
@@ -701,6 +732,17 @@ describe('loadHooks malformed config shapes', () => {
 })
 
 describe('malformed hook config', () => {
+  it('skips a null entry in a plugin manifest instead of throwing out of the load', () => {
+    // The pre-pass that drops shell-form user_config references ran before any shape
+    // check and dereferenced each entry. The inline-manifest path has no catch, so a
+    // plugin enabled mid-session threw from the settings watcher's poll and pi exited.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = (hooks: unknown) => ({ name: 'broken', root: '/p', dataDir: '/d', manifest: { hooks } })
+    const config: Record<string, unknown[]> = {}
+    expect(() => loadPluginHooks(config as never, [plugin({ PreToolUse: [null, { matcher: 'Bash', hooks: [null, { type: 'command', command: 'kept.sh' }] }] })] as never)).not.toThrow()
+    expect(JSON.stringify(config)).toContain('kept.sh')
+  })
+
   it('skips an entry whose hooks is not a list, keeping the rest of the event usable', () => {
     const dir = tempDir('hooks-cfg-')
     const file = join(dir, 'settings.json')
@@ -2461,6 +2503,20 @@ describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () 
     expect(seenPrompt).toContain('Should this stop?')
     expect(seenPrompt).toContain('"hook_event_name":"Stop"')
   })
+
+  it('reports a prompt hook that ran out of time as timed out, so the gated events fail closed', async () => {
+    // The real backend answers a fired AbortSignal by resolving an aborted message with
+    // no text. Read as an answer, that was exit 0 with empty stdout: a PreToolUse gate
+    // allowed the tool exactly when the model could not be reached in time.
+    setCompleteBackend(
+      ((_model: unknown, _context: unknown, options: { signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve({ role: 'assistant', content: [], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'aborted', timestamp: 0 }))
+        })) as never,
+    )
+    const result = await runPromptHook({ command: '', type: 'prompt', prompt: 'Should this run?' }, { hook_event_name: 'PreToolUse' }, { id: 'session-model' } as never, 50)
+    expect(result.timedOut).toBe(true)
+  })
 })
 
 describe('hooks extension PostModelSwitch', () => {
@@ -2935,6 +2991,36 @@ describe('settings watching', () => {
         { timeout: 3000, interval: 100 },
       )
       expect(staleReads).toBe(0)
+      await ext.shutdown('new')
+    } finally {
+      delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
+    }
+  })
+
+  it('does not load project hooks that appear mid-session in a project nobody approved', async () => {
+    // A repository with nothing claude-shaped reads as approved without a question, and
+    // the watcher used to reuse that answer: checking out a branch that ships
+    // .claude/settings.json ran its hook commands with no approval dialog.
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    try {
+      writeSettings(hoisted.home, 'settings.json', {})
+      const project = tempDir('hooks-proj-')
+      mkdirSync(join(project, '.git'))
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true })
+
+      writeSettings(project, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'project-hook' }] }] })
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-hook' }] }] })
+      // The user hook landing proves the reload ran; the project hook must not ride along.
+      await vi.waitFor(
+        async () => {
+          hoisted.calls.length = 0
+          await ext.toolCall('bash', {})
+          expect(commandsRun()).toContain('user-hook')
+        },
+        { timeout: 3000, interval: 100 },
+      )
+      expect(commandsRun()).toEqual(['user-hook'])
       await ext.shutdown('new')
     } finally {
       delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS

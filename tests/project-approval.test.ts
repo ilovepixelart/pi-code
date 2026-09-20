@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
 import { hookFiles } from '../extensions/hooks/index.ts'
-import { hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
+import { approvalRecheck, hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp/index.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'pa-'))
@@ -118,6 +118,44 @@ describe('isProjectApprovedSilently', () => {
     expect(isProjectApprovedSilently(ctx(), deps({ savedDecision: () => false }))).toBe(false)
     // The prompting variant would ask here; the silent one must not.
     expect(isProjectApprovedSilently(ctx(), deps({ savedDecision: () => null }))).toBe(false)
+  })
+})
+
+describe('approvalRecheck', () => {
+  it('withdraws approval once a project nobody was asked about turns claude-shaped mid-session', () => {
+    // A repository with nothing claude-shaped reads as approved without a question. Config
+    // that appears later (a branch checkout, an unpacked archive) must not inherit that
+    // answer: a settings watcher reloading with it ran the repository's hooks unasked.
+    let shaped = false
+    const recheck = approvalRecheck(ctx(), deps({ hasClaudeShaped: () => shaped }))
+    expect(recheck()).toBe(true)
+    shaped = true
+    expect(recheck()).toBe(false)
+  })
+
+  it('keeps a project approved when its decision was recorded', () => {
+    expect(approvalRecheck(ctx(), deps({ savedDecision: () => true }))()).toBe(true)
+  })
+
+  it('reads the session ctx once, since a poll outlives it and every getter then throws', () => {
+    let replaced = false
+    const live = {
+      get cwd() {
+        if (replaced) throw new Error('This extension ctx is stale')
+        return '/repo'
+      },
+      isProjectTrusted: () => {
+        if (replaced) throw new Error('This extension ctx is stale')
+        return true
+      },
+    }
+    const recheck = approvalRecheck(live, deps({ savedDecision: () => true }))
+    replaced = true
+    expect(recheck()).toBe(true)
+  })
+
+  it('never approves what pi itself declined to trust', () => {
+    expect(approvalRecheck(ctx({ isProjectTrusted: () => false }), deps({ savedDecision: () => true }))()).toBe(false)
   })
 })
 

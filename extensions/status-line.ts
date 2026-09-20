@@ -35,7 +35,7 @@ import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js
 import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
-import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
 import { gitRoot, repoRoot } from './internal/project-root.js'
 import { readSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
@@ -503,10 +503,15 @@ export default function statusLine(pi: ExtensionAPI) {
     armRefresh()
     // Claude re-runs the script when the statusLine settings change mid-session; a
     // command change re-resolves and re-runs.
+    // The reload asks again rather than reusing `trusted` (see approvalRecheck), and reads
+    // the chain that answer allows: a statusLine command is executed, not just displayed.
+    const watchCwd = ctx.cwd
+    const stillApproved = approvalRecheck(ctx)
     disposeSettingsWatch()
     disposeSettingsWatch = watchSettingsFiles(files, () => {
       const previousCommand = config?.command
-      config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
+      const liveFiles = hookFiles(watchCwd, os.homedir(), trusted && stillApproved())
+      config = readDisableAllHooks(liveFiles) ? undefined : readStatusLineConfig(liveFiles)
       armRefresh()
       // The debounce batches rapid triggers, but a command the user just edited has
       // nothing to batch with: run it now so the result of the edit is immediate.

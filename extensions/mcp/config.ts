@@ -11,7 +11,7 @@ import { claudeConfigDir } from '../internal/config-dir.js'
 import type { OAuthServerConfig } from '../internal/mcp-oauth.js'
 import { type InstalledPlugin, pluginComponentPath } from '../internal/plugins.js'
 import { findNearestFile } from '../internal/project-root.js'
-import { errorMessage } from '../internal/values.js'
+import { errorMessage, isRecord } from '../internal/values.js'
 
 export interface StdioServerConfig {
   type?: 'stdio'
@@ -105,12 +105,26 @@ export function projectConfigPaths(cwd: string): string[] {
   return ['.mcp.json', path.join('.pi', 'mcp.json')].map((rel) => findNearestFile(cwd, rel) ?? path.join(cwd, rel))
 }
 
+/** The object entries of a raw `mcpServers` map. A string or null entry (a JSON "comment"
+ * key, a nulled-out server) would throw in the connect batch outside its per-server catch
+ * and sink every server with it, the project trust prompt included, so it is dropped here
+ * by name. */
+function serverEntries(raw: unknown, source: string): Record<string, ServerConfig> {
+  const servers: Record<string, ServerConfig> = {}
+  for (const [name, entry] of Object.entries(isRecord(raw) ? raw : {})) {
+    // Shape only: the fields are validated where a transport is chosen.
+    if (isRecord(entry)) servers[name] = entry as unknown as ServerConfig
+    else console.warn(`pi-code-mcp: ignoring mcpServers entry "${name}" in ${source}: not an object`)
+  }
+  return servers
+}
+
 export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
   const servers: Record<string, ServerConfig> = {}
   for (const file of files) {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
-      Object.assign(servers, parsed.mcpServers ?? {})
+      Object.assign(servers, serverEntries(parsed?.mcpServers, file))
     } catch (error) {
       // A missing file is the normal case. A present file that does not parse is
       // not: one trailing comma silently disabled every server in it.
@@ -128,7 +142,7 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
  */
 export function loadUserScope(home: string, cwd: string): Record<string, ServerConfig> {
   const servers = loadConfigFrom(userConfigPaths(home))
-  Object.assign(servers, projectRecord(home, cwd).mcpServers ?? {})
+  Object.assign(servers, serverEntries(projectRecord(home, cwd).mcpServers, claudeJsonPath(home)))
   return servers
 }
 

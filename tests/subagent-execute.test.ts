@@ -653,6 +653,25 @@ describe('runSingleAgent process handling', () => {
     expect(results(result)[0]).toMatchObject({ exitCode: 1, stderr: 'spawn E2BIG' })
   })
 
+  it('reports a spawn that came back without stdio, as node does at the descriptor limit', async () => {
+    // For EMFILE and ENFILE node returns a child with no pid and undefined stdout/stderr,
+    // and emits 'error' on the next tick. Wiring stdout first threw a TypeError before the
+    // 'error' listener was attached, so the deferred event had no listener: pi exited with
+    // "uncaughtException: spawn ... EMFILE" and the session was lost.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({})], projectAgentsDir: null })
+    spawnMock.mockImplementationOnce(() => {
+      const child = new EventEmitter()
+      setImmediate(() => child.emit('error', Object.assign(new Error('spawn pi EMFILE'), { code: 'EMFILE' })))
+      return child
+    })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(results(result)[0]).toMatchObject({ exitCode: 1 })
+    expect(results(result)[0].stderr).toMatch(/descriptor|EMFILE/i)
+  })
+
   it('reports an unknown agent without spawning anything', async () => {
     const result = await execute('c1', { agent: 'ghost', task: 'find it' }, undefined, undefined, trustedCtx)
 
@@ -1981,6 +2000,19 @@ describe('subagent run semantics conformance', () => {
 
     expect(spawnedChildren[0].kill).toHaveBeenCalledWith('SIGTERM')
     expect(text(result)).toContain('partial')
+  })
+
+  it('reports a maxTurns-capped foreground run as a result, not a failed agent', async () => {
+    // The cap SIGTERMs the child, and pi's print mode answers SIGTERM with exit 143, not a
+    // null code. Read as the agent's own exit status, every capped run came back as
+    // "Agent toolUse: ..." with the failure icon, and a chain stopped at that step.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 1 })], projectAgentsDir: null })
+    script('inspect', { stdout: [say('first turn'), say('second turn')], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('partial')
+    expect(text(result)).not.toMatch(/^Agent /)
+    expect((result as { isError?: boolean }).isError).not.toBe(true)
   })
 
   it('does not mark an uncapped clean run as partial', async () => {

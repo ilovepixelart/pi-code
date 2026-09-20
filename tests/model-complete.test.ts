@@ -100,6 +100,17 @@ describe('completeText', () => {
     })
     await expect(completeText({} as never, 'q')).rejects.toThrow(/no credentials/)
   })
+
+  it('throws when the provider failed, which the real backend reports by resolving, not rejecting', async () => {
+    // pi-ai never rejects on a 429, an overload, an auth error or a fired AbortSignal: the
+    // stream resolves with a message carrying stopReason error|aborted and empty content.
+    // Returned as text, that is an empty answer no caller can tell from a real one.
+    const failed = (stopReason: string, errorMessage?: string) => ({ role: 'assistant', content: [], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason, errorMessage, timestamp: 0 }) as never
+    setCompleteBackend(async () => failed('error', 'rate limited'))
+    await expect(completeText({} as never, 'q')).rejects.toThrow(/rate limited/)
+    setCompleteBackend(async () => failed('aborted'))
+    await expect(completeText({} as never, 'q')).rejects.toThrow(/aborted/)
+  })
 })
 
 describe('completeText realBackend wiring', () => {

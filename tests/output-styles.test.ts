@@ -170,6 +170,18 @@ describe('loadStyles', () => {
 
     expect(loadStyles([dir]).map((s) => s.name)).toEqual(['Real'])
   })
+
+  it('skips a style file whose frontmatter does not parse, keeping every other style', () => {
+    // pi's frontmatter parser is strict YAML and throws on a plain scalar holding ": ".
+    // The throw escaped loadStyles, so session_start aborted with no styles at all: the
+    // style selected in settings silently stopped applying, the built-in ones included.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const dir = tempDir()
+    writeFileSync(join(dir, 'broken.md'), '---\ndescription: Terse mode: bullet points only\n---\nBODY')
+    writeFileSync(join(dir, 'good.md'), '---\nname: Good\n---\nBODY')
+
+    expect(loadStyles([dir]).map((s) => s.name)).toEqual(['Good'])
+  })
 })
 
 describe('builtin styles', () => {

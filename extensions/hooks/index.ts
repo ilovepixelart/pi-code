@@ -103,7 +103,7 @@ import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.js'
 import { resolveModelOverride } from '../internal/model-lookup.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
 import { installedPlugins, managedForceEnabled } from '../internal/plugins.js'
-import { isProjectApproved } from '../internal/project-approval.js'
+import { approvalRecheck, isProjectApproved } from '../internal/project-approval.js'
 import { repoRoot } from '../internal/project-root.js'
 import { watchSettingsFiles } from '../internal/settings-watch.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
@@ -457,8 +457,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // closes over the cwd value, never ctx: the poll has no awaiter, and every getter of
     // a replaced session's ctx throws, which would exit pi as an uncaughtException.
     const watchCwd = ctx.cwd
+    // The reload asks again rather than reusing `trusted`: see approvalRecheck.
+    const stillApproved = approvalRecheck(ctx)
     disposeSettingsWatch()
-    disposeSettingsWatch = watchSettingsFiles(hookFiles(watchCwd, os.homedir(), trusted), () => resolveConfig(watchCwd, trusted))
+    disposeSettingsWatch = watchSettingsFiles(hookFiles(watchCwd, os.homedir(), trusted), () => resolveConfig(watchCwd, trusted && stillApproved()))
     // A disabled or managed-only resolution leaves config empty (or managed-only),
     // so the SessionStart run below fires exactly what remains active.
     pendingSessionContext = []

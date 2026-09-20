@@ -190,6 +190,9 @@ export default function question(pi: ExtensionAPI) {
     description:
       'Ask the user a question and let them pick from options. Use when you need user input to proceed. Pass question and options, for example {"question": "Which one?", "options": [{"label": "alpha"}, {"label": "beta"}]}. To ask 2-4 questions at once, pass questions instead, with the same fields per entry.',
     parameters: QuestionParams,
+    // The host shows a custom dialog in one editor slot, so two questions running in
+    // parallel leave the first unanswerable and the run unable to finish.
+    executionMode: 'sequential',
 
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const specs = questionList(rawParams as Partial<QuestionSpec> & { questions?: QuestionSpec[] })

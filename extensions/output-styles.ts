@@ -31,7 +31,7 @@ import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs } from './internal/project-root.js'
 import { claudeSettingsChain, localSettingsFile, readSettingsChain } from './internal/settings-chain.js'
-import { isDirectory } from './internal/values.js'
+import { errorMessage, isDirectory } from './internal/values.js'
 
 export interface OutputStyle {
   name: string
@@ -121,6 +121,25 @@ export function pluginStyleDirs(home: string): string[] {
   })
 }
 
+/** One style file, or undefined when it cannot be used. A directory named *.md or an
+ * unreadable file is skipped silently. pi's frontmatter parser is strict YAML and throws:
+ * one unparseable file must cost that style, not every style of the session. */
+function readStyleFile(dir: string, entry: string): OutputStyle | undefined {
+  const file = path.join(dir, entry)
+  let content: string
+  try {
+    content = fs.readFileSync(file, 'utf-8')
+  } catch {
+    return undefined
+  }
+  try {
+    return parseStyle(content, entry.replace(/\.md$/, ''))
+  } catch (error) {
+    console.warn(`pi-code-output-styles: skipping ${file}: ${errorMessage(error).split('\n')[0]}`)
+    return undefined
+  }
+}
+
 /** All output styles, project entries overriding user entries of the same name. */
 export function loadStyles(dirs: string[]): OutputStyle[] {
   const byName = new Map<string, OutputStyle>()
@@ -131,16 +150,9 @@ export function loadStyles(dirs: string[]): OutputStyle[] {
     } catch {
       continue
     }
-    for (const entry of entries) {
-      if (!entry.endsWith('.md')) continue
-      let content: string
-      try {
-        content = fs.readFileSync(path.join(dir, entry), 'utf-8')
-      } catch {
-        continue // a directory named *.md or an unreadable file must not take down session start
-      }
-      const style = parseStyle(content, entry.replace(/\.md$/, ''))
-      byName.set(style.name, style)
+    for (const entry of entries.filter((name) => name.endsWith('.md'))) {
+      const style = readStyleFile(dir, entry)
+      if (style) byName.set(style.name, style)
     }
   }
   return [...byName.values()]

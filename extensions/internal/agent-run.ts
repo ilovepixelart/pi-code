@@ -9,6 +9,8 @@
  * are skipped rather than failing the event.
  */
 
+import { sharedSlot } from './shared-slot.js'
+
 export interface AgentRunRequest {
   /** The agent's task prompt, with `$ARGUMENTS` already substituted. */
   prompt: string
@@ -29,20 +31,21 @@ export interface AgentRunRequest {
 /** Run a subagent to completion and return its final assistant text. */
 export type AgentRunner = (request: AgentRunRequest) => Promise<string>
 
-let runner: AgentRunner | undefined
+const slot = sharedSlot<AgentRunner>('agent-runner')
 
 /** The subagent extension registers its runner here; pass undefined to clear it. */
 export function setAgentRunner(fn: AgentRunner | undefined): void {
-  runner = fn
+  slot.set(fn)
 }
 
 /** Test seam: whether a runner is registered. */
 export function hasAgentRunner(): boolean {
-  return runner !== undefined
+  return slot.get() !== undefined
 }
 
 /** Run a subagent for an agent hook. Rejects when no runner is registered. */
 export function runAgent(request: AgentRunRequest): Promise<string> {
+  const runner = slot.get()
   if (!runner) return Promise.reject(new Error('no subagent runner registered for agent hooks'))
   return runner(request)
 }

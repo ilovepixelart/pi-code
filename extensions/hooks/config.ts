@@ -251,9 +251,12 @@ function withoutUserConfigShellCommands(raw: string, source: string): string {
   for (const matchers of Object.values(parsed?.hooks ?? {})) {
     if (!Array.isArray(matchers)) continue
     for (const entry of matchers) {
-      const record = entry as { hooks?: unknown }
-      if (!Array.isArray(record.hooks)) continue
-      const kept = record.hooks.filter((hook) => {
+      // A malformed entry is left for mergeHooksJson to report by name; this pass must
+      // not throw on it, because the inline-manifest caller has no catch.
+      if (!isRecord(entry) || !Array.isArray(entry.hooks)) continue
+      const record = entry
+      const kept = (record.hooks as unknown[]).filter((hook) => {
+        if (!isRecord(hook)) return true
         const candidate = hook as { command?: unknown; args?: unknown }
         if (Array.isArray(candidate.args) || typeof candidate.command !== 'string' || !USER_CONFIG_REF.test(candidate.command)) return true
         console.warn(`pi-code-hooks: ignoring a hook in ${source}: a shell-form command cannot reference \${user_config.*}; use exec form with "args", or read CLAUDE_PLUGIN_OPTION_<KEY> from the environment`)
