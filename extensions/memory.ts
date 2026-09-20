@@ -277,14 +277,22 @@ export function capIndexForPrompt(index: string): string {
   return `${text}\n(${dropped} more memories not shown; use the memory tool with action "list")`
 }
 
+/** A memory's file name. Letters and digits of any script survive: an ASCII-only slug
+ * reduced every non-Latin name to one fallback, so distinct memories overwrote each
+ * other. `memory` is never produced, because on a case-insensitive filesystem memory.md
+ * is the MEMORY.md index, and writing one destroys the other. Cut by code point, so a
+ * character outside the basic plane is never split. */
 export function slugifyName(name: string): string {
-  return (
-    name
+  const slug = [
+    ...name
       .toLowerCase()
-      .replaceAll(/[^a-z0-9]+/g, '-')
-      .replaceAll(/^-|-$/g, '')
-      .slice(0, 64) || 'memory'
-  )
+      .replaceAll(/[^\p{L}\p{N}]+/gu, '-')
+      .replaceAll(/^-|-$/g, ''),
+  ]
+    .slice(0, 64)
+    .join('')
+  if (slug === '') return 'untitled'
+  return slug === 'memory' ? 'memory-note' : slug
 }
 
 /** The exact key prefix of a memory's index line; matching on a substring would also
