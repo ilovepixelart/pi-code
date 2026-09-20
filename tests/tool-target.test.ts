@@ -1,5 +1,6 @@
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
@@ -21,7 +22,9 @@ describe('fileToolTarget', () => {
     expect(target({ path: '@src/a.ts' })).toBe('src/a.ts')
     expect(target({ path: '~/work/a.ts' })).toBe(path.join(os.homedir(), 'work/a.ts'))
     expect(target({ path: '~' })).toBe(os.homedir())
-    expect(target({ path: 'file:///tmp/a%20b.ts' })).toBe(path.normalize('/tmp/a b.ts'))
+    // Built from a real absolute path: a file URL without a drive letter is not valid on Windows.
+    const spaced = path.join(os.tmpdir(), 'a b.ts')
+    expect(target({ path: pathToFileURL(spaced).href })).toBe(spaced)
     expect(target({ path: 'my\u00A0file.ts' })).toBe('my file.ts')
     expect(target({ path: '~user/a.ts' })).toBe('~user/a.ts')
   })

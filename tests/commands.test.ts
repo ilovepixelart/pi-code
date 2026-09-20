@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -1002,7 +1003,7 @@ describe('allowed-tools argument scopes', () => {
 
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'README.md' } }, s.ctx)).toBeUndefined()
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: '@README.md' } }, s.ctx)).toBeUndefined()
-    for (const outside of ['~/secret/notes.md', `file://${tempDir()}/notes.md`]) {
+    for (const outside of ['~/secret/notes.md', pathToFileURL(join(tempDir(), 'notes.md')).href]) {
       const verdict = (await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: outside } }, s.ctx)) as { block?: boolean }
       expect(verdict?.block, outside).toBe(true)
     }
