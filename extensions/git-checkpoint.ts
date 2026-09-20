@@ -168,6 +168,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // assistant turns it drives. before_agent_start starts a run; the first turn_start
   // then snapshots and clears this, so turns 2..n skip the wasted git work.
   let runNeedsSnapshot = true
+  /** Whether the run about to start came from a prompt (see before_agent_start below). */
+  let promptedRun = false
   let shadowDir: string | undefined
   let workTree: string | undefined
   // Absolute paths this session's edit tools targeted: the whole of what a checkpoint
@@ -217,6 +219,17 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     // Written on every start, so repos that predate the sidecar pick it up too.
     rememberWorkTree(shadowDir, ctx.cwd)
     await mirrorLocalExcludes(ctx)
+  }
+
+  /** /fork writes a new session file and copies the branch's checkpoint entries into it,
+   * while the shadow repository is keyed to the session file: the refs those entries name
+   * live in the parent's shadow, and a restore from the fork's own answered "invalid
+   * reference". A local bare-to-bare fetch brings them across. Best effort: a parent
+   * shadow already pruned leaves those checkpoints unrestorable, as they were. */
+  async function inheritCheckpointRefs(previousSessionFile: string): Promise<void> {
+    const parentShadow = path.join(getAgentDir(), 'checkpoints', sessionSlug(previousSessionFile))
+    if (parentShadow === shadowDir || !fs.existsSync(parentShadow)) return
+    await gitShadow(['fetch', '--quiet', parentShadow, `+${CHECKPOINT_REF_PREFIX}/*:${CHECKPOINT_REF_PREFIX}/*`])
   }
 
   /** git reads ignore rules from the tree's .gitignore files, the user's global excludes,
@@ -308,12 +321,29 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   /** Fold a file's pre-edit content into the run's checkpoint. A file first edited part
    * way through a run is absent from that run's pre-run snapshot, so without this its
    * checkpoint holds no baseline and /rewind cannot undo that first edit. */
+  /** `file` named by the real directory it sits in, when a symlink inside the work tree
+   * leads there. git refuses a pathspec that passes through a symlink ("beyond a symbolic
+   * link"), so the file has to be tracked where it really is. The real directory is mapped
+   * back under the work tree as the session spells it: a cwd that is itself a symlinked
+   * path (macOS /var) must not push every file outside the tree. */
+  function throughSymlinks(file: string): string {
+    if (!workTree) return file
+    try {
+      const realTree = fs.realpathSync(workTree)
+      const realDir = fs.realpathSync(path.dirname(file))
+      const inside = path.relative(realTree, realDir)
+      if (inside.startsWith('..') || path.isAbsolute(inside)) return file
+      return path.join(workTree, inside, path.basename(file))
+    } catch {
+      return file
+    }
+  }
+
   async function captureBaseline(file: string): Promise<void> {
     const rel = workTreePath(file)
     if (!runRef || rel === undefined || !fs.existsSync(file)) return
     if ((await withoutIgnored([rel])).length === 0) return
-    const add = await gitShadow(['add', '--', rel])
-    if (add.code !== 0) return
+    if (!(await addPaths([rel]))) return
     // A commit, never an amend: the run's checkpoint can be a commit an earlier
     // checkpoint also points at, and rewriting it would strand that one.
     const commit = await commitShadow([])
@@ -329,13 +359,50 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     return files.code === 0 && files.stdout.trim() === ''
   }
 
+  /** Stage what `git add` silently skipped. For a path under another repository (a
+   * workspace of clones, a submodule, $HOME) it exits 0 and stages nothing, so the edit
+   * was never snapshotted while /rewind still reported success. Such a file is written to
+   * the index directly, which `checkout` restores like any other entry. A deletion needs
+   * nothing here: `git add` does stage the removal of an entry the index already holds. */
+  async function stageSkippedPaths(paths: string[]): Promise<void> {
+    if (!workTree) return
+    const listed = await gitShadow(['ls-files', '-z', '--', ...paths])
+    if (listed.code !== 0) return
+    const indexed = new Set(listed.stdout.split('\0').filter(Boolean))
+    for (const rel of paths) {
+      if (!indexed.has(rel) && fs.existsSync(path.join(workTree, rel))) await indexDirectly(rel)
+    }
+  }
+
+  async function indexDirectly(rel: string): Promise<void> {
+    if (!workTree) return
+    const blob = await gitShadow(['hash-object', '-w', '--', rel])
+    if (blob.code !== 0) return
+    const executable = (fs.statSync(path.join(workTree, rel)).mode & 0o111) !== 0
+    await gitShadow(['update-index', '--add', '--cacheinfo', `${executable ? '100755' : '100644'},${blob.stdout.trim()},${rel}`])
+  }
+
+  /** Stage the tracked paths. git fails the whole add when one pathspec is refused, which
+   * used to end checkpointing for the session over a single path. On a failure each path
+   * is added alone and one git still refuses is dropped from the edit set, so it costs
+   * its own checkpoint and nobody else's. False only when nothing could be staged. */
+  async function addPaths(paths: string[]): Promise<boolean> {
+    if ((await gitShadow(['add', '--', ...paths])).code === 0) {
+      await stageSkippedPaths(paths)
+      return true
+    }
+    let staged = 0
+    for (const rel of paths) {
+      if ((await gitShadow(['add', '--', rel])).code === 0) staged++
+      else if (workTree) touched.delete(path.resolve(workTree, rel))
+    }
+    return staged > 0
+  }
+
   async function snapshot(): Promise<{ ref: string; createdAt: string } | undefined> {
     const createdAt = new Date().toISOString()
     const paths = await addablePaths()
-    if (paths.length > 0) {
-      const add = await gitShadow(['add', '--', ...paths])
-      if (add.code !== 0) return undefined
-    }
+    if (paths.length > 0 && !(await addPaths(paths))) return undefined
     // Decide "nothing changed" from the index, not from the commit exit code: a commit can
     // also fail on the user's global signing or hooks config, and reusing HEAD then would
     // record a ref that predates the current tree, so /rewind restores the wrong state.
@@ -386,7 +453,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     ctx.ui.notify('Rewind complete', 'info')
   }
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     // One extension instance serves every session. A mid-turn /new fires session_start on
     // the same instance after turn_start took the pre-run snapshot but before turn_end saved
     // it; that pending ref belongs to the previous session and must not attach to the next
@@ -394,8 +461,11 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     // own tree even though the prior run left it false.
     pending = undefined
     runNeedsSnapshot = true
+    promptedRun = false
     runRef = undefined
     await ensureShadow(ctx)
+    const forkedFrom = event.reason === 'fork' ? event.previousSessionFile : undefined
+    if (forkedFrom) await inheritCheckpointRefs(forkedFrom)
     touched.clear()
     for (const rel of await committedPaths()) touched.add(path.resolve(ctx.cwd, rel))
     checkpoints.clear()
@@ -425,13 +495,39 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // the checkpoint is only keyed and saved at turn_end. The snapshot is awaited here so
   // `git add -A` captures the tree before the model's first edit; turn_end reads the
   // resolved value.
-  pi.on('turn_start', async () => {
+  // Only a prompt fires before_agent_start. A provider retry, an overflow recovery and a
+  // queued follow-up all re-enter through agent.continue(), with agent_start alone.
+  pi.on('before_agent_start', async () => {
+    promptedRun = true
+  })
+
+  /** The checkpoint a continued run is still working under: it re-entered with no new user
+   * message, so its prompt already has one. A snapshot taken there stages every tracked
+   * file at its MID-run content into the index the recorded checkpoint is later extended
+   * from (a baseline captured afterwards moved the checkpoint onto that content), and a
+   * file first edited in that turn had its baseline folded into the discarded ref. */
+  function continuedCheckpoint(ctx: ExtensionContext): Checkpoint | undefined {
+    // A queued follow-up is a new user message and needs its own snapshot. Optional: the
+    // peer range reaches runtimes that may not have the method.
+    if (ctx.hasPendingMessages?.()) return undefined
+    const target = findLastUserMessage(ctx)
+    return target ? checkpoints.get(target.entryId) : undefined
+  }
+
+  pi.on('turn_start', async (_event, ctx) => {
     if (!runNeedsSnapshot) return
     runNeedsSnapshot = false
+    const prompted = promptedRun
+    promptedRun = false
     // Claude: "Set to 1 to disable file checkpointing. The /rewind command will not be
     // able to restore code changes." No snapshot means turn_end's `if (!snap) return`
     // always fires, so no checkpoint is ever recorded.
     if (process.env.CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING === '1') return
+    const continued = prompted ? undefined : continuedCheckpoint(ctx)
+    if (continued) {
+      runRef = continued.ref
+      return
+    }
     pending = await snapshot()
   })
 
@@ -442,7 +538,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if (!EDIT_TOOLS.has(event.toolName)) return
     const target = fileToolTarget(event)
     if (target === undefined) return
-    const file = path.resolve(ctx.cwd, target)
+    const file = throughSymlinks(path.resolve(ctx.cwd, target))
     if (touched.has(file)) return
     touched.add(file)
     await captureBaseline(file)

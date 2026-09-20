@@ -404,7 +404,11 @@ const loadBackground = async (): Promise<typeof import('../extensions/subagent/b
   vi.resetModules()
   spawned.calls.length = 0
   spawned.children.length = 0
-  return await import('../extensions/subagent/background.ts')
+  const background = await import('../extensions/subagent/background.ts')
+  // The registry outlives a module instance (see the re-import test), so a fresh
+  // import alone no longer starts a case from empty.
+  background.resetBackgroundRuns()
+  return background
 }
 
 describe('parseFinalOutputFromJsonl', () => {
@@ -548,6 +552,26 @@ describe('cancelAllBackgroundRuns', () => {
     for (const child of spawned.children) child.emit('close', 143)
   })
   const invocation = { command: 'pi', args: ['--mode', 'json'], cwd: '/work/dir' }
+
+  it('still sees and signals a running child after pi re-imports the module', async () => {
+    // /reload, and /resume into a session recorded in another directory, clear pi's
+    // extension cache, and the module is evaluated again. With the registry in module
+    // state the re-import started empty: /tasks said "No background subagent runs", cancel
+    // said "Unknown background run", and at quit cancelAllBackgroundRuns signalled nothing,
+    // so the detached child outlived pi, still spending tokens.
+    const first = await loadBackground()
+    const id = first.startBackgroundRun('scout', 'long task', invocation, () => {})
+    expect(first.activeBackgroundRuns()).toBe(1)
+
+    vi.resetModules()
+    const reimported = await import('../extensions/subagent/background.ts')
+    expect(reimported.activeBackgroundRuns()).toBe(1)
+    expect(reimported.allBackgroundRuns().map((run) => run.id)).toEqual([id])
+    expect(reimported.cancelAllBackgroundRuns()).toBe(1)
+    expect(treeSignals('SIGTERM')).toBe(1)
+    for (const child of spawned.children) child.emit('close', 143)
+    reimported.resetBackgroundRuns()
+  })
 
   it('signals every live child, marks them cancelled, and reports the count', async () => {
     const { startBackgroundRun, cancelAllBackgroundRuns, activeBackgroundRuns, backgroundStatusText } = await loadBackground()

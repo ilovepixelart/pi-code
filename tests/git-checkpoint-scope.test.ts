@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -31,19 +31,22 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function setup() {
+/** A fresh instance on its own repository, or, given `forkOf`, a second instance on that
+ * repository under a new session file, as pi creates for /fork. */
+function setup(forkOf?: { repo: string }) {
   const handlers = new Map<string, Handler>()
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>()
   const appended: Array<{ customType: string; data: any }> = []
   const notifications: string[] = []
 
-  const repo = mkdtempSync(join(tmpdir(), 'gcscope-repo-'))
-  hoisted.home = mkdtempSync(join(tmpdir(), 'gcscope-home-'))
-  process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
-  tempDirs.push(repo, hoisted.home)
-
-  const sessionFile = join(repo, 'session-test.jsonl')
-  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
+  const repo = forkOf?.repo ?? mkdtempSync(join(tmpdir(), 'gcscope-repo-'))
+  const sessionFile = join(repo, forkOf ? 'session-fork.jsonl' : 'session-test.jsonl')
+  if (!forkOf) {
+    hoisted.home = mkdtempSync(join(tmpdir(), 'gcscope-home-'))
+    process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
+    tempDirs.push(repo, hoisted.home)
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
+  }
 
   gitCheckpoint({
     on: (name: string, fn: Handler) => handlers.set(name, fn),
@@ -70,7 +73,7 @@ function setup() {
     navigateTree: async () => ({ editorText: '', cancelled: false }),
   })
 
-  return { handlers, commands, appended, notifications, repo, makeCtx }
+  return { handlers, commands, appended, notifications, repo, makeCtx, sessionFile }
 }
 
 type Harness = ReturnType<typeof setup>
@@ -184,6 +187,235 @@ describe('checkpoint scope', () => {
     writeFileSync(join(t.repo, 'loader.ts'), 'v3\n')
     await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry, second], [`1. ${new Date(t.appended[1].data.createdAt).toLocaleTimeString()}  ${t.appended[1].data.prompt}`, 'Code only']))
     expect(readFileSync(join(t.repo, 'loader.ts'), 'utf8')).toBe('v2\n')
+  })
+
+  it('restores code from a checkpoint a forked session inherited', async () => {
+    // /fork writes a new session file and copies the branch's checkpoint entries into it.
+    // The shadow repository is keyed to the session file, so the fork started with an
+    // empty one while its entries named refs that live in the parent's: every inherited
+    // checkpoint answered "Code restore failed: fatal: invalid reference".
+    const parent = setup()
+    const file = join(parent.repo, 'loader.ts')
+    writeFileSync(file, 'before\n')
+    await start(parent)
+    await beginRun(parent)
+    await turnStart(parent)
+    await announceEdit(parent, file)
+    writeFileSync(file, 'after\n')
+    await turnEnd(parent)
+
+    const fork = setup(parent)
+    // The copied entries as pi stores them; the fork's instance has nothing in memory.
+    const inherited = parent.appended.map((entry) => ({ type: 'custom', ...entry }))
+    await fork.handlers.get('session_start')?.({ reason: 'fork', previousSessionFile: parent.sessionFile }, fork.makeCtx(inherited, [userEntry], []))
+    const label = `1. ${new Date(parent.appended[0].data.createdAt).toLocaleTimeString()}  ${parent.appended[0].data.prompt}`
+    await fork.commands.get('rewind')?.handler('', fork.makeCtx(inherited, [userEntry], [label, 'Code only']))
+
+    expect(fork.notifications.join('\n')).not.toContain('Code restore failed')
+    expect(readFileSync(file, 'utf8')).toBe('before\n')
+  })
+
+  it('checkpoints and restores a file edited through a symlinked directory', async () => {
+    // git refuses a pathspec that passes through a symlink ("beyond a symbolic link"), and
+    // one refused entry fails the whole add: the baseline was silently skipped, and every
+    // later pre-run snapshot of the session failed with it, with no notification.
+    const t = setup()
+    mkdirSync(join(t.repo, 'real'))
+    symlinkSync(join(t.repo, 'real'), join(t.repo, 'linked'))
+    writeFileSync(join(t.repo, 'real', 'f.txt'), 'before\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, join(t.repo, 'linked', 'f.txt'))
+    writeFileSync(join(t.repo, 'real', 'f.txt'), 'after\n')
+    await turnEnd(t)
+    expect(snapshotPaths(t.appended[0].data.ref)).toContain('real/f.txt')
+
+    const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+    await beginRun(t)
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+    expect(t.appended).toHaveLength(2)
+
+    // The list is newest first, so the first prompt's checkpoint is entry 2.
+    const label = `2. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+    await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry, second], [label, 'Code only']))
+    expect(readFileSync(join(t.repo, 'real', 'f.txt'), 'utf8')).toBe('before\n')
+  })
+
+  // chmod cannot make a file unreadable on Windows.
+  it.skipIf(process.platform === 'win32')('keeps checkpointing the other files when git refuses one of them', async () => {
+    // git fails the whole add when it cannot stage one entry. An unreadable file in the
+    // edit set therefore cost every later run its checkpoint, the readable files included.
+    const t = setup()
+    const fine = join(t.repo, 'fine.ts')
+    const locked = join(t.repo, 'locked.ts')
+    writeFileSync(fine, 'v1\n')
+    writeFileSync(locked, 'v1\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, fine)
+    await announceEdit(t, locked)
+    await turnEnd(t)
+    chmodSync(locked, 0o000)
+    writeFileSync(fine, 'v2\n')
+
+    try {
+      const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+
+      expect(t.appended).toHaveLength(2)
+      expect(execFileSync('git', ['--git-dir', shadowDir(), 'show', `${t.appended[1].data.ref}:fine.ts`], { encoding: 'utf8' })).toBe('v2\n')
+    } finally {
+      chmodSync(locked, 0o644)
+    }
+  })
+
+  it('checkpoints and restores a file inside a nested repository', async () => {
+    // A workspace directory holding clones, a monorepo with submodules, or $HOME. `git add`
+    // exits 0 for a path under another repository and stages nothing, so the edit was never
+    // snapshotted while /rewind still answered "Rewind complete".
+    const t = setup()
+    const nested = join(t.repo, 'clones', 'lib')
+    mkdirSync(nested, { recursive: true })
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: nested, stdio: ['pipe', 'pipe', 'pipe'] })
+    const file = join(nested, 'index.ts')
+    writeFileSync(file, 'before\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, file)
+    writeFileSync(file, 'after\n')
+    await turnEnd(t)
+
+    expect(snapshotPaths(t.appended[0].data.ref)).toContain('clones/lib/index.ts')
+    const label = `1. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+    await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [label, 'Code only']))
+    expect(readFileSync(file, 'utf8')).toBe('before\n')
+  })
+
+  it('drops a nested-repository file from the next checkpoint once it is deleted', async () => {
+    // The entry is written to the index directly, since `git add` will not add content from
+    // under another repository. It does stage the removal of an entry the index already
+    // holds, so a deletion needs no plumbing: pinned, because a rewind would otherwise
+    // resurrect the file.
+    const t = setup()
+    const nested = join(t.repo, 'clones', 'lib')
+    mkdirSync(nested, { recursive: true })
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: nested, stdio: ['pipe', 'pipe', 'pipe'] })
+    const file = join(nested, 'index.ts')
+    writeFileSync(file, 'v1\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, file)
+    await turnEnd(t)
+    rmSync(file)
+
+    const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+    await beginRun(t)
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+
+    expect(t.appended).toHaveLength(2)
+    expect(snapshotPaths(t.appended[1].data.ref)).not.toContain('clones/lib/index.ts')
+  })
+
+  describe('a provider retry inside a run', () => {
+    // A provider error (overloaded, 429, 5xx) or an overflow recovery makes pi continue the
+    // same prompt through agent.continue(), which fires agent_start and turn_start again.
+    // The pre-run snapshot taken there staged every tracked file at its MID-run content,
+    // and was only discarded at turn_end, after the shared index had changed.
+    const retry = async (t: Harness) => {
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+    }
+    const rewindToFirst = (t: Harness) => {
+      const label = `1. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+      return t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [label, 'Code only']))
+    }
+
+    it('restores pre-run content for a file edited before the retry', async () => {
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      const b = join(t.repo, 'b.ts')
+      writeFileSync(a, 'a before\n')
+      writeFileSync(b, 'b before\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'a mid-run\n')
+      await turnEnd(t)
+
+      await retry(t)
+      // A later turn of the same run first touches another file: its baseline is folded
+      // into the recorded checkpoint, which must not pick up a.ts as the retry saw it.
+      await t.handlers.get('turn_start')?.({ turnIndex: 2 }, t.makeCtx([], [userEntry], []))
+      await announceEdit(t, b)
+      writeFileSync(b, 'b after\n')
+      writeFileSync(a, 'a final\n')
+      await t.handlers.get('turn_end')?.({ turnIndex: 2 }, t.makeCtx([], [userEntry], []))
+
+      await rewindToFirst(t)
+      expect(readFileSync(a, 'utf8')).toBe('a before\n')
+      expect(readFileSync(b, 'utf8')).toBe('b before\n')
+    })
+
+    it('still checkpoints a queued follow-up, which re-enters the same way as a retry', async () => {
+      // A follow-up typed while the agent was busy is delivered through agent.continue() too,
+      // with agent_start alone. It is a new user message: while it is still queued the
+      // branch's last user message is the previous, checkpointed one, so only the pending
+      // queue tells it apart from a retry.
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      writeFileSync(a, 'v1\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'v2\n')
+      await turnEnd(t)
+
+      const followUp = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and also this' } }
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, { ...t.makeCtx([], [userEntry], []), hasPendingMessages: () => true })
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, followUp], []))
+
+      expect(t.appended).toHaveLength(2)
+      expect(execFileSync('git', ['--git-dir', shadowDir(), 'show', `${t.appended[1].data.ref}:a.ts`], { encoding: 'utf8' })).toBe('v2\n')
+    })
+
+    it('keeps the baseline of a file first edited in the retry turn', async () => {
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      const d = join(t.repo, 'd.ts')
+      writeFileSync(a, 'a before\n')
+      writeFileSync(d, 'd before\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'a after\n')
+      await turnEnd(t)
+
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+      await announceEdit(t, d)
+      writeFileSync(d, 'd after\n')
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+
+      await rewindToFirst(t)
+      expect(readFileSync(d, 'utf8')).toBe('d before\n')
+    })
   })
 
   it('keeps recording checkpoints when a tracked file is deleted between runs', async () => {
