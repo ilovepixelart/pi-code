@@ -175,6 +175,57 @@ describe('env-settings extension', () => {
     }, 5000)
   })
 
+  it('re-applies a settings edit without reading the session ctx', async () => {
+    // pi invalidates the session_start ctx on /new, /resume, /fork and /reload, after
+    // which every getter throws; a throw from the poll timer has no awaiter, so it
+    // is an uncaughtException that exits pi. Only an approved project reads the cwd.
+    track('ENVTEST_CTX')
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    usedKeys.add('PI_CODE_SETTINGS_WATCH_INTERVAL_MS')
+    hoisted.approved = true
+    const project = tempDir('env-proj-')
+    writeSettings(project, 'settings.json', { ENVTEST_CTX: 'before' })
+    let replaced = false
+    let staleReads = 0
+    const liveCtx = {
+      get cwd() {
+        if (replaced) staleReads++
+        return project
+      },
+    }
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({}, liveCtx)
+    expect(process.env.ENVTEST_CTX).toBe('before')
+    replaced = true
+
+    writeSettings(project, 'settings.json', { ENVTEST_CTX: 'after' })
+    await vi.waitFor(() => {
+      expect(process.env.ENVTEST_CTX).toBe('after')
+    }, 5000)
+    expect(staleReads).toBe(0)
+    await handlers.get('session_shutdown')?.({}, {})
+  })
+
+  it('stops watching at session_shutdown', async () => {
+    // pi's CLI loads a fresh extension instance for every session replacement, so the next
+    // session_start cannot dispose this watcher: left armed, each replaced session
+    // leaks one more poll for the life of the process.
+    track('ENVTEST_STOPPED')
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    usedKeys.add('PI_CODE_SETTINGS_WATCH_INTERVAL_MS')
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_STOPPED: 'before' })
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({}, { cwd: tempDir('env-proj-') })
+    await handlers.get('session_shutdown')?.({}, {})
+
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_STOPPED: 'after' })
+    // A dozen poll intervals: a watcher still armed would have re-applied by now.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(process.env.ENVTEST_STOPPED).toBe('before')
+  })
+
   it('applies user and managed env at factory time, but not project env', async () => {
     track('ENVTEST_USER', 'ENVTEST_MANAGED', 'ENVTEST_PROJECT')
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_USER: 'uv' })

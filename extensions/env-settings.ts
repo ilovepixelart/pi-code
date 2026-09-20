@@ -160,7 +160,10 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx: ExtensionContext) => {
     const home = os.homedir()
     const approved = isProjectApprovedSilently(ctx)
-    const reapply = (): void => apply(home, approved ? projectEnv(ctx.cwd, home) : {})
+    // The watcher's reapply closes over the cwd value, never ctx: the poll has no awaiter,
+    // and every getter of a replaced session's ctx throws, which would exit pi.
+    const cwd = ctx.cwd
+    const reapply = (): void => apply(home, approved ? projectEnv(cwd, home) : {})
     reapply()
     // Claude: "Claude Code watches your settings files and reloads them when they change,
     // so it applies most edits to the running session without a restart." `env` is not
@@ -168,7 +171,7 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
     // edit has to reach process.env now rather than at the next session. applyEnvSettings
     // tracks what it owns, so a key removed from the file is restored, not left behind.
     disposeWatch()
-    disposeWatch = watchSettingsFiles(claudeSettingsChain(ctx.cwd, home, approved), reapply)
+    disposeWatch = watchSettingsFiles(claudeSettingsChain(cwd, home, approved), reapply)
   })
 
   pi.on('session_shutdown', async () => {

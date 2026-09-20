@@ -453,9 +453,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // subdirectory session too.
     projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
     resolveConfig(ctx.cwd, trusted)
-    // Claude picks up direct settings edits mid-session via a file watcher.
+    // Claude picks up direct settings edits mid-session via a file watcher. The reload
+    // closes over the cwd value, never ctx: the poll has no awaiter, and every getter of
+    // a replaced session's ctx throws, which would exit pi as an uncaughtException.
+    const watchCwd = ctx.cwd
     disposeSettingsWatch()
-    disposeSettingsWatch = watchSettingsFiles(hookFiles(ctx.cwd, os.homedir(), trusted), () => resolveConfig(ctx.cwd, trusted))
+    disposeSettingsWatch = watchSettingsFiles(hookFiles(watchCwd, os.homedir(), trusted), () => resolveConfig(watchCwd, trusted))
     // A disabled or managed-only resolution leaves config empty (or managed-only),
     // so the SessionStart run below fires exactly what remains active.
     pendingSessionContext = []
@@ -759,6 +762,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_shutdown', async (event, ctx) => {
+    // pi's CLI loads a fresh extension instance for every session replacement, so no later
+    // session_start reaches this watcher: left armed, it polls for the life of the process.
+    disposeSettingsWatch()
+    disposeSettingsWatch = () => {}
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
     // SessionEnd rides Claude's short shared budget (see sessionEndTimeoutMs) so a
     // slow hook cannot stall session exit, /new or /resume.
