@@ -106,7 +106,17 @@ describe('memory helpers', () => {
 
   it('slugifies memory names', () => {
     expect(slugifyName('User prefers TABS!')).toBe('user-prefers-tabs')
-    expect(slugifyName('///')).toBe('memory')
+  })
+
+  it('keeps names in any script distinct, and never produces the index file name', () => {
+    // An ASCII-only slug reduced every Japanese, Chinese, Russian or Arabic name to the
+    // "memory" fallback: two saves answered "Saved" while the second overwrote the first,
+    // and on a case-insensitive filesystem memory.md IS the MEMORY.md index, so the index
+    // rewrite then destroyed the content as well.
+    expect(slugifyName('設定')).toBe('設定')
+    expect(slugifyName('Настройки проекта')).toBe('настройки-проекта')
+    expect(slugifyName('設定')).not.toBe(slugifyName('言語'))
+    for (const reserved of ['memory', 'Memory', 'MEMORY!', '///', '']) expect(slugifyName(reserved).toLowerCase()).not.toBe('memory')
   })
 
   it('upserts index lines and creates a header', () => {

@@ -172,12 +172,12 @@ describe('loadStyles', () => {
   })
 
   it('skips a style file whose frontmatter does not parse, keeping every other style', () => {
-    // pi's frontmatter parser is strict YAML and throws on a plain scalar holding ": ".
+    // pi's frontmatter parser is strict YAML and throws on a value it cannot read.
     // The throw escaped loadStyles, so session_start aborted with no styles at all: the
     // style selected in settings silently stopped applying, the built-in ones included.
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const dir = tempDir()
-    writeFileSync(join(dir, 'broken.md'), '---\ndescription: Terse mode: bullet points only\n---\nBODY')
+    writeFileSync(join(dir, 'broken.md'), '---\nname: [unclosed\n---\nBODY')
     writeFileSync(join(dir, 'good.md'), '---\nname: Good\n---\nBODY')
 
     expect(loadStyles([dir]).map((s) => s.name)).toEqual(['Good'])
@@ -267,6 +267,7 @@ describe('extension wiring', () => {
     mkdirSync(join(tree, '.claude', 'output-styles'), { recursive: true })
     writeFileSync(join(tree, '.claude', 'output-styles', 'style.md'), '---\nname: Explain\n---\nExplain everything.')
     writeFileSync(join(tree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
     outputStyles({

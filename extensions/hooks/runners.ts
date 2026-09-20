@@ -163,7 +163,16 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, {
     }
     // On Windows `detached` means DETACHED_PROCESS, which gives a console child its own
     // window; windowsHide keeps every hook invisible (a no-op elsewhere).
-    const child = spawn(target.file, target.spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env })
+    // node defers only a few spawn errors to the 'error' event; the rest (E2BIG from a
+    // payload past the argv limit) throw here, inside the promise executor, which would
+    // reject the runner and lose every sibling hook's verdict for the event.
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(target.file, target.spawnArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, windowsHide: true, env })
+    } catch (error) {
+      resolve({ code: 0, stdout: '', stderr: errorMessage(error), timedOut: false, spawnFailed: true })
+      return
+    }
     onChild?.(() => killTree(child))
     let stdout = ''
     let stderr = ''

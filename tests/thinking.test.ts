@@ -4,11 +4,11 @@ import thinkingExtension, { requestedThinkingLevel, thinkingRank } from '../exte
 
 type Handler = (event: any, ctx: any) => unknown
 
-function wire(initial = 'off') {
+function wire(initial = 'off', clamp: (level: string) => string = (level) => level) {
   const handlers = new Map<string, Handler>()
   let level = initial
   const setThinkingLevel = vi.fn((l: string) => {
-    level = l
+    level = clamp(l)
   })
   const getThinkingLevel = vi.fn(() => level)
   thinkingExtension({
@@ -58,6 +58,18 @@ describe('requestedThinkingLevel', () => {
 })
 
 describe('thinking extension', () => {
+  it('restores the level on a model without max, where the runtime clamps the escalation', async () => {
+    // pi stores clampThinkingLevel(model, level), not the level asked for, and most
+    // reasoning models have no max: the escalation landed on high. Armed with the level
+    // requested, the override saw "someone else moved it" at settle and stood down, so the
+    // session stayed at high for good, and the transcript carried it into `pi -c`.
+    const t = wire('low', (level) => (level === 'max' ? 'high' : level))
+    await t.input('ultrathink about this')
+    expect(t.level()).toBe('high')
+    await t.settle()
+    expect(t.level()).toBe('low')
+  })
+
   it('escalates to max on ultrathink and restores the prior level when the turn settles', () => {
     const t = wire('low')
     t.input('please ultrathink')

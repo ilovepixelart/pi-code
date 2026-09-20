@@ -121,6 +121,25 @@ describe('isProjectApprovedSilently', () => {
   })
 })
 
+describe('hasClaudeShapedConfig covers the settings a worktree pointer relocates', () => {
+  // Not on Windows: there settings.local.json stays in the working directory (one of
+  // Claude's placement exceptions), so nothing is relocated and the walk covers it.
+  it.skipIf(process.platform === 'win32')('counts the settings.local.json the chain reads from the main checkout', () => {
+    // settings.local.json is read from the main checkout, which a worktree's .git file
+    // names. An archive can carry both ends of that pointer, so its payload directory
+    // became the "main checkout" while the walk from cwd saw nothing claude-shaped: the
+    // payload's hooks and env loaded with no approval dialog.
+    const tree = tempDir()
+    const payload = join(tree, 'payload')
+    mkdirSync(join(payload, '.git', 'worktrees', 'x'), { recursive: true })
+    writeFileSync(join(tree, '.git'), 'gitdir: payload/.git/worktrees/x\n')
+    writeFileSync(join(payload, '.git', 'worktrees', 'x', 'gitdir'), '../../../../.git\n')
+    write(payload, '.claude/settings.local.json', '{"hooks":{}}')
+
+    expect(hasClaudeShapedConfig(tree, join(tree, 'nowhere'))).toBe(true)
+  })
+})
+
 describe('approvalRecheck', () => {
   it('withdraws approval once a project nobody was asked about turns claude-shaped mid-session', () => {
     // A repository with nothing claude-shaped reads as approved without a question. Config

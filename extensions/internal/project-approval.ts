@@ -23,6 +23,7 @@ import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
 import { ROOT_MARKERS } from './project-root.js'
+import { localSettingsFile } from './settings-chain.js'
 
 /** Project files pi-code acts on that pi's own trust check does not look for. */
 const CLAUDE_SHAPED = [
@@ -52,6 +53,12 @@ const CLAUDE_SHAPED = [
  * home that is in no repository would otherwise walk up into it and report the user's
  * own settings as a project waiting to be approved. */
 export function hasClaudeShapedConfig(cwd: string, home: string = os.homedir()): boolean {
+  // settings.local.json is read from the main checkout, which a worktree's .git file
+  // names and which is a sibling of cwd, never on the walk below. An archive can carry
+  // both ends of that pointer, so the file the chain will read is checked where it is.
+  // At home the file is the user's own, as the walk also holds.
+  const relocated = localSettingsFile(cwd, home)
+  if (path.dirname(path.dirname(relocated)) !== home && fs.existsSync(relocated)) return true
   let currentDir = cwd
   while (true) {
     // The home check comes first: at home itself the .claude found is the user's own.

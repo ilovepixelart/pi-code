@@ -5,12 +5,13 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { getAgentDir, parseFrontmatter, stripFrontmatter } from '@earendil-works/pi-coding-agent'
+import { getAgentDir, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
 import { parseToolGrants } from '../internal/command-file.js'
 import { claudeConfigDir } from '../internal/config-dir.js'
+import { parseClaudeFrontmatter } from '../internal/frontmatter.js'
 import { findModel } from '../internal/model-lookup.js'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
 import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
@@ -176,7 +177,7 @@ function agentName(frontmatter: Record<string, unknown>, filePath: string, plugi
 function parseAgentFile(content: string, source: AgentSource, filePath: string, pluginName?: string): AgentConfig | null {
   let parsed: { frontmatter: Record<string, unknown>; body: string }
   try {
-    parsed = parseFrontmatter<Record<string, unknown>>(content)
+    parsed = parseClaudeFrontmatter<Record<string, unknown>>(content)
   } catch (error) {
     // Malformed YAML must not abort discovery for the whole directory, but a silent drop
     // reads as "that agent does not exist", so it is named like the other rejections here.
