@@ -31,6 +31,7 @@ type CustomFactory = (tui: unknown, theme: unknown, keybindings: unknown, done: 
 
 interface QuestionTool {
   name: string
+  executionMode?: string
   execute: (id: string, params: { question: string; options: Option[] }, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<ToolResult>
   renderCall: (args: Record<string, unknown>, theme: unknown, context?: unknown) => Text
   renderResult: (result: ToolResult, options: unknown, theme: unknown, context?: unknown) => Text
@@ -114,6 +115,14 @@ describe('question schema caps', () => {
 })
 
 describe('question execute', () => {
+  it('runs sequentially, since the host has one dialog slot', () => {
+    // pi runs the tool calls of one assistant message in parallel, and the host shows a
+    // custom dialog in a single editor slot: a second question replaced the first, whose
+    // promise then never resolved. The run could not reach turn_end, and neither Esc nor
+    // /new recovered the session. One sequential tool makes pi run the whole batch in order.
+    expect(setup().executionMode).toBe('sequential')
+  })
+
   it('refuses to ask when no UI is available', async () => {
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, { hasUI: false })
     expect(result.content).toEqual([{ type: 'text', text: 'Error: UI not available (running in non-interactive mode)' }])
