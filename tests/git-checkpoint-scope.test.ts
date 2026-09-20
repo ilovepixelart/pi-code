@@ -328,6 +328,96 @@ describe('checkpoint scope', () => {
     expect(snapshotPaths(t.appended[1].data.ref)).not.toContain('clones/lib/index.ts')
   })
 
+  describe('a provider retry inside a run', () => {
+    // A provider error (overloaded, 429, 5xx) or an overflow recovery makes pi continue the
+    // same prompt through agent.continue(), which fires agent_start and turn_start again.
+    // The pre-run snapshot taken there staged every tracked file at its MID-run content,
+    // and was only discarded at turn_end, after the shared index had changed.
+    const retry = async (t: Harness) => {
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+    }
+    const rewindToFirst = (t: Harness) => {
+      const label = `1. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+      return t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [label, 'Code only']))
+    }
+
+    it('restores pre-run content for a file edited before the retry', async () => {
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      const b = join(t.repo, 'b.ts')
+      writeFileSync(a, 'a before\n')
+      writeFileSync(b, 'b before\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'a mid-run\n')
+      await turnEnd(t)
+
+      await retry(t)
+      // A later turn of the same run first touches another file: its baseline is folded
+      // into the recorded checkpoint, which must not pick up a.ts as the retry saw it.
+      await t.handlers.get('turn_start')?.({ turnIndex: 2 }, t.makeCtx([], [userEntry], []))
+      await announceEdit(t, b)
+      writeFileSync(b, 'b after\n')
+      writeFileSync(a, 'a final\n')
+      await t.handlers.get('turn_end')?.({ turnIndex: 2 }, t.makeCtx([], [userEntry], []))
+
+      await rewindToFirst(t)
+      expect(readFileSync(a, 'utf8')).toBe('a before\n')
+      expect(readFileSync(b, 'utf8')).toBe('b before\n')
+    })
+
+    it('still checkpoints a queued follow-up, which re-enters the same way as a retry', async () => {
+      // A follow-up typed while the agent was busy is delivered through agent.continue() too,
+      // with agent_start alone. It is a new user message: while it is still queued the
+      // branch's last user message is the previous, checkpointed one, so only the pending
+      // queue tells it apart from a retry.
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      writeFileSync(a, 'v1\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'v2\n')
+      await turnEnd(t)
+
+      const followUp = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and also this' } }
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, { ...t.makeCtx([], [userEntry], []), hasPendingMessages: () => true })
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, followUp], []))
+
+      expect(t.appended).toHaveLength(2)
+      expect(execFileSync('git', ['--git-dir', shadowDir(), 'show', `${t.appended[1].data.ref}:a.ts`], { encoding: 'utf8' })).toBe('v2\n')
+    })
+
+    it('keeps the baseline of a file first edited in the retry turn', async () => {
+      const t = setup()
+      const a = join(t.repo, 'a.ts')
+      const d = join(t.repo, 'd.ts')
+      writeFileSync(a, 'a before\n')
+      writeFileSync(d, 'd before\n')
+      await start(t)
+      await beginRun(t)
+      await turnStart(t)
+      await announceEdit(t, a)
+      writeFileSync(a, 'a after\n')
+      await turnEnd(t)
+
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+      await announceEdit(t, d)
+      writeFileSync(d, 'd after\n')
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
+
+      await rewindToFirst(t)
+      expect(readFileSync(d, 'utf8')).toBe('d before\n')
+    })
+  })
+
   it('keeps recording checkpoints when a tracked file is deleted between runs', async () => {
     // git aborts the whole pathspec when one entry matches neither a file on disk nor a
     // committed path, which would cost the run its checkpoint entirely.

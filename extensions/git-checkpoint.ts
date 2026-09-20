@@ -168,6 +168,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // assistant turns it drives. before_agent_start starts a run; the first turn_start
   // then snapshots and clears this, so turns 2..n skip the wasted git work.
   let runNeedsSnapshot = true
+  /** Whether the run about to start came from a prompt (see before_agent_start below). */
+  let promptedRun = false
   let shadowDir: string | undefined
   let workTree: string | undefined
   // Absolute paths this session's edit tools targeted: the whole of what a checkpoint
@@ -459,6 +461,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     // own tree even though the prior run left it false.
     pending = undefined
     runNeedsSnapshot = true
+    promptedRun = false
     runRef = undefined
     await ensureShadow(ctx)
     const forkedFrom = event.reason === 'fork' ? event.previousSessionFile : undefined
@@ -492,13 +495,39 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // the checkpoint is only keyed and saved at turn_end. The snapshot is awaited here so
   // `git add -A` captures the tree before the model's first edit; turn_end reads the
   // resolved value.
-  pi.on('turn_start', async () => {
+  // Only a prompt fires before_agent_start. A provider retry, an overflow recovery and a
+  // queued follow-up all re-enter through agent.continue(), with agent_start alone.
+  pi.on('before_agent_start', async () => {
+    promptedRun = true
+  })
+
+  /** The checkpoint a continued run is still working under: it re-entered with no new user
+   * message, so its prompt already has one. A snapshot taken there stages every tracked
+   * file at its MID-run content into the index the recorded checkpoint is later extended
+   * from (a baseline captured afterwards moved the checkpoint onto that content), and a
+   * file first edited in that turn had its baseline folded into the discarded ref. */
+  function continuedCheckpoint(ctx: ExtensionContext): Checkpoint | undefined {
+    // A queued follow-up is a new user message and needs its own snapshot. Optional: the
+    // peer range reaches runtimes that may not have the method.
+    if (ctx.hasPendingMessages?.()) return undefined
+    const target = findLastUserMessage(ctx)
+    return target ? checkpoints.get(target.entryId) : undefined
+  }
+
+  pi.on('turn_start', async (_event, ctx) => {
     if (!runNeedsSnapshot) return
     runNeedsSnapshot = false
+    const prompted = promptedRun
+    promptedRun = false
     // Claude: "Set to 1 to disable file checkpointing. The /rewind command will not be
     // able to restore code changes." No snapshot means turn_end's `if (!snap) return`
     // always fires, so no checkpoint is ever recorded.
     if (process.env.CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING === '1') return
+    const continued = prompted ? undefined : continuedCheckpoint(ctx)
+    if (continued) {
+      runRef = continued.ref
+      return
+    }
     pending = await snapshot()
   })
 

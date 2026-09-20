@@ -271,25 +271,24 @@ describe('shadow-repo checkpoint lifecycle', () => {
     expect(t.appended).toHaveLength(1)
   })
 
-  it('discards a retry re-snapshot of the same user message', async () => {
+  it('does not re-snapshot a retry of the same user message', async () => {
     const t = setup()
     await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
     await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx([], [], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx([], [userEntry], []))
 
-    // A retry re-arms the run via a second agent_start, so the next turn_start snapshots
-    // the pre-run tree again. The user message it lands on already owns a checkpoint, so
-    // the checkpoints.has dedupe guard drops the duplicate at turn_end.
+    // A retry re-arms the run via a second agent_start. The user message it lands on
+    // already owns a checkpoint, and a snapshot there would stage mid-run content into
+    // the index that checkpoint is extended from, so none is taken.
     await t.handlers.get('agent_start')?.({}, t.makeCtx([], [], []))
     await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
     await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry], []))
 
     expect(t.appended).toHaveLength(1)
-    // Two real snapshots ran: the second `git status` proves the re-snapshot happened and
-    // was discarded by the guard, not merely skipped, so the test cannot pass by accident.
+    // One real snapshot ran: a second `git status` would mean the retry re-snapshotted.
     const snapshots = t.execLog.filter((c) => c[0] === 'git' && c.includes('status')).length
-    expect(snapshots).toBe(2)
+    expect(snapshots).toBe(1)
   })
 
   it('reuses the existing HEAD ref when the tree has not changed', async () => {
