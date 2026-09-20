@@ -220,10 +220,12 @@ describe('env-settings extension', () => {
     await handlers.get('session_start')?.({}, { cwd: tempDir('env-proj-') })
     await handlers.get('session_shutdown')?.({}, {})
 
+    expect(process.env.ENVTEST_STOPPED).toBeUndefined()
+
     writeSettings(hoisted.home, 'settings.json', { ENVTEST_STOPPED: 'after' })
     // A dozen poll intervals: a watcher still armed would have re-applied by now.
     await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(process.env.ENVTEST_STOPPED).toBe('before')
+    expect(process.env.ENVTEST_STOPPED).toBeUndefined()
   })
 
   it('applies user and managed env at factory time, but not project env', async () => {
@@ -325,6 +327,29 @@ describe('env-settings extension', () => {
     const other = tempDir('env-proj-')
     await handlers.get('session_start')?.({ reason: 'startup' }, { cwd: other, isProjectTrusted: () => true })
     expect(process.env.ENVTEST_PROJECT).toBeUndefined()
+  })
+
+  it('hands the environment back at session_shutdown, since the next session gets a fresh instance', async () => {
+    // pi's CLI loads a fresh extension instance for every session replacement, and its
+    // empty ownership record cannot restore what the previous instance set: an approved
+    // project's env stayed live in process.env after /resume into another project.
+    track('ENVTEST_LEAK')
+    setReal('ENVTEST_SHELL', 'from-shell')
+    const projectA = tempDir('env-proj-a-')
+    writeSettings(projectA, 'settings.json', { ENVTEST_LEAK: 'from-project-a', ENVTEST_SHELL: 'from-project-a' })
+    hoisted.approved = true
+
+    const first = setup()
+    await first.handlers.get('session_start')?.({ reason: 'startup' }, { cwd: projectA })
+    expect(process.env.ENVTEST_LEAK).toBe('from-project-a')
+    expect(process.env.ENVTEST_SHELL).toBe('from-project-a')
+    await first.handlers.get('session_shutdown')?.({ reason: 'resume' }, {})
+
+    const second = setup()
+    await second.handlers.get('session_start')?.({ reason: 'resume' }, { cwd: tempDir('env-proj-b-') })
+    expect(process.env.ENVTEST_LEAK).toBeUndefined()
+    expect(process.env.ENVTEST_SHELL).toBe('from-shell')
+    await second.handlers.get('session_shutdown')?.({ reason: 'quit' }, {})
   })
 
   it('lets every settings scope override a preexisting shell export', async () => {

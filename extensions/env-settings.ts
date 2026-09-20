@@ -177,5 +177,9 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     disposeWatch()
     disposeWatch = () => {}
+    // pi's CLI loads a fresh extension instance for every session replacement, and its
+    // empty `owned` cannot restore what this one set: everything is handed back here, and
+    // the next instance re-applies managed and user env at factory time, as at startup.
+    applyEnvSettings({}, process.env, owned)
   })
 }
