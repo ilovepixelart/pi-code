@@ -83,8 +83,10 @@ export default function thinkingExtension(pi: ExtensionAPI) {
     const current = pi.getThinkingLevel?.() ?? ctx.thinkingLevel ?? 'off'
     // A keyword only raises reasoning: leave a level already at or above the target.
     if (thinkingRank(current) >= thinkingRank(target)) return
-    override.arm(current, target)
+    // Armed with the level pi actually stored: it clamps to what the model supports, and
+    // an override armed with the level asked for never recognises its own escalation.
     pi.setThinkingLevel?.(target)
+    override.arm(current, pi.getThinkingLevel?.() ?? target)
     // Return nothing so the input is neither consumed nor transformed: Claude keeps
     // the keyword in the prompt.
   })
