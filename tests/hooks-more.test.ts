@@ -200,6 +200,9 @@ const setupExtension = () => {
     notes,
     sent,
     sessionStart: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, { ...defaultCtx, ...ctx }),
+    /** The ctx is handed over as is: a spread would flatten the live getters pi's own ctx has. */
+    sessionStartWithLiveCtx: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
+    defaultCtx,
     toolCall: (toolName: string, input: unknown, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_call')({ toolName, input, toolCallId }, { ...defaultCtx, ...ctxOverride }),
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
@@ -2897,6 +2900,62 @@ describe('settings watching', () => {
         },
         { timeout: 3000, interval: 100 },
       )
+    } finally {
+      delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
+    }
+  })
+
+  it('reloads a settings edit without reading the session ctx', async () => {
+    // pi invalidates the session_start ctx on /new, /resume, /fork and /reload, after
+    // which every getter throws; a throw from the poll timer has no awaiter, so it
+    // is an uncaughtException that exits pi.
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    try {
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'before-edit' }] }] })
+      const ext = setupExtension()
+      const cwd = tempDir('hooks-proj-')
+      let replaced = false
+      let staleReads = 0
+      const liveCtx = Object.defineProperty({ ...ext.defaultCtx }, 'cwd', {
+        get: () => {
+          if (replaced) staleReads++
+          return cwd
+        },
+      })
+      await ext.sessionStartWithLiveCtx('startup', liveCtx)
+      replaced = true
+
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'after-edit' }] }] })
+      await vi.waitFor(
+        async () => {
+          hoisted.calls.length = 0
+          await ext.toolCall('bash', {})
+          expect(commandsRun()).toEqual(['after-edit'])
+        },
+        { timeout: 3000, interval: 100 },
+      )
+      expect(staleReads).toBe(0)
+    } finally {
+      delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
+    }
+  })
+
+  it('stops watching at session_shutdown', async () => {
+    // pi's CLI loads a fresh extension instance for every session replacement, so the next
+    // session_start cannot dispose this watcher: left armed, each replaced session
+    // leaks one more poll for the life of the process.
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    try {
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'before-edit' }] }] })
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+      await ext.shutdown('new')
+
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'after-edit' }] }] })
+      // A dozen poll intervals: a watcher still armed would have reloaded by now.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await ext.toolCall('bash', {})
+      expect(commandsRun()).toEqual(['before-edit'])
     } finally {
       delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
     }
