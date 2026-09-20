@@ -121,12 +121,14 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
       return // no model, provider error: leave the session untitled (best-effort)
     }
     if (!title) return
-    // A /new during the await moved us to a different session, or a name has since been set;
-    // applying this title now would rename the wrong session, so drop it.
-    if (generation !== startedGeneration || pi.getSessionName?.()) return
     // Post-await ctx getters throw once the session is disposed, and an escaping rejection
-    // from this un-awaited settle can exit pi; apply the title best-effort.
+    // from this un-awaited settle can exit pi; apply the title best-effort. The name read
+    // belongs inside the guard too: pi's CLI never delivers the next session_start to this
+    // instance, so only that throw reveals a session replaced during the call.
     try {
+      // A /new during the await moved us to a different session, or a name has since been
+      // set; applying this title now would rename the wrong session, so drop it.
+      if (generation !== startedGeneration || pi.getSessionName?.()) return
       // pi.setSessionName refreshes the terminal/tab title natively (pi changelog), so a
       // separate ctx.ui.setTitle call would only duplicate that. The guard stays: a
       // disposed session throws from setSessionName post-await, and an escaping rejection

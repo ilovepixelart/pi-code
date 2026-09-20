@@ -15,7 +15,7 @@ afterEach(() => setCompleteBackend(null))
 
 /** Fresh extension instance over a stub API. `initialName` seeds a pre-named session;
  * `throwOnSetName` models a session disposed while the title call was in flight. */
-function setup(initialName?: string, opts: { throwOnSetName?: boolean } = {}) {
+function setup(initialName?: string, opts: { throwOnSetName?: boolean; staleAfterCall?: { stale: boolean } } = {}) {
   const handlers = new Map<string, Handler>()
   let name: string | undefined = initialName
   const namesSet: string[] = []
@@ -29,7 +29,10 @@ function setup(initialName?: string, opts: { throwOnSetName?: boolean } = {}) {
       name = n
       namesSet.push(n)
     },
-    getSessionName: () => name,
+    getSessionName: () => {
+      if (opts.staleAfterCall?.stale) throw new Error('This extension ctx is stale after session replacement or reload')
+      return name
+    },
   } as any)
 
   const makeCtx = (branch: any[], ctxOpts: { model?: unknown } = {}) => ({
@@ -184,6 +187,21 @@ describe('session auto-titling', () => {
     // setSessionName is the only post-await title sink; a session disposed while the call
     // was in flight throws from it, and an escaping rejection from this un-awaited settle
     // can exit pi, so the guard must swallow it.
+    await expect(t.settle([userEntry('do a thing')])).resolves.toBeUndefined()
+    expect(t.namesSet).toEqual([])
+  })
+
+  it('does not reject when the session is replaced during the title call', async () => {
+    // pi's CLI never delivers the next session_start to this instance, so the generation
+    // check cannot notice the replacement, and getSessionName on the replaced pi throws.
+    // That read sat outside the guard: the rejection surfaced in the NEXT session as a red
+    // extension error with a stack trace.
+    const replaced = { stale: false }
+    const t = setup(undefined, { staleAfterCall: replaced })
+    setCompleteBackend(async () => {
+      replaced.stale = true
+      return assistantMsg('Some Title')
+    })
     await expect(t.settle([userEntry('do a thing')])).resolves.toBeUndefined()
     expect(t.namesSet).toEqual([])
   })
