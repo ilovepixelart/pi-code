@@ -207,6 +207,29 @@ describe('checkpoint scope', () => {
     expect(t.appended).toHaveLength(2)
   })
 
+  it('keeps recording checkpoints after a resume when an edited file has a non-ASCII name', async () => {
+    // session_start seeds the edit set from the last checkpoint's tree. Listed without -z,
+    // git quotes and octal-escapes such a name ("caf\\303\\251.md"), a pathspec that
+    // matches nothing: every later add failed, and the rewind list silently stopped growing.
+    const t = setup()
+    writeFileSync(join(t.repo, 'café.md'), 'v1\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, join(t.repo, 'café.md'))
+    await turnEnd(t)
+    expect(t.appended).toHaveLength(1)
+
+    await t.handlers.get('session_start')?.({ reason: 'resume' }, t.makeCtx([], [userEntry], []))
+    const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+    await beginRun(t)
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+
+    expect(t.appended).toHaveLength(2)
+  })
+
   it('keeps recording checkpoints after the model edits an ignored file', async () => {
     // An ignored file stays in the edit set but never reaches the index, so every later
     // pre-run add carries a pathspec git rejects. One entry rejects the whole add, which

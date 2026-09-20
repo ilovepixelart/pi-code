@@ -263,9 +263,11 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * matches a pathspec through this, so its removal is staged instead of the stale index
    * entry silently riding along into the next checkpoint. */
   async function committedPaths(): Promise<Set<string>> {
-    const listed = await gitShadow(['ls-tree', '-r', '--name-only', 'HEAD'])
+    // -z: without it git quotes and octal-escapes a non-ASCII name, and the quoted form
+    // is a pathspec that matches nothing, which fails every later add of the session.
+    const listed = await gitShadow(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
     if (listed.code !== 0) return new Set()
-    return new Set(listed.stdout.split('\n').filter(Boolean))
+    return new Set(listed.stdout.split('\0').filter(Boolean))
   }
 
   /** git rejects the whole pathspec when one entry is ignored, so the ignored paths are
