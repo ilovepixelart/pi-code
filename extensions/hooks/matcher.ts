@@ -135,9 +135,11 @@ function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: H
       if (raw.spent === true) continue
       const hook = withCommand(raw)
       // Claude runs a handler defined in more than one settings file once; a
-      // plugin's or skill's copy of the same handler stays separate, and http
-      // handlers with the same URL but different headers are distinct.
-      const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${hook.headers ? JSON.stringify(hook.headers) : ''}`
+      // plugin's or skill's copy of the same handler stays separate. Handlers that
+      // share a command but differ in what they run or when (http headers, exec-form
+      // args, an `if` filter, an mcp_tool input) are different handlers: `if` is applied
+      // after this, so collapsing two filters left the other tool call with no guard.
+      const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
       if (seen.has(key)) continue
       seen.add(key)
       result.push(hook)

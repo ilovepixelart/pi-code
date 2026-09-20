@@ -611,6 +611,36 @@ describe('matchingCommands edge shapes', () => {
     expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh' }, { command: 'other.sh' }])
   })
 
+  it('keeps handlers that share a command but differ in args, if or input: they are not the same handler', () => {
+    // Deduping on the command alone dropped the second of two exec-form hooks sharing an
+    // interpreter, and of one guard registered under two `if` filters kept only the first:
+    // the survivor was then filtered out for the other tool call, so no guard ran at all.
+    const execForm = [
+      {
+        matcher: 'Bash',
+        hooks: [
+          { command: 'node', args: ['a.js'] },
+          { command: 'node', args: ['b.js'] },
+        ],
+      },
+    ]
+    expect(matchingCommands(execForm, 'bash').map((hook) => hook.args)).toEqual([['a.js'], ['b.js']])
+
+    const filtered = [
+      {
+        matcher: 'Bash',
+        hooks: [
+          { command: 'guard.sh', if: 'Bash(git *)' },
+          { command: 'guard.sh', if: 'Bash(npm *)' },
+        ],
+      },
+    ]
+    expect(matchingCommands(filtered, 'bash').map((hook) => hook.if)).toEqual(['Bash(git *)', 'Bash(npm *)'])
+
+    const mcpTools = [{ matcher: 'Bash', hooks: [{ type: 'mcp_tool', server: 's', tool: 't', input: { level: 'a' } } as never, { type: 'mcp_tool', server: 's', tool: 't', input: { level: 'b' } } as never] }]
+    expect(matchingCommands(mcpTools, 'bash')).toHaveLength(2)
+  })
+
   it('falls back to case-insensitive literal equality when the matcher is an invalid regex', () => {
     const hook = { matcher: 'Bash(', hooks: [{ command: 'lit' }] }
     expect(matchingCommands([hook], 'bash(')).toEqual([{ command: 'lit' }])
