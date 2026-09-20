@@ -653,6 +653,25 @@ describe('runSingleAgent process handling', () => {
     expect(results(result)[0]).toMatchObject({ exitCode: 1, stderr: 'spawn E2BIG' })
   })
 
+  it('reports a spawn that came back without stdio, as node does at the descriptor limit', async () => {
+    // For EMFILE and ENFILE node returns a child with no pid and undefined stdout/stderr,
+    // and emits 'error' on the next tick. Wiring stdout first threw a TypeError before the
+    // 'error' listener was attached, so the deferred event had no listener: pi exited with
+    // "uncaughtException: spawn ... EMFILE" and the session was lost.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({})], projectAgentsDir: null })
+    spawnMock.mockImplementationOnce(() => {
+      const child = new EventEmitter()
+      setImmediate(() => child.emit('error', Object.assign(new Error('spawn pi EMFILE'), { code: 'EMFILE' })))
+      return child
+    })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(results(result)[0]).toMatchObject({ exitCode: 1 })
+    expect(results(result)[0].stderr).toMatch(/descriptor|EMFILE/i)
+  })
+
   it('reports an unknown agent without spawning anything', async () => {
     const result = await execute('c1', { agent: 'ghost', task: 'find it' }, undefined, undefined, trustedCtx)
 

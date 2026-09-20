@@ -133,16 +133,22 @@ function appendPartialNote(result: SingleResult): void {
  * try/catch around an inline spawn() call loses. */
 export function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
   try {
-    return {
-      proc: spawn(command, args, {
-        ...options,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        // Its own group, so an abort reaches grandchildren too: killing only the
-        // direct child orphans a build or dev server the agent started.
-        detached: true,
-      }),
+    const proc = spawn(command, args, {
+      ...options,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Its own group, so an abort reaches grandchildren too: killing only the
+      // direct child orphans a build or dev server the agent started.
+      detached: true,
+    })
+    // A third failure shape: at the descriptor limit (EMFILE, ENFILE) node returns a child
+    // with no stdio and emits 'error' on the next tick. The callers wire stdout first, so
+    // the deferred event would find no listener, and an unhandled 'error' exits pi.
+    if (!proc.stdout) {
+      proc.on('error', () => {})
+      return { error: new Error('spawn returned no stdio: the file descriptor limit is likely exhausted (EMFILE)') }
     }
+    return { proc }
   } catch (error) {
     return { error: error as Error }
   }
