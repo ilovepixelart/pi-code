@@ -72,5 +72,8 @@ export async function completeText(model: Model<Api>, prompt: string, options: C
     messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
   }
   const message = await complete(model, context, { maxTokens: options.maxTokens ?? 1024, signal: options.signal })
+  // pi-ai reports a provider failure or a fired signal by resolving, never rejecting: the
+  // message then has no text, and returned as an answer it is indistinguishable from one.
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new Error(message.errorMessage ?? `completion ${message.stopReason}`)
   return { text: assistantText(message), usage: message.usage }
 }

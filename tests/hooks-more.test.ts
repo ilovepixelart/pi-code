@@ -2461,6 +2461,20 @@ describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () 
     expect(seenPrompt).toContain('Should this stop?')
     expect(seenPrompt).toContain('"hook_event_name":"Stop"')
   })
+
+  it('reports a prompt hook that ran out of time as timed out, so the gated events fail closed', async () => {
+    // The real backend answers a fired AbortSignal by resolving an aborted message with
+    // no text. Read as an answer, that was exit 0 with empty stdout: a PreToolUse gate
+    // allowed the tool exactly when the model could not be reached in time.
+    setCompleteBackend(
+      ((_model: unknown, _context: unknown, options: { signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve({ role: 'assistant', content: [], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'aborted', timestamp: 0 }))
+        })) as never,
+    )
+    const result = await runPromptHook({ command: '', type: 'prompt', prompt: 'Should this run?' }, { hook_event_name: 'PreToolUse' }, { id: 'session-model' } as never, 50)
+    expect(result.timedOut).toBe(true)
+  })
 })
 
 describe('hooks extension PostModelSwitch', () => {
