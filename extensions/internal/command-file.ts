@@ -15,10 +15,8 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-
-import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
-
 import { CLAUDE_TOOL_MAP } from './claude-tool-names.js'
+import { parseClaudeFrontmatter } from './frontmatter.js'
 import { escapeRegExp } from './values.js'
 
 /** The pi file tools a Claude path rule can govern. */
@@ -291,7 +289,7 @@ export function parseCommandFile(content: string): ParsedCommand {
   // pi's own parser, rather than a hand-rolled one: it reads the YAML shapes Claude
   // command files actually use (flow sequences, block lists, quoted and multi-line
   // values), and a value this misreads is a restriction silently not applied.
-  const { frontmatter, body: raw } = parseFrontmatter(content)
+  const { frontmatter, body: raw } = parseClaudeFrontmatter(content)
   const body = raw.trim()
   const firstLine = body.split('\n').find((line) => line.trim().length > 0) ?? ''
   const disable = frontmatter['disable-model-invocation']

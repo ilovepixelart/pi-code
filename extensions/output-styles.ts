@@ -22,10 +22,11 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { type ExtensionAPI, parseFrontmatter } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.js'
 import { isFlagEnabled } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { parseClaudeFrontmatter } from './internal/frontmatter.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
@@ -54,7 +55,7 @@ function field(frontmatter: Record<string, unknown>, key: string): string {
  * own YAML frontmatter parser, as the command loader uses: a line regex captured to
  * end of line, so `"Terse" # short` came back as `Terse" # short`. */
 export function parseStyle(content: string, fallbackName: string): OutputStyle {
-  const { frontmatter, body } = parseFrontmatter(content)
+  const { frontmatter, body } = parseClaudeFrontmatter(content)
   return {
     name: field(frontmatter, 'name') || fallbackName,
     description: field(frontmatter, 'description'),

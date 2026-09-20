@@ -303,6 +303,18 @@ describe('discoverAgents', () => {
     expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find'])
   })
 
+  it('loads an agent whose description is the plain scalar Claude Code itself writes', () => {
+    // The /agents generator and Anthropic's official plugins write the description
+    // unquoted with ": " inside it. Strict YAML throws on that, and the throw dropped the
+    // agent: "Unknown agent" on a call, with only a console warning to say why.
+    mkdirSync(piUserDir, { recursive: true })
+    writeFileSync(join(piUserDir, 'reviewer.md'), '---\nname: reviewer\ndescription: Use this agent when reviewing code. Examples: <example>Context: The user asks for a review</example>\n---\nprompt')
+
+    const [agent] = nonBuiltin(discoverAgents(cwd, 'user').agents)
+    expect(agent?.name).toBe('reviewer')
+    expect(agent?.description).toContain('Examples: <example>Context: The user asks')
+  })
+
   it('skips a file with malformed YAML frontmatter instead of aborting discovery, and says which', () => {
     mkdirSync(piUserDir, { recursive: true })
     writeFileSync(join(piUserDir, 'broken-yaml.md'), '---\nname: [unclosed\ndescription: d\n---\nprompt')

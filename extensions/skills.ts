@@ -22,11 +22,12 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { type ExtensionAPI, type ExtensionContext, parseFrontmatter } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { expandCommand, shellExecutionDisabled } from './commands.js'
 import { runAgent } from './internal/agent-run.js'
 import { parseCommandFile } from './internal/command-file.js'
 import { claudeConfigDir } from './internal/config-dir.js'
+import { parseClaudeFrontmatter } from './internal/frontmatter.js'
 import { managedSettingsFile } from './internal/managed-settings.js'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApprovedSilently } from './internal/project-approval.js'
@@ -103,7 +104,7 @@ function skillAt(root: string, dirName: string): { name: string; filePath: strin
   }
   let name = dirName
   try {
-    const declared = parseFrontmatter<Record<string, unknown>>(content).frontmatter.name
+    const declared = parseClaudeFrontmatter<Record<string, unknown>>(content).frontmatter.name
     if (typeof declared === 'string' && declared.trim()) name = declared.trim()
   } catch {
     // Malformed frontmatter: pi's loader falls back to the directory name too.
@@ -210,7 +211,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   // Claude registers hooks a skill's frontmatter declares when the skill is
   // invoked, for the rest of the session; the hooks extension owns running them,
   // so the declaration is announced over the shared bus.
-  const frontmatter = parseFrontmatter<Record<string, unknown>>(content).frontmatter
+  const frontmatter = parseClaudeFrontmatter<Record<string, unknown>>(content).frontmatter
   const declaredHooks = frontmatter.hooks
   if (declaredHooks !== null && typeof declaredHooks === 'object' && !Array.isArray(declaredHooks)) {
     pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })

@@ -19,6 +19,15 @@ afterEach(() => {
 })
 
 describe('parseCommandFile', () => {
+  it('reads the documented multi-argument hint and a description with a colon', () => {
+    // Anthropic's command reference writes `argument-hint: [arg1] [arg2]`. Strict YAML
+    // throws on the second flow sequence, and the throw dropped the whole command from
+    // the slash menu.
+    const parsed = parseCommandFile(['---', 'description: Review PR: full pass', 'argument-hint: [pr-number] [priority] [assignee]', '---', 'Body'].join('\n'))
+    expect(parsed.argumentHint).toBe('[pr-number] [priority] [assignee]')
+    expect(parsed.description).toBe('Review PR: full pass')
+  })
+
   it('reads the frontmatter Claude documents and keeps the body', () => {
     const md = ['---', 'description: Ship it', 'argument-hint: [pr]', 'allowed-tools: Bash, Read, Glob', 'model: sonnet', 'disable-model-invocation: true', '---', 'Do the thing with $1.'].join('\n')
     expect(parseCommandFile(md)).toEqual({
