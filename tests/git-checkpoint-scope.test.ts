@@ -276,6 +276,58 @@ describe('checkpoint scope', () => {
     }
   })
 
+  it('checkpoints and restores a file inside a nested repository', async () => {
+    // A workspace directory holding clones, a monorepo with submodules, or $HOME. `git add`
+    // exits 0 for a path under another repository and stages nothing, so the edit was never
+    // snapshotted while /rewind still answered "Rewind complete".
+    const t = setup()
+    const nested = join(t.repo, 'clones', 'lib')
+    mkdirSync(nested, { recursive: true })
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: nested, stdio: ['pipe', 'pipe', 'pipe'] })
+    const file = join(nested, 'index.ts')
+    writeFileSync(file, 'before\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, file)
+    writeFileSync(file, 'after\n')
+    await turnEnd(t)
+
+    expect(snapshotPaths(t.appended[0].data.ref)).toContain('clones/lib/index.ts')
+    const label = `1. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+    await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry], [label, 'Code only']))
+    expect(readFileSync(file, 'utf8')).toBe('before\n')
+  })
+
+  it('drops a nested-repository file from the next checkpoint once it is deleted', async () => {
+    // The entry is written to the index directly, since `git add` will not add content from
+    // under another repository. It does stage the removal of an entry the index already
+    // holds, so a deletion needs no plumbing: pinned, because a rewind would otherwise
+    // resurrect the file.
+    const t = setup()
+    const nested = join(t.repo, 'clones', 'lib')
+    mkdirSync(nested, { recursive: true })
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: nested, stdio: ['pipe', 'pipe', 'pipe'] })
+    const file = join(nested, 'index.ts')
+    writeFileSync(file, 'v1\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, file)
+    await turnEnd(t)
+    rmSync(file)
+
+    const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+    await beginRun(t)
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+
+    expect(t.appended).toHaveLength(2)
+    expect(snapshotPaths(t.appended[1].data.ref)).not.toContain('clones/lib/index.ts')
+  })
+
   it('keeps recording checkpoints when a tracked file is deleted between runs', async () => {
     // git aborts the whole pathspec when one entry matches neither a file on disk nor a
     // committed path, which would cost the run its checkpoint entirely.

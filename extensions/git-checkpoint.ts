@@ -341,8 +341,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     const rel = workTreePath(file)
     if (!runRef || rel === undefined || !fs.existsSync(file)) return
     if ((await withoutIgnored([rel])).length === 0) return
-    const add = await gitShadow(['add', '--', rel])
-    if (add.code !== 0) return
+    if (!(await addPaths([rel]))) return
     // A commit, never an amend: the run's checkpoint can be a commit an earlier
     // checkpoint also points at, and rewriting it would strand that one.
     const commit = await commitShadow([])
@@ -358,12 +357,38 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     return files.code === 0 && files.stdout.trim() === ''
   }
 
+  /** Stage what `git add` silently skipped. For a path under another repository (a
+   * workspace of clones, a submodule, $HOME) it exits 0 and stages nothing, so the edit
+   * was never snapshotted while /rewind still reported success. Such a file is written to
+   * the index directly, which `checkout` restores like any other entry. A deletion needs
+   * nothing here: `git add` does stage the removal of an entry the index already holds. */
+  async function stageSkippedPaths(paths: string[]): Promise<void> {
+    if (!workTree) return
+    const listed = await gitShadow(['ls-files', '-z', '--', ...paths])
+    if (listed.code !== 0) return
+    const indexed = new Set(listed.stdout.split('\0').filter(Boolean))
+    for (const rel of paths) {
+      if (!indexed.has(rel) && fs.existsSync(path.join(workTree, rel))) await indexDirectly(rel)
+    }
+  }
+
+  async function indexDirectly(rel: string): Promise<void> {
+    if (!workTree) return
+    const blob = await gitShadow(['hash-object', '-w', '--', rel])
+    if (blob.code !== 0) return
+    const executable = (fs.statSync(path.join(workTree, rel)).mode & 0o111) !== 0
+    await gitShadow(['update-index', '--add', '--cacheinfo', `${executable ? '100755' : '100644'},${blob.stdout.trim()},${rel}`])
+  }
+
   /** Stage the tracked paths. git fails the whole add when one pathspec is refused, which
    * used to end checkpointing for the session over a single path. On a failure each path
    * is added alone and one git still refuses is dropped from the edit set, so it costs
    * its own checkpoint and nobody else's. False only when nothing could be staged. */
   async function addPaths(paths: string[]): Promise<boolean> {
-    if ((await gitShadow(['add', '--', ...paths])).code === 0) return true
+    if ((await gitShadow(['add', '--', ...paths])).code === 0) {
+      await stageSkippedPaths(paths)
+      return true
+    }
     let staged = 0
     for (const rel of paths) {
       if ((await gitShadow(['add', '--', rel])).code === 0) staged++
