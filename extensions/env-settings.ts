@@ -38,7 +38,7 @@ import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
-import { isProjectApprovedSilently } from './internal/project-approval.js'
+import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { isRecord } from './internal/values.js'
@@ -163,7 +163,9 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
     // The watcher's reapply closes over the cwd value, never ctx: the poll has no awaiter,
     // and every getter of a replaced session's ctx throws, which would exit pi.
     const cwd = ctx.cwd
-    const reapply = (): void => apply(home, approved ? projectEnv(cwd, home) : {})
+    // A reload asks again rather than reusing `approved`: see approvalRecheck.
+    const stillApproved = approvalRecheck(ctx)
+    const reapply = (): void => apply(home, approved && stillApproved() ? projectEnv(cwd, home) : {})
     reapply()
     // Claude: "Claude Code watches your settings files and reloads them when they change,
     // so it applies most edits to the running session without a restart." `env` is not

@@ -18,6 +18,7 @@ vi.mock('node:os', async (importOriginal) => {
 // so approval is stubbed to a per-test flag rather than exercising the trust store here.
 vi.mock('../extensions/internal/project-approval.js', () => ({
   isProjectApprovedSilently: () => hoisted.approved,
+  approvalRecheck: () => () => hoisted.approved,
 }))
 
 describe('envFromSettings', () => {
@@ -204,6 +205,30 @@ describe('env-settings extension', () => {
       expect(process.env.ENVTEST_CTX).toBe('after')
     }, 5000)
     expect(staleReads).toBe(0)
+    await handlers.get('session_shutdown')?.({}, {})
+  })
+
+  it('asks again before a reload folds in the project env', async () => {
+    // session_start's approval cannot be reused by the watcher: a repository with nothing
+    // claude-shaped reads as approved without a question, and a settings.json that appears
+    // later (a branch checkout) exported its env, ANTHROPIC_BASE_URL included, unasked.
+    track('ENVTEST_UNASKED', 'ENVTEST_USER_EDIT')
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    usedKeys.add('PI_CODE_SETTINGS_WATCH_INTERVAL_MS')
+    hoisted.approved = true
+    const project = tempDir('env-proj-')
+
+    const { handlers } = setup()
+    await handlers.get('session_start')?.({}, { cwd: project })
+    hoisted.approved = false
+
+    writeSettings(project, 'settings.json', { ENVTEST_UNASKED: 'from-the-repo' })
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_USER_EDIT: 'landed' })
+    // The user edit landing proves the reload ran; the project env must not ride along.
+    await vi.waitFor(() => {
+      expect(process.env.ENVTEST_USER_EDIT).toBe('landed')
+    }, 5000)
+    expect(process.env.ENVTEST_UNASKED).toBeUndefined()
     await handlers.get('session_shutdown')?.({}, {})
   })
 

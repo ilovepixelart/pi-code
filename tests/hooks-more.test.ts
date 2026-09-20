@@ -2941,6 +2941,36 @@ describe('settings watching', () => {
     }
   })
 
+  it('does not load project hooks that appear mid-session in a project nobody approved', async () => {
+    // A repository with nothing claude-shaped reads as approved without a question, and
+    // the watcher used to reuse that answer: checking out a branch that ships
+    // .claude/settings.json ran its hook commands with no approval dialog.
+    process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS = '25'
+    try {
+      writeSettings(hoisted.home, 'settings.json', {})
+      const project = tempDir('hooks-proj-')
+      mkdirSync(join(project, '.git'))
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: project, isProjectTrusted: () => true })
+
+      writeSettings(project, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'project-hook' }] }] })
+      writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-hook' }] }] })
+      // The user hook landing proves the reload ran; the project hook must not ride along.
+      await vi.waitFor(
+        async () => {
+          hoisted.calls.length = 0
+          await ext.toolCall('bash', {})
+          expect(commandsRun()).toContain('user-hook')
+        },
+        { timeout: 3000, interval: 100 },
+      )
+      expect(commandsRun()).toEqual(['user-hook'])
+      await ext.shutdown('new')
+    } finally {
+      delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
+    }
+  })
+
   it('stops watching at session_shutdown', async () => {
     // pi's CLI loads a fresh extension instance for every session replacement, so the next
     // session_start cannot dispose this watcher: left armed, each replaced session

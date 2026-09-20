@@ -130,6 +130,22 @@ export function isProjectApprovedSilently(ctx: Pick<ApprovalContext, 'cwd' | 'is
 }
 
 /**
+ * A re-check of the approval decision for code that outlives session_start, such as a
+ * settings watcher's reload. The answer given at session_start cannot be reused: a
+ * repository with nothing Claude-shaped reads as approved without a question, so config
+ * that appears later (a branch checkout, an unpacked archive) would inherit an answer
+ * nobody gave. ctx is read once, here: the returned function holds values only, because
+ * a poll outlives the session and every getter of a replaced session's ctx throws. It
+ * never prompts, so a project that turned Claude-shaped mid-session stays out until the
+ * next session asks.
+ */
+export function approvalRecheck(ctx: Pick<ApprovalContext, 'cwd' | 'isProjectTrusted'>, deps: ApprovalDeps = defaultDeps): () => boolean {
+  const cwd = ctx.cwd
+  const piTrusted = ctx.isProjectTrusted?.() === true
+  return () => isProjectApprovedSilently({ cwd, isProjectTrusted: () => piTrusted }, deps)
+}
+
+/**
  * The approval decision for a file that is itself the thing to gate.
  *
  * The silent check short-circuits to approved when the repository holds no

@@ -434,6 +434,25 @@ describe('statusLine concurrency and compaction', () => {
     expect(hoisted.runs.length).toBe(afterShutdown)
   })
 
+  it('does not run a project statusLine command that appears mid-session in a project nobody approved', async () => {
+    // A repository with nothing claude-shaped reads as approved without a question, and
+    // the watcher used to reuse that answer: a statusLine command arriving with a branch
+    // checkout was executed on the next refresh with no approval dialog.
+    const cwd = tempDir()
+    mkdirSync(join(cwd, '.git'))
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    writeSettings(cwd, 'settings.json', { statusLine: { type: 'command', command: 'from-the-repo.sh' } })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs.map((run) => run.command)).not.toContain('from-the-repo.sh')
+    await handlers.get('session_shutdown')?.({}, ctx)
+  })
+
   it('stops the settings watcher at shutdown', async () => {
     // pi's CLI loads a fresh extension instance for every session replacement, so the next
     // session_start cannot dispose this watcher: left armed, each replaced session
