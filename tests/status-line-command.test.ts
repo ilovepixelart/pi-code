@@ -525,9 +525,9 @@ describe('statusLine rate limits', () => {
         type: 'after_provider_response',
         status: 200,
         headers: {
-          'anthropic-ratelimit-unified-5h-utilization': '35.5',
+          'anthropic-ratelimit-unified-5h-utilization': '0.355',
           'anthropic-ratelimit-unified-5h-reset': '2026-08-16T12:00:00Z',
-          'anthropic-ratelimit-unified-7d-utilization': '12',
+          'anthropic-ratelimit-unified-7d-utilization': '0.12',
           'anthropic-ratelimit-unified-7d-reset': '2026-08-22T00:00:00Z',
         },
       },
@@ -572,6 +572,28 @@ describe('statusLine rate limits', () => {
     expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 75 } })
   })
 
+  it('reports the utilization header, a 0 to 1 fraction, as the documented 0 to 100 percentage', async () => {
+    // Claude documents used_percentage as "from 0 to 100" and resets_at as Unix epoch
+    // seconds. The -utilization header carries a fraction: Claude Code builds the field as
+    // Math.round(utilization * 1000) / 10. Passed through unchanged, 23.5% usage reached
+    // the script as 0.235, so a status line printing it showed 0% all the way to the limit.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
+    const resetsAt = Date.parse('2026-08-16T05:00:00Z') / 1000
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '0.2349', 'anthropic-ratelimit-unified-5h-reset': String(resetsAt) } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 23.5, resets_at: resetsAt } })
+  })
+
   it('clamps an out-of-range utilization down to 100', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
@@ -580,7 +602,7 @@ describe('statusLine rate limits', () => {
     vi.useFakeTimers()
     await handlers.get('session_start')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
-    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '150' } }, ctx)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '1.5' } }, ctx)
     await handlers.get('turn_end')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
 
@@ -753,7 +775,7 @@ describe('statusLine payload and expiry conformance', () => {
         type: 'after_provider_response',
         status: 200,
         headers: {
-          'anthropic-ratelimit-unified-5h-utilization': '35.5',
+          'anthropic-ratelimit-unified-5h-utilization': '0.355',
           'anthropic-ratelimit-unified-5h-reset': '2026-08-16T12:00:00Z',
         },
       },
@@ -840,7 +862,7 @@ describe('statusLine cadence and managed config', () => {
     vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
     await handlers.get('session_start')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
-    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '90', 'anthropic-ratelimit-unified-5h-reset': '2026-08-16T00:10:00Z' } }, ctx)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '0.9', 'anthropic-ratelimit-unified-5h-reset': '2026-08-16T00:10:00Z' } }, ctx)
     await handlers.get('turn_end')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
     hoisted.runs.length = 0

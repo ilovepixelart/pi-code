@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -988,6 +989,24 @@ describe('allowed-tools argument scopes', () => {
 
     await s.handlers.get('agent_settled')?.({}, s.ctx)
     expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'src/secret.ts' } }, s.ctx)).toBeUndefined()
+  })
+
+  it('judges the path pi will open, not the string the model wrote', async () => {
+    // pi's file tools strip a leading @, expand ~ and accept file:// before resolving. The
+    // guard resolved the raw string, so `~/secret/notes.md` became <cwd>/~/secret/notes.md,
+    // matched `*.md` and was allowed, while pi read $HOME/secret/notes.md.
+    const cwd = tempDir()
+    writeCommand(cwd, 'notes.md', '---\nallowed-tools: Read(*.md)\n---\nNotes only.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('notes')?.handler('', s.ctx)
+
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: 'README.md' } }, s.ctx)).toBeUndefined()
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: '@README.md' } }, s.ctx)).toBeUndefined()
+    for (const outside of ['~/secret/notes.md', pathToFileURL(join(tempDir(), 'notes.md')).href]) {
+      const verdict = (await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: outside } }, s.ctx)) as { block?: boolean }
+      expect(verdict?.block, outside).toBe(true)
+    }
   })
 
   it('reads the file_path alias at the path-scope guard, as the shared target reader does', async () => {

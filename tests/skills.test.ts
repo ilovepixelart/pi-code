@@ -289,6 +289,129 @@ describe('context: fork and skillOverrides', () => {
     }
   })
 
+  describe('a forked skill in an interactive session', () => {
+    // Claude: "The forked subagent runs in the background: you keep working while it runs,
+    // and its result arrives in your conversation when it completes. Set background: false
+    // in the frontmatter to instead wait for the result in the turn that invoked the skill."
+    const forkSetup = async (frontmatterExtra = '') => {
+      const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+      // Every fork is resolved at the end: one left pending stays "running" in the module
+      // and would make the next test's invocation wait behind it.
+      const finishers: Array<(text: string) => void> = []
+      const requests: unknown[] = []
+      setAgentRunner((request) => {
+        requests.push(request)
+        return new Promise<string>((resolve) => {
+          finishers.push(resolve)
+        })
+      })
+      const cwd = tempDir('cs-proj-')
+      hoisted.home = tempDir('cs-home-')
+      mkdirSync(join(hoisted.home, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: d\ncontext: fork\n${frontmatterExtra}---\nDeploy $ARGUMENTS now.`)
+      const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+      const sent: Array<{ message: { content?: string }; options: unknown }> = []
+      let sendThrows = false
+      skillsExt({
+        on: (name: string, fn: never) => handlers.set(name, fn),
+        exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+        sendMessage: (message: { content?: string }, options: unknown) => {
+          if (sendThrows) throw new Error('This extension ctx is stale after session replacement or reload')
+          sent.push({ message, options })
+        },
+      } as never)
+      const notes: string[] = []
+      const invoke = () => handlers.get('input')?.({ text: '/skill:deploy prod', source: 'interactive' }, { cwd, hasUI: true, ui: { notify: (m: string) => notes.push(m) } }) as Promise<{ action: string; text?: string }>
+      const done = async () => {
+        for (const finish of finishers) finish('released')
+        await new Promise((resolve) => setImmediate(resolve))
+        setAgentRunner(undefined)
+      }
+      return { invoke, finish: (text: string) => finishers.at(-1)?.(text), sent, notes, requests, staleSession: () => (sendThrows = true), done }
+    }
+    const settled = () => new Promise((resolve) => setImmediate(resolve))
+
+    it('runs in the background and delivers the result to the conversation when it completes', async () => {
+      const t = await forkSetup()
+      try {
+        const result = await t.invoke()
+        expect(result.action).toBe('handled')
+        expect(t.sent).toEqual([])
+        expect(t.notes.join(' ')).toContain('deploy')
+
+        t.finish('FORK RESULT')
+        await settled()
+        expect(t.sent).toHaveLength(1)
+        expect(t.sent[0].message.content).toContain('FORK RESULT')
+        expect(t.sent[0].options).toEqual({ triggerTurn: true })
+      } finally {
+        await t.done()
+      }
+    })
+
+    it('waits in the invoking turn when the skill sets background: false', async () => {
+      const t = await forkSetup('background: false\n')
+      try {
+        const pending = t.invoke()
+        await settled()
+        t.finish('FORK RESULT')
+        const result = await pending
+        expect(result.action).toBe('transform')
+        expect(result.text).toContain('FORK RESULT')
+        expect(t.sent).toEqual([])
+      } finally {
+        await t.done()
+      }
+    })
+
+    it('waits when CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is 1', async () => {
+      process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1'
+      const t = await forkSetup()
+      try {
+        const pending = t.invoke()
+        await settled()
+        t.finish('FORK RESULT')
+        expect((await pending).action).toBe('transform')
+      } finally {
+        await t.done()
+        delete process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+      }
+    })
+
+    it('waits for a second invocation while an earlier one of the same skill is still running', async () => {
+      const t = await forkSetup()
+      try {
+        expect((await t.invoke()).action).toBe('handled')
+        const second = t.invoke()
+        await settled()
+        t.finish('SECOND RESULT')
+        expect((await second).action).toBe('transform')
+      } finally {
+        await t.done()
+      }
+    })
+
+    it('loses only the delivery when the session was replaced before the fork finished', async () => {
+      // The background promise has no awaiter, and sendMessage on a replaced pi throws: an
+      // escaping rejection there is an unhandledRejection, and pi exits on one.
+      const t = await forkSetup()
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        await t.invoke()
+        t.staleSession()
+        t.finish('LATE RESULT')
+        await settled()
+        await settled()
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+        await t.done()
+      }
+    })
+  })
+
   it('refuses a skill set to off in skillOverrides', async () => {
     const cwd = tempDir('cs-proj-')
     hoisted.home = tempDir('cs-home-')

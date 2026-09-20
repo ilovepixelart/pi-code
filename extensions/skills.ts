@@ -167,11 +167,37 @@ function refusedByOverride(name: string, ctx: ExtensionContext, trusted: boolean
   return { action: 'handled' }
 }
 
+/** Forked skills still running in the background, by name. */
+const runningForks = new Set<string>()
+
+/** Whether a context: fork skill holds the invoking turn for its result. Claude: "The
+ * forked subagent runs in the background: you keep working while it runs, and its result
+ * arrives in your conversation when it completes. Set background: false in the frontmatter
+ * to instead wait for the result in the turn that invoked the skill." It also waits in
+ * non-interactive mode, when CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is 1, and "when you
+ * invoke a forked skill while an earlier invocation of the same skill is still running". */
+function forkWaits(name: string, frontmatter: Record<string, unknown>, ctx: ExtensionContext): boolean {
+  if (String(frontmatter.background).trim().toLowerCase() === 'false') return true
+  return !ctx.hasUI || process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === '1' || runningForks.has(name)
+}
+
+/** Start a forked skill in the background and hand its result to the conversation when it
+ * completes. The promise has no awaiter, and sendMessage on a pi whose session was
+ * replaced meanwhile throws: the catch keeps that from exiting pi, at the cost of the
+ * delivery, as a background subagent run's completion notice is lost the same way. */
+function startForkedSkill(pi: ExtensionAPI, ctx: ExtensionContext, fork: { name: string; filePath: string; expanded: string; agentName: string | undefined }): { action: 'handled' } {
+  runningForks.add(fork.name)
+  ctx.ui.notify(`Skill ${fork.name} is running in a forked subagent in the background; its result arrives here when it completes.`, 'info')
+  void runForkedSkill(fork.name, fork.filePath, fork.expanded, fork.agentName)
+    .then((result) => pi.sendMessage({ customType: 'skill-fork', content: result.text, display: true }, { triggerTurn: true }))
+    .catch(() => {})
+    .finally(() => runningForks.delete(fork.name))
+  return { action: 'handled' }
+}
+
 /** Claude's context: fork run: the expanded skill content becomes the prompt that
- * drives a subagent, without the conversation history. Divergence: Claude
- * backgrounds the fork by default; pi-code waits for the result in the invoking
- * turn (Claude's background: false behavior, which is also what Claude itself
- * does in -p and SDK runs). */
+ * drives a subagent, without the conversation history. Never rejects: a failed run
+ * is reported in the returned block. */
 async function runForkedSkill(name: string, filePath: string, expanded: string, agentName: string | undefined): Promise<{ action: 'transform'; text: string }> {
   try {
     const output = await runAgent({ prompt: expanded, fullTools: true, ...(agentName ? { agent: agentName } : {}) })
@@ -218,7 +244,9 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   }
   const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
-    return runForkedSkill(name, found.filePath, expanded, typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined)
+    const agentName = typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined
+    if (forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)
+    return startForkedSkill(pi, ctx, { name, filePath: found.filePath, expanded, agentName })
   }
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
 }
