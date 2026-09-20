@@ -114,12 +114,15 @@ function toNumber(value: string | undefined): number | undefined {
 }
 
 /** One rate-limit window from the `anthropic-ratelimit-<prefix>-*` header family,
- * taking a direct `-utilization` percentage when present, else computing it from
- * `-limit` and `-remaining`. resets_at comes from `-reset` when the header is set.
- * Header names vary, so only what is present is read and a bare number is enough. */
+ * taking `-utilization` when present, else computing the percentage from `-limit` and
+ * `-remaining`. `-utilization` is a 0 to 1 fraction, while Claude documents
+ * used_percentage as "from 0 to 100": it is scaled and rounded to one decimal, as
+ * Claude Code does (Math.round(utilization * 1000) / 10). resets_at comes from `-reset`
+ * when the header is set. Header names vary, so only what is present is read. */
 function readRateLimitWindow(headers: Record<string, string>, prefix: string): RateLimitWindow | undefined {
   const base = `anthropic-ratelimit-${prefix}`
-  let usedPercentage = toNumber(headers[`${base}-utilization`])
+  const utilization = toNumber(headers[`${base}-utilization`])
+  let usedPercentage = utilization === undefined ? undefined : Math.round(utilization * 1000) / 10
   if (usedPercentage === undefined) {
     const limit = toNumber(headers[`${base}-limit`])
     const remaining = toNumber(headers[`${base}-remaining`])
