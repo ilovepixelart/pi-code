@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -213,6 +213,67 @@ describe('checkpoint scope', () => {
 
     expect(fork.notifications.join('\n')).not.toContain('Code restore failed')
     expect(readFileSync(file, 'utf8')).toBe('before\n')
+  })
+
+  it('checkpoints and restores a file edited through a symlinked directory', async () => {
+    // git refuses a pathspec that passes through a symlink ("beyond a symbolic link"), and
+    // one refused entry fails the whole add: the baseline was silently skipped, and every
+    // later pre-run snapshot of the session failed with it, with no notification.
+    const t = setup()
+    mkdirSync(join(t.repo, 'real'))
+    symlinkSync(join(t.repo, 'real'), join(t.repo, 'linked'))
+    writeFileSync(join(t.repo, 'real', 'f.txt'), 'before\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, join(t.repo, 'linked', 'f.txt'))
+    writeFileSync(join(t.repo, 'real', 'f.txt'), 'after\n')
+    await turnEnd(t)
+    expect(snapshotPaths(t.appended[0].data.ref)).toContain('real/f.txt')
+
+    const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+    await beginRun(t)
+    await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+    await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+    expect(t.appended).toHaveLength(2)
+
+    // The list is newest first, so the first prompt's checkpoint is entry 2.
+    const label = `2. ${new Date(t.appended[0].data.createdAt).toLocaleTimeString()}  ${t.appended[0].data.prompt}`
+    await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry, second], [label, 'Code only']))
+    expect(readFileSync(join(t.repo, 'real', 'f.txt'), 'utf8')).toBe('before\n')
+  })
+
+  // chmod cannot make a file unreadable on Windows.
+  it.skipIf(process.platform === 'win32')('keeps checkpointing the other files when git refuses one of them', async () => {
+    // git fails the whole add when it cannot stage one entry. An unreadable file in the
+    // edit set therefore cost every later run its checkpoint, the readable files included.
+    const t = setup()
+    const fine = join(t.repo, 'fine.ts')
+    const locked = join(t.repo, 'locked.ts')
+    writeFileSync(fine, 'v1\n')
+    writeFileSync(locked, 'v1\n')
+
+    await start(t)
+    await beginRun(t)
+    await turnStart(t)
+    await announceEdit(t, fine)
+    await announceEdit(t, locked)
+    await turnEnd(t)
+    chmodSync(locked, 0o000)
+    writeFileSync(fine, 'v2\n')
+
+    try {
+      const second = { ...userEntry, id: 'user0002', message: { role: 'user', content: 'and again' } }
+      await beginRun(t)
+      await t.handlers.get('turn_start')?.({ turnIndex: 1 }, t.makeCtx([], [], []))
+      await t.handlers.get('turn_end')?.({ turnIndex: 1 }, t.makeCtx([], [userEntry, second], []))
+
+      expect(t.appended).toHaveLength(2)
+      expect(execFileSync('git', ['--git-dir', shadowDir(), 'show', `${t.appended[1].data.ref}:fine.ts`], { encoding: 'utf8' })).toBe('v2\n')
+    } finally {
+      chmodSync(locked, 0o644)
+    }
   })
 
   it('keeps recording checkpoints when a tracked file is deleted between runs', async () => {

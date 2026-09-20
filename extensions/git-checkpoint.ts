@@ -319,6 +319,24 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   /** Fold a file's pre-edit content into the run's checkpoint. A file first edited part
    * way through a run is absent from that run's pre-run snapshot, so without this its
    * checkpoint holds no baseline and /rewind cannot undo that first edit. */
+  /** `file` named by the real directory it sits in, when a symlink inside the work tree
+   * leads there. git refuses a pathspec that passes through a symlink ("beyond a symbolic
+   * link"), so the file has to be tracked where it really is. The real directory is mapped
+   * back under the work tree as the session spells it: a cwd that is itself a symlinked
+   * path (macOS /var) must not push every file outside the tree. */
+  function throughSymlinks(file: string): string {
+    if (!workTree) return file
+    try {
+      const realTree = fs.realpathSync(workTree)
+      const realDir = fs.realpathSync(path.dirname(file))
+      const inside = path.relative(realTree, realDir)
+      if (inside.startsWith('..') || path.isAbsolute(inside)) return file
+      return path.join(workTree, inside, path.basename(file))
+    } catch {
+      return file
+    }
+  }
+
   async function captureBaseline(file: string): Promise<void> {
     const rel = workTreePath(file)
     if (!runRef || rel === undefined || !fs.existsSync(file)) return
@@ -340,13 +358,24 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     return files.code === 0 && files.stdout.trim() === ''
   }
 
+  /** Stage the tracked paths. git fails the whole add when one pathspec is refused, which
+   * used to end checkpointing for the session over a single path. On a failure each path
+   * is added alone and one git still refuses is dropped from the edit set, so it costs
+   * its own checkpoint and nobody else's. False only when nothing could be staged. */
+  async function addPaths(paths: string[]): Promise<boolean> {
+    if ((await gitShadow(['add', '--', ...paths])).code === 0) return true
+    let staged = 0
+    for (const rel of paths) {
+      if ((await gitShadow(['add', '--', rel])).code === 0) staged++
+      else if (workTree) touched.delete(path.resolve(workTree, rel))
+    }
+    return staged > 0
+  }
+
   async function snapshot(): Promise<{ ref: string; createdAt: string } | undefined> {
     const createdAt = new Date().toISOString()
     const paths = await addablePaths()
-    if (paths.length > 0) {
-      const add = await gitShadow(['add', '--', ...paths])
-      if (add.code !== 0) return undefined
-    }
+    if (paths.length > 0 && !(await addPaths(paths))) return undefined
     // Decide "nothing changed" from the index, not from the commit exit code: a commit can
     // also fail on the user's global signing or hooks config, and reusing HEAD then would
     // record a ref that predates the current tree, so /rewind restores the wrong state.
@@ -455,7 +484,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if (!EDIT_TOOLS.has(event.toolName)) return
     const target = fileToolTarget(event)
     if (target === undefined) return
-    const file = path.resolve(ctx.cwd, target)
+    const file = throughSymlinks(path.resolve(ctx.cwd, target))
     if (touched.has(file)) return
     touched.add(file)
     await captureBaseline(file)
