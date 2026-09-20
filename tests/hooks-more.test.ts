@@ -24,6 +24,8 @@ interface Behavior {
   code?: number | null
   error?: Error
   stdinError?: Error
+  /** spawn() itself throws, as node does for a failure it detects at the call (E2BIG). */
+  spawnThrows?: Error
   hang?: boolean
   /** A pid for the fake child; far above any real pid so a group kill can only fail. */
   pid?: number
@@ -58,6 +60,7 @@ vi.mock('node:child_process', async (importOriginal) => {
     spawn: (file: string, args: string[], options: unknown) => {
       const command = args[1] ?? ''
       const behavior = hoisted.behaviors.get(command) ?? {}
+      if (behavior.spawnThrows) throw behavior.spawnThrows
       const record: SpawnRecord = { file, args, options, command, stdin: '', killSignals: [] }
       hoisted.calls.push(record)
 
@@ -2256,6 +2259,17 @@ describe('/hooks command', () => {
 })
 
 describe('hook spawn failures', () => {
+  it('reports a spawn that throws at the call as a spawn failure, not a rejected runner', async () => {
+    // node defers only a few spawn errors to the 'error' event; the rest, E2BIG from a
+    // payload past the argv limit among them, throw from spawn() inside the promise
+    // executor. The rejection failed a PreToolUse call with an opaque "spawn E2BIG" and,
+    // on the other events, lost every sibling hook's verdict with it.
+    hoisted.behaviors.set('big.sh', { spawnThrows: Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' }) })
+    const result = await runHookCommand('big.sh', { hook_event_name: 'PreToolUse' }, 5000)
+    expect(result).toMatchObject({ spawnFailed: true, timedOut: false })
+    expect(result.stderr).toContain('E2BIG')
+  })
+
   it('fails closed on PreToolUse and still surfaces the spawn failure notice', async () => {
     // The guard never spawned, so its code 0 carries no verdict; reading it as an
     // allow would fail open exactly when the machine is degraded (EMFILE, missing
