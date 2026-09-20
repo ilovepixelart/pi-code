@@ -82,10 +82,13 @@ describe('pi session replacement contract', () => {
     await runtime.newSession()
     await runtime.session.bindExtensions({})
 
-    expect(instances).toHaveLength(2)
-    expect(instances[0].liveAtShutdown).toBe(true)
-    expect(() => instances[0].ctx?.cwd).toThrow(/stale/)
-    expect(reads(instances[1].ctx)).toBe(true)
-    await runtime.dispose()
+    try {
+      expect(instances).toHaveLength(2)
+      expect(instances[0].liveAtShutdown).toBe(true)
+      expect(() => instances[0].ctx?.cwd).toThrow(/stale/)
+      expect(reads(instances[1].ctx)).toBe(true)
+    } finally {
+      await runtime.dispose()
+    }
   })
 })

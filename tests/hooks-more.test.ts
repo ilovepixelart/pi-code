@@ -2935,6 +2935,7 @@ describe('settings watching', () => {
         { timeout: 3000, interval: 100 },
       )
       expect(staleReads).toBe(0)
+      await ext.shutdown('new')
     } finally {
       delete process.env.PI_CODE_SETTINGS_WATCH_INTERVAL_MS
     }
