@@ -219,6 +219,17 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     await mirrorLocalExcludes(ctx)
   }
 
+  /** /fork writes a new session file and copies the branch's checkpoint entries into it,
+   * while the shadow repository is keyed to the session file: the refs those entries name
+   * live in the parent's shadow, and a restore from the fork's own answered "invalid
+   * reference". A local bare-to-bare fetch brings them across. Best effort: a parent
+   * shadow already pruned leaves those checkpoints unrestorable, as they were. */
+  async function inheritCheckpointRefs(previousSessionFile: string): Promise<void> {
+    const parentShadow = path.join(getAgentDir(), 'checkpoints', sessionSlug(previousSessionFile))
+    if (parentShadow === shadowDir || !fs.existsSync(parentShadow)) return
+    await gitShadow(['fetch', '--quiet', parentShadow, `+${CHECKPOINT_REF_PREFIX}/*:${CHECKPOINT_REF_PREFIX}/*`])
+  }
+
   /** git reads ignore rules from the tree's .gitignore files, the user's global excludes,
    * and $GIT_DIR/info/exclude. The shadow is the GIT_DIR here, so the repo's own
    * .git/info/exclude (where secrets and scratch that must never be committed live)
@@ -386,7 +397,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     ctx.ui.notify('Rewind complete', 'info')
   }
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     // One extension instance serves every session. A mid-turn /new fires session_start on
     // the same instance after turn_start took the pre-run snapshot but before turn_end saved
     // it; that pending ref belongs to the previous session and must not attach to the next
@@ -396,6 +407,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     runNeedsSnapshot = true
     runRef = undefined
     await ensureShadow(ctx)
+    const forkedFrom = event.reason === 'fork' ? event.previousSessionFile : undefined
+    if (forkedFrom) await inheritCheckpointRefs(forkedFrom)
     touched.clear()
     for (const rel of await committedPaths()) touched.add(path.resolve(ctx.cwd, rel))
     checkpoints.clear()

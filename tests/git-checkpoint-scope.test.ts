@@ -31,19 +31,22 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function setup() {
+/** A fresh instance on its own repository, or, given `forkOf`, a second instance on that
+ * repository under a new session file, as pi creates for /fork. */
+function setup(forkOf?: { repo: string }) {
   const handlers = new Map<string, Handler>()
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>()
   const appended: Array<{ customType: string; data: any }> = []
   const notifications: string[] = []
 
-  const repo = mkdtempSync(join(tmpdir(), 'gcscope-repo-'))
-  hoisted.home = mkdtempSync(join(tmpdir(), 'gcscope-home-'))
-  process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
-  tempDirs.push(repo, hoisted.home)
-
-  const sessionFile = join(repo, 'session-test.jsonl')
-  execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
+  const repo = forkOf?.repo ?? mkdtempSync(join(tmpdir(), 'gcscope-repo-'))
+  const sessionFile = join(repo, forkOf ? 'session-fork.jsonl' : 'session-test.jsonl')
+  if (!forkOf) {
+    hoisted.home = mkdtempSync(join(tmpdir(), 'gcscope-home-'))
+    process.env.PI_CODING_AGENT_DIR = join(hoisted.home, '.pi', 'agent')
+    tempDirs.push(repo, hoisted.home)
+    execFileSync('git', ['init', '-qb', 'main'], { cwd: repo, stdio: ['pipe', 'pipe', 'pipe'] })
+  }
 
   gitCheckpoint({
     on: (name: string, fn: Handler) => handlers.set(name, fn),
@@ -70,7 +73,7 @@ function setup() {
     navigateTree: async () => ({ editorText: '', cancelled: false }),
   })
 
-  return { handlers, commands, appended, notifications, repo, makeCtx }
+  return { handlers, commands, appended, notifications, repo, makeCtx, sessionFile }
 }
 
 type Harness = ReturnType<typeof setup>
@@ -184,6 +187,32 @@ describe('checkpoint scope', () => {
     writeFileSync(join(t.repo, 'loader.ts'), 'v3\n')
     await t.commands.get('rewind')?.handler('', t.makeCtx(t.appended, [userEntry, second], [`1. ${new Date(t.appended[1].data.createdAt).toLocaleTimeString()}  ${t.appended[1].data.prompt}`, 'Code only']))
     expect(readFileSync(join(t.repo, 'loader.ts'), 'utf8')).toBe('v2\n')
+  })
+
+  it('restores code from a checkpoint a forked session inherited', async () => {
+    // /fork writes a new session file and copies the branch's checkpoint entries into it.
+    // The shadow repository is keyed to the session file, so the fork started with an
+    // empty one while its entries named refs that live in the parent's: every inherited
+    // checkpoint answered "Code restore failed: fatal: invalid reference".
+    const parent = setup()
+    const file = join(parent.repo, 'loader.ts')
+    writeFileSync(file, 'before\n')
+    await start(parent)
+    await beginRun(parent)
+    await turnStart(parent)
+    await announceEdit(parent, file)
+    writeFileSync(file, 'after\n')
+    await turnEnd(parent)
+
+    const fork = setup(parent)
+    // The copied entries as pi stores them; the fork's instance has nothing in memory.
+    const inherited = parent.appended.map((entry) => ({ type: 'custom', ...entry }))
+    await fork.handlers.get('session_start')?.({ reason: 'fork', previousSessionFile: parent.sessionFile }, fork.makeCtx(inherited, [userEntry], []))
+    const label = `1. ${new Date(parent.appended[0].data.createdAt).toLocaleTimeString()}  ${parent.appended[0].data.prompt}`
+    await fork.commands.get('rewind')?.handler('', fork.makeCtx(inherited, [userEntry], [label, 'Code only']))
+
+    expect(fork.notifications.join('\n')).not.toContain('Code restore failed')
+    expect(readFileSync(file, 'utf8')).toBe('before\n')
   })
 
   it('keeps recording checkpoints when a tracked file is deleted between runs', async () => {
