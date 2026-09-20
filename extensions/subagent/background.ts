@@ -11,6 +11,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { killProcessTree } from '../internal/process-tree.js'
+import { sharedSlot } from '../internal/shared-slot.js'
 import { errorMessage } from '../internal/values.js'
 import { spawnChild } from './run.js'
 
@@ -57,7 +58,14 @@ export interface BackgroundSpawn {
   maxTurns?: number
 }
 
-const runs = new Map<string, BackgroundRun>()
+/** The registry, held on globalThis rather than in module state. /reload and a /resume into
+ * another directory clear pi's extension cache and evaluate this module again; a registry
+ * that died with the old instance left live children unlisted, uncancellable, and running
+ * on past pi's exit, since the quit path signals only what the registry holds. */
+const registry = sharedSlot<{ runs: Map<string, BackgroundRun>; finishSequence: number }>('background-runs')
+const state = registry.get() ?? { runs: new Map<string, BackgroundRun>(), finishSequence: 0 }
+registry.set(state)
+const runs = state.runs
 
 /** Cap on simultaneously running background children. */
 export const MAX_BACKGROUND_RUNS = 8
@@ -76,16 +84,15 @@ export function activeBackgroundRuns(): number {
   return [...runs.values()].filter((run) => run.live || run.state === 'running').length
 }
 
-/** Stamps BackgroundRun.finishedAt; a counter rather than a clock so two runs
- * completing in the same millisecond still evict in their true finish order. */
-let finishSequence = 0
+// state.finishSequence stamps BackgroundRun.finishedAt: a counter rather than a clock, so
+// two runs completing in the same millisecond still evict in their true finish order.
 
 /** Test seam: the registry is module state, so tests reset it between cases to
  * stay order-independent. */
 export function resetBackgroundRuns(): void {
   for (const run of runs.values()) removeRebuiltPrompt(run)
   runs.clear()
-  finishSequence = 0
+  state.finishSequence = 0
 }
 
 function evictFinishedRuns(): void {
@@ -287,7 +294,7 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
   const complete = (): void => {
     if (completed) return
     completed = true
-    run.finishedAt = ++finishSequence
+    run.finishedAt = ++state.finishSequence
     evictFinishedRuns()
     // A run outlives the session that started it, and pi's loader wires assertActive()
     // into every runtime call, so notifying a disposed session throws. This fires from
