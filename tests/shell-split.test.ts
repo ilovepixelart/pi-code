@@ -13,6 +13,16 @@ describe('splitSegments', () => {
     expect(splitSegments('a\nb')).toEqual(['a', 'b'])
   })
 
+  it("keeps a redirection's ampersand inside its segment", () => {
+    // 2>&1 and &>file are redirections, not a background separator: cut at the &, the
+    // command lost its redirect and a bare "1" became a second command.
+    expect(splitSegments('ls x 2>&1')).toEqual(['ls x 2>&1'])
+    expect(splitSegments('ls x >&2')).toEqual(['ls x >&2'])
+    expect(splitSegments('ls x &>/dev/null')).toEqual(['ls x &>/dev/null'])
+    expect(splitSegments('ls x 2>&1 | head')).toEqual(['ls x 2>&1', 'head'])
+    expect(splitSegments('ls & pwd')).toEqual(['ls', 'pwd'])
+  })
+
   it('keeps an escaped separator inside its segment', () => {
     // find's \; is an argument, not a command boundary.
     expect(splitSegments(String.raw`find . -exec rm {} \;`)).toEqual([String.raw`find . -exec rm {} \;`])

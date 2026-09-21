@@ -5,7 +5,9 @@
 
 import { hasSubstitution, splitSegments } from '../internal/shell-split.js'
 
-// Destructive commands blocked in plan mode
+// Destructive commands blocked in plan mode. Tested against the segment's command word,
+// the one word that runs: an allowlisted head never executes its arguments, so `code`
+// in a path, `touch` in a quoted pattern or `cp` in a file name is not a command.
 const DESTRUCTIVE_PATTERNS = [
   /\brm\b/i,
   /\brmdir\b/i,
@@ -21,8 +23,6 @@ const DESTRUCTIVE_PATTERNS = [
   /\btruncate\b/i,
   /\bdd\b/i,
   /\bshred\b/i,
-  /(^|[^<])>(?!>)/,
-  />>/,
   /\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
   /\byarn\s+(add|remove|install|publish)/i,
   /\bpnpm\s+(add|remove|install|publish)/i,
@@ -40,7 +40,14 @@ const DESTRUCTIVE_PATTERNS = [
   /\bsystemctl\s+(start|stop|restart|enable|disable)/i,
   /\bservice\s+\S+\s+(start|stop|restart)/i,
   /\b(vim?|nano|emacs|code|subl)\b/i,
-]
+].map((pattern) => new RegExp(`^\\s*(?:${pattern.source})`, pattern.flags))
+
+// A redirect writes wherever it points, from any position in the segment.
+const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/]
+
+// Redirections that write nothing: onto /dev/null, and a descriptor duplicated onto
+// another (`2>&1`, `>&2`, `>&-`). `>&file` is not one: it writes the file.
+const HARMLESS_REDIRECTS = /(?:&|\d*)>>?\s*\/dev\/null(?=\s|$)|\d*>&(?:\d+|-)(?=\s|$)/g
 
 // Safe read-only commands allowed in plan mode. Deliberately excludes env/printenv
 // (secret disclosure, and env is an exec wrapper), curl/wget (fetch plus -o writes),
@@ -55,6 +62,7 @@ const SAFE_PATTERNS = [
   /^\s*find\b/,
   /^\s*ls\b/,
   /^\s*pwd\b/,
+  /^\s*cd(\s|$)/,
   /^\s*echo\b/,
   /^\s*printf\b/,
   /^\s*wc\b/,
@@ -92,13 +100,86 @@ const SAFE_PATTERNS = [
   /^\s*eza\b/,
 ]
 
-// find is allowlisted for traversal only; these actions run commands or delete.
-const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprintf)\b/
+// find is allowlisted for traversal only; these actions run commands, delete or write.
+const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprint0|fprintf)\b/
+
+// Flags that turn an allowlisted read into a write or an execution, per command.
+const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
+  [/^\s*find\b/, FIND_ACTIONS],
+  [/^\s*sort\b/, /\s(-[a-zA-Z]*o|--output\b|--compress-program\b)/],
+  [/^\s*tree\b/, /\s-[a-zA-Z]*o/],
+  [/^\s*rg\b/, /\s--(pre|hostname-bin)\b/],
+  [/^\s*git\s/, /\s--output(=|\s|$)/],
+]
+
+/** `segment` with its quoted spans removed, so a `>` or a flag inside a pattern reads as
+ * text. Follows splitSegments: a backslash outside quotes escapes the next character,
+ * and inside quotes only the closing quote matters. */
+function withoutQuoted(segment: string): string {
+  let bare = ''
+  let quote: string | undefined
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+    } else if (ch === '\\') {
+      i++
+    } else {
+      bare += ch
+    }
+  }
+  return bare
+}
+
+function writesThroughRedirect(segment: string): boolean {
+  const bare = withoutQuoted(segment).replace(HARMLESS_REDIRECTS, ' ')
+  return REDIRECT_PATTERNS.some((pattern) => pattern.test(bare))
+}
+
+/** uniq [INPUT [OUTPUT]] writes its second operand. An option's value (-f N, -s N, -w N)
+ * is not an operand. */
+function uniqWrites(args: string[]): boolean {
+  let operands = 0
+  for (let i = 0; i < args.length; i++) {
+    if (['-f', '-s', '-w'].includes(args[i])) i++
+    else if (!args[i].startsWith('-')) operands++
+  }
+  return operands >= 2
+}
+
+const BRANCH_LISTS = /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/
+const BRANCH_WRITE_FLAGS = /^(-[a-zA-Z]*[dDmMcCuft][a-zA-Z]*|--(delete|move|copy|force|unset-upstream|set-upstream-to|edit-description|track|no-track|create-reflog)(=.*)?)$/
+
+/** `git branch` lists unless it is given a name to create or a flag that changes one. */
+function gitBranchWrites(args: string[]): boolean {
+  if (args.some((arg) => BRANCH_WRITE_FLAGS.test(arg))) return true
+  return args.some((arg) => !arg.startsWith('-')) && !args.some((arg) => BRANCH_LISTS.test(arg))
+}
+
+/** `git remote` lists and shows; every other subcommand edits the configuration. */
+function gitRemoteWrites(args: string[]): boolean {
+  const subcommand = args.find((arg) => !arg.startsWith('-'))
+  return subcommand !== undefined && !['show', 'get-url'].includes(subcommand)
+}
+
+/** Whether an allowlisted command carries a flag or operand that makes it write. */
+function writesThroughOperands(segment: string): boolean {
+  const bare = withoutQuoted(segment)
+  if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flag.test(bare))) return true
+  const [command = '', subcommand = '', ...rest] = segment.trim().split(/\s+/)
+  if (command === 'uniq') return uniqWrites([subcommand, ...rest].filter(Boolean))
+  if (command !== 'git') return false
+  if (subcommand === 'branch') return gitBranchWrites(rest)
+  return subcommand === 'remote' && gitRemoteWrites(rest)
+}
 
 function isSafeSegment(segment: string): boolean {
-  if (DESTRUCTIVE_PATTERNS.some((p) => p.test(segment))) return false
-  if (!SAFE_PATTERNS.some((p) => p.test(segment))) return false
-  return !(/^\s*find\b/.test(segment) && FIND_ACTIONS.test(segment))
+  if (DESTRUCTIVE_PATTERNS.some((pattern) => pattern.test(segment))) return false
+  if (writesThroughRedirect(segment)) return false
+  if (!SAFE_PATTERNS.some((pattern) => pattern.test(segment))) return false
+  return !writesThroughOperands(segment)
 }
 
 /**
