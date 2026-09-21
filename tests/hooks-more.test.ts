@@ -2914,6 +2914,82 @@ describe('hooks from agent frontmatter in the child', () => {
   })
 })
 
+describe('user-level hooks inside a subagent child', () => {
+  // Claude: settings hooks "also run inside subagents": tool events fire the same configured
+  // hooks, carrying agent_id. But "Stop: runs when the main Claude Code agent has finished
+  // responding", a subagent's completion is SubagentStop, and a subagent run is neither a
+  // session (SessionStart, SessionEnd) nor a prompt the user submitted (UserPromptSubmit).
+  // The child is a full pi process loading the same settings, so every one of them fired in
+  // it: a Stop hook (a finish sound, "block until tests pass") ran once per subagent, and
+  // a blocking one forced each read-only child to carry on.
+  const withUserHooksInChild = async () => {
+    writeSettings(hoisted.home, 'settings.json', {
+      SessionStart: [{ hooks: [{ command: 'user-session-start' }] }],
+      UserPromptSubmit: [{ hooks: [{ command: 'user-prompt-submit' }] }],
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-tool-guard' }] }],
+      Stop: [{ hooks: [{ command: 'user-stop' }] }],
+      SubagentStop: [{ hooks: [{ command: 'user-subagent-stop' }] }],
+      SessionEnd: [{ hooks: [{ command: 'user-session-end' }] }],
+    })
+    process.env.PI_CODE_SUBAGENT = '1'
+    process.env.PI_CODE_AGENT_HOOKS = JSON.stringify({ agent: 'scout', id: 'fg-9', hooks: { SubagentStop: [{ hooks: [{ command: 'agent-done' }] }] } })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  afterEach(() => {
+    delete process.env.PI_CODE_SUBAGENT
+    delete process.env.PI_CODE_AGENT_HOOKS
+  })
+
+  it('fires no SessionStart, UserPromptSubmit or SessionEnd', async () => {
+    const ext = await withUserHooksInChild()
+    await ext.input('survey the auth module')
+    await ext.shutdown('quit')
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it("fires no Stop hook, and no settings-level SubagentStop, at the child's own end", async () => {
+    const ext = await withUserHooksInChild()
+    await ext.agentEnd()
+
+    // The agent's own frontmatter Stop, converted to SubagentStop, is the only one that runs
+    // here: the parent fires the settings-level SubagentStop when the child completes.
+    expect(commandsRun()).toEqual(['agent-done'])
+  })
+
+  it('arms no idle notification: no user is waiting on a child', async () => {
+    vi.useFakeTimers()
+    writeSettings(hoisted.home, 'settings.json', { Notification: [{ matcher: 'idle_prompt', hooks: [{ command: 'user-idle' }] }] })
+    process.env.PI_CODE_SUBAGENT = '1'
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('still fires tool event hooks, which Claude runs inside subagents', async () => {
+    const ext = await withUserHooksInChild()
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['user-tool-guard'])
+  })
+
+  it('keeps firing every event in the main session, where the guard must not apply', async () => {
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'user-stop' }] }], SessionEnd: [{ hooks: [{ command: 'user-session-end' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.agentEnd()
+    await ext.shutdown('quit')
+
+    expect(commandsRun()).toEqual(['user-stop', 'user-session-end'])
+  })
+})
+
 describe('allowManagedHooksOnly', () => {
   it('runs only managed hooks when the managed policy sets allowManagedHooksOnly', async () => {
     // Claude: "Your user, project, local, and plugin hooks are blocked."
