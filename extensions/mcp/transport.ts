@@ -37,12 +37,17 @@ const DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS = 1_800_000
 
 /** Claude's numeric env vars accept scientific notation and digit-separator spellings
  * (2e3 as 2000, 64_000 as 64000). A non-numeric value is undefined, not zero. */
+/** The longest delay setTimeout holds: it keeps the delay in 32 bits, and a larger one fires
+ * after 1 ms. A user's "never" (3000000000) made every call time out at once, so a timeout
+ * is clamped to this, about 24.8 days. */
+const MAX_TIMER_MS = 2_147_483_647
+
 /** A positive-integer env override, or the default when unset or unparseable. */
 function envTimeout(name: string, fallback: number): number {
   const raw = process.env[name]
   if (raw === undefined) return fallback
   const value = parseNumericEnv(raw)
-  return value !== undefined && value > 0 ? Math.floor(value) : fallback
+  return value !== undefined && value > 0 ? Math.min(Math.floor(value), MAX_TIMER_MS) : fallback
 }
 
 // Claude honors MCP_TIMEOUT (connect) and MCP_TOOL_TIMEOUT (per-call), both in ms.
@@ -97,7 +102,7 @@ export function callRequestOptions(wall: number, tuning: ServerCallTuning = {}):
  * per-server timeout. Per Claude, timeout values below 1000 are ignored and fall
  * through to MCP_TOOL_TIMEOUT. */
 export function serverCallTuning(config: ServerConfig): ServerCallTuning {
-  const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? config.timeout : undefined
+  const declared = typeof config.timeout === 'number' && config.timeout >= 1000 ? Math.min(config.timeout, MAX_TIMER_MS) : undefined
   return { stdio: isStdio(config), ...(declared !== undefined ? { serverTimeoutMs: declared } : {}) }
 }
 
