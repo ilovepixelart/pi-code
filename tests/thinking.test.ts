@@ -20,6 +20,7 @@ function wire(initial = 'off', clamp: (level: string) => string = (level) => lev
     input: (text: string, ctx: any = {}, source = 'interactive') => handlers.get('input')?.({ text, source }, ctx),
     settle: () => handlers.get('agent_settled')?.({}, {}),
     start: () => handlers.get('session_start')?.({}, {}),
+    shutdown: () => handlers.get('session_shutdown')?.({ reason: 'quit' }, {}),
     setThinkingLevel,
     getThinkingLevel,
     level: () => level,
@@ -58,6 +59,24 @@ describe('requestedThinkingLevel', () => {
 })
 
 describe('thinking extension', () => {
+  it('restores the level when pi quits mid-run, before agent_settled can', async () => {
+    // The escalation is written to the transcript, so a quit mid-run (double Ctrl+C, Ctrl+D,
+    // a closed terminal, SIGTERM) left `pi -c` resuming at max for good.
+    const t = wire('low')
+    await t.input('ultrathink about this')
+    expect(t.level()).toBe('max')
+
+    await t.shutdown()
+
+    expect(t.level()).toBe('low')
+  })
+
+  it('leaves the level alone at shutdown when nothing was escalated', async () => {
+    const t = wire('medium')
+    await t.shutdown()
+    expect(t.setThinkingLevel).not.toHaveBeenCalled()
+  })
+
   it('restores the level on a model without max, where the runtime clamps the escalation', async () => {
     // pi stores clampThinkingLevel(model, level), not the level asked for, and most
     // reasoning models have no max: the escalation landed on high. Armed with the level

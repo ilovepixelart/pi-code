@@ -91,11 +91,17 @@ export default function thinkingExtension(pi: ExtensionAPI) {
     // the keyword in the prompt.
   })
 
+  // agent_settled never fires when pi is quit mid-run, and the escalation is already in the
+  // transcript: `pi -c` would resume at the raised level for good.
+  pi.on('session_shutdown', async () => {
+    await override.settle()
+  })
+
   pi.on('agent_settled', () => {
     // Restore the pre-escalation level, but only if nothing else moved it since (a
     // command's effort restore, a manual change): the conditional override stands down in
     // that case and restores unconditionally when the level cannot be read, the prior
     // best-effort behavior.
-    override.settle()
+    void override.settle()
   })
 }
