@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { join } from 'node:path'
@@ -280,7 +280,10 @@ describe('setAutoMemoryEnabledSetting', () => {
 
       // Like writeIndex, the write lands through a temp file renamed onto the target, so a
       // crash mid-write cannot truncate the user's hooks/env/permissions config.
-      expect(fsHoisted.renames.some(([from, to]) => to === file && from.includes('.tmp'))).toBe(true)
+      // Compared by real path: the write goes to the file a path leads to, and the temp
+      // directory itself is a symlink on macOS (/var is /private/var).
+      const target = realpathSync(file)
+      expect(fsHoisted.renames.some(([from, to]) => to === target && from.includes('.tmp'))).toBe(true)
     } finally {
       if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = savedConfigDir
