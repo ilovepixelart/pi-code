@@ -227,6 +227,56 @@ describe('FileOAuthProvider', () => {
   })
 })
 
+describe('FileOAuthProvider.invalidateCredentials', () => {
+  // The SDK calls this when the server rejects what is stored (`invalid_grant` for an expired
+  // or revoked refresh token, `invalid_client` for a forgotten registration) and only then
+  // restarts authorization. Without it the rejection propagated and the dead credentials
+  // stayed on disk, so the server failed the same way on every connect.
+  const hasVerifier = (provider: InstanceType<typeof FileOAuthProvider>): boolean => {
+    try {
+      provider.codeVerifier()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const seeded = async (): Promise<InstanceType<typeof FileOAuthProvider>> => {
+    const provider = new FileOAuthProvider('linear', () => {})
+    await provider.saveClientInformation({ client_id: 'cid-1' })
+    await provider.saveTokens({ access_token: 'at-1', token_type: 'bearer', refresh_token: 'rt-1' })
+    await provider.saveCodeVerifier('ver-1')
+    provider.bindRedirectPort(45678)
+    return provider
+  }
+
+  it.each([
+    ['tokens', { client: true, tokens: false, verifier: true }],
+    ['client', { client: false, tokens: true, verifier: true }],
+    ['verifier', { client: true, tokens: true, verifier: false }],
+    ['all', { client: false, tokens: false, verifier: false }],
+  ] as const)('drops %s and keeps the rest, on disk too', async (scope, kept) => {
+    const provider = await seeded()
+
+    await provider.invalidateCredentials(scope)
+
+    const reloaded = new FileOAuthProvider('linear', () => {})
+    expect(reloaded.clientInformation() !== undefined).toBe(kept.client)
+    expect(reloaded.tokens() !== undefined).toBe(kept.tokens)
+    expect(hasVerifier(reloaded)).toBe(kept.verifier)
+    // A re-login must still bind the port the client was registered with.
+    expect(reloaded.savedRedirectPort()).toBe(45678)
+  })
+
+  it('has nothing to drop for discovery state, which is not stored', async () => {
+    const provider = await seeded()
+
+    await provider.invalidateCredentials('discovery')
+
+    expect(new FileOAuthProvider('linear', () => {}).tokens()).toBeDefined()
+  })
+})
+
 describe('callback server', () => {
   it('resolves the authorization code from the redirect and answers the browser', async () => {
     const { server, port } = await startCallbackServer()
@@ -448,6 +498,79 @@ describe('headless OAuth refusal', () => {
       const failing = connect('locked', { type: 'http', url: `http://127.0.0.1:${port}/` } as never)
       await expect(failing).rejects.toBeInstanceOf(OAuthRequiredError)
       await expect(connect('locked', { type: 'http', url: `http://127.0.0.1:${port}/` } as never)).rejects.toThrow('run pi interactively')
+    } finally {
+      server.close()
+    }
+  })
+})
+
+describe('credentials the server no longer accepts', () => {
+  /** A protected MCP endpoint whose token endpoint rejects every refresh with `error`:
+   * `invalid_grant` for an expired or revoked refresh token, `invalid_client` for a
+   * registration the server forgot (which the SDK answers by registering again). */
+  async function idp(error = 'invalid_grant'): Promise<{ url: string; close: () => void }> {
+    const { createServer } = await import('node:http')
+    const server = createServer((request, response) => {
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+      const json = (status: number, body: unknown, headers: Record<string, string> = {}): void => {
+        response.writeHead(status, { 'content-type': 'application/json', ...headers })
+        response.end(JSON.stringify(body))
+      }
+      request.resume()
+      if (request.url?.startsWith('/.well-known/oauth-protected-resource')) return json(200, { resource: `${base}/mcp`, authorization_servers: [base] })
+      if (request.url?.startsWith('/.well-known/oauth-authorization-server')) {
+        return json(200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'] })
+      }
+      if (request.url === '/token') return json(400, { error, error_description: 'rejected' })
+      if (request.url === '/register') return json(201, { client_id: 'client-2', redirect_uris: ['http://localhost:45678/callback'] })
+      if (request.url === '/mcp') return json(401, { error: 'unauthorized' }, { 'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"` })
+      json(404, {})
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    return {
+      url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`,
+      close: () => {
+        server.closeAllConnections()
+        server.close()
+      },
+    }
+  }
+
+  it.each(['invalid_grant', 'invalid_client'])('prompts a new login on %s instead of failing the same way every connect', async (error) => {
+    // The SDK reported the rejection, isUnauthorized did not recognise it, so the server
+    // failed as "InvalidGrantError: ..." without ever asking to log in, and the dead
+    // credentials stayed in the store to fail the next connect the same way.
+    const server = await idp(error)
+    try {
+      const seed = new FileOAuthProvider('stale', () => {}, undefined, server.url)
+      await seed.saveClientInformation({ client_id: 'client-1', redirect_uris: ['http://localhost:45678/callback'] })
+      await seed.saveTokens({ access_token: 'expired-access', token_type: 'Bearer', refresh_token: 'expired-refresh', expires_in: 3600 })
+      const { connect, OAuthRequiredError } = await import('../extensions/mcp/transport.ts')
+      const confirm = vi.fn(async () => false)
+
+      const outcome = await connect('stale', { type: 'http', url: server.url } as never, { confirm, notify: () => {} }).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      )
+
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(outcome).toBeInstanceOf(OAuthRequiredError)
+      expect(new FileOAuthProvider('stale', () => {}, undefined, server.url).tokens()).toBeUndefined()
+    } finally {
+      server.close()
+    }
+  })
+
+  it('tells a headless run to log in interactively, and forgets the dead token', async () => {
+    const server = await idp()
+    try {
+      const seed = new FileOAuthProvider('stale', () => {}, undefined, server.url)
+      await seed.saveClientInformation({ client_id: 'client-1', redirect_uris: ['http://localhost:45678/callback'] })
+      await seed.saveTokens({ access_token: 'expired-access', token_type: 'Bearer', refresh_token: 'expired-refresh', expires_in: 3600 })
+      const { connect } = await import('../extensions/mcp/transport.ts')
+
+      await expect(connect('stale', { type: 'http', url: server.url } as never)).rejects.toThrow('run pi interactively')
+      expect(new FileOAuthProvider('stale', () => {}, undefined, server.url).tokens()).toBeUndefined()
     } finally {
       server.close()
     }

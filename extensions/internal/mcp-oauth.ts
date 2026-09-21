@@ -188,6 +188,19 @@ export class FileOAuthProvider implements OAuthClientProvider {
     return this.data.tokens !== undefined
   }
 
+  /** Called by the SDK when the server rejects what is stored: `invalid_grant` for an expired
+   * or revoked refresh token, `invalid_client` for a forgotten registration. It restarts
+   * authorization once this returns, which reaches the login prompt. Without it the
+   * rejection propagated and the dead credentials stayed on disk, so the server failed the
+   * same way on every connect. Discovery state is not stored, and the redirect port is kept
+   * so a re-login can still bind the port the client was registered with. */
+  invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): void {
+    if (scope === 'all' || scope === 'client') delete this.data.client
+    if (scope === 'all' || scope === 'tokens') delete this.data.tokens
+    if (scope === 'all' || scope === 'verifier') delete this.data.verifier
+    this.persist()
+  }
+
   /** The CSRF token the SDK adds to the authorization URL as `state`; waitForAuthCode
    * verifies the redirect echoes exactly this value. */
   state(): string {
