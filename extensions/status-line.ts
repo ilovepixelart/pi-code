@@ -360,6 +360,10 @@ export default function statusLine(pi: ExtensionAPI) {
           killInflight = kill
         },
       })
+      // A newer trigger killed this run and queued its rerun: what a killed script left
+      // behind is not its output, and applying it blanked the custom segment until the
+      // rerun finished. Claude cancels the in-flight script and shows nothing for it.
+      if (rerunQueued) return
       // Claude: "Your script can output multiple lines to create a richer display."
       // pi has one row for every extension status and replaces newlines with spaces
       // before rendering it (footer.js sanitizeStatusText), so the rows are joined

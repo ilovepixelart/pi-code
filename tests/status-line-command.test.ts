@@ -453,6 +453,48 @@ describe('statusLine concurrency and compaction', () => {
     await handlers.get('session_shutdown')?.({}, ctx)
   })
 
+  it('keeps the custom segment while a newer trigger cancels the run in flight', async () => {
+    // Claude cancels the in-flight script when a new update triggers, and shows nothing for
+    // it. The killed run resolved with empty output, which was applied: the custom segment
+    // dropped to the built-in one until the rerun finished. With a script slower than the
+    // gap between triggers that flicker was constant, or, at refreshInterval 1, permanent.
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'CUSTOM', stderr: '', timedOut: false }
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toContain('CUSTOM')
+    const shown = status.length
+
+    // Run two is held open; a second gate holds the rerun that the cancellation queues.
+    let releaseRunTwo!: () => void
+    let releaseRerun!: () => void
+    hoisted.gate = new Promise<void>((resolve) => {
+      releaseRunTwo = resolve
+    })
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    hoisted.gate = new Promise<void>((resolve) => {
+      releaseRerun = resolve
+    })
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    // What a killed script leaves behind is nothing.
+    hoisted.result = { code: 143, stdout: '', stderr: '', timedOut: false }
+    releaseRunTwo()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(status.slice(shown).every((text) => text?.includes('CUSTOM'))).toBe(true)
+
+    hoisted.result = { code: 0, stdout: 'CUSTOM 2', stderr: '', timedOut: false }
+    releaseRerun()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toContain('CUSTOM 2')
+    await handlers.get('session_shutdown')?.({}, ctx)
+  })
+
   it('stops the settings watcher at shutdown', async () => {
     // pi's CLI loads a fresh extension instance for every session replacement, so the next
     // session_start cannot dispose this watcher: left armed, each replaced session
