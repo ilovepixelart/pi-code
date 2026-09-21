@@ -929,6 +929,69 @@ describe('resumeBackgroundRun', () => {
     expect(followUp.at(-1)).toBe('Task: second')
   })
 
+  const sessionDirOf = (args: string[]): string => {
+    const at = args.indexOf('--session-dir')
+    if (at < 0) throw new Error(`no --session-dir in: ${args.join(' ')}`)
+    return args[at + 1] as string
+  }
+
+  it('keeps the child session out of the project session directory', async () => {
+    // The child persists its session so a follow-up can continue it, and with no
+    // --session-dir that file landed among the user's own sessions for the project: the
+    // newest one, which `pi -c` and /resume then offered as "the previous session".
+    const { startBackgroundRun } = await loadBackground()
+    startBackgroundRun('scout', 'first', invocation, () => {})
+
+    const args = spawned.calls[0].args
+    expect(args).toContain('--session-dir')
+    const dir = sessionDirOf(args)
+    expect(existsSync(dir)).toBe(true)
+    expect(dir.startsWith(tmpdir())).toBe(true)
+  })
+
+  it('resumes the follow-up in the same session directory', async () => {
+    const { startBackgroundRun, resumeBackgroundRun } = await loadBackground()
+    const id = startBackgroundRun('scout', 'first', invocation, () => {}) as string
+    spawned.children[0].emit('close', 0)
+
+    expect(resumeBackgroundRun(id, 'second', () => {})).toBe('resumed')
+
+    expect(sessionDirOf(spawned.calls[1].args)).toBe(sessionDirOf(spawned.calls[0].args))
+  })
+
+  it('gives each run a directory of its own', async () => {
+    const { startBackgroundRun } = await loadBackground()
+    startBackgroundRun('scout', 'first', invocation, () => {})
+    startBackgroundRun('scout', 'second', invocation, () => {})
+
+    expect(sessionDirOf(spawned.calls[0].args)).not.toBe(sessionDirOf(spawned.calls[1].args))
+  })
+
+  it('removes the directory when the runs are cleared at quit', async () => {
+    // Nothing in the registry is resumable once pi exits, so its session files are garbage.
+    const { startBackgroundRun, cancelAllBackgroundRuns } = await loadBackground()
+    startBackgroundRun('scout', 'first', invocation, () => {})
+    const dir = sessionDirOf(spawned.calls[0].args)
+
+    cancelAllBackgroundRuns()
+
+    expect(existsSync(dir)).toBe(false)
+  })
+
+  it('removes the directory of a run the registry evicts', async () => {
+    const { startBackgroundRun, MAX_FINISHED_RUNS } = await loadBackground()
+    const first = startBackgroundRun('scout', 'first', invocation, () => {}) as string
+    expect(first).toBeTruthy()
+    const evictedDir = sessionDirOf(spawned.calls[0].args)
+    spawned.children[0].emit('close', 0)
+    for (let i = 1; i <= MAX_FINISHED_RUNS; i++) {
+      startBackgroundRun('scout', `t${i}`, invocation, () => {})
+      spawned.children[i].emit('close', 0)
+    }
+
+    expect(existsSync(evictedDir)).toBe(false)
+  })
+
   it('rebuilds the system-prompt file when the finished run deleted it', async () => {
     const { startBackgroundRun, resumeBackgroundRun } = await loadBackground()
     const dir = mkdtempSync(join(tmpdir(), 'prompt-'))
