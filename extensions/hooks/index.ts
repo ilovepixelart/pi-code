@@ -790,9 +790,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const runner = boundRunner(ctx)
     const results = await Promise.all(sessionEndCommands.map((command) => runner(command, { hook_event_name: 'SessionEnd', reason: reason.value }, sessionEndTimeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
-    // Claude kills async hooks still running at teardown; the session that spawned
-    // these is over, and their delivery would target a disposed context anyway.
-    for (const kill of backgroundKills) kill()
+    // Claude: "In non-interactive mode with the -p flag, Claude Code kills any async hook
+    // still running at teardown". Only there: an interactive session leaves them running, so
+    // an async SessionEnd hook, started by this very shutdown, can finish instead of being
+    // killed a microtask after it spawned. Their delivery targets a disposed context and is
+    // caught (see deliverBackgroundResult).
+    if (ctx.hasUI !== true) for (const kill of backgroundKills) kill()
     backgroundKills.clear()
   })
 

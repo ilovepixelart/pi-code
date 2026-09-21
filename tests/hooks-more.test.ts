@@ -217,7 +217,7 @@ const setupExtension = () => {
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
     beforeCompact: (reason: string, customInstructions?: string) => handler('session_before_compact')({ reason, customInstructions }, defaultCtx),
     compacted: (reason: string, summary?: string) => handler('session_compact')({ reason, ...(summary === undefined ? {} : { compactionEntry: { summary } }) }, defaultCtx),
-    shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
+    shutdown: (reason: string, ctx: Record<string, unknown> = {}) => handler('session_shutdown')({ reason }, { ...defaultCtx, ...ctx }),
     beforeAgentStart: (event: Record<string, unknown> = { systemPrompt: '' }) => handler('before_agent_start')(event),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
     emitSkillHooks: (event: unknown) => busHandlers.get('pi-code:skill-hooks')?.(event),
@@ -1810,15 +1810,43 @@ describe('background hooks (Claude async/asyncRewake contract, #123)', () => {
     expect(ext.sent).toEqual([])
   })
 
-  it('kills a background hook still running at session end', async () => {
-    // Claude kills async hooks at teardown; without this a hung background hook
-    // pins the event loop past a one-shot run's end.
+  // Claude: "In non-interactive mode with the -p flag, Claude Code kills any async hook still
+  // running at teardown ... If your hook's work must outlive a claude -p session, start a
+  // fully detached process from it". Nothing says an interactive session kills them.
+  it('kills a background hook still running at the end of a non-interactive run', async () => {
+    // Without this a hung background hook pins the event loop past a one-shot run's end.
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true }] }] })
     script('monitor', { hang: true })
     await ext.agentEnd()
     expect(recordFor('monitor').killSignals).toEqual([])
-    await ext.shutdown('quit')
+    await ext.shutdown('quit', { hasUI: false })
     expect(recordFor('monitor').killSignals).toEqual(['SIGKILL'])
+  })
+
+  it('leaves a background hook running when an interactive session ends', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true }] }] })
+    script('monitor', { hang: true })
+    await ext.agentEnd()
+    await ext.shutdown('quit', { hasUI: true })
+    expect(recordFor('monitor').killSignals).toEqual([])
+  })
+
+  it('lets an async SessionEnd hook finish in an interactive session', async () => {
+    // The shape people choose so that exit is not delayed: `async: true`. It was started by
+    // the very shutdown that then killed every background hook, so it never completed (0 of
+    // 12 runs) unless a synchronous sibling happened to keep the shutdown open.
+    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'upload-log', async: true }] }] })
+    script('upload-log', { hang: true })
+    await ext.shutdown('quit', { hasUI: true })
+    expect(commandsRun()).toEqual(['upload-log'])
+    expect(recordFor('upload-log').killSignals).toEqual([])
+  })
+
+  it('still reaps an async SessionEnd hook when the run is non-interactive, as Claude documents', async () => {
+    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'upload-log', async: true }] }] })
+    script('upload-log', { hang: true })
+    await ext.shutdown('quit', { hasUI: false })
+    expect(recordFor('upload-log').killSignals).toEqual(['SIGKILL'])
   })
 
   it('does not enforce a timeout on an async command hook, while asyncRewake keeps its own', () => {
