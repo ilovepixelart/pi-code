@@ -64,18 +64,28 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let todoItems: TodoItem[] = []
   let planFromTool = false
   let savedTools: string[] = []
+  /** Every tool pi had registered when the set was saved, active or not: a tool outside it
+   * was registered later, and pi activated it on top of whatever set was in force. */
+  let toolsAtSave = new Set<string>()
   let stalledRuns = 0
   let runProgress = false
 
+  const registeredTools = (): Set<string> => new Set((pi.getAllTools?.() ?? []).map((tool) => tool.name))
+
   function enterPlanTools(): void {
     savedTools = pi.getActiveTools()
+    toolsAtSave = registeredTools()
     pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
   }
 
+  /** Put back the saved set, plus any tool registered since: pi activates a late one (an MCP
+   * server past its connect window) on top of the restricted set, and overwriting with the
+   * snapshot dropped it for the rest of the session. A tool that was registered but not
+   * active at entry is not late, and stays out. */
   function restoreTools(): void {
-    if (savedTools.length > 0) {
-      pi.setActiveTools(savedTools)
-    }
+    if (savedTools.length === 0) return
+    const late = pi.getActiveTools().filter((name) => !toolsAtSave.has(name) && !savedTools.includes(name))
+    pi.setActiveTools([...savedTools, ...late])
   }
 
   /** Hooks report Claude's permission_mode from this bus state. */
@@ -457,6 +467,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
       // snapshot when plan mode is off would instead push a stale set over whatever
       // pi has registered since, so it stays scoped to this branch.
       savedTools = restored.savedTools ?? pi.getActiveTools()
+      toolsAtSave = registeredTools()
       pi.setActiveTools(PLAN_MODE_TOOLS.filter((t) => savedTools.includes(t)))
       // --plan enters plan mode without ever toggling, so nothing has persisted yet
       // and a /reload would find no snapshot to restore from. Record it now, while

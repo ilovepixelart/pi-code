@@ -39,6 +39,8 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
   const appended: Array<{ type: string; data: unknown }> = []
   const emitted: Array<{ channel: string; data: unknown }> = []
   let activeTools = options.activeTools ?? [...ALL_TOOLS]
+  /** Tools registered after setup, as an MCP server that connects late does. */
+  const lateTools: string[] = []
 
   const pi = {
     registerFlag: () => {},
@@ -46,7 +48,7 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     getActiveTools: () => activeTools,
     // The real getAllTools reads the tool-definition registry, so the active-tool
     // restriction does not narrow it.
-    getAllTools: () => ALL_TOOLS.map((name) => ({ name })),
+    getAllTools: () => [...ALL_TOOLS, ...lateTools].map((name) => ({ name })),
     setActiveTools: (next: string[]) => {
       activeTools = next
     },
@@ -100,6 +102,15 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
     emitted,
     shortcuts,
     getActiveTools: () => activeTools,
+    /** pi switches on a tool it already had registered, as a reload does for every extension tool. */
+    activate: (name: string) => {
+      activeTools = [...activeTools, name]
+    },
+    /** pi registers the tool and activates it on top of whatever set is in force. */
+    registerLateTool: (name: string) => {
+      lateTools.push(name)
+      activeTools = [...activeTools, name]
+    },
     runCommand: (name: string, args = '', context: unknown = ctx) => commands.get(name)?.(args, context),
     callTool: (name: string, params: Record<string, unknown>) => tools.get(name)?.('call-1', params) as Promise<ToolResult>,
     /** The { triggerTurn } options the last sendMessage of this customType carried. */
@@ -517,6 +528,60 @@ describe('session restore', () => {
 
     expect(reloaded.getActiveTools()).toContain('edit')
     expect(reloaded.getActiveTools()).toContain('write')
+  })
+
+  it('keeps a tool that registered while plan mode was on, once plan mode ends', async () => {
+    // pi activates a tool registered late (an MCP server past its connect window) on top of
+    // whatever set is in force. Restoring the snapshot taken at entry dropped it for the rest
+    // of the session, which only /reload repaired.
+    const s = setup()
+    await s.runCommand('plan')
+    s.registerLateTool('github_create_issue')
+    expect(s.getActiveTools()).toContain('github_create_issue')
+
+    await s.runCommand('plan')
+
+    expect(s.getActiveTools()).toContain('github_create_issue')
+    expect(s.getActiveTools()).toContain('write')
+  })
+
+  it('does not switch on a tool that was registered but inactive when plan mode began', async () => {
+    // Only a tool registered AFTER the snapshot is late. One the session had narrowed itself
+    // away from stays away: pi force-activates every extension tool on a reload, and putting
+    // those back would undo the narrowing the snapshot exists to preserve.
+    const s = setup({ activeTools: ['read', 'bash', 'edit', 'plan_mode_complete'] })
+    await s.runCommand('plan')
+    s.activate('todo')
+    s.activate('memory')
+
+    await s.runCommand('plan')
+
+    expect(s.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete'])
+  })
+
+  it('applies the same rule to a plan mode resumed from the session', async () => {
+    const first = setup({ activeTools: ['read', 'bash', 'edit', 'plan_mode_complete'] })
+    await first.runCommand('plan')
+    const entries = first.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
+
+    const resumed = setup({ activeTools: ['read', 'bash', 'edit', 'plan_mode_complete'] })
+    await resumed.emit('session_start', { reason: 'resume' }, restoreCtx(resumed, entries))
+    resumed.activate('todo')
+    resumed.registerLateTool('github_create_issue')
+    await resumed.runCommand('plan')
+
+    expect(resumed.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete', 'github_create_issue'])
+  })
+
+  it('keeps a late tool when the plan is executed, too', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    s.registerLateTool('github_create_issue')
+    await s.callTool('plan_mode_complete', { plan: '1. Read the config loader\n2. Add the new field' })
+    await s.emit('agent_end', { messages: [] })
+
+    expect(s.getActiveTools()).toContain('github_create_issue')
+    expect(s.getActiveTools()).toContain('write')
   })
 
   it('restores exactly what was active before plan mode, not the whole registry', async () => {
