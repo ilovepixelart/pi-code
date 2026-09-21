@@ -29,6 +29,15 @@ export function repoRoot(from: string): string | undefined {
   return mainCheckout(root)
 }
 
+/** The root of the checkout a session runs in, or `from` itself outside one. Claude's
+ * `CLAUDE_PROJECT_DIR` is "the project root where the session started", and `/`-rooted path
+ * rules anchor there. In a worktree that is the worktree, not the main checkout repoRoot
+ * resolves to: right for shared state (settings.local.json, auto memory), wrong here, where
+ * a hook script or a rule anchor must land in the tree the session is editing. */
+export function checkoutRoot(from: string): string {
+  return gitRoot(from) ?? from
+}
+
 /** The git checkout at or above `from`, or undefined outside one.
  *
  * Narrower than repoRoot on purpose: repoRoot resolves a worktree to its main checkout,

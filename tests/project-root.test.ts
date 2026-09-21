@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { gitRoot, repoRoot } from '../extensions/internal/project-root.ts'
+import { checkoutRoot, gitRoot, repoRoot } from '../extensions/internal/project-root.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'root-'))
 
@@ -74,6 +75,25 @@ describe('repoRoot', () => {
     writeFileSync(join(tree, '.git'), 'gitdir: ../main/.git/worktrees/feature\n')
     writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), '../../../../feature/.git\n')
     expect(repoRoot(tree)).toBe(main)
+  })
+
+  it('names the worktree, not the main checkout, as the root a session runs in', () => {
+    // repoRoot is the key for shared state; the project a session works in is its own checkout.
+    const { main, tree } = makeWorktree(tempDir())
+    mkdirSync(join(tree, 'src'))
+
+    expect(checkoutRoot(join(tree, 'src'))).toBe(tree)
+    expect(repoRoot(join(tree, 'src'))).toBe(main)
+  })
+
+  it('names the repository root from a subdirectory, and the directory itself outside one', () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(repo, 'src'))
+    expect(checkoutRoot(join(repo, 'src'))).toBe(repo)
+
+    const outside = tempDir()
+    expect(checkoutRoot(outside)).toBe(outside)
   })
 
   it('leaves the checkout as its own root when the .git file says something else', () => {

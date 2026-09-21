@@ -55,7 +55,7 @@ import { matchesPathRules } from './internal/path-rules.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { type InstalledPlugin, installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { ancestorDirs, repoRoot } from './internal/project-root.js'
+import { ancestorDirs, checkoutRoot } from './internal/project-root.js'
 import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from './internal/scope-rules.js'
 import { claudeSettingsChain } from './internal/settings-chain.js'
 import { fileToolTarget } from './internal/tool-target.js'
@@ -206,7 +206,7 @@ function commandVars(ctx: { cwd: string }, filePath: string, plugin?: CommandPlu
     // low|medium|high|xhigh|max, and an unset one stays literal in the body.
     CLAUDE_EFFORT: claudeEffortLevel(varCtx.thinkingLevel),
     CLAUDE_SKILL_DIR: path.dirname(filePath),
-    CLAUDE_PROJECT_DIR: repoRoot(ctx.cwd) ?? ctx.cwd,
+    CLAUDE_PROJECT_DIR: checkoutRoot(ctx.cwd),
     CLAUDE_PLUGIN_ROOT: plugin?.root,
     CLAUDE_PLUGIN_DATA: plugin?.dataDir,
   }
@@ -228,7 +228,7 @@ interface SpanRunner {
  * from running.
  */
 export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, args: string, ctx: { cwd: string }, filePath: string, plugin?: CommandPlugin, options?: { allowShell?: boolean }): Promise<string> {
-  const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
+  const projectRoot = checkoutRoot(ctx.cwd)
   const vars = commandVars(ctx, filePath, plugin)
   const { text: withArgs, consumed } = substituteArgsDetailed(parsed.body, args, parsed.argumentNames ?? [])
   // `${user_config.KEY}` is a plugin-command variable only; leave it literal in an
@@ -415,7 +415,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // pi's read/edit/write accept `file_path` as an alias for `path`; the shared reader
     // handles both, and the paired guard in hooks/matcher.ts reads both too.
     const filePath = fileToolTarget(event) ?? ''
-    const anchors = { cwd: ctx.cwd, projectRoot: repoRoot(ctx.cwd) ?? ctx.cwd, home: os.homedir() }
+    const anchors = { cwd: ctx.cwd, projectRoot: checkoutRoot(ctx.cwd), home: os.homedir() }
     if (filePath && matchesPathRules(filePath, rules, anchors)) return
     return {
       block: true,

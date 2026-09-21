@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { makeWorktree } from './worktree-fixture.ts'
 
 /**
  * Exercises the extension body of mcp.ts (transport selection, tool registration,
@@ -235,9 +236,9 @@ const writeServers = (file: string, servers: Record<string, unknown>): void => {
 }
 
 /** Boots a fresh extension instance against temp-dir user/project config. */
-const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown>; confirm?: () => Promise<boolean> } = {}): Promise<Harness> => {
+const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown>; confirm?: () => Promise<boolean>; cwd?: string } = {}): Promise<Harness> => {
   const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
-  const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
+  const cwd = opts.cwd ?? mkdtempSync(join(tmpdir(), 'mcp-proj-'))
   tempDirs.push(home, cwd)
   hoisted.home = home
   if (opts.user) writeServers(join(home, '.claude.json'), opts.user)
@@ -2529,6 +2530,17 @@ describe('mcp stdio session context', () => {
     // exports to MCP server subprocesses.
     const pluggedEnv = hoisted.transports[1].options.env as Record<string, string>
     expect(pluggedEnv.CLAUDE_PLUGIN_ROOT).toBe('/plug/root')
+  })
+
+  it('sets CLAUDE_PROJECT_DIR to the worktree the session started in', async () => {
+    // Claude: "the project root where the session started". repoRoot named the main checkout.
+    const { main, tree } = makeWorktree(mkdtempSync(join(tmpdir(), 'mcp-wt-')))
+    tempDirs.push(main, tree)
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { srv: { command: 'x' } }, cwd: tree })
+
+    const env = hoisted.transports[0].options.env as Record<string, string>
+    expect(env.CLAUDE_PROJECT_DIR).toBe(tree)
   })
 
   it('declares the roots capability and answers roots/list with the session launch directory', async () => {

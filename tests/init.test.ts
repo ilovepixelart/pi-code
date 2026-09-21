@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import initExtension, { buildInitPrompt, CONTEXT_FILE_CANDIDATES, findExistingContextFile } from '../extensions/init.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 const dirs: string[] = []
 const tempDir = (): string => {
@@ -109,6 +110,18 @@ describe('init extension', () => {
     await s.commands.get('init')?.handler('', ctxFor(cwd))
     expect(s.sent).toHaveLength(1)
     expect(s.sent[0]).toContain('AGENTS.md')
+    expect(s.sent[0].toLowerCase()).toContain('propose improvements')
+    expect(s.sent[0].toLowerCase()).toContain('do not overwrite')
+  })
+
+  it('looks for the context file in the worktree it runs in, not the main checkout', async () => {
+    // The worktree holds AGENTS.md and the main checkout does not. Looking at the main
+    // checkout sent the "create it" prompt, and the agent overwrote the existing file.
+    const { tree } = makeWorktree(tempDir())
+    writeFileSync(join(tree, 'AGENTS.md'), '# existing')
+    mkdirSync(join(tree, 'src'))
+    const s = setup()
+    await s.commands.get('init')?.handler('', ctxFor(join(tree, 'src')))
     expect(s.sent[0].toLowerCase()).toContain('propose improvements')
     expect(s.sent[0].toLowerCase()).toContain('do not overwrite')
   })

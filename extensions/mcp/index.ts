@@ -42,7 +42,7 @@ import { setMcpToolCaller } from '../internal/mcp-call.js'
 import { capForContext } from '../internal/output-guard.js'
 import { installedPlugins } from '../internal/plugins.js'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.js'
-import { repoRoot } from '../internal/project-root.js'
+import { checkoutRoot } from '../internal/project-root.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
 import { errorMessage } from '../internal/values.js'
 import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
@@ -539,7 +539,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // Plugin servers merge under the user scope (plugins are user-installed);
     // the user's own entry wins a name clash with a plugin's. A server toggled off
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
-    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), repoRoot(ctx.cwd) ?? ctx.cwd)
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)
     const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }).filter(([name]) => !disabled.has(name)))
     const scoped = applyServerPolicy(merged, policy)
@@ -622,7 +622,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     projectConnected = false
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
-    sessionDirs = { projectDir: repoRoot(ctx.cwd) ?? ctx.cwd, launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
+    sessionDirs = { projectDir: checkoutRoot(ctx.cwd), launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
     const authUi = authUiFor(ctx)
     sessionAuthUi = authUi
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They

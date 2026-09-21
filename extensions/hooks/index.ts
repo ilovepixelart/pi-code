@@ -104,7 +104,7 @@ import { resolveModelOverride } from '../internal/model-lookup.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
 import { installedPlugins, managedForceEnabled } from '../internal/plugins.js'
 import { approvalRecheck, isProjectApproved } from '../internal/project-approval.js'
-import { repoRoot } from '../internal/project-root.js'
+import { checkoutRoot } from '../internal/project-root.js'
 import { watchSettingsFiles } from '../internal/settings-watch.js'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.js'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
@@ -457,7 +457,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
     // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
     // subdirectory session too.
-    projectDir = repoRoot(ctx.cwd) ?? ctx.cwd
+    projectDir = checkoutRoot(ctx.cwd)
     resolveConfig(ctx.cwd, trusted)
     // Claude picks up direct settings edits mid-session via a file watcher. The reload
     // closes over the cwd value, never ctx: the poll has no awaiter, and every getter of
