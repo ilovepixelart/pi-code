@@ -339,6 +339,21 @@ export function isTransientConnectError(error: unknown): boolean {
   return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|timed out after/.test(String(error))
 }
 
+/** Whether a failed call means the server is gone, not that the call was wrong: a refused,
+ * reset or unreachable connection, the 404 a restarted stateful server answers for a
+ * session it forgot (the spec has the client start a new one), or the SDK's own
+ * closed-connection errors. The SDK fires `Client.onclose` only from `close()`, never when
+ * an HTTP or SSE server disappears, so a call is the one place a dead server shows.
+ * Narrower than isTransientConnectError on purpose: a tool timing out, or a tool's own
+ * 5xx, says nothing about the connection and must not drop a healthy server. The closed
+ * connection is matched by the SDK's message, not its -32000 code, which servers also use
+ * for errors of their own. */
+export function isConnectionLost(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (code === 404 || errorCodes(error).some((one) => TRANSIENT_CODES.has(one))) return true
+  return /\(HTTP 404\)|^Not connected$|^MCP error -32000: Connection closed$/.test(error instanceof Error ? error.message : '')
+}
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** Connect with Claude's first-connection retry: an HTTP or SSE server's transient
