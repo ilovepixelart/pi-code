@@ -38,6 +38,20 @@ export function checkoutRoot(from: string): string {
   return gitRoot(from) ?? from
 }
 
+/** Whether two paths are the same file or directory once symlinks resolve. A session at
+ * `$HOME` finds the user's own `~/.claude/{rules,agents,CLAUDE.md}` as its "project" ones;
+ * comparing by realpath also catches a stow-style symlinked `~/.claude`. */
+export function sameLocation(a: string, b: string): boolean {
+  const resolve = (target: string): string => {
+    try {
+      return fs.realpathSync(target)
+    } catch {
+      return path.resolve(target)
+    }
+  }
+  return resolve(a) === resolve(b)
+}
+
 /** The git checkout at or above `from`, or undefined outside one.
  *
  * Narrower than repoRoot on purpose: repoRoot resolves a worktree to its main checkout,

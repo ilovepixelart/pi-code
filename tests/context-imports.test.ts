@@ -1324,6 +1324,35 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
     expect(wired.instructionEvents()).toHaveLength(1)
   })
 
+  it('injects it once when the session starts in the home directory', async () => {
+    // At cwd == $HOME the nearest ./.claude/CLAUDE.md is ~/.claude/CLAUDE.md itself, which
+    // then loaded again as a Project block: the user's file sat in the prompt twice and
+    // was announced as both a User and a Project instruction.
+    const home = realpathSync(hoisted.home)
+    const file = writeUserClaudeMd('USER GLOBAL RULES')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(home))
+    const prompt = await wired.fire(home)
+
+    expect(prompt.split('USER GLOBAL RULES')).toHaveLength(2)
+    expect(wired.instructionEvents()).toEqual([{ file_path: file, memory_type: 'User', load_reason: 'session_start' }])
+  })
+
+  it("does not ask to approve the project for the user's own file at home", async () => {
+    // The file is the user's; there is no repository content to approve.
+    const home = realpathSync(hoisted.home)
+    writeUserClaudeMd('USER GLOBAL RULES')
+    const confirm = vi.fn(async () => false)
+
+    const wired = wireWithBus()
+    await wired.start({ cwd: home, isProjectTrusted: () => false, hasUI: true, ui: { notify: () => {}, confirm } })
+    const prompt = await wired.fire(home)
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(prompt).toContain('USER GLOBAL RULES')
+  })
+
   it('places the user block after the managed block and before pi native project blocks', async () => {
     // Claude's order: managed, then user, then project.
     writeUserClaudeMd('USER RULES')

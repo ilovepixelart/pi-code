@@ -76,7 +76,7 @@ import { managedSettingsPath, readManagedSettings } from './internal/managed-set
 import { capForContext, sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isGatedFileApproved, isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
-import { ancestorFiles, checkoutRoot, findNearestFile, repoRoot } from './internal/project-root.js'
+import { ancestorFiles, checkoutRoot, findNearestFile, repoRoot, sameLocation } from './internal/project-root.js'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
@@ -975,7 +975,11 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // ./.claude/CLAUDE.md (nearest at or above cwd) is repo-controlled too, so both
     // ride the one approval decision.
     const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
-    const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+    const nearestDotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+    // From $HOME (or under a dotfiles repo rooted there) the nearest one is the user's own
+    // ~/.claude/CLAUDE.md, already loaded above as User memory: not a project file, so no
+    // second block and nothing to approve.
+    const dotClaudeMd = nearestDotClaudeMd !== null && sameLocation(nearestDotClaudeMd, userClaudeMd) ? null : nearestDotClaudeMd
     if ((candidates.length === 0 && dotClaudeMd === null) || !(await isProjectApproved(ctx))) return memory
 
     for (const candidate of candidates) {
