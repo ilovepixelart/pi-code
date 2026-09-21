@@ -605,12 +605,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
       ctx.ui.notify(decision.reason ?? 'Prompt blocked by hook', 'error')
       return { action: 'handled' }
     }
-    // Claude injects a UserPromptSubmit hook's context ahead of the prompt; transform is
-    // pi's seam for rewriting the submitted text. The prompt itself always survives:
     // "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
-    // alongside it". suppressOriginalPrompt scopes to the block message, which never
+    // alongside it", as a system reminder with no visible transcript entry. So the context
+    // is a hidden message next to the prompt and the prompt text is left alone: prepended,
+    // it moved a `/skill:` or `/template` invocation off position 0 and pi stopped
+    // expanding it. pi appends a "nextTurn" message to this very prompt (after this handler
+    // runs); one typed mid-stream never reaches before_agent_start, so it is queued in the
+    // prompt's own mode. suppressOriginalPrompt scopes to the block message, which never
     // carries the prompt here, so it needs nothing of its own.
-    if (decision.context) return { action: 'transform', text: `${decision.context}\n\n${event.text}` }
+    if (decision.context) pi.sendMessage({ customType: 'claude-hook-context', content: decision.context, display: false }, { deliverAs: event.streamingBehavior ?? 'nextTurn' })
     return { action: 'continue' }
   })
 

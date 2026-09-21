@@ -211,7 +211,7 @@ const setupExtension = () => {
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
-    input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
+    input: (text: string, source = 'interactive', streamingBehavior?: 'steer' | 'followUp') => handler('input')({ text, source, streamingBehavior }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
     modelSelect: (to: string, from?: string, source = 'set') => handler('model_select')({ model: { id: to, name: to }, previousModel: from ? { id: from, name: from } : undefined, source }, defaultCtx),
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
@@ -1227,16 +1227,50 @@ describe('hooks extension UserPromptSubmit', () => {
     expect(commandsRun()).toEqual([])
   })
 
-  it('injects a hook additionalContext ahead of the prompt via transform', async () => {
+  // Claude: "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+  // alongside it", as "a system reminder that starts with the hook's name", and "neither
+  // channel produces a visible transcript entry". The context is a hidden message next to the
+  // prompt, never text inside it: prepended, it moved a `/skill:` or `/template` invocation
+  // off position 0, so pi and the skills shim stopped expanding it, on every prompt for as
+  // long as the hook was configured.
+  const contextMessages = (ext: Awaited<ReturnType<typeof withPromptHooks>>) => ext.sent.filter((entry) => (entry.message as { customType?: string }).customType === 'claude-hook-context')
+
+  it('injects a hook additionalContext as a hidden message alongside the prompt', async () => {
     const ext = await withPromptHooks([{ command: 'ctx' }])
     script('ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'repo is frozen' } })] })
-    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'repo is frozen\n\ndeploy' })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toEqual([{ message: { customType: 'claude-hook-context', content: 'repo is frozen', display: false }, options: { deliverAs: 'nextTurn' } }])
   })
 
   it('injects plain stdout as context', async () => {
     const ext = await withPromptHooks([{ command: 'ctx' }])
     script('ctx', { stdout: ['remember the changelog'] })
-    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'remember the changelog\n\ndeploy' })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)[0]?.message).toMatchObject({ content: 'remember the changelog', display: false })
+  })
+
+  it.each(['/skill:deploy prod', '/review src/a.ts', '  /skill:deploy'])('leaves the slash invocation %j to pi and the skills shim', async (text) => {
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: ['Today is Sunday.'] })
+    expect(await ext.input(text)).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toHaveLength(1)
+  })
+
+  it('queues the context the way pi queues the prompt while the agent is streaming', async () => {
+    // A steer or follow-up typed mid-run never reaches before_agent_start, so a "nextTurn"
+    // message would wait for the next prompt: it goes out in the same mode as the prompt.
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: ['keep it short'] })
+    await ext.input('and this too', 'interactive', 'steer')
+    await ext.input('and that', 'interactive', 'followUp')
+    expect(contextMessages(ext).map((entry) => entry.options)).toEqual([{ deliverAs: 'steer' }, { deliverAs: 'followUp' }])
+  })
+
+  it('sends no message when the hook adds no context', async () => {
+    const ext = await withPromptHooks([{ command: 'quiet' }])
+    script('quiet', { stdout: [] })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toEqual([])
   })
 
   it('blocks a prompt a hook denies and surfaces the reason', async () => {
@@ -2783,9 +2817,9 @@ describe('hooks suppressOriginalPrompt', () => {
     script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX","suppressOriginalPrompt":true}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'suppress' }] }] })
 
-    const result = (await ext.input('the original prompt')) as { action: string; text?: string }
-    expect(result.action).toBe('transform')
-    expect(result.text).toBe('CTX\n\nthe original prompt')
+    // The prompt is neither replaced nor rewritten: the context is a message beside it.
+    expect(await ext.input('the original prompt')).toEqual({ action: 'continue' })
+    expect(ext.sent.map((entry) => (entry.message as { content?: string }).content)).toEqual(['CTX'])
   })
 
   it('never echoes the prompt in a block message, which is what the field asks for', async () => {
@@ -2801,8 +2835,8 @@ describe('hooks suppressOriginalPrompt', () => {
     script('ctx', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX"}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'ctx' }] }] })
 
-    const result = (await ext.input('keep me')) as { action: string; text?: string }
-    expect(result.text).toBe('CTX\n\nkeep me')
+    expect(await ext.input('keep me')).toEqual({ action: 'continue' })
+    expect(ext.sent.map((entry) => (entry.message as { content?: string }).content)).toEqual(['CTX'])
   })
 })
 
