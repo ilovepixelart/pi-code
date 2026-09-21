@@ -736,6 +736,24 @@ describe('startBackgroundRun', () => {
     expect(completed).toMatchObject([{ id, agent: 'scout', task: 'survey', state: 'done', exitCode: 0, output: 'all done', turns: 1 }])
   })
 
+  it('keeps a multi-byte character that a pipe read cut in two', async () => {
+    // A pipe delivers whatever bytes are ready, so a read can end inside a character. Each
+    // chunk was decoded on its own, and both halves became U+FFFD: "fișiere" came back as
+    // "fi��iere", and CJK or box-drawing output was hit constantly.
+    const { startBackgroundRun } = await loadBackground()
+    const completed: Array<Record<string, unknown>> = []
+    const bytes = Buffer.from(messageEnd('assistant', 'fișiere 日本語'))
+    const cut = bytes.indexOf(Buffer.from('ș')) + 1
+
+    startBackgroundRun('scout', 'survey', invocation, (run) => completed.push({ ...run }))
+    const child = spawned.children[0]
+    child.stdout.emit('data', bytes.subarray(0, cut))
+    child.stdout.emit('data', bytes.subarray(cut))
+    child.emit('close', 0)
+
+    expect(completed[0].output).toBe('fișiere 日本語')
+  })
+
   it('concatenates stdout chunks before parsing', async () => {
     const { startBackgroundRun } = await loadBackground()
     const completed: Array<Record<string, unknown>> = []

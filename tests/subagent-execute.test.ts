@@ -59,6 +59,8 @@ class FakeChild extends EventEmitter {
 interface Script {
   /** Raw stdout chunks, emitted in order. Chunk boundaries need not align with lines. */
   stdout?: string[]
+  /** Stdout as bytes, for a read that ends inside a multi-byte character. Emitted first. */
+  stdoutBytes?: Buffer[]
   stderr?: string[]
   /** Exit code handed to the 'close' event. */
   exitCode?: number | null
@@ -84,6 +86,7 @@ let scripts: Map<string, Script>
 const script = (task: string, s: Script) => scripts.set(`Task: ${task}`, s)
 
 const drive = (child: FakeChild, s: Script) => {
+  for (const chunk of s.stdoutBytes ?? []) child.stdout.emit('data', chunk)
   for (const chunk of s.stdout ?? []) child.stdout.emit('data', Buffer.from(chunk))
   for (const chunk of s.stderr ?? []) child.stderr.emit('data', Buffer.from(chunk))
   if (s.fail) child.emit('error', new Error('spawn ENOENT'))
@@ -670,6 +673,20 @@ describe('runSingleAgent process handling', () => {
 
     expect(results(result)[0]).toMatchObject({ exitCode: 1 })
     expect(results(result)[0].stderr).toMatch(/descriptor|EMFILE/i)
+  })
+
+  it('keeps a multi-byte character that a pipe read cut in two', async () => {
+    // A pipe delivers whatever bytes are ready, so a read can end inside a character. Each
+    // chunk was decoded on its own, and both halves became U+FFFD.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({})], projectAgentsDir: null })
+    const bytes = Buffer.from(say('fișiere 日本語'))
+    const cut = bytes.indexOf(Buffer.from('ș')) + 1
+    script('inspect', { stdoutBytes: [bytes.subarray(0, cut), bytes.subarray(cut)] })
+
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('fișiere 日本語')
+    expect(text(result)).not.toContain('\uFFFD')
   })
 
   it('reports an unknown agent without spawning anything', async () => {

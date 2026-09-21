@@ -12,6 +12,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { Readable } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
@@ -123,6 +124,14 @@ function appendWorktreeNote(result: SingleResult, worktree: AgentWorktree): void
  * with the output. A no-op for uncapped runs. */
 function appendPartialNote(result: SingleResult): void {
   if (result.partial) appendResultNote(result, '[Output is partial: the subagent stopped at its maxTurns limit.]')
+}
+
+/** A decoder for one child stream. A pipe delivers whatever bytes are ready, so a read can
+ * end inside a multi-byte character: decoded on its own, each half became U+FFFD. This one
+ * holds the incomplete bytes until the rest arrive. One per stream, never shared. */
+export function utf8Chunks(): (chunk: Buffer | string) => string {
+  const decoder = new StringDecoder('utf8')
+  return (chunk) => (typeof chunk === 'string' ? chunk : decoder.write(chunk))
 }
 
 /** The pi child, or the error spawning it threw synchronously. Node normally
@@ -328,8 +337,10 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
         if (onAbort && signal) signal.removeEventListener('abort', onAbort)
       }
 
+      const decodeStdout = utf8Chunks()
+      const decodeStderr = utf8Chunks()
       proc.stdout.on('data', (data) => {
-        buffer += data.toString()
+        buffer += decodeStdout(data)
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
         for (const line of lines) processLine(line)
@@ -337,7 +348,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       proc.stdout.on('error', () => {})
 
       proc.stderr.on('data', (data) => {
-        currentResult.stderr += data.toString()
+        currentResult.stderr += decodeStderr(data)
       })
       proc.stderr.on('error', () => {})
 
