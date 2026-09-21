@@ -27,7 +27,7 @@ import { publishInstructionLoad } from './internal/instruction-events.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { type CompiledGlob, compileGlobs, matchesCompiledGlobs } from './internal/path-rules.js'
 import { isProjectApproved } from './internal/project-approval.js'
-import { findNearestDir } from './internal/project-root.js'
+import { findNearestDir, sameLocation } from './internal/project-root.js'
 import { stripBlockComments } from './internal/strip-comments.js'
 import { fileToolTarget } from './internal/tool-target.js'
 
@@ -303,7 +303,10 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     globalRules = readRules(globalRulesDir, isExcluded)
     // Nearest at-or-above cwd, so a subdirectory session still reads the rules the
     // approval walk gated on.
-    const projectRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
+    // Not the user's own rules dir: from $HOME (or under a dotfiles repo rooted there)
+    // the nearest one is ~/.claude/rules, which the global load above already read.
+    const nearestRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
+    const projectRulesDir = nearestRulesDir !== null && sameLocation(nearestRulesDir, globalRulesDir) ? null : nearestRulesDir
     projectRules = projectRulesDir ? readRules(projectRulesDir, isExcluded) : EMPTY_RULES
 
     // Global globs are relative to cwd; project globs to the project root (the dir

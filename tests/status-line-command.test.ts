@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, settingsChanged: undefined as (() => void) | undefined, fsReads: [] as string[], kills: [] as number[] }))
 
@@ -283,6 +284,22 @@ describe('statusLine command contract', () => {
 
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
     expect(payload.exceeds_200k_tokens).toBe(true)
+  })
+
+  it('anchors workspace.project_dir at the worktree a session runs in, not the main checkout', async () => {
+    const { main, tree } = makeWorktree(tempDir())
+    const sub = join(tree, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(sub)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const workspace = (hoisted.runs[0].payload as { workspace: { project_dir: string } }).workspace
+    expect(workspace.project_dir).toBe(tree)
+    expect(workspace.project_dir).not.toBe(main)
+    await handlers.get('session_shutdown')?.({}, ctx)
   })
 
   it('anchors workspace.project_dir at the repository, not the starting directory', async () => {

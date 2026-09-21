@@ -200,6 +200,41 @@ describe('agent discovery boundary', () => {
   })
 })
 
+describe('a session started in the home directory', () => {
+  it("reads the user's own ~/.claude/agents as user agents, not project agents", () => {
+    // At cwd == $HOME the nearest ./.claude/agents is ~/.claude/agents, the user's own
+    // config. Loaded as project scope it hit the repo-controlled-agent gate: refused
+    // outright under `pi -p`, a "trusted repositories only" prompt on every run otherwise.
+    const home = realpathSync(hoisted.home)
+    mkdirSync(join(home, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'agents', 'mine.md'), agentFile('mine'))
+
+    const found = discoverAgents(home, 'both')
+    expect(found.agents.find((a) => a.name === 'mine')?.source).toBe('user')
+  })
+
+  it('still offers only user agents when a dotfiles repo makes $HOME the repository root', () => {
+    const home = realpathSync(hoisted.home)
+    mkdirSync(join(home, '.git'), { recursive: true })
+    mkdirSync(join(home, 'notes'), { recursive: true })
+    mkdirSync(join(home, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'agents', 'mine.md'), agentFile('mine'))
+
+    const found = discoverAgents(join(home, 'notes'), 'both')
+    expect(found.agents.find((a) => a.name === 'mine')?.source).toBe('user')
+  })
+
+  it('keeps a genuine project agent one level below home as a project agent', () => {
+    const home = realpathSync(hoisted.home)
+    const repo = join(home, 'repo')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    mkdirSync(join(repo, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(repo, '.claude', 'agents', 'theirs.md'), agentFile('theirs'))
+
+    expect(discoverAgents(repo, 'both').agents.find((a) => a.name === 'theirs')?.source).toBe('project')
+  })
+})
+
 describe('monorepo agent discovery', () => {
   it('finds root-level project agents from a subdirectory session, nearest winning a name clash', () => {
     // Claude: "every .claude/agents/ between there and the repository root is

@@ -76,7 +76,7 @@ import { managedSettingsPath, readManagedSettings } from './internal/managed-set
 import { capForContext, sliceBytes } from './internal/output-guard.js'
 import { globToRegExpSource } from './internal/path-rules.js'
 import { isGatedFileApproved, isProjectApproved, isProjectApprovedSilently } from './internal/project-approval.js'
-import { ancestorFiles, findNearestFile, repoRoot } from './internal/project-root.js'
+import { ancestorFiles, checkoutRoot, findNearestFile, repoRoot, sameLocation } from './internal/project-root.js'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.js'
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
@@ -293,7 +293,10 @@ export function rootsForImporter(importer: string, home: string, cwd: string, ex
   // granting the importer's own directory. pi also loads home-level context
   // files (~/AGENTS.md) that sit outside the config roots; their directory is
   // $HOME, and allowing it would let @.ssh/... read into every session's prompt.
-  return realRoots([cwd, repoRoot(cwd) ?? cwd])
+  // The checkout the session runs in, and the main checkout too: in a worktree they are
+  // siblings, and the checkout's own files (docs/, a sibling CLAUDE.md) are as much the
+  // project as the shared root a CLAUDE.local.md may live at.
+  return realRoots([cwd, checkoutRoot(cwd), repoRoot(cwd) ?? cwd])
 }
 
 /** Claude's env gate for loading memory files from --add-dir directories. */
@@ -972,7 +975,11 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // ./.claude/CLAUDE.md (nearest at or above cwd) is repo-controlled too, so both
     // ride the one approval decision.
     const candidates = ancestorFiles(ctx.cwd, 'CLAUDE.local.md')
-    const dotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+    const nearestDotClaudeMd = findNearestFile(ctx.cwd, path.join('.claude', 'CLAUDE.md'))
+    // From $HOME (or under a dotfiles repo rooted there) the nearest one is the user's own
+    // ~/.claude/CLAUDE.md, already loaded above as User memory: not a project file, so no
+    // second block and nothing to approve.
+    const dotClaudeMd = nearestDotClaudeMd !== null && sameLocation(nearestDotClaudeMd, userClaudeMd) ? null : nearestDotClaudeMd
     if ((candidates.length === 0 && dotClaudeMd === null) || !(await isProjectApproved(ctx))) return memory
 
     for (const candidate of candidates) {
@@ -1029,7 +1036,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
 
     if (envCache?.cwd !== cwd) {
       const managedNow = readManagedSettings()
-      envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: repoRoot(cwd) ?? cwd }
+      envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: checkoutRoot(cwd) }
     }
     const { managed, excludeGlobs, projectRoot } = envCache
     // CLAUDE_CODE_DISABLE_CLAUDE_MDS also covers pi's own auto-discovered native context
@@ -1136,7 +1143,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     if (touchedDir === undefined) return
 
     const home = os.homedir()
-    const projectRoot = repoRoot(ctx.cwd) ?? ctx.cwd
+    const projectRoot = checkoutRoot(ctx.cwd)
     const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, home, projectApproved), readManagedSettings())
     const load: NestedLoadContext = { home, cwd: ctx.cwd, realCwd, projectRoot, excludeGlobs, touched, launchLoaded: launchLoadedPaths }
     const { bodies, events } = nestedContextAttachments(touchedDir, load, nestedLoaded, gatedFilesApproved)

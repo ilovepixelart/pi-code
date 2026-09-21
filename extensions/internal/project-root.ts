@@ -29,6 +29,29 @@ export function repoRoot(from: string): string | undefined {
   return mainCheckout(root)
 }
 
+/** The root of the checkout a session runs in, or `from` itself outside one. Claude's
+ * `CLAUDE_PROJECT_DIR` is "the project root where the session started", and `/`-rooted path
+ * rules anchor there. In a worktree that is the worktree, not the main checkout repoRoot
+ * resolves to: right for shared state (settings.local.json, auto memory), wrong here, where
+ * a hook script or a rule anchor must land in the tree the session is editing. */
+export function checkoutRoot(from: string): string {
+  return gitRoot(from) ?? from
+}
+
+/** Whether two paths are the same file or directory once symlinks resolve. A session at
+ * `$HOME` finds the user's own `~/.claude/{rules,agents,CLAUDE.md}` as its "project" ones;
+ * comparing by realpath also catches a stow-style symlinked `~/.claude`. */
+export function sameLocation(a: string, b: string): boolean {
+  const resolve = (target: string): string => {
+    try {
+      return fs.realpathSync(target)
+    } catch {
+      return path.resolve(target)
+    }
+  }
+  return resolve(a) === resolve(b)
+}
+
 /** The git checkout at or above `from`, or undefined outside one.
  *
  * Narrower than repoRoot on purpose: repoRoot resolves a worktree to its main checkout,

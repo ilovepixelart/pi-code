@@ -36,7 +36,7 @@ import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
-import { gitRoot, repoRoot } from './internal/project-root.js'
+import { checkoutRoot, gitRoot } from './internal/project-root.js'
 import { readSettingsChain } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { readActiveStyleName, settingsFiles } from './output-styles.js'
@@ -283,7 +283,7 @@ export default function statusLine(pi: ExtensionAPI) {
       // directory. added_dirs comes from the --add-dir flag pi-code registers.
       workspace: {
         current_dir: ctx.cwd,
-        project_dir: repoRoot(ctx.cwd) ?? ctx.cwd,
+        project_dir: checkoutRoot(ctx.cwd),
         git_worktree: isGitWorktree(ctx.cwd),
         added_dirs: addedDirs(),
       },

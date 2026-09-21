@@ -23,7 +23,7 @@ export { CONTEXT_FILE_CANDIDATES }
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { repoRoot } from './internal/project-root.js'
+import { checkoutRoot } from './internal/project-root.js'
 
 function statOf(target: string): fs.Stats | undefined {
   try {
@@ -73,7 +73,7 @@ export default function initExtension(pi: ExtensionAPI) {
   pi.registerCommand('init', {
     description: 'Analyze the codebase and create or improve the project context file (AGENTS.md)',
     handler: async (_args, ctx) => {
-      const root = repoRoot(ctx.cwd) ?? ctx.cwd
+      const root = checkoutRoot(ctx.cwd)
       const existing = findExistingContextFile(root)
       const cursorRules = statOf(path.join(root, '.cursor', 'rules'))?.isDirectory() === true || statOf(path.join(root, '.cursorrules'))?.isFile() === true
       const copilotRules = statOf(path.join(root, '.github', 'copilot-instructions.md'))?.isFile() === true

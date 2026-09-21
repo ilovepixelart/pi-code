@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -26,6 +26,7 @@ import contextImports, {
 } from '../extensions/context-imports.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
 import { managedSettingsPath, readManagedSettings, setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 // The extension reads ~/.claude/settings.json (claudeMdExcludes) and the OS
 // managed-settings.json; point both at throwaway dirs so the developer's real
@@ -1323,6 +1324,35 @@ describe('user CLAUDE.md (~/.claude/CLAUDE.md)', () => {
     expect(wired.instructionEvents()).toHaveLength(1)
   })
 
+  it('injects it once when the session starts in the home directory', async () => {
+    // At cwd == $HOME the nearest ./.claude/CLAUDE.md is ~/.claude/CLAUDE.md itself, which
+    // then loaded again as a Project block: the user's file sat in the prompt twice and
+    // was announced as both a User and a Project instruction.
+    const home = realpathSync(hoisted.home)
+    const file = writeUserClaudeMd('USER GLOBAL RULES')
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(home))
+    const prompt = await wired.fire(home)
+
+    expect(prompt.split('USER GLOBAL RULES')).toHaveLength(2)
+    expect(wired.instructionEvents()).toEqual([{ file_path: file, memory_type: 'User', load_reason: 'session_start' }])
+  })
+
+  it("does not ask to approve the project for the user's own file at home", async () => {
+    // The file is the user's; there is no repository content to approve.
+    const home = realpathSync(hoisted.home)
+    writeUserClaudeMd('USER GLOBAL RULES')
+    const confirm = vi.fn(async () => false)
+
+    const wired = wireWithBus()
+    await wired.start({ cwd: home, isProjectTrusted: () => false, hasUI: true, ui: { notify: () => {}, confirm } })
+    const prompt = await wired.fire(home)
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(prompt).toContain('USER GLOBAL RULES')
+  })
+
   it('places the user block after the managed block and before pi native project blocks', async () => {
     // Claude's order: managed, then user, then project.
     writeUserClaudeMd('USER RULES')
@@ -2064,6 +2094,21 @@ describe('subdirectory context files load on demand', () => {
 
     expect(texts(result).join('\n')).toContain('HEAD RULES')
     expect(texts(result).join('\n').length).toBeLessThan(120_000)
+  })
+
+  it('lets a worktree CLAUDE.md import files inside its own checkout, from a subdirectory session', () => {
+    // The roots were [cwd, repoRoot(cwd)], and repoRoot names the main checkout, a sibling of
+    // the worktree. From feature/src an in-repo `@docs/style.md` was "outside the project": the
+    // external-import dialog opened and the content was missing. From the worktree root the
+    // same import loaded.
+    const { tree } = makeWorktree(tempDir())
+    mkdirSync(join(tree, 'docs'), { recursive: true })
+    mkdirSync(join(tree, 'src'))
+    writeFileSync(join(tree, 'docs', 'style.md'), 'STYLE RULES')
+
+    const roots = rootsForImporter(join(tree, 'CLAUDE.md'), tempDir(), join(tree, 'src'))
+    const inside = realpathSync(join(tree, 'docs', 'style.md'))
+    expect(roots.some((root) => inside === root || inside.startsWith(root + sep))).toBe(true)
   })
 
   it('does not follow an import commented out in a nested CLAUDE.md', async () => {

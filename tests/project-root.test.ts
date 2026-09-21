@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { gitRoot, repoRoot } from '../extensions/internal/project-root.ts'
+import { checkoutRoot, gitRoot, repoRoot, sameLocation } from '../extensions/internal/project-root.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'root-'))
 
@@ -76,6 +77,25 @@ describe('repoRoot', () => {
     expect(repoRoot(tree)).toBe(main)
   })
 
+  it('names the worktree, not the main checkout, as the root a session runs in', () => {
+    // repoRoot is the key for shared state; the project a session works in is its own checkout.
+    const { main, tree } = makeWorktree(tempDir())
+    mkdirSync(join(tree, 'src'))
+
+    expect(checkoutRoot(join(tree, 'src'))).toBe(tree)
+    expect(repoRoot(join(tree, 'src'))).toBe(main)
+  })
+
+  it('names the repository root from a subdirectory, and the directory itself outside one', () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    mkdirSync(join(repo, 'src'))
+    expect(checkoutRoot(join(repo, 'src'))).toBe(repo)
+
+    const outside = tempDir()
+    expect(checkoutRoot(outside)).toBe(outside)
+  })
+
   it('leaves the checkout as its own root when the .git file says something else', () => {
     // A submodule's .git file points at <super>/.git/modules/<name>, not worktrees, and
     // an unreadable or malformed one must not resolve to a guess.
@@ -108,5 +128,32 @@ describe('repoRoot', () => {
 
     expect(gitRoot(tree)).toBe(tree)
     expect(repoRoot(tree)).toBe(main)
+  })
+})
+
+describe('sameLocation', () => {
+  it('is true for a path and itself, and false for two different directories', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'a'))
+    mkdirSync(join(dir, 'b'))
+
+    expect(sameLocation(join(dir, 'a'), join(dir, 'a'))).toBe(true)
+    expect(sameLocation(join(dir, 'a'), join(dir, 'b'))).toBe(false)
+  })
+
+  it('sees through a symlinked directory, the way a stow-managed ~/.claude is laid out', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'dotfiles', 'claude', 'rules'), { recursive: true })
+    mkdirSync(join(dir, 'home'))
+    symlinkSync(join(dir, 'dotfiles', 'claude'), join(dir, 'home', '.claude'))
+
+    expect(sameLocation(join(dir, 'home', '.claude', 'rules'), join(dir, 'dotfiles', 'claude', 'rules'))).toBe(true)
+  })
+
+  it('compares by resolved path when neither exists, without throwing', () => {
+    const dir = tempDir()
+
+    expect(sameLocation(join(dir, 'gone', '..', 'missing'), join(dir, 'missing'))).toBe(true)
+    expect(sameLocation(join(dir, 'missing'), join(dir, 'other'))).toBe(false)
   })
 })

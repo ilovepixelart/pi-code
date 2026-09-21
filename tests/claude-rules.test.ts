@@ -377,6 +377,32 @@ describe('extension wiring', () => {
     expect(prompt).toContain('Use parameterized queries.')
   })
 
+  it("loads the user's rules once when the session starts in the home directory", async () => {
+    // At cwd == $HOME the nearest ./.claude/rules is ~/.claude/rules itself, which then
+    // loaded a second time as project rules: every inline rule appeared twice in the
+    // prompt and every scoped rule attached twice.
+    const home = realpathSync(hoisted.home)
+    mkdirSync(join(home, '.claude', 'rules'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'rules', 'style.md'), 'Prefer guard clauses.')
+
+    const prompt = await sessionPrompt({ cwd: home, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+
+    expect(prompt.split('Prefer guard clauses.')).toHaveLength(2)
+  })
+
+  it("loads the user's rules once from a subdirectory of a dotfiles repo rooted at home", async () => {
+    const home = realpathSync(hoisted.home)
+    mkdirSync(join(home, '.git'), { recursive: true })
+    mkdirSync(join(home, 'notes'), { recursive: true })
+    mkdirSync(join(home, '.claude', 'rules'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'rules', 'style.md'), 'Prefer guard clauses.')
+
+    const cwd = join(home, 'notes')
+    const prompt = await sessionPrompt({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
+
+    expect(prompt.split('Prefer guard clauses.')).toHaveLength(2)
+  })
+
   it('resolves the global rules directory under CLAUDE_CONFIG_DIR', async () => {
     // Global rules live under the relocated config dir when CLAUDE_CONFIG_DIR is set,
     // not ~/.claude/rules.

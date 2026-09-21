@@ -14,7 +14,7 @@ import { claudeConfigDir } from '../internal/config-dir.js'
 import { parseClaudeFrontmatter } from '../internal/frontmatter.js'
 import { findModel } from '../internal/model-lookup.js'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
-import { ancestorDirs, findNearestDir } from '../internal/project-root.js'
+import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.js'
 import { errorMessage } from '../internal/values.js'
 
 /**
@@ -371,7 +371,12 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   // Claude scans every .claude/agents between cwd and the repository root, the
   // definition closest to cwd winning a name clash; root-first load order makes
   // the nearer directory's entry overwrite in the map below.
-  const projectClaudeDirs = ancestorDirs(cwd, path.join('.claude', 'agents')).reverse()
+  // The user's own directory is not a project one: at $HOME, or under a dotfiles repo
+  // rooted there, the walk reaches ~/.claude/agents and would gate the user's agents as
+  // repo-controlled.
+  const projectClaudeDirs = ancestorDirs(cwd, path.join('.claude', 'agents'))
+    .filter((dir) => !sameLocation(dir, claudeUserDir))
+    .reverse()
 
   // Plugins load after builtins and before the user's own dirs, so a user agent
   // wins a name clash with a plugin's, and ~/.pi/agent/agents wins over ~/.claude.

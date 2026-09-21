@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import commandsExtension, { collectCommands, commandDirs, expandCommand, SHELL_DISABLED_PLACEHOLDER, shellExecutionDisabled, slashCommandBudget, slashCommandToolDescription } from '../extensions/commands.ts'
 import { parseCommandFile } from '../extensions/internal/command-file.js'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', pwshBinary: undefined as string | undefined }))
 vi.mock('node:os', async (importOriginal) => {
@@ -223,6 +224,24 @@ describe('commands extension', () => {
 
     expect(s.sent[0]).toContain('git status')
     expect(s.sent[0]).toContain('NOTE_BODY')
+  })
+
+  it('exposes the worktree as CLAUDE_PROJECT_DIR, and anchors a /-rooted path rule there', async () => {
+    // Claude: "the project root where the session started". repoRoot names the main checkout,
+    // so a span acted on it and a `Read(/docs/**)` scope judged paths under a directory the
+    // session is not editing: every read in the worktree was blocked.
+    const { main, tree } = makeWorktree(tempDir())
+    writeCommand(tree, 'ctx.md', '---\nallowed-tools: Read(/docs/**), Bash\n---\nroot: ${CLAUDE_PROJECT_DIR}\nhere: !`pwd`')
+    const s = setup(tree)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ctx')?.handler('', s.ctx)
+
+    expect(s.execCalls[0].shell).toContain(`export CLAUDE_PROJECT_DIR='${tree}'`)
+    expect(s.execCalls[0].shell).not.toContain(main)
+    expect(s.sent[0]).toContain(`root: ${tree}`)
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: join(tree, 'docs', 'guide.md') } }, s.ctx)).toBeUndefined()
+    const outside = (await s.handlers.get('tool_call')?.({ toolName: 'read', input: { path: join(tree, 'src', 'secret.ts') } }, s.ctx)) as { block?: boolean }
+    expect(outside?.block).toBe(true)
   })
 
   it('exposes CLAUDE_PROJECT_DIR to a bash span, as hooks do', async () => {
