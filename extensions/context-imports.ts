@@ -601,7 +601,8 @@ function nestedContextBlock(file: string, dir: string, load: NestedLoadContext):
   // a body already in the system prompt.
   const seen = new Set([...load.launchLoaded, real])
   const budget = createImportBudget()
-  const imports = collectImports(content, dir, load.home, rootsForImporter(real, load.home, load.cwd), seen, {
+  // The stripped body, as at launch: a commented-out @import never expands.
+  const imports = collectImports(body, dir, load.home, rootsForImporter(real, load.home, load.cwd), seen, {
     importer: real,
     isExcluded: (absPath) => isExcludedPath(absPath, load.excludeGlobs, load.home),
     budget,
