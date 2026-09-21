@@ -874,8 +874,15 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // @import cannot pay for a body that is already there.
   let launchLoadedPaths: string[] = []
   // Nested CLAUDE.md/CLAUDE.local.md files already attached this session, so a second
-  // read in the same subtree does not repeat them.
+  // read in the same subtree does not repeat them. Emptied when compaction or /tree takes
+  // the tool results that carried them out of context: Claude reloads them "as Claude
+  // reads files they apply to".
   const nestedLoaded = new Set<string>()
+  const forgetNested = (): void => {
+    nestedLoaded.clear()
+  }
+  pi.on('session_compact', forgetNested)
+  pi.on('session_tree', forgetNested)
   // Instruction loads already announced on the shared bus, keyed reason:path.
   // before_agent_start fires every turn, so without this a configured
   // InstructionsLoaded hook would fire once per file per turn.

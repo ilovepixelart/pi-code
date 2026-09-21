@@ -2133,6 +2133,24 @@ describe('subdirectory context files load on demand', () => {
     expect(texts(second).join('\n')).not.toContain('SRC RULES')
   })
 
+  // Claude: after /compact "nested CLAUDE.md files in subdirectories and rules with paths:
+  // frontmatter reload as Claude reads files they apply to". Compaction folds the tool result
+  // that carried the memory into a summary, and /tree moves to a branch that never had it, so
+  // "once per session" left the instructions gone until a new session.
+  it.each(['session_compact', 'session_tree'])('attaches a subdirectory CLAUDE.md again after %s took the earlier one out of context', async (event) => {
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    expect(texts(await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })).join('\n')).toContain('SRC RULES')
+    expect(texts(await wired.handlers.get('tool_result')?.(readResult(join('src', 'b.ts')), { cwd })).join('\n')).not.toContain('SRC RULES')
+
+    await wired.handlers.get(event)?.({ type: event }, approvingCtx(cwd))
+
+    const after = await wired.handlers.get('tool_result')?.(readResult(join('src', 'c.ts')), { cwd })
+    expect(texts(after).join('\n')).toContain('SRC RULES')
+  })
+
   it('attaches every level between the touched file and cwd, deepest last', async () => {
     const cwd = tempDir()
     writeAt(cwd, 'CLAUDE.md', 'ROOT RULES')
