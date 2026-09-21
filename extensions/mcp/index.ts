@@ -49,7 +49,7 @@ import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, 
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
-import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
+import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isConnectionLost, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
 export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.js'
 // Re-exports for consumers: the module split keeps the extension's public surface
@@ -189,6 +189,19 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     return count
   }
 
+  /** A client that is gone: flip the status and free the name so a reconnect can take it.
+   * Claude reconnects a dropped remote server with exponential backoff; stdio servers are
+   * local processes and are not reconnected. Shutdown closes clients while they are still
+   * in the map, so the flag guards against scheduling a reconnect for a deliberate
+   * teardown. Called by the transport's onclose and by a call that found the connection
+   * dead (isConnectionLost), so several calls failing together schedule one reconnect. */
+  function dropClient(name: string, client: Client, config: ServerConfig): void {
+    if (clients.get(name) !== client) return
+    clients.delete(name)
+    status.set(name, { state: 'disconnected', tools: 0 })
+    if (!shuttingDown && !serverCallTuning(config).stdio) void reconnectWithBackoff(name, config)
+  }
+
   /** Claude's mid-session reconnect for a dropped remote server: five attempts with
    * a delay doubling from one second. connectServers redoes the full bring-up
    * (tools, prompts, subscriptions, a fresh onclose) and its duplicate guard skips
@@ -205,17 +218,27 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
+  // One auth recovery per server at a time, shared by every call that met the same 401.
+  const authReconnects = new Map<string, Promise<void>>()
+
   /** Claude's 401/403 tool-call recovery: drop the client and reconnect once, so the
    * headersHelper re-runs (fresh credential) or the OAuth tokens refresh, then the
    * caller retries the call once. The map delete precedes the close so the onclose
-   * guard does not also schedule a backoff reconnect. */
-  async function reconnectForAuth(name: string, config: ServerConfig): Promise<void> {
-    const old = clients.get(name)
-    if (old) {
+   * guard does not also schedule a backoff reconnect. Parallel calls that all met the
+   * expired credential share the one reconnect: `failed` is the client a call was made
+   * on, and a map holding another one means a sibling already replaced it, so closing
+   * "the client in the map" would tear down the fresh connection under that sibling. */
+  function reconnectForAuth(name: string, config: ServerConfig, failed: Client | undefined): Promise<void> {
+    const inFlight = authReconnects.get(name)
+    if (inFlight !== undefined) return inFlight
+    if (clients.get(name) !== failed) return Promise.resolve()
+    const recovery = (async () => {
       clients.delete(name)
-      await withTimeout(old.close(), 3000, 'close').catch(() => {})
-    }
-    await connectServers({ [name]: config }, sessionAuthUi, true)
+      if (failed) await withTimeout(failed.close(), 3000, 'close').catch(() => {})
+      await connectServers({ [name]: config }, sessionAuthUi, true)
+    })().finally(() => authReconnects.delete(name))
+    authReconnects.set(name, recovery)
+    return recovery
   }
 
   /** A tool call with the auth retry: on a 401/403 rejection, reconnect once and
@@ -223,16 +246,26 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   async function callToolWithAuthRetry(name: string, config: ServerConfig, args: { name: string; arguments: Record<string, unknown> }, label: string): Promise<Awaited<ReturnType<Client['callTool']>>> {
     const tuning = serverCallTuning(config)
     const wall = tuning.serverTimeoutMs ?? callTimeoutMs()
+    let used: Client | undefined
     const callOnce = async () => {
       const current = clients.get(name)
       if (!current) throw new Error(`MCP server "${name}" is not connected`)
-      return await withTimeout(current.callTool(args, undefined, callRequestOptions(wall, tuning)), wall, label)
+      used = current
+      try {
+        return await withTimeout(current.callTool(args, undefined, callRequestOptions(wall, tuning)), wall, label)
+      } catch (error) {
+        if (isConnectionLost(error)) {
+          dropClient(name, current, config)
+          void withTimeout(current.close(), 3000, 'close').catch(() => {})
+        }
+        throw error
+      }
     }
     try {
       return await callOnce()
     } catch (error) {
       if (!isUnauthorized(error)) throw error
-      await reconnectForAuth(name, config)
+      await reconnectForAuth(name, config, used)
       return await callOnce()
     }
   }
@@ -463,16 +496,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           // A server that dies mid-session would otherwise stay "connected" in /mcp
           // while every call fails with the SDK's bare "Not connected"; flip the
           // status and free the name so a later session start can reconnect it.
-          client.onclose = () => {
-            if (clients.get(name) !== client) return
-            clients.delete(name)
-            status.set(name, { state: 'disconnected', tools: 0 })
-            // Claude reconnects a dropped remote server with exponential backoff;
-            // stdio servers are local processes and are not reconnected. Shutdown
-            // closes clients while they are still in the map, so the flag guards
-            // against scheduling a reconnect for a deliberate teardown.
-            if (!shuttingDown && !serverCallTuning(config).stdio) void reconnectWithBackoff(name, config)
-          }
+          client.onclose = () => dropClient(name, client, config)
         } catch (error) {
           status.set(name, { state: `failed: ${errorMessage(error)}`, tools: 0 })
           // Connected but failed after (tool listing hung or errored): left in the

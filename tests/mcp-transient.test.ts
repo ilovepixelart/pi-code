@@ -1,8 +1,9 @@
 import { createServer } from 'node:net'
-
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
 import { describe, expect, it, vi } from 'vitest'
 
-import { isTransientConnectError } from '../extensions/mcp/transport.ts'
+import { isConnectionLost, isTransientConnectError } from '../extensions/mcp/transport.ts'
 
 describe('isTransientConnectError', () => {
   it('classifies a refused connection as transient, however node wraps it', async () => {
@@ -31,6 +32,47 @@ describe('isTransientConnectError', () => {
   it('leaves a configuration error alone', () => {
     expect(isTransientConnectError(new Error('Not Found'))).toBe(false)
     expect(isTransientConnectError(Object.assign(new Error('server error'), { code: 503 }))).toBe(true)
+  })
+})
+
+describe('isConnectionLost', () => {
+  const refused = async (): Promise<unknown> => {
+    const port = await new Promise<number>((resolve) => {
+      const probe = createServer()
+      probe.listen(0, '127.0.0.1', () => {
+        const address = probe.address() as { port: number }
+        probe.close(() => resolve(address.port))
+      })
+    })
+    return await fetch(`http://127.0.0.1:${port}/mcp`).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  }
+
+  it('recognises the errors a call gets from a server that went away, as the SDK and node throw them', async () => {
+    const lost: Array<[string, unknown]> = [
+      ['a refused connection', await refused()],
+      ['a reset connection', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) })],
+      ['the 404 for a forgotten session (Streamable HTTP)', new StreamableHTTPError(404, 'Error POSTing to endpoint: Session not found')],
+      ['the 404 for a forgotten session (SSE)', new Error('Error POSTing to endpoint (HTTP 404): Not Found')],
+      ['a connection the SDK closed under the call', McpError.fromError(ErrorCode.ConnectionClosed, 'Connection closed')],
+      ['a client whose transport is gone', new Error('Not connected')],
+    ]
+    for (const [label, error] of lost) expect([label, isConnectionLost(error)]).toEqual([label, true])
+  })
+
+  it('leaves alone a failure that says nothing about the connection', () => {
+    const kept: Array<[string, unknown]> = [
+      ['a plain tool failure', new Error('boom')],
+      ['a tool timeout', new Error('remote: go timed out after 60000ms')],
+      ['a tool that returned a 5xx', Object.assign(new Error('server error'), { code: 503 })],
+      ['bad input', new McpError(ErrorCode.InvalidParams, 'missing "path"')],
+      ['a server error that reuses -32000', new McpError(ErrorCode.ConnectionClosed, 'Bad Request: Server not initialized')],
+      ['an auth failure, which has its own recovery', Object.assign(new Error('expired'), { code: 401 })],
+      ['a value that is not an error', undefined],
+    ]
+    for (const [label, error] of kept) expect([label, isConnectionLost(error)]).toEqual([label, false])
   })
 })
 

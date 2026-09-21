@@ -899,6 +899,141 @@ describe('auth reconnect ordering', () => {
   })
 })
 
+/** A remote server with a configured credential: connects silently, so a test can drive
+ * the call path without the login flow. */
+const remoteServer = { remote: { url: 'https://remote.example/mcp', headers: { Authorization: 'Bearer t' } } }
+
+const unauthorized = (): Error => Object.assign(new Error('token expired'), { code: 401 })
+
+describe('parallel calls that meet a 401 together', () => {
+  it('reconnects once and retries every call on the new client', async () => {
+    // Each call's recovery closed "the client in the map", which for the second call was
+    // the one the first had just connected: two reconnects, and the first call's retry ran
+    // on a client that was being torn down.
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: remoteServer })
+    const stale = hoisted.clients.at(-1)
+    const perConnect = hoisted.clients.length
+    let releaseSecond: () => void = () => {}
+    const secondMayFail = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    let calls = 0
+    hoisted.control.callTool = async (_args, client) => {
+      if (client !== stale) return { content: [{ type: 'text', text: 'ok' }] }
+      // The second call is still in flight on the stale client while the first recovers.
+      if (++calls === 2) await secondMayFail
+      throw unauthorized()
+    }
+
+    const first = harness.tools[0].execute('call-1', {})
+    const second = harness.tools[0].execute('call-2', {})
+    await expect(first).resolves.toMatchObject({ content: [{ text: 'ok' }] })
+    releaseSecond()
+    await expect(second).resolves.toMatchObject({ content: [{ text: 'ok' }] })
+
+    // One reconnect builds as many clients as the first connect did.
+    expect(hoisted.clients).toHaveLength(perConnect * 2)
+    expect(hoisted.closed).toEqual([stale])
+  })
+
+  it('shares one reconnect between calls that fail at the same moment', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: remoteServer })
+    const stale = hoisted.clients.at(-1)
+    const perConnect = hoisted.clients.length
+    hoisted.control.callTool = async (_args, client) => {
+      if (client !== stale) return { content: [{ type: 'text', text: 'ok' }] }
+      throw unauthorized()
+    }
+    // A slow close keeps the first recovery in flight while the others fail.
+    hoisted.control.close = () => new Promise((resolve) => setTimeout(resolve, 50))
+
+    const results = await Promise.all([harness.tools[0].execute('a', {}), harness.tools[0].execute('b', {}), harness.tools[0].execute('c', {})])
+
+    for (const result of results) expect(result.content).toEqual([{ type: 'text', text: 'ok' }])
+    // One reconnect builds as many clients as the first connect did.
+    expect(hoisted.clients).toHaveLength(perConnect * 2)
+  })
+})
+
+/** What the SDK's Streamable HTTP client throws once a restarted server has forgotten the session. */
+const sessionGone = (): Error => Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: {"error":{"code":-32001,"message":"Session not found"}}'), { code: 404 })
+
+const answersOk = async (): Promise<CallResult> => ({ content: [{ type: 'text', text: 'ok' }] })
+
+describe('a remote server that disappears mid-session', () => {
+  // The SDK fires Client.onclose only from close(), never when an HTTP or SSE server goes
+  // away, so the reconnect Claude documents ("automatic reconnection with exponential
+  // backoff") never started: /mcp said "connected" and every call failed until a restart.
+  it('is reported disconnected once a call finds it gone, then reconnected with backoff', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: remoteServer })
+    const perConnect = hoisted.clients.length
+    const dead = hoisted.clients.at(-1)
+    vi.useFakeTimers()
+    hoisted.control.callTool = async () => {
+      throw sessionGone()
+    }
+
+    await expect(harness.tools[0].execute('call-1', {})).rejects.toThrow('Session not found')
+    expect(await statusLinesOf(harness)).toEqual(['remote: disconnected (0 tools)'])
+    // The dead transport is released, not left holding its stream and reconnect timers.
+    expect(hoisted.closed).toEqual([dead])
+
+    hoisted.control.callTool = answersOk
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(await statusLinesOf(harness)).toEqual(['remote: connected (1 tools)'])
+    expect(hoisted.clients).toHaveLength(perConnect * 2)
+    await expect(harness.tools[0].execute('call-2', {})).resolves.toMatchObject({ content: [{ text: 'ok' }] })
+  })
+
+  it('starts one reconnect however many calls were in flight', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: remoteServer })
+    const perConnect = hoisted.clients.length
+    vi.useFakeTimers()
+    hoisted.control.callTool = async () => {
+      throw sessionGone()
+    }
+
+    await Promise.allSettled([harness.tools[0].execute('a', {}), harness.tools[0].execute('b', {}), harness.tools[0].execute('c', {})])
+    hoisted.control.callTool = answersOk
+    await vi.advanceTimersByTimeAsync(40_000)
+
+    expect(hoisted.clients).toHaveLength(perConnect * 2)
+  })
+
+  it('stays connected when a call fails for a reason that is not the connection', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: remoteServer })
+    for (const failure of [new Error('boom'), new Error('remote: go timed out after 60000ms'), Object.assign(new Error('bad input'), { code: -32602 }), Object.assign(new Error('server error'), { code: 500 }), Object.assign(new Error('MCP error -32000: Bad Request: Server not initialized'), { code: -32000 })]) {
+      hoisted.control.callTool = async () => {
+        throw failure
+      }
+      await expect(harness.tools[0].execute('call', {})).rejects.toThrow(failure.message)
+    }
+
+    expect(await statusLinesOf(harness)).toEqual(['remote: connected (1 tools)'])
+  })
+
+  it('does not reconnect a stdio server, as Claude documents', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { local: { command: 'node', args: ['server.js'] } } })
+    vi.useFakeTimers()
+    hoisted.control.callTool = async () => {
+      throw Object.assign(new Error('MCP error -32000: Connection closed'), { code: -32000 })
+    }
+    const perConnect = hoisted.clients.length
+
+    await expect(harness.tools[0].execute('call', {})).rejects.toThrow('Connection closed')
+    await vi.advanceTimersByTimeAsync(40_000)
+
+    expect(hoisted.clients).toHaveLength(perConnect)
+    expect(await statusLinesOf(harness)).toEqual(['local: disconnected (0 tools)'])
+  })
+})
+
 describe('interactive OAuth serialization', () => {
   it('runs interactive OAuth logins one at a time, and both servers still connect', async () => {
     // The user scope and consented project scope connect concurrently, so two servers
