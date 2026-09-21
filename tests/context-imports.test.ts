@@ -2066,6 +2066,25 @@ describe('subdirectory context files load on demand', () => {
     expect(texts(result).join('\n').length).toBeLessThan(120_000)
   })
 
+  it('does not follow an import commented out in a nested CLAUDE.md', async () => {
+    // A commented-out @import never expands: not at launch, where the content is stripped of
+    // block comments before its imports are collected, and not here. The nested path scanned
+    // the raw file, so a disabled import was still read into the tool result, though the
+    // body it injected was already stripped.
+    const cwd = tempDir()
+    writeAt(cwd, 'off.md', 'DISABLED IMPORT BODY')
+    writeAt(cwd, 'on.md', 'LIVE IMPORT BODY')
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES\n<!-- @../off.md -->\n@../on.md')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    const attached = texts(result).join('\n')
+    expect(attached).toContain('LIVE IMPORT BODY')
+    expect(attached).not.toContain('DISABLED IMPORT BODY')
+  })
+
   it('does not re-attach a file already in the system prompt', async () => {
     // The repo-root CLAUDE.md is loaded at launch; a nested file importing it would
     // otherwise pay for the whole body a second time on every subtree read.

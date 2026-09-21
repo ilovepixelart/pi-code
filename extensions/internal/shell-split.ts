@@ -17,6 +17,8 @@ function separatorAt(command: string, i: number): number {
   const pair = command.slice(i, i + 2)
   if (pair === '&&' || pair === '||' || pair === '|&') return 2
   const ch = command[i]
+  // The & of a redirection (`2>&1`, `&>file`) belongs to the command, not between two.
+  if (ch === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) return 0
   return ch === ';' || ch === '|' || ch === '&' || ch === '\n' ? 1 : 0
 }
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -176,6 +176,37 @@ describe('Claude skill invocation expansion', () => {
     expect(result.text).toContain('SPAN-OUT')
     expect(result.text).toContain('Hello world')
     expect(result.text).not.toContain('$ARGUMENTS')
+  })
+
+  it('expands a skill whose directory is a symlink, as pi loads it', async () => {
+    // `npx skills add` installs under .agents/skills and links into .claude/skills, and
+    // dotfile managers link the whole tree. pi's loader follows the link and registers the
+    // skill; the shim skipped it (a symlink is not a directory to Dirent), so the plain
+    // body went out with $ARGUMENTS literal and every dynamic feature off.
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    const real = tempDir('cs-real-')
+    writeFileSync(join(real, 'SKILL.md'), '---\nname: greet\ndescription: greets\n---\nHello $ARGUMENTS')
+    mkdirSync(join(hoisted.home, '.claude', 'skills'), { recursive: true })
+    symlinkSync(real, join(hoisted.home, '.claude', 'skills', 'greet'))
+    const { input } = setup(cwd)
+    const result = (await input('/skill:greet world')) as { action: string; text: string }
+    expect(result?.action).toBe('transform')
+    expect(result.text).toContain('Hello world')
+    expect(result.text).not.toContain('$ARGUMENTS')
+  })
+
+  it('leaves a dangling skill link to pi, and a link to a plain file', async () => {
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    const skills = join(hoisted.home, '.claude', 'skills')
+    mkdirSync(skills, { recursive: true })
+    symlinkSync(join(hoisted.home, 'nowhere'), join(skills, 'dangling'))
+    writeFileSync(join(hoisted.home, 'plain.md'), 'not a directory')
+    symlinkSync(join(hoisted.home, 'plain.md'), join(skills, 'plain'))
+    const { input } = setup(cwd)
+    expect(await input('/skill:dangling x')).toBeUndefined()
+    expect(await input('/skill:plain x')).toBeUndefined()
   })
 
   it('matches a skill by frontmatter name over its directory name, like pi does', async () => {

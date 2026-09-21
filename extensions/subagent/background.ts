@@ -13,7 +13,7 @@ import * as path from 'node:path'
 import { killProcessTree } from '../internal/process-tree.js'
 import { sharedSlot } from '../internal/shared-slot.js'
 import { errorMessage } from '../internal/values.js'
-import { spawnChild } from './run.js'
+import { spawnChild, utf8Chunks } from './run.js'
 
 export interface BackgroundRun {
   id: string
@@ -350,13 +350,15 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
       : undefined,
   )
   let stderrTail = ''
-  proc.stdout.on('data', (data) => parser.push(data.toString()))
+  const decodeStdout = utf8Chunks()
+  const decodeStderr = utf8Chunks()
+  proc.stdout.on('data', (data) => parser.push(decodeStdout(data)))
   // An 'error' on a stream with no listener is rethrown by EventEmitter, and this one
   // belongs to a detached child, so a pipe read failure would exit pi the same way an
   // unguarded completion would. The foreground runner guards its streams the same way.
   proc.stdout.on('error', () => {})
   proc.stderr?.on('data', (data) => {
-    stderrTail = (stderrTail + data.toString()).slice(-STDERR_TAIL_CHARS)
+    stderrTail = (stderrTail + decodeStderr(data)).slice(-STDERR_TAIL_CHARS)
   })
   proc.stderr?.on('error', () => {})
   proc.on('close', (code) => {

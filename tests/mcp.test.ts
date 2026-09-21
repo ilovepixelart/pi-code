@@ -23,6 +23,31 @@ import {
   urlPatternMatches,
   userConfigPaths,
 } from '../extensions/mcp/index.ts'
+import { callTimeoutMs, connectTimeoutMs, serverCallTuning } from '../extensions/mcp/transport.ts'
+
+describe('timeouts beyond what a timer can hold', () => {
+  // setTimeout stores its delay in 32 bits. A larger one fires after 1 ms (and Node prints
+  // TimeoutOverflowWarning), so a user's "never" made every call fail at once with
+  // "timed out after 3000000000ms". Such a value is clamped to the longest a timer holds.
+  const MAX_TIMER_MS = 2_147_483_647
+
+  it('clamps MCP_TOOL_TIMEOUT and MCP_TIMEOUT', () => {
+    process.env.MCP_TOOL_TIMEOUT = '3000000000'
+    process.env.MCP_TIMEOUT = '9e12'
+    expect(callTimeoutMs()).toBe(MAX_TIMER_MS)
+    expect(connectTimeoutMs()).toBe(MAX_TIMER_MS)
+  })
+
+  it('clamps a per-server timeout', () => {
+    expect(serverCallTuning({ command: 'x', timeout: 3_000_000_000 } as never).serverTimeoutMs).toBe(MAX_TIMER_MS)
+  })
+
+  it('leaves an ordinary value alone', () => {
+    process.env.MCP_TOOL_TIMEOUT = '90000'
+    expect(callTimeoutMs()).toBe(90_000)
+    expect(serverCallTuning({ command: 'x', timeout: 120_000 } as never).serverTimeoutMs).toBe(120_000)
+  })
+})
 
 describe('parseHelperHeaders', () => {
   it('keeps string-valued header entries and drops the rest', () => {
