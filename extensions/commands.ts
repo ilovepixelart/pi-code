@@ -52,6 +52,7 @@ import { managedSettingsFile, readManagedSettings } from './internal/managed-set
 import { findModel } from './internal/model-lookup.js'
 import { capForContext } from './internal/output-guard.js'
 import { matchesPathRules } from './internal/path-rules.js'
+import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { type InstalledPlugin, installedPlugins, pluginComponentPath } from './internal/plugins.js'
 import { isProjectApproved } from './internal/project-approval.js'
 import { ancestorDirs, repoRoot } from './internal/project-root.js'
@@ -319,6 +320,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
   let projectApproved = false
   /** Tool set to put back once the run a restricted command drove has ended. */
   let pendingRestore: string[] | undefined
+  /** The tools this run's restriction took out of the set. Put back as a delta on whatever is
+   * active by then: overwriting with the snapshot undid every change made meanwhile. */
+  let tookAway = new Set<string>()
   /** `Bash(...)` scopes enforced while that run lasts; lifted with the restriction. */
   let pendingBashRules: string[] | undefined
   /** `WebFetch(domain:...)` scopes enforced the same way. */
@@ -362,17 +366,17 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // agent_settled fires exactly once, after the run has fully settled and no such
   // continuation remains, which is the grant's true clearing point.
   pi.on('agent_settled', async () => {
-    pendingBashRules = undefined
-    pendingDomainRules = undefined
-    pendingAgentRules = undefined
-    pendingSkillRules = undefined
-    pendingPathRules = undefined
     void modelOverride.settle()
     void effortOverride.settle()
-    if (pendingRestore) {
-      pi.setActiveTools(pendingRestore)
-      pendingRestore = undefined
-    }
+    liftToolScope()
+  })
+
+  // "Execute the plan" continues the very run a scoped command started, so the scope it set
+  // for planning would judge every call of the execution and the tools it narrowed away
+  // would stay gone. Leaving plan mode is the point the user approved more than the command
+  // asked for; the model and effort overrides still last until the run settles.
+  pi.events?.on(PLAN_MODE_CHANNEL, (data) => {
+    if (isPlanModeState(data) && !data.active) liftToolScope()
   })
 
   // agent_settled never fires when pi is quit mid-run (double Ctrl+C, Ctrl+D, a closed
@@ -427,6 +431,32 @@ export default function commandsExtension(pi: ExtensionAPI) {
     return original
   }
 
+  /** Record what the restriction just applied took out, against the set captured before it. */
+  function noteTakenAway(): void {
+    if (!pendingRestore) return
+    const active = new Set(pi.getActiveTools())
+    tookAway = new Set(pendingRestore.filter((tool) => !active.has(tool)))
+  }
+
+  /** End the run's tool restriction: drop its scopes and put back what it took away, as a
+   * delta on the set in force. A snapshot overwrite undid whatever else changed the set
+   * meanwhile: plan mode's Execute (the session finished read-only, plan mode off, with edit
+   * and write gone) and a tool registered during the run (dropped until a /reload). */
+  function liftToolScope(): void {
+    pendingBashRules = undefined
+    pendingDomainRules = undefined
+    pendingAgentRules = undefined
+    pendingSkillRules = undefined
+    pendingPathRules = undefined
+    const original = pendingRestore
+    if (!original) return
+    const active = pi.getActiveTools()
+    const keep = new Set([...active, ...tookAway])
+    pi.setActiveTools([...original.filter((tool) => keep.has(tool)), ...active.filter((tool) => !original.includes(tool))])
+    pendingRestore = undefined
+    tookAway = new Set()
+  }
+
   /** Apply a command's allowed-tools to the run it drives: intersect with the tools
    * pi actually has, keep the bash and path scopes for the tool_call guard, and let
    * agent_settled restore the previous set. */
@@ -442,6 +472,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // intersects to nothing named only tools pi has none of: that restriction cannot
     // be expressed, and applying it as "no tools" is not what the command asked for.
     if (granted.length > 0 || allowed.length === 0) pi.setActiveTools(granted)
+    noteTakenAway()
     // The latest restricted command speaks for the turn: a later unscoped grant
     // lifts an earlier command's scopes rather than stacking under them. Rules get
     // the same ${CLAUDE_*} substitution as the body, so a rule can name a bundled
@@ -460,6 +491,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     if (!disallowed || disallowed.length === 0) return
     captureRestorePoint()
     pi.setActiveTools(pi.getActiveTools().filter((tool) => !disallowed.includes(tool)))
+    noteTakenAway()
   }
 
   /** Claude's `model:` frontmatter overrides the model for this run only, then the
