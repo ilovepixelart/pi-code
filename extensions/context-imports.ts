@@ -189,11 +189,10 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
   // notice would otherwise hand a repo the real name of whatever the link reaches,
   // which is the disclosure the refusal exists to prevent. An excluded file is not
   // named either, since exclusion removes it from every other surface too.
-  const refuse = (isFile: boolean): null => {
-    if (isExcluded?.(resolved) === true) return null
+  const refuse = (isFile: boolean): void => {
+    if (isExcluded?.(resolved) === true) return
     refusals.refused.add(resolved)
     if (isFile) refusals.refusedPresent.add(resolved)
-    return null
   }
   let real: string
   try {
@@ -203,10 +202,14 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     // reported never depends on whether it exists: a notice that named only the
     // existing ones would enumerate the filesystem for any repo-controlled file
     // willing to write one @line per guess.
-    return isUnder(resolved, allowedRoots) ? null : refuse(false)
+    if (!isUnder(resolved, allowedRoots)) refuse(false)
+    return null
   }
   if (seen.has(real)) return null
-  if (!isUnder(real, allowedRoots)) return refuse(isRegularFile(real))
+  if (!isUnder(real, allowedRoots)) {
+    refuse(isRegularFile(real))
+    return null
+  }
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
