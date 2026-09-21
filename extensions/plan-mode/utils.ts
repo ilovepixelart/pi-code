@@ -40,14 +40,17 @@ const DESTRUCTIVE_PATTERNS = [
   /\bsystemctl\s+(start|stop|restart|enable|disable)/i,
   /\bservice\s+\S+\s+(start|stop|restart)/i,
   /\b(vim?|nano|emacs|code|subl)\b/i,
-].map((pattern) => new RegExp(`^\\s*(?:${pattern.source})`, pattern.flags))
+].map((pattern) => new RegExp(String.raw`^\s*(?:${pattern.source})`, pattern.flags))
 
 // A redirect writes wherever it points, from any position in the segment.
 const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/]
 
 // Redirections that write nothing: onto /dev/null, and a descriptor duplicated onto
-// another (`2>&1`, `>&2`, `>&-`). `>&file` is not one: it writes the file.
-const HARMLESS_REDIRECTS = /(?:&|\d*)>>?\s*\/dev\/null(?=\s|$)|\d*>&(?:\d+|-)(?=\s|$)/g
+// another (`2>&1`, `>&2`, `>&-`). `>&file` is not one: it writes the file. Every run is
+// bounded: the text is chosen by the model, and an unbounded `\d*` in front of an
+// unanchored match backtracks quadratically (40,000 digits took over a second).
+const DEV_NULL_REDIRECT = /(?:&|\d{0,3})>>?[ \t]{0,8}\/dev\/null(?=\s|$)/g
+const DESCRIPTOR_REDIRECT = /\d{0,3}>&(?:\d{1,3}|-)(?=\s|$)/g
 
 // Safe read-only commands allowed in plan mode. Deliberately excludes env/printenv
 // (secret disclosure, and env is an exec wrapper), curl/wget (fetch plus -o writes),
@@ -134,7 +137,7 @@ function withoutQuoted(segment: string): string {
 }
 
 function writesThroughRedirect(segment: string): boolean {
-  const bare = withoutQuoted(segment).replace(HARMLESS_REDIRECTS, ' ')
+  const bare = withoutQuoted(segment).replace(DEV_NULL_REDIRECT, ' ').replace(DESCRIPTOR_REDIRECT, ' ')
   return REDIRECT_PATTERNS.some((pattern) => pattern.test(bare))
 }
 
@@ -150,11 +153,18 @@ function uniqWrites(args: string[]): boolean {
 }
 
 const BRANCH_LISTS = /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/
-const BRANCH_WRITE_FLAGS = /^(-[a-zA-Z]*[dDmMcCuft][a-zA-Z]*|--(delete|move|copy|force|unset-upstream|set-upstream-to|edit-description|track|no-track|create-reflog)(=.*)?)$/
+const BRANCH_WRITE_LONG_FLAGS = new Set(['--delete', '--move', '--copy', '--force', '--unset-upstream', '--set-upstream-to', '--edit-description', '--track', '--no-track', '--create-reflog'])
+
+/** A `git branch` flag that changes a branch: -d -D -m -M -c -C -u -f -t, alone or in a
+ * cluster, or the long form of one. */
+function isBranchWriteFlag(arg: string): boolean {
+  if (arg.startsWith('--')) return BRANCH_WRITE_LONG_FLAGS.has(arg.split('=')[0])
+  return arg.startsWith('-') && /[dDmMcCuft]/.test(arg)
+}
 
 /** `git branch` lists unless it is given a name to create or a flag that changes one. */
 function gitBranchWrites(args: string[]): boolean {
-  if (args.some((arg) => BRANCH_WRITE_FLAGS.test(arg))) return true
+  if (args.some(isBranchWriteFlag)) return true
   return args.some((arg) => !arg.startsWith('-')) && !args.some((arg) => BRANCH_LISTS.test(arg))
 }
 
