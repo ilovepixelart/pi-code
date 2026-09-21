@@ -1467,6 +1467,172 @@ describe('external import approval', () => {
     return await wired.fire(cwd, native, assembledPrompt(native), ctx)
   }
 
+  // Claude: "User-scope memory files, such as ~/.claude/CLAUDE.md and ~/.claude/rules/, are
+  // files you wrote yourself ... Claude Code loads their imports without the dialog and
+  // trusts them like the rest of your personal configuration." pi-code bounded them to
+  // ~/.claude, so a user file importing @~/notes/style.md was refused, the per-project dialog
+  // opened for the user's own file, and approving it changed nothing.
+  it('loads what the user CLAUDE.md imports from elsewhere in home, without asking', async () => {
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, 'notes'), { recursive: true })
+    writeFileSync(join(hoisted.home, 'notes', 'style.md'), 'MY STYLE NOTES')
+    homeFile('CLAUDE.md', 'USER BODY\n\n@~/notes/style.md\n')
+    const asked: string[][] = []
+
+    const prompt = await session(
+      cwd,
+      [],
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toEqual([])
+    expect(prompt).toContain('MY STYLE NOTES')
+    expect(prompt).not.toContain('Imports not loaded')
+  })
+
+  it("treats a ~/.claude/CLAUDE.md linked from a dotfiles repo as the user's own", async () => {
+    // GNU stow links the files into ~/.claude, so their real paths are outside it.
+    const cwd = tempDir()
+    const dotfiles = join(hoisted.home, 'dotfiles', 'claude', '.claude')
+    mkdirSync(dotfiles, { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(dotfiles, 'CLAUDE.md'), 'USER BODY\n\n@conventions.md\n')
+    writeFileSync(join(dotfiles, 'conventions.md'), 'MY CONVENTIONS')
+    symlinkSync(join(dotfiles, 'CLAUDE.md'), join(hoisted.home, '.claude', 'CLAUDE.md'))
+    symlinkSync(join(dotfiles, 'conventions.md'), join(hoisted.home, '.claude', 'conventions.md'))
+    const asked: string[][] = []
+
+    const prompt = await session(
+      cwd,
+      [],
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toEqual([])
+    expect(prompt).toContain('MY CONVENTIONS')
+  })
+
+  it('still refuses the same import from a project file', async () => {
+    // The freedom is the user file\'s: a repository\'s CLAUDE.md naming the same file is the
+    // case the dialog exists for.
+    const cwd = tempDir()
+    mkdirSync(join(hoisted.home, 'notes'), { recursive: true })
+    writeFileSync(join(hoisted.home, 'notes', 'style.md'), 'MY STYLE NOTES')
+    const native = [contextFile(cwd, 'CLAUDE.md', '@~/notes/style.md')]
+    const asked: string[][] = []
+
+    const prompt = await session(
+      cwd,
+      native,
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toHaveLength(1)
+    expect(prompt).not.toContain('MY STYLE NOTES')
+  })
+
+  // Claude reads the files an import names and asks about the external ones it read: it never
+  // lists or asks for a path that is not a file. A prose mention of the TypeScript alias
+  // `@/components/ui` resolves to /components/ui, which does not exist, and opened the dialog
+  // asking to "load imports from outside this project" for a file that could not load.
+  it('does not ask about a path alias mentioned in prose, since no file can load from it', async () => {
+    const cwd = tempDir()
+    const prose = '- Import UI pieces from @/components/ui and helpers from @/lib/utils.\n- The @/ alias maps to src/.'
+    const native = [contextFile(cwd, 'CLAUDE.md', prose)]
+    const asked: string[][] = []
+
+    await session(
+      cwd,
+      native,
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toEqual([])
+  })
+
+  it('does not ask about an existing directory either, which cannot be imported', async () => {
+    // On Linux `/lib` and `/app` exist, so `@/lib` or `@/app` in prose names a real directory.
+    const cwd = tempDir()
+    const directory = tempDir()
+    const native = [contextFile(cwd, 'CLAUDE.md', `See @${directory}`)]
+    const asked: string[][] = []
+
+    await session(
+      cwd,
+      native,
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toEqual([])
+  })
+
+  it('does not ask about a file the user CLAUDE.md loaded after the project file was refused it', async () => {
+    // The dialog governs what an approval would let in; this file is in context already.
+    const cwd = tempDir()
+    const outside = tempDir()
+    const shared = join(outside, 'shared.md')
+    writeFileSync(shared, 'SHARED BODY')
+    homeFile('CLAUDE.md', `@${shared}`)
+    const native = [contextFile(cwd, 'CLAUDE.md', `@${shared}`)]
+    const asked: string[][] = []
+
+    const prompt = await session(
+      cwd,
+      native,
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(prompt).toContain('SHARED BODY')
+    expect(asked).toEqual([])
+  })
+
+  it('does not settle the project on a decision when only aliases were seen', async () => {
+    // Nothing was decided, so a real external import added later is still asked about.
+    const cwd = tempDir()
+    const outside = tempDir()
+    const real = join(outside, 'shared.md')
+    writeFileSync(real, 'SHARED BODY')
+    const asked: string[][] = []
+    await session(
+      cwd,
+      [contextFile(cwd, 'CLAUDE.md', 'See @/components/ui.')],
+      ctxWith(cwd, async () => true, asked),
+    )
+    expect(asked).toEqual([])
+
+    await session(
+      cwd,
+      [contextFile(cwd, 'CLAUDE.md', `See @/components/ui and @${real}`)],
+      ctxWith(cwd, async () => true, asked),
+    )
+
+    expect(asked).toHaveLength(1)
+  })
+
+  it('lists only the files that exist when it does ask, though the notice keeps reporting every refusal alike', async () => {
+    // The dialog is the user's: it names what an approval would actually load. The notice
+    // stays the one that must not reveal which of a repo's guesses exist (see below).
+    const cwd = tempDir()
+    const outside = tempDir()
+    const present = join(outside, 'here.md')
+    const absent = join(outside, 'not-here.md')
+    writeFileSync(present, 'PRESENT BODY')
+    const native = [contextFile(cwd, 'CLAUDE.md', `@${present}\n@${absent}`)]
+    const asked: string[][] = []
+
+    const prompt = await session(
+      cwd,
+      native,
+      ctxWith(cwd, async () => false, asked),
+    )
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.[1]).toContain(present)
+    expect(asked[0]?.[1]).not.toContain(absent)
+    expect(prompt).toContain(`\n- ${present}`)
+    expect(prompt).toContain(`\n- ${absent}`)
+  })
+
   // Claude: "The first time Claude Code encounters external imports in a project, it
   // shows an approval dialog listing the files."
   it('asks once, listing the external file, and loads it when allowed', async () => {
@@ -1564,25 +1730,26 @@ describe('external import approval', () => {
     expect(prompt).not.toContain('PERSONAL INSTRUCTIONS')
   })
 
-  it('does not widen what a user-scope file may already read', async () => {
-    // The user CLAUDE.md loads its own imports either way; approving a repository must
-    // not turn it into a reader of the whole filesystem.
+  it("loads a user-scope file's imports whatever was decided about the repository", async () => {
+    // The user CLAUDE.md is trusted with or without the project's approval (Claude loads its
+    // imports "without the dialog"), so the answer about a repository neither grants nor
+    // withholds anything from it. The project's own import of user config is what the
+    // dialog governs.
     const cwd = tempDir()
     homeFile('my-project-instructions.md', 'PERSONAL INSTRUCTIONS')
     const outside = tempDir()
     writeFileSync(join(outside, 'elsewhere.md'), 'ELSEWHERE BODY')
     writeFileSync(join(hoisted.home, '.claude', 'CLAUDE.md'), `@${join(outside, 'elsewhere.md')}`)
     const native = [contextFile(cwd, 'CLAUDE.md', '@~/.claude/my-project-instructions.md')]
-    const asked: string[][] = []
 
-    const prompt = await session(
+    const declined = await session(
       cwd,
       native,
-      ctxWith(cwd, async () => true, asked),
+      ctxWith(cwd, async () => false, []),
     )
 
-    expect(prompt).toContain('PERSONAL INSTRUCTIONS')
-    expect(prompt).not.toContain('ELSEWHERE BODY')
+    expect(declined).toContain('ELSEWHERE BODY')
+    expect(declined).not.toContain('PERSONAL INSTRUCTIONS')
   })
 
   // The dialog is only worth anything if it names everything the approval lets in.
