@@ -957,6 +957,22 @@ describe('parallel calls that meet a 401 together', () => {
   })
 })
 
+describe('tool names a provider would reject', () => {
+  it("registers a valid pi name and still calls the server by the tool's own name", async () => {
+    withTools([{ name: 'repo.read' }])
+    const called: string[] = []
+    hoisted.control.callTool = async (args) => {
+      called.push(args.name)
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+    const harness = await setupStarted({ user: { 'my server': { command: 'node', args: ['s.js'] } } })
+
+    expect(harness.toolNames()).toEqual(['my_server_repo_read'])
+    await harness.tools[0].execute('call', {})
+    expect(called).toEqual(['repo.read'])
+  })
+})
+
 /** What the SDK's Streamable HTTP client throws once a restarted server has forgotten the session. */
 const sessionGone = (): Error => Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: {"error":{"code":-32001,"message":"Session not found"}}'), { code: 404 })
 

@@ -395,6 +395,35 @@ describe('mcp adapter helpers', () => {
     expect(formatToolName('sonar-qube', 'search-issues')).toBe('sonar_qube_search_issues')
   })
 
+  // Providers accept a tool name only as ^[a-zA-Z0-9_-]{1,64}$ and reject the whole request
+  // otherwise, so one odd name in one server's list failed every turn of the session. The MCP
+  // spec allows dots in tool names, and a server name is whatever the user typed.
+  it.each([
+    ['a dot in the tool name', 'files', 'repo.read', 'files_repo_read'],
+    ['a space in the server name', 'my server', 'search', 'my_server_search'],
+    ['a plugin server name', 'plugin:github:github', 'list_issues', 'plugin_github_github_list_issues'],
+    ['a slash and a colon', 'srv', 'ns/tool:v2', 'srv_ns_tool_v2'],
+  ])('keeps only characters a provider accepts: %s', (_label, server, tool, expected) => {
+    expect(formatToolName(server, tool)).toBe(expected)
+  })
+
+  it('shortens a name over the provider limit, keeping two long tools of one server apart', () => {
+    const server = 'a-very-long-server-name-that-a-plugin-namespace-might-produce'
+    const first = formatToolName(server, 'list_all_pull_request_review_comments_for_a_repository')
+    const second = formatToolName(server, 'list_all_pull_request_review_comments_for_an_organization')
+
+    for (const name of [first, second]) expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/)
+    expect(first).not.toBe(second)
+    // The same tool must keep its name from one session to the next: a resumed session's
+    // history calls it by that name.
+    expect(formatToolName(server, 'list_all_pull_request_review_comments_for_a_repository')).toBe(first)
+  })
+
+  it('leaves a name at the limit as it is', () => {
+    const tool = 'x'.repeat(64 - 'srv_'.length)
+    expect(formatToolName('srv', tool)).toBe(`srv_${tool}`)
+  })
+
   it('normalizes schemas by stripping $schema and additionalProperties', () => {
     const schema = normalizeSchema({ $schema: 'x', additionalProperties: false, type: 'object', properties: { a: { type: 'string' } } })
     expect(schema).toEqual({ type: 'object', properties: { a: { type: 'string' } } })

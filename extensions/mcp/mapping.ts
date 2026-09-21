@@ -4,11 +4,25 @@
  * blocks mapped into pi's output budget.
  */
 
+import { createHash } from 'node:crypto'
+
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
 import { capForContext } from '../internal/output-guard.js'
 
+/** Providers take a tool name only as `^[a-zA-Z0-9_-]{1,64}$` (64 is OpenAI's cap, the
+ * tighter of the two) and reject the whole request otherwise, so one bad name failed every
+ * turn of the session. */
+const MAX_TOOL_NAME = 64
+
+/** The pi tool name for a server's tool: `server_tool` with every character a provider
+ * rejects (the MCP spec allows dots; a server name is whatever the user typed) as an
+ * underscore. A name over the limit is cut and ends in a hash of the whole, so two long
+ * tools of one server stay apart and a tool keeps its name from one session to the next. */
 export function formatToolName(server: string, tool: string): string {
-  return `${server}_${tool}`.replaceAll('-', '_')
+  const name = `${server}_${tool}`.replace(/[^A-Za-z0-9_]/g, '_')
+  if (name.length <= MAX_TOOL_NAME) return name
+  const digest = createHash('sha256').update(name).digest('hex').slice(0, 8)
+  return `${name.slice(0, MAX_TOOL_NAME - digest.length - 1)}_${digest}`
 }
 
 /** Claude exposes server prompts as /mcp__<server>__<prompt> slash commands: any
