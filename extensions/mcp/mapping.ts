@@ -19,7 +19,7 @@ const MAX_TOOL_NAME = 64
  * underscore. A name over the limit is cut and ends in a hash of the whole, so two long
  * tools of one server stay apart and a tool keeps its name from one session to the next. */
 export function formatToolName(server: string, tool: string): string {
-  const name = `${server}_${tool}`.replace(/[^A-Za-z0-9_]/g, '_')
+  const name = `${server}_${tool}`.replace(/\W/g, '_')
   if (name.length <= MAX_TOOL_NAME) return name
   const digest = createHash('sha256').update(name).digest('hex').slice(0, 8)
   return `${name.slice(0, MAX_TOOL_NAME - digest.length - 1)}_${digest}`
