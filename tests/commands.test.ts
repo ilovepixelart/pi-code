@@ -470,6 +470,37 @@ describe('command effort frontmatter', () => {
     expect(s.thinkingSets).toEqual(['max', 'high'])
   })
 
+  it('restores the session model and level when pi quits mid-run', async () => {
+    // agent_settled never fires when pi is quit while a run is in flight (double Ctrl+C,
+    // Ctrl+D, a closed terminal, SIGTERM). The switch had already been written to the
+    // transcript, so `pi -c` resumed on the command's override model at its raised level.
+    const cwd = tempDir()
+    writeCommand(cwd, 'deep.md', '---\nmodel: opus\neffort: max\n---\nThink hard.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('deep')?.handler('', s.ctx)
+    expect(s.modelSets).toEqual(['claude-opus-5'])
+    expect(s.thinkingSets).toEqual(['max'])
+
+    await s.handlers.get('session_shutdown')?.({ reason: 'quit' }, s.ctx)
+
+    expect(s.modelSets).toEqual(['claude-opus-5', 'gemma4'])
+    expect(s.thinkingSets).toEqual(['max', 'high'])
+  })
+
+  it('restores nothing more at shutdown when the run had already settled', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'deep.md', '---\nmodel: opus\neffort: max\n---\nThink hard.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('deep')?.handler('', s.ctx)
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    await s.handlers.get('session_shutdown')?.({ reason: 'quit' }, s.ctx)
+
+    expect(s.modelSets).toEqual(['claude-opus-5', 'gemma4'])
+    expect(s.thinkingSets).toEqual(['max', 'high'])
+  })
+
   it('does not touch the thinking level when effort matches the session or is absent, and restores nothing', async () => {
     const cwd = tempDir()
     // The session level is 'high'.

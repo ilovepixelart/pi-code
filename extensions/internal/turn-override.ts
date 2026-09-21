@@ -26,14 +26,15 @@ export interface TurnOverride<T> {
   reset(): void
   /** Restore the captured prior via `set` and clear the capture. A conditional override
    * stands down when the current value has moved off the target. No-op when nothing is
-   * armed. */
-  settle(): void
+   * armed. Returns what `set` returns, so a caller that must not exit before an async
+   * restore has landed (a shutdown) can await it. */
+  settle(): void | Promise<void>
 }
 
 export function createTurnOverride<T>(opts: {
   /** Applies the restore value. Consumers wrap their setter here (async-with-catch for
    * commands' model, plain for the thinking level). */
-  set: (value: T) => void
+  set: (value: T) => void | Promise<void>
   /** Reads the current value, for a conditional restore. Only consulted when
    * `conditional` is set. */
   get?: () => T | undefined
@@ -67,7 +68,7 @@ export function createTurnOverride<T>(opts: {
         const current = opts.get?.()
         if (current !== undefined && current !== movedTo) return
       }
-      opts.set(restore)
+      return opts.set(restore)
     },
   }
 }

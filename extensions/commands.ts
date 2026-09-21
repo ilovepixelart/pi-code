@@ -335,12 +335,16 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // setModel can reject (e.g. auth resolution fails), and a floated rejection would
     // escape as unhandled; surface it as a no-op instead of leaving the session silently
     // on the command's override model.
-    set: (model) => {
+    set: async (model) => {
       // A refused switch leaves the turn on the session model rather than the one the
-      // command named, and the reply gives no sign of it, so the refusal is reported.
-      void pi.setModel(model as Parameters<typeof pi.setModel>[0]).catch((error: unknown) => {
+      // command named, and the reply gives no sign of it, so the refusal is reported. The
+      // promise never rejects, so a caller that does not await it (agent_settled) cannot
+      // float a rejection; the shutdown handler awaits it so the exit cannot outrun it.
+      try {
+        await pi.setModel(model as Parameters<typeof pi.setModel>[0])
+      } catch (error) {
         console.warn(`pi-code-commands: could not switch to ${typeof model === 'object' && model !== null && 'id' in model ? String((model as { id: unknown }).id) : String(model)}: ${errorMessage(error)}`)
-      })
+      }
     },
   })
   /** The thinking level to restore after a command's `effort:` override drove its run,
@@ -363,12 +367,21 @@ export default function commandsExtension(pi: ExtensionAPI) {
     pendingAgentRules = undefined
     pendingSkillRules = undefined
     pendingPathRules = undefined
-    modelOverride.settle()
-    effortOverride.settle()
+    void modelOverride.settle()
+    void effortOverride.settle()
     if (pendingRestore) {
       pi.setActiveTools(pendingRestore)
       pendingRestore = undefined
     }
+  })
+
+  // agent_settled never fires when pi is quit mid-run (double Ctrl+C, Ctrl+D, a closed
+  // terminal, SIGTERM), and the switch is already in the transcript: `pi -c` resumed on the
+  // command's override model at its raised level. A run that settled has nothing armed, so
+  // this restores nothing twice.
+  pi.on('session_shutdown', async () => {
+    await modelOverride.settle()
+    await effortOverride.settle()
   })
 
   // The active-tool set has no argument dimension, so a scoped grant hands the turn

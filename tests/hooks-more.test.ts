@@ -211,13 +211,13 @@ const setupExtension = () => {
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
     userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
-    input: (text: string, source = 'interactive') => handler('input')({ text, source }, defaultCtx),
+    input: (text: string, source = 'interactive', streamingBehavior?: 'steer' | 'followUp') => handler('input')({ text, source, streamingBehavior }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
     modelSelect: (to: string, from?: string, source = 'set') => handler('model_select')({ model: { id: to, name: to }, previousModel: from ? { id: from, name: from } : undefined, source }, defaultCtx),
     agentSettled: () => handler('agent_settled')({}, defaultCtx),
     beforeCompact: (reason: string, customInstructions?: string) => handler('session_before_compact')({ reason, customInstructions }, defaultCtx),
     compacted: (reason: string, summary?: string) => handler('session_compact')({ reason, ...(summary === undefined ? {} : { compactionEntry: { summary } }) }, defaultCtx),
-    shutdown: (reason: string) => handler('session_shutdown')({ reason }, defaultCtx),
+    shutdown: (reason: string, ctx: Record<string, unknown> = {}) => handler('session_shutdown')({ reason }, { ...defaultCtx, ...ctx }),
     beforeAgentStart: (event: Record<string, unknown> = { systemPrompt: '' }) => handler('before_agent_start')(event),
     emitMcpTools: (entries: unknown) => busHandlers.get('pi-code:mcp-tools')?.(entries),
     emitSkillHooks: (event: unknown) => busHandlers.get('pi-code:skill-hooks')?.(event),
@@ -1227,16 +1227,50 @@ describe('hooks extension UserPromptSubmit', () => {
     expect(commandsRun()).toEqual([])
   })
 
-  it('injects a hook additionalContext ahead of the prompt via transform', async () => {
+  // Claude: "UserPromptSubmit: can't replace the prompt; it only injects additionalContext
+  // alongside it", as "a system reminder that starts with the hook's name", and "neither
+  // channel produces a visible transcript entry". The context is a hidden message next to the
+  // prompt, never text inside it: prepended, it moved a `/skill:` or `/template` invocation
+  // off position 0, so pi and the skills shim stopped expanding it, on every prompt for as
+  // long as the hook was configured.
+  const contextMessages = (ext: Awaited<ReturnType<typeof withPromptHooks>>) => ext.sent.filter((entry) => (entry.message as { customType?: string }).customType === 'claude-hook-context')
+
+  it('injects a hook additionalContext as a hidden message alongside the prompt', async () => {
     const ext = await withPromptHooks([{ command: 'ctx' }])
     script('ctx', { stdout: [JSON.stringify({ hookSpecificOutput: { additionalContext: 'repo is frozen' } })] })
-    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'repo is frozen\n\ndeploy' })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toEqual([{ message: { customType: 'claude-hook-context', content: 'repo is frozen', display: false }, options: { deliverAs: 'nextTurn' } }])
   })
 
   it('injects plain stdout as context', async () => {
     const ext = await withPromptHooks([{ command: 'ctx' }])
     script('ctx', { stdout: ['remember the changelog'] })
-    expect(await ext.input('deploy')).toEqual({ action: 'transform', text: 'remember the changelog\n\ndeploy' })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)[0]?.message).toMatchObject({ content: 'remember the changelog', display: false })
+  })
+
+  it.each(['/skill:deploy prod', '/review src/a.ts', '  /skill:deploy'])('leaves the slash invocation %j to pi and the skills shim', async (text) => {
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: ['Today is Sunday.'] })
+    expect(await ext.input(text)).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toHaveLength(1)
+  })
+
+  it('queues the context the way pi queues the prompt while the agent is streaming', async () => {
+    // A steer or follow-up typed mid-run never reaches before_agent_start, so a "nextTurn"
+    // message would wait for the next prompt: it goes out in the same mode as the prompt.
+    const ext = await withPromptHooks([{ command: 'ctx' }])
+    script('ctx', { stdout: ['keep it short'] })
+    await ext.input('and this too', 'interactive', 'steer')
+    await ext.input('and that', 'interactive', 'followUp')
+    expect(contextMessages(ext).map((entry) => entry.options)).toEqual([{ deliverAs: 'steer' }, { deliverAs: 'followUp' }])
+  })
+
+  it('sends no message when the hook adds no context', async () => {
+    const ext = await withPromptHooks([{ command: 'quiet' }])
+    script('quiet', { stdout: [] })
+    expect(await ext.input('deploy')).toEqual({ action: 'continue' })
+    expect(contextMessages(ext)).toEqual([])
   })
 
   it('blocks a prompt a hook denies and surfaces the reason', async () => {
@@ -1776,15 +1810,43 @@ describe('background hooks (Claude async/asyncRewake contract, #123)', () => {
     expect(ext.sent).toEqual([])
   })
 
-  it('kills a background hook still running at session end', async () => {
-    // Claude kills async hooks at teardown; without this a hung background hook
-    // pins the event loop past a one-shot run's end.
+  // Claude: "In non-interactive mode with the -p flag, Claude Code kills any async hook still
+  // running at teardown ... If your hook's work must outlive a claude -p session, start a
+  // fully detached process from it". Nothing says an interactive session kills them.
+  it('kills a background hook still running at the end of a non-interactive run', async () => {
+    // Without this a hung background hook pins the event loop past a one-shot run's end.
     const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true }] }] })
     script('monitor', { hang: true })
     await ext.agentEnd()
     expect(recordFor('monitor').killSignals).toEqual([])
-    await ext.shutdown('quit')
+    await ext.shutdown('quit', { hasUI: false })
     expect(recordFor('monitor').killSignals).toEqual(['SIGKILL'])
+  })
+
+  it('leaves a background hook running when an interactive session ends', async () => {
+    const ext = await withHooks({ Stop: [{ hooks: [{ command: 'monitor', async: true }] }] })
+    script('monitor', { hang: true })
+    await ext.agentEnd()
+    await ext.shutdown('quit', { hasUI: true })
+    expect(recordFor('monitor').killSignals).toEqual([])
+  })
+
+  it('lets an async SessionEnd hook finish in an interactive session', async () => {
+    // The shape people choose so that exit is not delayed: `async: true`. It was started by
+    // the very shutdown that then killed every background hook, so it never completed (0 of
+    // 12 runs) unless a synchronous sibling happened to keep the shutdown open.
+    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'upload-log', async: true }] }] })
+    script('upload-log', { hang: true })
+    await ext.shutdown('quit', { hasUI: true })
+    expect(commandsRun()).toEqual(['upload-log'])
+    expect(recordFor('upload-log').killSignals).toEqual([])
+  })
+
+  it('still reaps an async SessionEnd hook when the run is non-interactive, as Claude documents', async () => {
+    const ext = await withHooks({ SessionEnd: [{ hooks: [{ command: 'upload-log', async: true }] }] })
+    script('upload-log', { hang: true })
+    await ext.shutdown('quit', { hasUI: false })
+    expect(recordFor('upload-log').killSignals).toEqual(['SIGKILL'])
   })
 
   it('does not enforce a timeout on an async command hook, while asyncRewake keeps its own', () => {
@@ -2783,9 +2845,9 @@ describe('hooks suppressOriginalPrompt', () => {
     script('suppress', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX","suppressOriginalPrompt":true}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'suppress' }] }] })
 
-    const result = (await ext.input('the original prompt')) as { action: string; text?: string }
-    expect(result.action).toBe('transform')
-    expect(result.text).toBe('CTX\n\nthe original prompt')
+    // The prompt is neither replaced nor rewritten: the context is a message beside it.
+    expect(await ext.input('the original prompt')).toEqual({ action: 'continue' })
+    expect(ext.sent.map((entry) => (entry.message as { content?: string }).content)).toEqual(['CTX'])
   })
 
   it('never echoes the prompt in a block message, which is what the field asks for', async () => {
@@ -2801,8 +2863,8 @@ describe('hooks suppressOriginalPrompt', () => {
     script('ctx', { stdout: ['{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CTX"}}'], code: 0 })
     const ext = await withHooks({ UserPromptSubmit: [{ hooks: [{ command: 'ctx' }] }] })
 
-    const result = (await ext.input('keep me')) as { action: string; text?: string }
-    expect(result.text).toBe('CTX\n\nkeep me')
+    expect(await ext.input('keep me')).toEqual({ action: 'continue' })
+    expect(ext.sent.map((entry) => (entry.message as { content?: string }).content)).toEqual(['CTX'])
   })
 })
 
@@ -2877,6 +2939,82 @@ describe('hooks from agent frontmatter in the child', () => {
 
     expect(commandsRun()).toEqual(['agent-done'])
     expect(JSON.parse(recordFor('agent-done').stdin)).toMatchObject({ hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'fg-9' })
+  })
+})
+
+describe('user-level hooks inside a subagent child', () => {
+  // Claude: settings hooks "also run inside subagents": tool events fire the same configured
+  // hooks, carrying agent_id. But "Stop: runs when the main Claude Code agent has finished
+  // responding", a subagent's completion is SubagentStop, and a subagent run is neither a
+  // session (SessionStart, SessionEnd) nor a prompt the user submitted (UserPromptSubmit).
+  // The child is a full pi process loading the same settings, so every one of them fired in
+  // it: a Stop hook (a finish sound, "block until tests pass") ran once per subagent, and
+  // a blocking one forced each read-only child to carry on.
+  const withUserHooksInChild = async () => {
+    writeSettings(hoisted.home, 'settings.json', {
+      SessionStart: [{ hooks: [{ command: 'user-session-start' }] }],
+      UserPromptSubmit: [{ hooks: [{ command: 'user-prompt-submit' }] }],
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'user-tool-guard' }] }],
+      Stop: [{ hooks: [{ command: 'user-stop' }] }],
+      SubagentStop: [{ hooks: [{ command: 'user-subagent-stop' }] }],
+      SessionEnd: [{ hooks: [{ command: 'user-session-end' }] }],
+    })
+    process.env.PI_CODE_SUBAGENT = '1'
+    process.env.PI_CODE_AGENT_HOOKS = JSON.stringify({ agent: 'scout', id: 'fg-9', hooks: { SubagentStop: [{ hooks: [{ command: 'agent-done' }] }] } })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    return ext
+  }
+
+  afterEach(() => {
+    delete process.env.PI_CODE_SUBAGENT
+    delete process.env.PI_CODE_AGENT_HOOKS
+  })
+
+  it('fires no SessionStart, UserPromptSubmit or SessionEnd', async () => {
+    const ext = await withUserHooksInChild()
+    await ext.input('survey the auth module')
+    await ext.shutdown('quit')
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it("fires no Stop hook, and no settings-level SubagentStop, at the child's own end", async () => {
+    const ext = await withUserHooksInChild()
+    await ext.agentEnd()
+
+    // The agent's own frontmatter Stop, converted to SubagentStop, is the only one that runs
+    // here: the parent fires the settings-level SubagentStop when the child completes.
+    expect(commandsRun()).toEqual(['agent-done'])
+  })
+
+  it('arms no idle notification: no user is waiting on a child', async () => {
+    vi.useFakeTimers()
+    writeSettings(hoisted.home, 'settings.json', { Notification: [{ matcher: 'idle_prompt', hooks: [{ command: 'user-idle' }] }] })
+    process.env.PI_CODE_SUBAGENT = '1'
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.agentEnd()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('still fires tool event hooks, which Claude runs inside subagents', async () => {
+    const ext = await withUserHooksInChild()
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun()).toEqual(['user-tool-guard'])
+  })
+
+  it('keeps firing every event in the main session, where the guard must not apply', async () => {
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'user-stop' }] }], SessionEnd: [{ hooks: [{ command: 'user-session-end' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.agentEnd()
+    await ext.shutdown('quit')
+
+    expect(commandsRun()).toEqual(['user-stop', 'user-session-end'])
   })
 })
 
