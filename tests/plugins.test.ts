@@ -200,6 +200,119 @@ describe('installedPlugins', () => {
   })
 })
 
+/** Claude's record of what is installed: per plugin id, the installs and where each lives. */
+const writeInstallIndex = (root: string, plugins: Record<string, unknown>, version = 2): void => {
+  const dir = join(root, '.claude', 'plugins')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'installed_plugins.json'), JSON.stringify({ version, plugins }))
+}
+
+const orphan = (versionDir: string): void => writeFileSync(join(versionDir, '.orphaned_at'), '1789000000000')
+
+const rootsOf = (root: string): string[] => installedPlugins(root).map((plugin) => plugin.root)
+
+describe('which version directory of a plugin loads', () => {
+  // Claude's cache keeps old versions for a grace period and names some by commit sha. The
+  // walk read "the newest" from the names alone, so `2fe0f0266557` (a sha, parsed as the
+  // number 2) beat `1.2.49`, and a version Claude had already orphaned could beat the live one.
+  it('takes the directory Claude recorded, not a higher-sorting sha directory', () => {
+    const h = home()
+    const live = install(h, 'official', 'azure', '1.2.49')
+    install(h, 'official', 'azure', '2fe0f0266557')
+    enable(h, { 'azure@official': true })
+    writeInstallIndex(h, { 'azure@official': [{ scope: 'user', installPath: live, version: '1.2.49' }] })
+
+    expect(rootsOf(h)).toEqual([live])
+  })
+
+  it('prefers the user-scope install over a project one listed before it', () => {
+    // Enablement here is the user's own; a project or local install is another project's copy.
+    const h = home()
+    const projectCopy = install(h, 'official', 'review', 'unknown')
+    const userCopy = install(h, 'official', 'review', 'c447c3207a42')
+    enable(h, { 'review@official': true })
+    writeInstallIndex(h, {
+      'review@official': [
+        { scope: 'project', projectPath: '/somewhere/else', installPath: projectCopy, version: 'unknown' },
+        { scope: 'user', installPath: userCopy, version: 'c447c3207a42' },
+      ],
+    })
+
+    expect(rootsOf(h)).toEqual([userCopy])
+  })
+
+  it('reads the older index layout, one install object per plugin', () => {
+    const h = home()
+    const live = install(h, 'official', 'azure', '1.2.49')
+    install(h, 'official', 'azure', '2fe0f0266557')
+    enable(h, { 'azure@official': true })
+    writeInstallIndex(h, { 'azure@official': { version: '1.2.49', installPath: live } }, 1)
+
+    expect(rootsOf(h)).toEqual([live])
+  })
+
+  it('skips a version Claude marked orphaned when there is no index entry', () => {
+    const h = home()
+    const older = install(h, 'community', 'formatter', '1.0.0')
+    orphan(install(h, 'community', 'formatter', '2.0.0'))
+    enable(h, { formatter: true })
+
+    expect(rootsOf(h)).toEqual([older])
+  })
+
+  it('loads nothing for a plugin whose every version is orphaned', () => {
+    const h = home()
+    orphan(install(h, 'community', 'formatter', '1.0.0'))
+    enable(h, { formatter: true })
+
+    expect(rootsOf(h)).toEqual([])
+  })
+
+  it('falls back to the newest live version when the recorded directory is gone', () => {
+    const h = home()
+    const gone = join(h, '.claude', 'plugins', 'cache', 'community', 'formatter', '9.9.9')
+    const live = install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+    writeInstallIndex(h, { 'formatter@community': [{ scope: 'user', installPath: gone }] })
+
+    expect(rootsOf(h)).toEqual([live])
+  })
+
+  it('ignores a recorded path that is not a version directory of that plugin', () => {
+    // The index is a file in the user's config, but a path pointing at another plugin's tree
+    // or outside the cache would make one plugin load another's code.
+    const h = home()
+    const live = install(h, 'community', 'formatter', '1.0.0')
+    // A version name the plugin also has, so only the path itself says it belongs elsewhere.
+    const other = install(h, 'community', 'linter', '1.0.0')
+    enable(h, { formatter: true, linter: false })
+    writeInstallIndex(h, { 'formatter@community': [{ scope: 'user', installPath: other }] })
+
+    expect(rootsOf(h)).toEqual([live])
+  })
+
+  it('does not load the dot-directory Claude leaves while it clones a marketplace', () => {
+    const h = home()
+    mkdirSync(join(h, '.claude', 'plugins', 'cache', 'temp_git_1789929883961_186qjw', '.git', 'refs'), { recursive: true })
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { formatter: true })
+
+    expect(installedPlugins(h).map((plugin) => plugin.name)).toEqual(['formatter'])
+  })
+
+  it('notices an edit of the index on the next call', () => {
+    const h = home()
+    const first = install(h, 'official', 'azure', '1.2.47')
+    const second = install(h, 'official', 'azure', '1.2.49')
+    enable(h, { 'azure@official': true })
+    writeInstallIndex(h, { 'azure@official': [{ scope: 'user', installPath: first }] })
+    expect(rootsOf(h)).toEqual([first])
+
+    writeInstallIndex(h, { 'azure@official': [{ scope: 'user', installPath: second }] })
+    expect(rootsOf(h)).toEqual([second])
+  })
+})
+
 describe('installedPlugins manifest failures', () => {
   it('reports a plugin manifest it cannot parse instead of dropping the plugin', () => {
     // Without the manifest the plugin has no components at all: no commands, agents,
@@ -233,10 +346,10 @@ describe('installedPlugins cache', () => {
 
     const mark = fsHoisted.reads
     expect(installedPlugins(h)).toEqual(first)
-    // The walk is memoized. Revalidation re-reads only the one small settings
-    // file (content-hashed so a same-size rewrite is seen); the expensive part,
+    // The walk is memoized. Revalidation re-reads only the small settings file and Claude's
+    // install index (content-hashed so a same-size rewrite is seen); the expensive part,
     // re-parsing every manifest in the tree, must not happen.
-    expect(fsHoisted.reads).toBe(mark + 1)
+    expect(fsHoisted.reads).toBe(mark + 2)
   })
 
   it('re-reads after resetInstalledPluginsCache', () => {

@@ -289,6 +289,9 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   // Scoped rules still awaiting a matching touch. An attached rule leaves the
   // list, so each attaches at most once and the per-tool-result scan shrinks.
   let attachTargets: AttachTarget[] = []
+  // Every scoped rule of the session, the list attachTargets is rebuilt from when what was
+  // attached leaves the context (see rearm below).
+  let scopedTargets: AttachTarget[] = []
 
   pi.on('session_start', async (_event, ctx) => {
     // Project rules are repository text landing in the system prompt, so they load
@@ -318,6 +321,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
       ...globalRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: realpathOr(ctx.cwd), file: path.join(globalRulesDir, rule.rel), memoryType: 'User' as const })),
       ...projectRules.scoped.map((rule) => ({ globs: rule.paths, compiled: compileGlobs(rule.paths), body: rule.body, root: realpathOr(projectRoot), file: path.join(projectRulesDir ?? path.join(ctx.cwd, '.claude', 'rules'), rule.rel), memoryType: 'Project' as const })),
     ]
+    scopedTargets = attachTargets
     pendingScopedRules = attachTargets.length
     // Relative to cwd, which the read tool resolves: an ancestor dir yields a
     // `../…/.claude/rules` the model can follow, where a bare '.claude/rules'
@@ -339,6 +343,16 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
     return { systemPrompt: event.systemPrompt + addition }
   })
+
+  // A rule's body sits in the tool result that attached it. Compaction folds that result into
+  // a summary and /tree moves to a branch that never had it, and Claude reloads the rule "as
+  // Claude reads files they apply to", so every rule is armed again.
+  const rearm = (): void => {
+    attachTargets = scopedTargets
+    pendingScopedRules = attachTargets.length
+  }
+  pi.on('session_compact', rearm)
+  pi.on('session_tree', rearm)
 
   // Lazy attach: when a file tool touches a path a scoped rule covers, append the
   // rule body to that tool's result so it enters context, once per rule per session.

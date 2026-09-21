@@ -145,12 +145,15 @@ export interface ImportBudget {
   files: number
   bytes: number
   dropped: number
-  /** Existing files an @import named that resolve outside the importer's allowed
-   * roots. Collected so the refusal can be reported rather than left silent. */
+  /** Every @import target that resolves outside the importer's allowed roots, whether or not
+   * it exists: the notice to the model must not reveal which of a repo's guesses do. */
   refused: Set<string>
+  /** The subset of `refused` that is an existing file, which is what an approval would
+   * load and so what the user's dialog is about. */
+  refusedPresent: Set<string>
 }
 
-export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0, refused: new Set() })
+export const createImportBudget = (): ImportBudget => ({ files: MAX_IMPORT_FILES, bytes: MAX_IMPORT_BYTES, dropped: 0, refused: new Set(), refusedPresent: new Set() })
 
 /** The `@path` targets of a context file, in document order. Claude Code evaluates
  * imports neither in fenced code blocks (backtick or tilde) nor in inline spans. */
@@ -171,16 +174,25 @@ function importTargets(content: string): string[] {
   return targets
 }
 
+function isRegularFile(target: string): boolean {
+  try {
+    return fs.statSync(target).isFile()
+  } catch {
+    return false
+  }
+}
+
 /** Read one `@path` target, or null when it is unresolvable, already seen, outside `allowedRoots`, excluded, or unreadable. */
-function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded: ((realPath: string) => boolean) | undefined, refused: Set<string>): { real: string; body: string } | null {
+function readImport(target: string, fromDir: string, home: string, allowedRoots: string[], seen: Set<string>, isExcluded: ((realPath: string) => boolean) | undefined, refusals: Pick<ImportBudget, 'refused' | 'refusedPresent'>): { real: string; body: string } | null {
   const resolved = path.resolve(fromDir, expandHome(target, home))
   // Always the path the importing file named, never where a symlink pointed: the
   // notice would otherwise hand a repo the real name of whatever the link reaches,
   // which is the disclosure the refusal exists to prevent. An excluded file is not
   // named either, since exclusion removes it from every other surface too.
-  const refuse = (): null => {
-    if (isExcluded?.(resolved) !== true) refused.add(resolved)
-    return null
+  const refuse = (isFile: boolean): void => {
+    if (isExcluded?.(resolved) === true) return
+    refusals.refused.add(resolved)
+    if (isFile) refusals.refusedPresent.add(resolved)
   }
   let real: string
   try {
@@ -190,10 +202,14 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     // reported never depends on whether it exists: a notice that named only the
     // existing ones would enumerate the filesystem for any repo-controlled file
     // willing to write one @line per guess.
-    return isUnder(resolved, allowedRoots) ? null : refuse()
+    if (!isUnder(resolved, allowedRoots)) refuse(false)
+    return null
   }
   if (seen.has(real)) return null
-  if (!isUnder(real, allowedRoots)) return refuse()
+  if (!isUnder(real, allowedRoots)) {
+    refuse(isRegularFile(real))
+    return null
+  }
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
@@ -206,7 +222,8 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     seen.add(real)
     // A file another importer already refused is in context after all; the notice
     // must not claim otherwise.
-    refused.delete(resolved)
+    refusals.refused.delete(resolved)
+    refusals.refusedPresent.delete(resolved)
     return { real, body }
   } catch {
     return null
@@ -243,7 +260,7 @@ function collectFrom(scan: ImportScan, content: string, fromDir: string, depth: 
       scan.budget.dropped += 1
       continue
     }
-    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded, scan.budget.refused)
+    const file = readImport(target, fromDir, scan.home, scan.allowedRoots, scan.seen, scan.isExcluded, scan.budget)
     if (!file) continue
     scan.budget.files -= 1
     // The budget is bytes: a string slice counts UTF-16 units and lets CJK text through
@@ -272,16 +289,21 @@ export function collectImports(content: string, fromDir: string, home: string, a
 /**
  * Roots an importing file may pull from.
  *
- * A context file under the user's own config may reach the whole config; a project
- * file may not. `~/.claude` holds `.credentials.json`, global settings and every
- * project's transcripts, so granting those roots to a cloned repo's `CLAUDE.md`
- * would let it read them into the system prompt.
+ * A file under the user's own config may import from anywhere: Claude's user-scope memory
+ * files "are files you wrote yourself", and it loads their imports without the dialog and
+ * trusts them like the rest of the user's configuration. A project file may not, so a cloned
+ * repo's `CLAUDE.md` cannot read `~/.claude` (`.credentials.json`, global settings, every
+ * project's transcripts) into the system prompt.
+ *
+ * "Under the user's config" is judged by the path pi reported as well as its realpath: a
+ * dotfiles manager such as GNU stow links `~/.claude/CLAUDE.md` to a repository, so the
+ * real path is outside `~/.claude` although the user put the link there.
  */
 export function rootsForImporter(importer: string, home: string, cwd: string, externalApproved = false): string[] {
-  const userRoots = realRoots([claudeConfigDir(home), path.join(home, '.pi')])
+  const userConfig = [claudeConfigDir(home), path.join(home, '.pi')]
   const [real] = realRoots([importer])
-  const fromUserConfig = real !== undefined && isUnder(real, userRoots)
-  if (fromUserConfig) return realRoots([cwd, ...userRoots])
+  const fromUserConfig = isUnder(path.resolve(importer), userConfig) || (real !== undefined && isUnder(real, realRoots(userConfig)))
+  if (fromUserConfig) return [ANY_ROOT]
   // The project was asked about its external imports and allowed them, so a project
   // file may reach outside, as Claude's dialog grants. The widening is deliberately
   // only for project files: a user-scope file's roots are its own config, and an
@@ -552,7 +574,9 @@ export const EXTERNAL_IMPORT_PROMPT_TITLE = 'Load imports from outside this proj
  *
  * The list is the refusals the enforcing path produced, not a second enumeration of
  * what it might refuse: same files, same depth, same resolution, same exclusions. That
- * is the only way the dialog can promise it names everything the approval lets in.
+ * is the only way the dialog can promise it names everything the approval lets in. Only
+ * files that exist are listed, as in Claude, which asks about the external files it read:
+ * a prose `@/components/ui` names nothing an approval could load.
  */
 async function askExternalImports(ctx: ExtensionContext, root: string, refused: ReadonlySet<string>): Promise<boolean> {
   const listed = [...refused]
@@ -853,8 +877,15 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // @import cannot pay for a body that is already there.
   let launchLoadedPaths: string[] = []
   // Nested CLAUDE.md/CLAUDE.local.md files already attached this session, so a second
-  // read in the same subtree does not repeat them.
+  // read in the same subtree does not repeat them. Emptied when compaction or /tree takes
+  // the tool results that carried them out of context: Claude reloads them "as Claude
+  // reads files they apply to".
   const nestedLoaded = new Set<string>()
+  const forgetNested = (): void => {
+    nestedLoaded.clear()
+  }
+  pi.on('session_compact', forgetNested)
+  pi.on('session_tree', forgetNested)
   // Instruction loads already announced on the shared bus, keyed reason:path.
   // before_agent_start fires every turn, so without this a configured
   // InstructionsLoaded hook would fire once per file per turn.
@@ -1023,8 +1054,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const key = externalImportKey(cwd)
     const decided = externalImportDecision(key)
     const result = expandWith(decided === true)
-    if (decided !== null || result.budget.refused.size === 0 || ctx?.hasUI !== true) return result
-    const approved = await askExternalImports(ctx, key, result.budget.refused)
+    if (decided !== null || result.budget.refusedPresent.size === 0 || ctx?.hasUI !== true) return result
+    const approved = await askExternalImports(ctx, key, result.budget.refusedPresent)
     rememberExternalImportDecision(key, approved)
     return approved ? expandWith(true) : result
   }

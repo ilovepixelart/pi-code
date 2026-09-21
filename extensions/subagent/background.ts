@@ -29,6 +29,9 @@ export interface BackgroundRun {
   partial?: boolean
   /** Temp dir holding a prompt file rebuilt for a resume; removed with the run. */
   rebuiltPromptDir?: string
+  /** Temp dir the child persists its session in, apart from the project's session dir;
+   * removed with the run. */
+  sessionDir?: string
   /** Set while running so the run can be cancelled; cleared on completion. */
   kill?: () => void
   /** True until the child process actually closes: a cancelled child that ignores
@@ -90,7 +93,7 @@ export function activeBackgroundRuns(): number {
 /** Test seam: the registry is module state, so tests reset it between cases to
  * stay order-independent. */
 export function resetBackgroundRuns(): void {
-  for (const run of runs.values()) removeRebuiltPrompt(run)
+  for (const run of runs.values()) removeRunFiles(run)
   runs.clear()
   state.finishSequence = 0
 }
@@ -99,7 +102,7 @@ function evictFinishedRuns(): void {
   const finished = [...runs.values()].filter((run) => !run.live && run.state !== 'running')
   finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
   for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_RUNS))) {
-    removeRebuiltPrompt(stale)
+    removeRunFiles(stale)
     runs.delete(stale.id)
   }
 }
@@ -178,7 +181,7 @@ export function cancelAllBackgroundRuns(): number {
     if (cancelBackgroundRun(id) === 'cancelled') count++
   }
   // Called at quit: nothing in this registry is resumable once pi exits.
-  for (const run of runs.values()) removeRebuiltPrompt(run)
+  for (const run of runs.values()) removeRunFiles(run)
   return count
 }
 
@@ -259,12 +262,14 @@ function withRebuiltPrompt(spawnSpec: BackgroundSpawn, agent: string): { args: s
   }
 }
 
-/** The rebuilt prompt lives as long as its run can be resumed, so it goes when the run
- * leaves the registry: eviction, quit, or the test reset. */
-function removeRebuiltPrompt(run: BackgroundRun): void {
-  if (!run.rebuiltPromptDir) return
-  fs.rmSync(run.rebuiltPromptDir, { recursive: true, force: true })
+/** A run's temp files (the rebuilt prompt, its session) live as long as the run can be
+ * resumed, so they go when it leaves the registry: eviction, quit, or the test reset. */
+function removeRunFiles(run: BackgroundRun): void {
+  for (const dir of [run.rebuiltPromptDir, run.sessionDir]) {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+  }
   run.rebuiltPromptDir = undefined
+  run.sessionDir = undefined
 }
 
 export function startBackgroundRun(agent: string, task: string, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void, presetId?: string): string | null {
@@ -276,12 +281,15 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
   // id the run will carry.
   const id = presetId ?? `bg-${randomUUID().slice(0, 8)}`
   // A stable session id per run: the child persists its session, so a follow-up can
-  // resume it instead of starting cold.
+  // resume it instead of starting cold. It persists into a directory of its own: in the
+  // project's session dir it would be the newest session there, which `pi -c` and /resume
+  // offer as the user's previous one. The same args serve the resume, so it finds the file.
   const sessionId = `pi-code-${id}-${randomUUID().slice(0, 8)}`
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-code-bg-session-'))
   const args = invocation.args.map((arg) => (arg === '--no-session' ? '--session-id' : arg))
-  const withSession = args.includes('--session-id') ? args.flatMap((arg) => (arg === '--session-id' ? ['--session-id', sessionId] : [arg])) : args
+  const withSession = args.includes('--session-id') ? args.flatMap((arg) => (arg === '--session-id' ? ['--session-id', sessionId, '--session-dir', sessionDir] : [arg])) : args
   const spawnSpec: BackgroundSpawn = { ...invocation, args: withSession }
-  const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0, sessionId, spawn: spawnSpec }
+  const run: BackgroundRun = { id, agent, task, state: 'running', turns: 0, sessionId, sessionDir, spawn: spawnSpec }
   runs.set(id, run)
   driveRun(run, spawnSpec, onComplete)
   return id

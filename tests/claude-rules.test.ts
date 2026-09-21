@@ -183,6 +183,35 @@ describe('extension wiring', () => {
     expect(injectedTexts(second).join('\n')).not.toContain('Use parameterized queries.')
   })
 
+  // Claude: after /compact, "rules with paths: frontmatter reload as Claude reads files they
+  // apply to". The attached body sits in a tool result that compaction folds into a summary
+  // and that /tree leaves behind on another branch, so once per session lost the rule.
+  it.each(['session_compact', 'session_tree'])('attaches a scoped rule again after %s took the earlier one out of context', async (event) => {
+    const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const first = await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })
+    expect(injectedTexts(first).join('\n')).toContain('Use parameterized queries.')
+    expect(injectedTexts(await handlers.get('tool_result')?.(readResult('db/other.sql'), { cwd })).join('\n')).not.toContain('Use parameterized queries.')
+
+    await handlers.get(event)?.({ type: event }, approvedCtx(cwd))
+
+    const after = await handlers.get('tool_result')?.(readResult('db/again.sql'), { cwd })
+    expect(injectedTexts(after).join('\n')).toContain('Use parameterized queries.')
+  })
+
+  it('counts the rules still to attach again once a compaction re-arms them', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })
+    expect(pendingScopedRuleCount()).toBe(0)
+
+    await handlers.get('session_compact')?.({ type: 'session_compact' }, approvedCtx(cwd))
+
+    expect(pendingScopedRuleCount()).toBe(1)
+  })
+
   it('does not attach a scoped rule for a non-matching file, or on a failed tool', async () => {
     const cwd = projectWithRule('---\npaths:\n  - "db/**"\n---\nUse parameterized queries.')
     const handlers = wire()
