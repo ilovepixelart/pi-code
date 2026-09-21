@@ -123,7 +123,9 @@ function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined 
       continue
     }
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue
+      // A link counts: pi's loader follows it, and skillAt already turns a link that
+      // leads to no SKILL.md (dangling, or to a plain file) into undefined.
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
       const skill = skillAt(root, entry.name)
       if (skill?.name === name) return { filePath: skill.filePath, baseDir: path.dirname(skill.filePath) }
     }
