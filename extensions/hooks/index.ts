@@ -649,23 +649,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
       idlePromptTimer.unref?.()
     }
   }
+  /** In a subagent child, the agent-frontmatter Stop hooks were converted to SubagentStop
+   * and fire at the child's own end, notify-style, before the Stop early-returns, which do
+   * not apply to them. Only the agent's own frontmatter hooks (stamped agent:<name>): the
+   * settings-level SubagentStop is fired by the parent when the child completes, so the
+   * child firing it too ran it twice. */
+  const fireChildSubagentStop = async (event: { messages?: Array<{ role: string; content: unknown }> }, ctx: ExtensionContext): Promise<void> => {
+    if (!agentIdentity) return
+    const subStop = matchingCommands(config.SubagentStop, agentIdentity.agent).filter((command) => command.origin?.startsWith('agent:'))
+    if (subStop.length === 0) return
+    const subText = lastAssistantText(event.messages ?? [])
+    const subPayload = { hook_event_name: 'SubagentStop', agent_type: agentIdentity.agent, ...(agentIdentity.id ? { agent_id: agentIdentity.id } : {}), stop_hook_active: false, ...(subText ? { last_assistant_message: subText } : {}) }
+    await runNotifyHooks(subStop, subPayload, boundRunner(ctx)).catch(() => {})
+  }
+
   pi.on('agent_end', async (event, ctx) => {
     armIdlePrompt(ctx)
-
-    // In a subagent child, the agent-frontmatter Stop hooks were converted to
-    // SubagentStop and fire here, at the child's own end, notify-style; before the
-    // Stop early-returns, which do not apply to them.
-    if (agentIdentity) {
-      // Only the agent's own frontmatter hooks (stamped agent:<name>): the settings-level
-      // SubagentStop is fired by the parent when the child completes, so the child firing
-      // it too ran it twice.
-      const subStop = matchingCommands(config.SubagentStop, agentIdentity.agent).filter((command) => command.origin?.startsWith('agent:'))
-      if (subStop.length > 0) {
-        const subText = lastAssistantText((event as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [])
-        const subPayload = { hook_event_name: 'SubagentStop', agent_type: agentIdentity.agent, ...(agentIdentity.id ? { agent_id: agentIdentity.id } : {}), stop_hook_active: false, ...(subText ? { last_assistant_message: subText } : {}) }
-        await runNotifyHooks(subStop, subPayload, boundRunner(ctx)).catch(() => {})
-      }
-    }
+    await fireChildSubagentStop(event as { messages?: Array<{ role: string; content: unknown }> }, ctx)
 
     // Stop is the main agent's event; the child's completion was handled above.
     if (inSubagentChild()) return
