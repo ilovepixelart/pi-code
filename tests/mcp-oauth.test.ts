@@ -300,10 +300,14 @@ describe('openBrowser', () => {
   })
 
   it('selects the launch command and args per platform', () => {
-    const url = 'https://auth.example/authorize?x=1'
+    // Several bare ampersands, as every real authorization URL has. On Windows no shell may
+    // see them: cmd splits `start "" <url>` at each one, so the browser got a truncated URL
+    // (the IdP then reports a missing client_id) and every segment after the first ran as
+    // a command, the tail of a URL a server chose.
+    const url = 'https://auth.example/authorize?response_type=code&client_id=abc&code_challenge=xyz'
     const cases: Array<[NodeJS.Platform, string, string[]]> = [
       ['darwin', 'open', [url]],
-      ['win32', 'cmd', ['/c', 'start', '', url]],
+      ['win32', 'rundll32', ['url.dll,FileProtocolHandler', url]],
       ['linux', 'xdg-open', [url]],
     ]
     for (const [platform, command, args] of cases) {
@@ -311,6 +315,25 @@ describe('openBrowser', () => {
       setPlatform(platform)
       openBrowser(url)
       expect(spawnMock.calls).toEqual([{ command, args }])
+    }
+  })
+
+  it('opens only web pages, whatever authorization URL the server names', () => {
+    // authorization_endpoint comes from the server's metadata, and the SDK rejects only
+    // javascript:, data: and vbscript:. A file: URL or a custom protocol handler handed to
+    // the platform launcher opens a local file or launches an application.
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      setPlatform(platform)
+      for (const url of ['file:///C:/Windows/System32/calc.exe', 'file:///Applications/Calculator.app', 'ms-msdt:/id PCWDiagnostic', 'calc:', 'ftp://auth.example/x', 'not a url', '']) {
+        spawnMock.calls.length = 0
+        openBrowser(url)
+        expect(spawnMock.calls, `${platform} ${url}`).toEqual([])
+      }
+      for (const url of ['https://auth.example/authorize', 'HTTPS://auth.example/authorize', 'http://localhost:8080/authorize']) {
+        spawnMock.calls.length = 0
+        openBrowser(url)
+        expect(spawnMock.calls, `${platform} ${url}`).toHaveLength(1)
+      }
     }
   })
 

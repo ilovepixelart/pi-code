@@ -286,12 +286,20 @@ export function waitForAuthCode(server: http.Server, timeoutMs: number, expected
   })
 }
 
-/** Best-effort browser launch; the caller also surfaces the URL as text. */
+/** Best-effort browser launch; the caller also surfaces the URL as text.
+ *
+ * The URL comes from the server's metadata, so two things are not taken on trust. Only a
+ * web page is opened: the SDK rejects javascript:, data: and vbscript: alone, and a file:
+ * URL or a custom protocol handed to the platform launcher opens a file or starts an
+ * application. And on Windows no shell sees it: `cmd /c start` splits its line at every
+ * bare `&`, which every authorization URL has, truncating the URL and running the rest as
+ * commands. rundll32 takes the URL as one argument. */
 export function openBrowser(url: string): void {
+  if (!/^https?:\/\//i.test(url)) return
   let command = 'xdg-open'
   if (process.platform === 'darwin') command = 'open'
-  else if (process.platform === 'win32') command = 'cmd'
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
+  else if (process.platform === 'win32') command = 'rundll32'
+  const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url]
   try {
     const child = spawn(command, args, { stdio: 'ignore', detached: true })
     // A missing launcher (a container or an SSH session with no xdg-open) reports itself
