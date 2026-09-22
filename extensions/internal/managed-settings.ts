@@ -34,12 +34,29 @@ export function managedSettingsFile(): string {
   return managedSettingsFileOverride ?? managedSettingsPath()
 }
 
+/** Files already reported as unparsable. Managed settings are read from sixteen call
+ * sites, several of them once per turn, so one warning per broken file is the whole
+ * budget; the same warn-once shape project-approval.ts uses for its runtime notice. */
+const warnedUnparsable = new Set<string>()
+
 function readOneSettingsFile(file: string): Record<string, unknown> {
+  let raw: string
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    raw = fs.readFileSync(file, 'utf-8')
   } catch {
-    // No managed policy on this machine.
+    return {} // no such file: genuinely no managed policy on this machine
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (isRecord(parsed)) return parsed
+  } catch {
+    // Present but unparsable is an administrator's typo, not an absent policy. Silence
+    // there disabled every policy the file carries (exclusion lists, MCP allow and deny,
+    // enabledPlugins, disableAllHooks) on every session, with nothing said anywhere.
+    if (!warnedUnparsable.has(file)) {
+      warnedUnparsable.add(file)
+      console.warn(`pi-code: ignoring ${file}: not valid JSON; the managed policy it carries is not applied`)
+    }
   }
   return {}
 }

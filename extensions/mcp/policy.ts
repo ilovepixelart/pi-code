@@ -8,7 +8,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { managedSettingsFile } from '../internal/managed-settings.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
-import { errorMessage, escapeRegExp } from '../internal/values.js'
+import { errorMessage, escapeRegExp, isRecord } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
 export interface ProjectServerPolicy {
@@ -29,10 +29,22 @@ export interface ProjectServerPolicy {
  * disabledMcpjsonServers counts from every file, including the repo's own, and wins
  * over consent: a repo may always restrict itself further, never less. */
 export function projectServerPolicy(cwd: string, home: string, projectApproved: boolean): ProjectServerPolicy {
+  // Tells a missing file from an unparsable one, like mcpAllowDeny below: silence for the
+  // second silently emptied disabledMcpjsonServers, so a server the repository had
+  // explicitly disabled connected. That direction fails open, against this function's own
+  // rule that a repo may always restrict itself further, never less.
   const read = (file: string): Record<string, unknown> => {
+    let raw: string
     try {
-      return JSON.parse(fs.readFileSync(file, 'utf-8'))
+      raw = fs.readFileSync(file, 'utf-8')
     } catch {
+      return {} // no such file: genuinely no policy
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      return isRecord(parsed) ? parsed : {}
+    } catch {
+      console.warn(`pi-code-mcp: ignoring ${file}: not valid JSON; its MCP server consent and disable lists are not applied`)
       return {}
     }
   }

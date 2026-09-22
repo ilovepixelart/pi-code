@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { HookCommand } from '../extensions/hooks/config.ts'
 import { type IfFilterTarget, passesIfFilter } from '../extensions/hooks/matcher.ts'
+
+// `~` on the rule side expands against anchors.home, and on the target side against the
+// real home (as pi's own tools do), so the two must be the same home for a `~` rule to be
+// derivable here. In production they already are; the mock makes the fixture match.
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => '/home/u' }
+})
 
 // Fixed anchors so every expectation is hand-derivable: rules resolve against
 // cwd, /-rules against the project root, ~-rules against home.
@@ -68,6 +76,36 @@ describe('passesIfFilter', () => {
 
   it('reads the claude-shaped file_path input key as well', () => {
     expect(passesIfFilter(hookIf('Write(docs/**)'), target('write', { file_path: '/proj/sub/docs/a.md' }))).toBe(true)
+  })
+
+  // pi's read/edit/write resolve `~`, a leading `@` and a file:// URL before they open a
+  // file (internal/tool-target.ts asPiReadsIt, which the command allowed-tools guard in
+  // commands.ts already applies). The hook `if` filter compared the raw string instead, so
+  // a rule resolved against the real home while the target kept a literal `~` segment and
+  // never matched: a block-capable PreToolUse guard silently never ran for exactly the
+  // paths a prompt injection would name.
+  it.each([
+    ['a ~ path', '~/.ssh/authorized_keys'],
+    ['a leading @', '@/home/u/.ssh/authorized_keys'],
+  ])('matches a ~-rule against %s, as pi resolves it', (_label, input) => {
+    expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { path: input }))).toBe(true)
+  })
+
+  // POSIX only, for the fixture rather than the behaviour: these anchors are POSIX paths,
+  // and on Windows fileURLToPath rejects a file:// URL with no drive letter, so
+  // asPiReadsIt keeps the raw string (its documented fallback) and nothing matches. A
+  // Windows-shaped URL resolves there, but needs a drive-lettered home this fixture has not got.
+  it.skipIf(process.platform === 'win32')('matches a ~-rule against a file:// URL, as pi resolves it', () => {
+    expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { path: 'file:///home/u/.ssh/authorized_keys' }))).toBe(true)
+  })
+
+  it('normalises the file_path alias the same way', () => {
+    expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { file_path: '~/.ssh/id_rsa' }))).toBe(true)
+  })
+
+  it('still matches a path that needs no normalising, and still refuses a non-match', () => {
+    expect(passesIfFilter(hookIf('Edit(src/*.ts)'), target('edit', { path: 'src/app.ts' }))).toBe(true)
+    expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { path: 'src/app.ts' }))).toBe(false)
   })
 
   it('anchors a /-rule at the project root and a ~-rule at home', () => {

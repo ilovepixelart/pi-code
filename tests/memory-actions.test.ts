@@ -199,6 +199,32 @@ describe('memory index robustness', () => {
     expect(index).toContain('- [beta](beta.md): second of a pair')
   })
 
+  it('does not report "nothing was deleted" after it has already deleted the file', async () => {
+    // The content file was removed before the index was rewritten, so a failure in the
+    // rewrite left the index still listing a memory whose file was gone, while telling the
+    // user nothing had happened. Reading that name afterwards then found nothing, with no
+    // explanation. The index is what the prompt and /memory show, so it is what must move
+    // first: a failure after that leaves an orphan file, not a dangling index entry.
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'alpha', description: 'first', content: 'a' })
+    await tool.execute('2', { action: 'save', name: 'beta', description: 'second', content: 'b' })
+
+    // A directory exactly where atomicWriteFile puts its temp file: only the index write
+    // fails (EISDIR), on every platform, while the read and the file removal still work.
+    const indexPath = join(dir, 'MEMORY.md')
+    mkdirSync(`${indexPath}.${process.pid}.tmp`)
+
+    const result = (await tool.execute('3', { action: 'delete', name: 'alpha' })).content[0].text
+
+    const index = readFileSync(indexPath, 'utf-8')
+    const fileGone = !existsSync(join(dir, 'alpha.md'))
+    // Whatever it reports, the report has to match what actually happened on disk.
+    expect(result.includes('Nothing was deleted') && fileGone).toBe(false)
+    // And the index must never keep pointing at a file that is gone.
+    expect(index.includes('alpha.md') && fileGone).toBe(false)
+  })
+
   it('refuses to delete while the index is unreadable, keeping the memory file', async () => {
     const { handlers, tool, cwd, dir } = setup()
     await start(handlers, cwd)

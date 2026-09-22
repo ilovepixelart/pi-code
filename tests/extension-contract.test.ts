@@ -138,3 +138,52 @@ describe('pi session replacement contract', () => {
     }
   })
 })
+
+// pi added `agent_settled` in 0.80.4 (its CHANGELOG: "Added extension and RPC
+// agent_settled events plus session-level idle waiting for fully settled agent runs").
+// Several extensions rely on it unconditionally, so on an older runtime it simply never
+// arrives and the work it gates never happens: a command's tool restrictions and an
+// ultrathink escalation are never lifted, and the "Ready for input" notification never
+// fires. Unlike the `ctx.isProjectTrusted` floor, which a runtime feature check guards
+// (internal/project-approval.ts), this one cannot be feature-detected: registering a
+// handler for an event that never fires looks identical to one that has not fired yet.
+// The declared floor is therefore the only guard, so it is pinned here with its reason.
+describe('the peer version floor', () => {
+  const AGENT_SETTLED_SINCE = [0, 80, 4]
+
+  const parseMinimum = (range: string): number[] => {
+    const match = /^>=\s*(\d+)\.(\d+)\.(\d+)/.exec(range)
+    if (!match) throw new Error(`peer range ${range} is not a >=x.y.z floor this test can read`)
+    return [Number(match[1]), Number(match[2]), Number(match[3])]
+  }
+
+  const atLeast = (declared: number[], required: number[]): boolean => {
+    for (let i = 0; i < required.length; i++) {
+      if ((declared[i] ?? 0) !== required[i]) return (declared[i] ?? 0) > required[i]
+    }
+    return true
+  }
+
+  it('covers every runtime feature the extensions use unconditionally', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
+      peerDependencies: Record<string, string>
+    }
+    const peers = Object.entries(pkg.peerDependencies)
+    expect(peers.length).toBeGreaterThan(0)
+
+    for (const [name, range] of peers) {
+      expect([name, atLeast(parseMinimum(range), AGENT_SETTLED_SINCE)]).toEqual([name, true])
+    }
+  })
+
+  it('still has extensions depending on agent_settled, the reason for that floor', () => {
+    // If this ever finds none, the floor above may be loosened deliberately; until then
+    // the pin has a live reason rather than being folklore.
+    const users = fs
+      .readdirSync(extensionsDir, { recursive: true, encoding: 'utf-8' })
+      .filter((entry) => entry.endsWith('.ts'))
+      .filter((entry) => fs.readFileSync(path.join(extensionsDir, entry), 'utf-8').includes("pi.on('agent_settled'"))
+
+    expect(users.length).toBeGreaterThan(0)
+  })
+})

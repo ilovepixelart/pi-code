@@ -243,18 +243,25 @@ function readMemory(dir: string, name: string): MemoryToolResult {
   }
 }
 
-/** The delete action: remove a memory file and its index line, queued on the index
- * like save (single key, no deadlock). The index is read before anything is removed,
- * and any failure (a bad index read, or an unreadable store the queue key cannot
- * realpath) leaves both the memory file and the index as they were. */
+/** The delete action: remove a memory's index line and then its file, queued on the index
+ * like save (single key, no deadlock). The index moves first because it is what the prompt
+ * and /memory show: a failure before it is written leaves both the file and the index as
+ * they were, and a failure after it leaves an orphan file rather than an index line
+ * pointing at a file that is gone. Each outcome is reported as what actually happened. */
 async function deleteMemory(dir: string, indexPath: string, name: string): Promise<MemoryToolResult> {
   try {
     return await withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
       const index = readIndex(dir)
-      fs.rmSync(path.join(dir, `${name}.md`), { force: true })
       const remaining = removeIndexLine(index, name)
       if (remaining) writeIndex(indexPath, remaining)
       else fs.rmSync(indexPath, { force: true })
+      try {
+        fs.rmSync(path.join(dir, `${name}.md`), { force: true })
+      } catch (error) {
+        // Out of the index, so it is gone from every surface the user sees; saying the
+        // delete failed would be false, and silence would leave the stray file unexplained.
+        return { content: [{ type: 'text', text: `Deleted memory ${name} from the index, but its file could not be removed: ${errorMessage(error)}.` }], details: {} }
+      }
       return { content: [{ type: 'text', text: `Deleted memory ${name}.` }], details: {} }
     })
   } catch (error) {

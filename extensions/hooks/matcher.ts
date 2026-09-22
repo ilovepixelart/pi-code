@@ -8,6 +8,7 @@ import { matchesBashIfFilter } from '../internal/bash-rules.js'
 import { CLAUDE_TOOL_MAP } from '../internal/claude-tool-names.js'
 import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
 import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../internal/scope-rules.js'
+import { asPiReadsIt } from '../internal/tool-target.js'
 import { errorMessage } from '../internal/values.js'
 import type { HookCommand, HookMatcher } from './config.js'
 
@@ -219,8 +220,13 @@ function matchesToolPattern(piName: string, input: Record<string, unknown> | nul
     case 'slash_command':
       return matchesSkillRules(str(input?.command), [pattern])
     default: {
-      const filePath = str(input?.path) || str(input?.file_path)
-      return filePath.length > 0 && matchesPathRules(filePath, [pattern], anchors)
+      // Normalised as pi's file tools resolve it (~, a leading @, a file:// URL), because
+      // the rule side expands ~ against home too: comparing the raw string let an
+      // `if: Edit(~/.ssh/*)` guard miss the very call it names. The value is normalised
+      // rather than routed through fileToolTarget, which would drop every tool outside
+      // read/edit/write and so stop matching rules that match today.
+      const named = str(input?.path) || str(input?.file_path)
+      return named.length > 0 && matchesPathRules(asPiReadsIt(named), [pattern], anchors)
     }
   }
 }

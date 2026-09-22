@@ -19,7 +19,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { claudeConfigDir } from './config-dir.js'
 import { readManagedSettings } from './managed-settings.js'
-import { errorMessage } from './values.js'
+import { statToken } from './stat-token.js'
+import { errorMessage, isRecord } from './values.js'
 
 export interface InstalledPlugin {
   name: string
@@ -40,8 +41,10 @@ function readJson(file: string): Record<string, unknown> {
     return {} // no such file: nothing to read, and most callers expect that
   }
   try {
-    const parsed = JSON.parse(raw)
-    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+    const parsed: unknown = JSON.parse(raw)
+    // isRecord, not a hand-written object check: a manifest or settings file that is a
+    // JSON array is not a config object, and every caller here reads it by key.
+    return isRecord(parsed) ? parsed : {}
   } catch (error) {
     // A manifest that does not parse leaves the plugin with no components at all, and
     // settings that do not parse drop the enablement or configuration they carried.
@@ -176,12 +179,13 @@ export function resetInstalledPluginsCache(): void {
   pluginCache.clear()
 }
 
-/** mtime plus size; cheap, but blind to a same-size rewrite within one
- * timestamp tick, so only directory-tree entries use it. */
-function statToken(target: string): string {
+/** mtime plus size; cheap, but blind to a same-size rewrite within one timestamp tick, so
+ * only directory-tree entries use it. The shared token is the one that owns the format
+ * (internal/stat-token.ts); it throws where this caller wants a value for a path that is
+ * simply not there, which is the catch below rather than a second copy of the format. */
+function statTokenOrMissing(target: string): string {
   try {
-    const stat = fs.statSync(target)
-    return `${stat.mtimeMs}:${stat.size}`
+    return statToken(target)
   } catch {
     return 'missing'
   }
@@ -208,18 +212,18 @@ function pluginFingerprint(cacheDir: string, settingsFiles: string[], index: Map
   const parts = settingsFiles.map(contentToken)
   for (const marketplace of listDirs(cacheDir)) {
     const marketplaceDir = path.join(cacheDir, marketplace)
-    parts.push(`${marketplace}:${statToken(marketplaceDir)}`)
+    parts.push(`${marketplace}:${statTokenOrMissing(marketplaceDir)}`)
     for (const pluginDir of listPluginDirs(marketplaceDir)) {
       const pluginPath = path.join(marketplaceDir, pluginDir)
-      parts.push(`${marketplace}/${pluginDir}:${statToken(pluginPath)}`)
+      parts.push(`${marketplace}/${pluginDir}:${statTokenOrMissing(pluginPath)}`)
       const versions = listDirs(pluginPath)
       for (const version of versions) {
-        parts.push(`${marketplace}/${pluginDir}/${version}:${statToken(path.join(pluginPath, version))}`)
+        parts.push(`${marketplace}/${pluginDir}/${version}:${statTokenOrMissing(path.join(pluginPath, version))}`)
       }
       // resolvePlugin reads only the resolved version's manifest, so its stat token is
       // what an in-place edit (no directory entry changing) must move.
       const resolved = versionDir(pluginPath, index?.get(`${pluginDir}@${marketplace}`))
-      if (resolved) parts.push(`${marketplace}/${pluginDir}/${path.basename(resolved)}/manifest:${statToken(path.join(resolved, '.claude-plugin', 'plugin.json'))}`)
+      if (resolved) parts.push(`${marketplace}/${pluginDir}/${path.basename(resolved)}/manifest:${statTokenOrMissing(path.join(resolved, '.claude-plugin', 'plugin.json'))}`)
     }
   }
   return parts.join('\n')
