@@ -401,6 +401,52 @@ describe('env-settings extension', () => {
   })
 })
 
+describe('managed settings that do not parse', () => {
+  // An administrator's typo in managed-settings.json silently disabled every enterprise
+  // policy it carries (claudeMdExcludes, MCP allow/deny, enabledPlugins, disableAllHooks)
+  // on every session, reported nowhere: the reader treated "no such file" and "present but
+  // unparsable" identically. plugins.ts's readJson already warns for the same kind of file.
+  it('warns once per broken file instead of dropping the policy in silence', async () => {
+    const { readManagedSettings } = await import('../extensions/internal/managed-settings.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'managed-'))
+    const file = join(dir, 'managed-settings.json')
+    writeFileSync(file, '{ "disableAllHooks": true,')
+    const warnings: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(' '))
+    })
+
+    try {
+      expect(readManagedSettings(file)).toEqual({})
+      readManagedSettings(file)
+      readManagedSettings(file)
+    } finally {
+      warn.mockRestore()
+    }
+
+    // Read from many call sites per turn, so a warning per read would flood the session.
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('managed-settings.json')
+  })
+
+  it('stays silent when the file is simply absent', async () => {
+    const { readManagedSettings } = await import('../extensions/internal/managed-settings.ts')
+    const missing = join(mkdtempSync(join(tmpdir(), 'managed-none-')), 'managed-settings.json')
+    const warnings: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(' '))
+    })
+
+    try {
+      expect(readManagedSettings(missing)).toEqual({})
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(warnings).toEqual([])
+  })
+})
+
 describe('sanitizeProjectEnv', () => {
   it('drops the repo-hostile keys a checked-out repository must not control, warning each', async () => {
     // Claude: "Project and local settings can't set variables that a checked-out

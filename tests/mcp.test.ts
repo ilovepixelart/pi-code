@@ -372,6 +372,30 @@ describe('mcp adapter helpers', () => {
     }
   })
 
+  it("warns instead of silently dropping a repo's disabledMcpjsonServers when its settings do not parse", () => {
+    // The sibling reader in the same file (mcpAllowDeny) already tells a missing file from
+    // an unparsable one and warns about the second. This one returned {} for both, so a
+    // typo in .claude/settings.json silently emptied disabledMcpjsonServers, and a server
+    // the repository had explicitly disabled connected. That direction fails open, and the
+    // comment above it says a repo "may always restrict itself further, never less".
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-policy-'))
+    const home = mkdtempSync(join(tmpdir(), 'mcp-policy-home-'))
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    writeFileSync(join(dir, '.claude', 'settings.json'), '{ "disabledMcpjsonServers": ["blocked"],')
+    const warnings: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(' '))
+    })
+
+    try {
+      projectServerPolicy(dir, home, true)
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(warnings.join('\n')).toContain('settings.json')
+  })
+
   it('finds project mcp config at the repository root from a subdirectory session', () => {
     const repo = mkdtempSync(join(tmpdir(), 'mcp-repo-'))
     mkdirSync(join(repo, '.git'))
