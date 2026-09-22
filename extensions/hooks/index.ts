@@ -446,7 +446,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (event, ctx) => {
     sessionCtx = ctx
-    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // pi's CLI builds a fresh extension instance per session replacement; only RPC mode can
+    // reuse one across sessions. A mid-turn /new there fires session_start on
     // the same instance while a Stop-hook continuation streak is in flight; it must not
     // carry into the next session, so reset before any early return (disableAllHooks below).
     stopHookActive = false

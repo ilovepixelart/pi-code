@@ -458,7 +458,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (event, ctx) => {
-    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // pi's CLI builds a fresh extension instance per session replacement; only RPC mode can
+    // reuse one across sessions. A mid-turn /new there fires session_start on
     // the same instance after turn_start took the pre-run snapshot but before turn_end saved
     // it; that pending ref belongs to the previous session and must not attach to the next
     // session's first turn_end. Re-arm runNeedsSnapshot too, so the next run snapshots its

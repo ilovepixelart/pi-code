@@ -446,7 +446,8 @@ export default function goalExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_start', (_event, ctx) => {
-    // One extension instance serves every session: drop the previous session's goal and
+    // pi's CLI builds a fresh extension instance per session replacement; RPC mode can reuse
+    // one across sessions, so drop the previous session's goal and
     // timers before reading this session's persisted state.
     sessionCtx = ctx
     goal = undefined

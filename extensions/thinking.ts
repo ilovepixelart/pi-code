@@ -56,7 +56,8 @@ export default function thinkingExtension(pi: ExtensionAPI) {
   })
 
   pi.on('session_start', () => {
-    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // pi's CLI builds a fresh extension instance per session replacement; only RPC mode can
+    // reuse one across sessions. A mid-turn /new there fires session_start on
     // the same instance while an escalation is still pending (its agent_settled never came),
     // and that stale restore must be dropped rather than fired into the next session, whose
     // level the new session owns. Drop only: do NOT setThinkingLevel here.
