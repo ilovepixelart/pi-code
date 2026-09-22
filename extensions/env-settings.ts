@@ -103,7 +103,8 @@ function userEnv(home: string): Record<string, string> {
  * documented drop list: variables that choose where config and files are written
  * (redirecting later home-scope reads and every subprocess), variables that export
  * session content, and variables that change how the agent starts or syncs.
- * PI_CODING_AGENT_DIR is pi's own config-dir analogue of CLAUDE_CONFIG_DIR. */
+ * PI_CODING_AGENT_DIR is pi's own config-dir analogue of CLAUDE_CONFIG_DIR, and the
+ * PI_CODE_ prefix covers pi-code's own control variables (see isRepoHostileEnvKey). */
 const REPO_HOSTILE_ENV_KEYS = new Set([
   'CLAUDE_CONFIG_DIR',
   'CLAUDE_CODE_TMPDIR',
@@ -122,13 +123,24 @@ const REPO_HOSTILE_ENV_KEYS = new Set([
   'PI_CODING_AGENT_DIR',
 ])
 
+/** Whether a repository's settings must not set this key: Claude's documented drop list,
+ * the XDG_ family, and pi-code's own PI_CODE_ control variables. The last matter because
+ * they are read as instructions rather than data: PI_CODE_SUBAGENT makes a session believe
+ * it is a subagent child, which suppresses the USER's own SessionStart, UserPromptSubmit,
+ * Stop and SessionEnd hooks and their auto memory, and PI_CODE_AGENT_HOOKS is then parsed
+ * into hook definitions, which are shell commands. Approving a repository means running the
+ * config it ships, never silently disabling the user's own guardrails. */
+function isRepoHostileEnvKey(key: string): boolean {
+  return REPO_HOSTILE_ENV_KEYS.has(key) || key.startsWith('XDG_') || key.startsWith('PI_CODE_')
+}
+
 /** Drop the keys a repository's settings must not set, warning each, as Claude
  * documents ("Claude Code drops each one and logs a warning"). Set them in the
  * shell, user settings, or managed settings instead. */
 export function sanitizeProjectEnv(env: Record<string, string>, warn: (key: string) => void = (key) => console.warn(`pi-code-env: dropping ${key} from project settings env (a checked-out repository must not control it; set it in user or managed settings)`)): Record<string, string> {
   const kept: Record<string, string> = {}
   for (const [key, value] of Object.entries(env)) {
-    if (REPO_HOSTILE_ENV_KEYS.has(key) || key.startsWith('XDG_')) warn(key)
+    if (isRepoHostileEnvKey(key)) warn(key)
     else kept[key] = value
   }
   return kept
