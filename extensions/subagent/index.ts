@@ -250,11 +250,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
       if (params.tasks?.length) return runParallelMode(params.tasks, mode)
       if (params.agent && params.task) return runSingleMode(params.agent, params.task, params.cwd, mode)
 
-      const available = agents.map((a) => `${a.name} (${a.source})`).join(', ') || 'none'
-      return {
-        content: [{ type: 'text', text: `Invalid parameters. Available agents: ${available}` }],
-        details: makeDetails('single')([]),
-      }
+      // Unreachable: the modeCount guard above returns unless exactly one of these three
+      // is set, and nothing between it and here touches params. It was a second copy of
+      // that guard's message, which no input could ever produce, so a reader had to work
+      // out for themselves that it was dead. Stated as the invariant it actually is, so a
+      // future edit that breaks it says so instead of printing a confusing refusal.
+      throw new Error('subagent: exactly one mode must be set here; the mode guard should have returned')
     },
 
     renderCall(args, theme, _context) {
