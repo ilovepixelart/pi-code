@@ -82,6 +82,28 @@ describe('session auto-titling', () => {
     expect(t.getName()).toBe('User Chosen Name')
   })
 
+  it('skips the title call in a subagent child: its session is never seen by name', async () => {
+    // A subagent child's session (--no-session, or its own --session-dir since it persists
+    // one for a resumable follow-up) is never browsed by name in a session picker; the model
+    // call only adds latency and cost to how soon the child can exit.
+    const savedSubagent = process.env.PI_CODE_SUBAGENT
+    process.env.PI_CODE_SUBAGENT = '1'
+    let called = false
+    setCompleteBackend(async () => {
+      called = true
+      return assistantMsg('Model Title')
+    })
+    try {
+      const t = setup()
+      await t.settle([userEntry('survey the auth module')])
+      expect(called).toBe(false)
+      expect(t.namesSet).toEqual([])
+    } finally {
+      if (savedSubagent === undefined) delete process.env.PI_CODE_SUBAGENT
+      else process.env.PI_CODE_SUBAGENT = savedSubagent
+    }
+  })
+
   it('does nothing when CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set', async () => {
     // Claude: "disable automatic terminal title updates based on conversation context.
     // In Agent SDK and claude -p sessions, this also skips the background small/fast-model

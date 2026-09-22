@@ -178,11 +178,28 @@ async function resolveAndPin(url: URL): Promise<LookupFunction> {
 
 const MAX_REDIRECTS = 5
 
-/** Read a response body up to MAX_RAW_CHARS, then stop the download. Bounds memory and parsing cost. */
+/** The charset a content-type header declares, or 'utf-8' when it names none. */
+function declaredCharset(contentType: string): string {
+  const match = /charset=(?:"([^"]*)"|'([^']*)'|([^;\s]*))/i.exec(contentType)
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim() || 'utf-8'
+}
+
+/** A decoder for `contentType`'s declared charset, or the platform default (UTF-8) for a
+ * label TextDecoder does not recognize: a bad or made-up charset must not fail the fetch. */
+function decoderFor(contentType: string): TextDecoder {
+  try {
+    return new TextDecoder(declaredCharset(contentType))
+  } catch {
+    return new TextDecoder()
+  }
+}
+
+/** Read a response body up to MAX_RAW_CHARS, decoded as the content-type header's charset
+ * (UTF-8 when it names none), then stop the download. Bounds memory and parsing cost. */
 async function readCapped(response: Response): Promise<string> {
+  const decoder = decoderFor(response.headers.get('content-type') ?? '')
   const reader = response.body?.getReader()
-  if (!reader) return (await response.text()).slice(0, MAX_RAW_CHARS)
-  const decoder = new TextDecoder()
+  if (!reader) return decoder.decode(await response.arrayBuffer()).slice(0, MAX_RAW_CHARS)
   let text = ''
   while (text.length < MAX_RAW_CHARS) {
     const { done, value } = await reader.read()
@@ -234,13 +251,23 @@ function redirectTarget(response: Response, url: URL, rawUrl: string, crossHost:
   return { kind: 'next', next }
 }
 
-async function fetchText(rawUrl: string, crossHost: CrossHost, transport = httpFetch): Promise<FetchOutcome> {
+/** The per-hop timeout, combined with the caller's own signal (the tool call's, fired on
+ * Esc) when there is one: cancelling must not lose the ceiling that keeps a silently
+ * hanging host from holding the turn forever, but Esc must not have to wait for it either. */
+function hopSignal(signal: AbortSignal | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
+
+async function fetchText(rawUrl: string, crossHost: CrossHost, signal?: AbortSignal, transport = httpFetch): Promise<FetchOutcome> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    // Cancelled between hops (a redirect chain), not just mid-request.
+    signal?.throwIfAborted()
     // Resolve, validate and pin per hop: a redirect target gets the same guarantee.
     const lookup = await resolveAndPin(url)
     const response = await transport(url, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: hopSignal(signal),
       lookup,
       userAgent: USER_AGENT,
     })
@@ -317,9 +344,9 @@ export default function webExtension(pi: ExtensionAPI) {
       allowed_domains: Type.Optional(Type.Array(Type.String(), { description: 'Only include results from these domains' })),
       blocked_domains: Type.Optional(Type.Array(Type.String(), { description: 'Exclude results from these domains' })),
     }),
-    async execute(_id, params) {
+    async execute(_id, params, signal) {
       // Claude documents allowed/blocked domains as mutually exclusive; allowed wins.
-      const outcome = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query), 'follow')
+      const outcome = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query), 'follow', signal)
       const text = outcome.kind === 'body' ? outcome.text : ''
       const limit = Math.min(params.count ?? 5, 10)
       const results = filterByDomain(parseSearchResults(text, 10), params.allowed_domains, params.blocked_domains).slice(0, limit)
@@ -356,7 +383,7 @@ export default function webExtension(pi: ExtensionAPI) {
       if (cached && cached.expires > now) {
         body = cached.body
       } else {
-        const outcome = await fetchText(target, 'report')
+        const outcome = await fetchText(target, 'report', signal)
         // A cross-host redirect has no body to cache or summarize: the naming result is
         // the answer, and Claude fetches the target with a second call if it wants it.
         if (outcome.kind === 'redirect') {

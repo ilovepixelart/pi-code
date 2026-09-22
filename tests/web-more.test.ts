@@ -16,6 +16,8 @@ const setup = (): {
   search: (params: Record<string, unknown>) => Promise<ToolResult>
   fetchUrl: (url: string) => Promise<ToolResult>
   fetchWith: (params: Record<string, unknown>, ctx?: unknown) => Promise<ToolResult>
+  fetchWithSignal: (url: string, signal: AbortSignal) => Promise<ToolResult>
+  searchWithSignal: (query: string, signal: AbortSignal) => Promise<ToolResult>
 } => {
   const tools = new Map<string, Execute>()
   webExtension({
@@ -30,6 +32,8 @@ const setup = (): {
     search: (params) => search('call-1', params),
     fetchUrl: (url) => fetchUrl('call-1', { url }),
     fetchWith: (params, ctx) => fetchUrl('call-1', params, undefined, undefined, ctx),
+    fetchWithSignal: (url, signal) => fetchUrl('call-1', { url }, signal),
+    searchWithSignal: (query, signal) => search('call-1', { query }, signal),
   }
 }
 
@@ -132,6 +136,64 @@ describe('web_fetch cache', () => {
   })
 })
 
+describe('cancellation', () => {
+  // execute() receives the tool call's own AbortSignal (fired on Esc); web_fetch declared
+  // the parameter but never passed it to the actual HTTP request, so Esc could not stop it
+  // mid-fetch and a slow or hanging host held the turn for the full per-hop timeout instead
+  // (up to 20s, and again on every redirect hop). web_search did not even accept a signal.
+  it('passes the caller-provided signal into the transport for web_fetch', async () => {
+    fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+    const controller = new AbortController()
+
+    await setup().fetchWithSignal('https://example.com/slow', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal.aborted).toBe(false)
+    controller.abort()
+    expect(opts.signal.aborted).toBe(true)
+  })
+
+  it('passes the caller-provided signal into the transport for web_search', async () => {
+    fetchMock.mockResolvedValue(respond('', { contentType: 'text/html' }))
+    const controller = new AbortController()
+
+    await setup().searchWithSignal('site:example.com', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal.aborted).toBe(false)
+    controller.abort()
+    expect(opts.signal.aborted).toBe(true)
+  })
+
+  it('aborts the actual request, not just the signal object, when the caller cancels', async () => {
+    const controller = new AbortController()
+    fetchMock.mockImplementation(
+      (_url, opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+          controller.abort() // Esc arrives mid-request, listener already attached
+        }),
+    )
+
+    await expect(setup().fetchWithSignal('https://example.com/hangs', controller.signal)).rejects.toThrow(/abort/i)
+  })
+
+  it('still enforces the per-hop timeout when the caller never cancels', async () => {
+    // The caller's signal only adds early cancellation; it must not replace the timeout
+    // ceiling that keeps a silently hanging host from holding the turn forever.
+    fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+    const controller = new AbortController()
+
+    await setup().fetchWithSignal('https://example.com/a', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal).toBeInstanceOf(AbortSignal)
+    // Neither the bare caller signal nor a bare 20s timeout alone: a combined signal
+    // aborts for either reason, which a same-identity check would miss.
+    expect(opts.signal).not.toBe(controller.signal)
+  })
+})
+
 describe('web_fetch scheme validation', () => {
   it.each(['file:///etc/passwd', 'ftp://example.com/x', 'javascript:alert(1)', 'data:text/html,<b>x</b>', '/relative/path', 'example.com', 'HTTPS://example.com'])('rejects %s without touching DNS or the network', async (url) => {
     const result = await setup().fetchUrl(url)
@@ -188,13 +250,16 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe('café!')
   })
 
-  it('falls back to response.text() when the response exposes no body stream', async () => {
+  it('falls back to response.arrayBuffer() when the response exposes no body stream', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
       body: null,
       headers: new Headers({ 'content-type': 'text/plain' }),
-      text: async () => 'body-less payload',
+      arrayBuffer: async () => {
+        const bytes = Buffer.from('body-less payload')
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      },
     } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/nobody')
     expect(result.content[0].text).toBe('body-less payload')
@@ -232,6 +297,56 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe('ab�')
   })
 
+  it('decodes a non-UTF-8 charset declared in the content-type header (streamed body)', async () => {
+    // A raw fetch response is always decoded as UTF-8 today, wherever the body's actual
+    // charset is declared. A Windows-1252 page (still common for older or non-English
+    // sites) came back as mojibake for every byte outside plain ASCII.
+    const body = Buffer.from([0x63, 0x61, 0x66, 0xe9]) // "caf" + 0xE9, Windows-1252 for é
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream, { contentType: 'text/plain; charset=windows-1252' }))
+
+    const result = await setup().fetchUrl('https://example.com/latin1')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('decodes a non-UTF-8 charset on the no-stream fallback path too', async () => {
+    const body = Buffer.from([0x63, 0x61, 0x66, 0xe9])
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/plain; charset=iso-8859-1' }),
+      url: 'https://example.com/latin1-2',
+      body: null,
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+    } as unknown as Response)
+
+    const result = await setup().fetchUrl('https://example.com/latin1-2')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('falls back to UTF-8 for a charset label TextDecoder does not recognize, instead of throwing', async () => {
+    fetchMock.mockResolvedValue(respond('café', { contentType: 'text/plain; charset=not-a-real-charset' }))
+
+    const result = await setup().fetchUrl('https://example.com/bogus-charset')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('defaults to UTF-8 when the content-type has no charset', async () => {
+    fetchMock.mockResolvedValue(respond('café', { contentType: 'text/plain' }))
+
+    const result = await setup().fetchUrl('https://example.com/no-charset')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
   it('treats a missing content-type as non-html and skips html stripping', async () => {
     // Response() synthesizes text/plain for a string body, so a header-less
     // reply has to be duck-typed to actually reach the `?? ''` fallback.
@@ -241,7 +356,10 @@ describe('web_fetch responses', () => {
       headers: new Headers(),
       url: 'https://example.com/unknown',
       body: null,
-      text: async () => '<b>raw</b>',
+      arrayBuffer: async () => {
+        const bytes = Buffer.from('<b>raw</b>')
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      },
     } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/unknown')
     expect(result.content[0].text).toBe('<b>raw</b>')

@@ -426,7 +426,8 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
   // Restore state on session start/resume
   pi.on('session_start', async (_event, ctx) => {
-    // One extension instance serves every session, so clear prior state first: a fresh
+    // pi's CLI builds a fresh extension instance per session replacement; RPC mode can reuse
+    // one across sessions, so clear prior state first there too: a fresh
     // session (/new, no plan entry) must not inherit the last session's plan or execution.
     planModeEnabled = false
     executionMode = false

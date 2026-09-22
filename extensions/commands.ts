@@ -554,7 +554,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', async (_event, ctx) => {
-    // One extension instance serves every session. A mid-turn /new fires session_start on
+    // pi's CLI builds a fresh extension instance per session replacement; only RPC mode can
+    // reuse one across sessions. A mid-turn /new there fires session_start on
     // the same instance while a command's per-run scoping is still pending (its agent_settled
     // never came). Carrying that into the next session would restore an unrelated tool set,
     // bash/path scope, model, or effort onto it, so drop the pending state here. Drop only:
