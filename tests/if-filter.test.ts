@@ -87,9 +87,16 @@ describe('passesIfFilter', () => {
   it.each([
     ['a ~ path', '~/.ssh/authorized_keys'],
     ['a leading @', '@/home/u/.ssh/authorized_keys'],
-    ['a file:// URL', 'file:///home/u/.ssh/authorized_keys'],
   ])('matches a ~-rule against %s, as pi resolves it', (_label, input) => {
     expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { path: input }))).toBe(true)
+  })
+
+  // POSIX only, for the fixture rather than the behaviour: these anchors are POSIX paths,
+  // and on Windows fileURLToPath rejects a file:// URL with no drive letter, so
+  // asPiReadsIt keeps the raw string (its documented fallback) and nothing matches. A
+  // Windows-shaped URL resolves there, but needs a drive-lettered home this fixture has not got.
+  it.skipIf(process.platform === 'win32')('matches a ~-rule against a file:// URL, as pi resolves it', () => {
+    expect(passesIfFilter(hookIf('Edit(~/.ssh/*)'), target('edit', { path: 'file:///home/u/.ssh/authorized_keys' }))).toBe(true)
   })
 
   it('normalises the file_path alias the same way', () => {
