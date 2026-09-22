@@ -141,6 +141,66 @@ describe('sessionSlug', () => {
   })
 })
 
+describe("an ephemeral (--no-session) run's shadow repo", () => {
+  // getSessionFile() returns undefined for a --no-session run: pi persists nothing, so
+  // there is no session to ever resume or run /rewind from again once the process exits.
+  // Left in place, ensureShadow's own git init built a permanent, already-dead shadow
+  // repo per invocation, cleaned up only by the 30-day retention sweep: a headless run
+  // or a subagent child leaves one of these on every single invocation.
+  it('is removed at shutdown once the process quits', async () => {
+    const t = setup()
+    const ctx = t.makeCtx([], [], [])
+    const ephemeralCtx = { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionFile: () => undefined } }
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, ephemeralCtx)
+    const shadowDir = join(hoisted.home, '.pi', 'agent', 'checkpoints', sessionSlug(undefined))
+    expect(existsSync(shadowDir)).toBe(true)
+
+    await t.handlers.get('session_shutdown')?.({ reason: 'quit' }, ephemeralCtx)
+
+    expect(existsSync(shadowDir)).toBe(false)
+  })
+
+  it('stays usable for /rewind for the rest of the same live run', async () => {
+    const t = setup()
+    const ctx = t.makeCtx([], [], [])
+    const ephemeralCtx = { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionFile: () => undefined } }
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, ephemeralCtx)
+    const shadowDir = join(hoisted.home, '.pi', 'agent', 'checkpoints', sessionSlug(undefined))
+
+    await announceEdit(t, 'tracked.txt')
+    await t.handlers.get('before_agent_start')?.({}, ephemeralCtx)
+    await t.handlers.get('turn_start')?.({}, ephemeralCtx)
+
+    expect(existsSync(shadowDir)).toBe(true)
+  })
+
+  it("leaves a normal (persisted) session's shadow repo alone at shutdown", async () => {
+    const t = setup()
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx([], [], []))
+    const shadowDir = join(hoisted.home, '.pi', 'agent', 'checkpoints', sessionSlug(join(t.repo, 'session-test.jsonl')))
+    expect(existsSync(shadowDir)).toBe(true)
+
+    await t.handlers.get('session_shutdown')?.({ reason: 'quit' }, t.makeCtx([], [], []))
+
+    expect(existsSync(shadowDir)).toBe(true)
+  })
+
+  it('does not remove the shadow repo when the process stays alive for a fork', async () => {
+    // A fork can be written from a live in-memory session even with nothing on disk yet;
+    // the forked session's own session_start fetches refs from this exact shadow. Only a
+    // genuine process exit (reason: quit) is known to make it permanently unreachable.
+    const t = setup()
+    const ctx = t.makeCtx([], [], [])
+    const ephemeralCtx = { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionFile: () => undefined } }
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, ephemeralCtx)
+    const shadowDir = join(hoisted.home, '.pi', 'agent', 'checkpoints', sessionSlug(undefined))
+
+    await t.handlers.get('session_shutdown')?.({ reason: 'fork' }, ephemeralCtx)
+
+    expect(existsSync(shadowDir)).toBe(true)
+  })
+})
+
 describe('shadow-repo checkpoint lifecycle', () => {
   it('snapshots the files the session edited, untracked ones included', async () => {
     const t = setup()

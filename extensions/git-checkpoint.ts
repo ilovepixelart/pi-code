@@ -172,6 +172,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   let promptedRun = false
   let shadowDir: string | undefined
   let workTree: string | undefined
+  // Set in ensureShadow: whether the live session has no session file (--no-session),
+  // whose shadow repo session_shutdown then knows is safe to remove on a real quit.
+  let ephemeralShadow = false
   // Absolute paths this session's edit tools targeted: the whole of what a checkpoint
   // captures. Seeded on resume from the last commit, so a resumed session keeps
   // snapshotting the files it was already tracking.
@@ -191,6 +194,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   async function ensureShadow(ctx: ExtensionContext): Promise<void> {
     workTree = ctx.cwd
     const sessionFile = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.()
+    ephemeralShadow = sessionFile === undefined
     const checkpointsRoot = path.join(getAgentDir(), 'checkpoints')
     shadowDir = path.join(checkpointsRoot, sessionSlug(sessionFile))
     // A resumed session can arrive from a different directory than the one the shadow
@@ -478,6 +482,17 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     // The same cap the append path enforces: a resumed long session must not
     // rebuild a rewind list beyond the per-session limit.
     for (const checkpoint of capCheckpoints(stored)) checkpoints.set(checkpoint.entryId, checkpoint)
+  })
+
+  // A --no-session run has no session file, so nothing can ever resume it or run
+  // /rewind from it again once the process exits: its shadow repo, left in place, was
+  // pure waste for the 30 days until the retention sweep reached it. Only a genuine
+  // quit removes it eagerly; 'new', 'resume' and 'reload' keep the process (and this
+  // extension instance) alive, and 'fork' can write a session from the live run's
+  // in-memory entries and then fetch refs from exactly this shadow at its own
+  // session_start, so this one case is left for the retention sweep as before.
+  pi.on('session_shutdown', async (event) => {
+    if (ephemeralShadow && shadowDir && event.reason === 'quit') fs.rmSync(shadowDir, { recursive: true, force: true })
   })
 
   // A new agent loop starts a run: the next turn_start snapshots the pre-run tree.
