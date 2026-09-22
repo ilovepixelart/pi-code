@@ -58,30 +58,125 @@ const trimNewlines = (value: string): string => {
   return value.slice(start, end)
 }
 
+/** Every match of the global regex `re` in `html`, as `{start, end}` spans. One linear
+ * scan: `matchAll` resumes after each match rather than restarting the search. */
+function matchSpans(html: string, re: RegExp): Array<{ start: number; end: number }> {
+  return [...html.matchAll(re)].map((m) => ({ start: m.index, end: m.index + m[0].length }))
+}
+
+/**
+ * Replace every `open...close` span with `transform(open, body)`. `closeSource(open)`
+ * gives the close pattern's regex source for this particular open (a fixed literal for
+ * most callers; a backreference to `open[1]` for a shared tag family like
+ * script|style|noscript, so each open pairs only with its own tag name). An open with no
+ * reachable close is left as literal text, the same as a non-matching `[\s\S]*?` regex
+ * would leave it.
+ *
+ * Both the opens and each distinct close pattern are found with one bounded, linear scan
+ * (`openRe`'s attrs never cross a `<`/`>`, and neither does a close tag's), then paired by
+ * a single forward walk with a cursor per close pattern that only advances. A page that
+ * repeats one unclosed tag thousands of times used to cost one rescan to the end of the
+ * document per occurrence (O(n^2) for the lazy `[\s\S]*?<\/tag>` shape this replaces);
+ * this costs one pass.
+ */
+function replaceTagSpans(html: string, openRe: RegExp, closeSource: (open: RegExpMatchArray) => string, transform: (open: RegExpMatchArray, body: string) => string): string {
+  const opens = [...html.matchAll(openRe)]
+  if (opens.length === 0) return html
+
+  const closeSpans = new Map<string, Array<{ start: number; end: number }>>()
+  const closeCursor = new Map<string, number>()
+
+  let out = ''
+  let cursor = 0
+  for (const open of opens) {
+    const openStart = open.index ?? 0
+    if (openStart < cursor) continue // inside a span an earlier open of this pass already consumed
+    const source = closeSource(open)
+    if (!closeSpans.has(source)) {
+      closeSpans.set(source, matchSpans(html, new RegExp(source, 'gi')))
+      closeCursor.set(source, 0)
+    }
+    const spans = closeSpans.get(source) as Array<{ start: number; end: number }>
+    const openEnd = openStart + open[0].length
+    let idx = closeCursor.get(source) as number
+    while (idx < spans.length && spans[idx].start < openEnd) idx++
+    closeCursor.set(source, idx)
+    if (idx >= spans.length) continue // no close anywhere after this open: leave it as text
+    out += html.slice(cursor, openStart) + transform(open, html.slice(openEnd, spans[idx].start))
+    cursor = spans[idx].end
+  }
+  return out + html.slice(cursor)
+}
+
 export function htmlToMarkdown(html: string): string {
   // Pre blocks are lifted out first so no later transform touches their content.
   const preBodies: string[] = []
-  let work = html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|noscript|head|svg)\b[^<>]*>[\s\S]*?<\/\1[^<>]*>/gi, ' ')
-    .replace(/<pre\b[^<>]*>([\s\S]*?)<\/pre>/gi, (_whole, inner: string) => {
-      preBodies.push(trimNewlines(decodeAllEntities(removeTags(inner))))
+  // Each of these bodies can legitimately hold anything up to and including another `<`, so
+  // the body itself cannot be bounded like an open tag's attrs; replaceTagSpans keeps the
+  // pass linear instead by pairing opens and closes in one pass rather than rescanning the
+  // document from every open that turns out to have no close (a broken template or a fetch
+  // truncated mid-tag repeats that shape often enough to matter).
+  let work = replaceTagSpans(
+    html,
+    /<!--/g,
+    () => '-->',
+    () => ' ',
+  )
+  work = replaceTagSpans(
+    work,
+    /<(script|style|noscript|head|svg)\b[^<>]*>/gi,
+    (open) => `</${open[1]}[^<>]*>`,
+    () => ' ',
+  )
+  work = replaceTagSpans(
+    work,
+    /<pre\b[^<>]*>/gi,
+    () => '</pre[^<>]*>',
+    (_open, body) => {
+      preBodies.push(trimNewlines(decodeAllEntities(removeTags(body))))
       return `\n\n\uE000PRE${preBodies.length - 1}\uE000\n\n`
-    })
+    },
+  )
 
-  work = work
-    .replace(/<code\b[^<>]*>([\s\S]*?)<\/code>/gi, (_whole, inner: string) => `\`${removeTags(inner)}\``)
-    // Only real web links become markdown links; fragment and javascript hrefs
-    // keep their label and lose the target.
-    .replace(/<a\b[^<>]*?href=(?:"([^"]*)"|'([^']*)')[^<>]*>([\s\S]*?)<\/a>/gi, (_whole, dq: string | undefined, sq: string | undefined, inner: string) => {
-      const href = decodeAllEntities(dq ?? sq ?? '')
-      const label = removeTags(inner).trim()
+  work = replaceTagSpans(
+    work,
+    /<code\b[^<>]*>/gi,
+    () => '</code[^<>]*>',
+    (_open, body) => `\`${removeTags(body)}\``,
+  )
+  // Only real web links become markdown links; fragment and javascript hrefs
+  // keep their label and lose the target.
+  work = replaceTagSpans(
+    work,
+    /<a\b[^<>]*?href=(?:"([^"]*)"|'([^']*)')[^<>]*>/gi,
+    () => '</a[^<>]*>',
+    (open, body) => {
+      const href = decodeAllEntities(open[1] ?? open[2] ?? '')
+      const label = removeTags(body).trim()
       if (!label) return ' '
       return /^https?:\/\//i.test(href) ? `[${label}](${href})` : label
-    })
-    .replace(/<(strong|b)\b[^<>]*>([\s\S]*?)<\/\1>/gi, (_whole, _tag, inner: string) => `**${removeTags(inner).trim()}**`)
-    .replace(/<(em|i)\b[^<>]*>([\s\S]*?)<\/\1>/gi, (_whole, _tag, inner: string) => `*${removeTags(inner).trim()}*`)
-    .replace(/<h([1-6])\b[^<>]*>([\s\S]*?)<\/h\1>/gi, (_whole, level: string, inner: string) => `\n\n${'#'.repeat(Number(level))} ${removeTags(inner).trim()}\n\n`)
+    },
+  )
+  work = replaceTagSpans(
+    work,
+    /<(strong|b)\b[^<>]*>/gi,
+    (open) => `</${open[1]}[^<>]*>`,
+    (_open, body) => `**${removeTags(body).trim()}**`,
+  )
+  work = replaceTagSpans(
+    work,
+    /<(em|i)\b[^<>]*>/gi,
+    (open) => `</${open[1]}[^<>]*>`,
+    (_open, body) => `*${removeTags(body).trim()}*`,
+  )
+  work = replaceTagSpans(
+    work,
+    /<h([1-6])\b[^<>]*>/gi,
+    (open) => `</h${open[1]}[^<>]*>`,
+    (open, body) => `\n\n${'#'.repeat(Number(open[1]))} ${removeTags(body).trim()}\n\n`,
+  )
+
+  work = work
     .replace(/<img\b[^<>]*?alt=(?:"([^"]*)"|'([^']*)')[^<>]*>/gi, (_whole, dq?: string, sq?: string) => dq ?? sq ?? '')
     .replace(/<li\b[^<>]*>/gi, '\n- ')
     .replace(/<blockquote\b[^<>]*>/gi, '\n\n> ')
