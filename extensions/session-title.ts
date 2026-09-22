@@ -8,10 +8,12 @@
  * (pi changelog); a separate ctx.ui.setTitle call would only duplicate that, so there is none.
  *
  * It runs in every mode, not just the TUI: naming a session is cheap and harmless, and a
- * headless run that persists its session still benefits from a readable name later. Titling
- * is best-effort throughout: a session that already has a name, a run with no user text (a
- * slash-command-only turn), a headless run with no model, or any provider error leaves the
- * session untitled and never throws.
+ * headless run that persists its session still benefits from a readable name later. The one
+ * exception is a subagent child (PI_CODE_SUBAGENT=1): its session is never browsed by name,
+ * so the call is skipped outright rather than spending a model round trip nobody sees.
+ * Titling is best-effort throughout: a session that already has a name, a run with no user
+ * text (a slash-command-only turn), a headless run with no model, or any provider error
+ * leaves the session untitled and never throws.
  *
  * Cost: one model call per session at most. The guard is claimed before the completion so
  * repeated settles cannot each fire a call, and a failed attempt is not retried until a
@@ -98,6 +100,10 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
     // small/fast-model request that generates the session title." setSessionName is pi's
     // only title sink, so skipping the call here skips both effects at once.
     if (process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE === '1') return
+    // A subagent child's session (--no-session, or its own --session-dir once it persists
+    // one for a resumable follow-up) is never browsed by name in a session picker: the
+    // model call would only add latency and cost to how soon the child can exit.
+    if (process.env.PI_CODE_SUBAGENT === '1') return
     if (titled) return
     // Never clobber an existing name: a user-chosen or resumed name wins.
     if (pi.getSessionName?.()) return
