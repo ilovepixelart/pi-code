@@ -21,8 +21,10 @@ const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g
  * some models add) stripped, ~ expanded, a file:// URL decoded, unicode spaces folded.
  * pi does this in resolveToCwd (dist/core/tools/path-utils), which the package does not
  * export. A reader that skips it judges a different file than the one pi opens: a
- * command scoped to `Read(*.md)` allowed `~/secret/notes.md`, read as <cwd>/~/secret. */
-function asPiReadsIt(target: string): string {
+ * command scoped to `Read(*.md)` allowed `~/secret/notes.md`, read as <cwd>/~/secret.
+ * Exported for the hook `if` filter, which judges the same paths against the same rules
+ * but reaches them through tool names this module's FILE_TOOLS set does not cover. */
+export function asPiReadsIt(target: string): string {
   const folded = target.replace(UNICODE_SPACES, ' ')
   const bare = folded.startsWith('@') ? folded.slice(1) : folded
   if (bare === '~') return os.homedir()

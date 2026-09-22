@@ -413,7 +413,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
     // pi's read/edit/write accept `file_path` as an alias for `path`; the shared reader
-    // handles both, and the paired guard in hooks/matcher.ts reads both too.
+    // handles both and normalises the value as pi resolves it. The paired guard in
+    // hooks/matcher.ts judges the same paths against the same rules, so it normalises
+    // through the same helper rather than only aliasing the two keys.
     const filePath = fileToolTarget(event) ?? ''
     const anchors = { cwd: ctx.cwd, projectRoot: checkoutRoot(ctx.cwd), home: os.homedir() }
     if (filePath && matchesPathRules(filePath, rules, anchors)) return
