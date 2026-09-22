@@ -86,7 +86,11 @@ function notifyWindows(title: string, body: string): void {
 }
 
 function notifyDesktop(title: string, body: string): void {
-  if (process.env.WT_SESSION) {
+  // Windows Terminal sets WT_SESSION for a WSL session it hosts too, but WSL is a Linux
+  // process: notifyWindows's fixed C:\Windows\... path is a Windows path and cannot
+  // resolve there, so PowerShell never actually launched and no toast ever fired. The
+  // escape-sequence fallback below travels over the same pty either way.
+  if (process.env.WT_SESSION && process.platform === 'win32') {
     notifyWindows(title, body)
   } else if (process.env.KITTY_WINDOW_ID) {
     notifyOSC99(title, body)

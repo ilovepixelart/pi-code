@@ -112,18 +112,47 @@ describe('notify', () => {
     expect(writes).toEqual([])
   })
 
-  it('sends the toast through PowerShell by absolute path when WT_SESSION is set', async () => {
+  it('sends the toast through PowerShell by absolute path when WT_SESSION is set on native Windows', async () => {
+    const realPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
     process.stdout.isTTY = true
     delete process.env.KITTY_WINDOW_ID
     process.env.WT_SESSION = '1'
     hoisted.execCalls.length = 0
 
-    const d = drive()
-    await d.agentEnd()
-    await d.agentSettled()
-    const call = hoisted.execCalls.at(-1)
-    expect(call?.file).toMatch(/System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/)
-    expect(call?.args.join(' ')).toContain('Windows.UI.Notifications')
+    try {
+      const d = drive()
+      await d.agentEnd()
+      await d.agentSettled()
+      const call = hoisted.execCalls.at(-1)
+      expect(call?.file).toMatch(/System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/)
+      expect(call?.args.join(' ')).toContain('Windows.UI.Notifications')
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
+    }
+  })
+
+  // Windows Terminal sets WT_SESSION for a WSL session it hosts too, but a WSL process
+  // is Linux (process.platform !== 'win32'), where the fixed C:\\Windows\\... path can
+  // never resolve: PowerShell was never actually launched, so no toast ever fired.
+  it('falls back to the OSC 777 escape sequence rather than a Windows-only path under WSL', async () => {
+    const realPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    process.stdout.isTTY = true
+    delete process.env.KITTY_WINDOW_ID
+    process.env.WT_SESSION = '1'
+    hoisted.execCalls.length = 0
+    const writes = captureWrites()
+
+    try {
+      const d = drive()
+      await d.agentEnd()
+      await d.agentSettled()
+      expect(hoisted.execCalls).toEqual([])
+      expect(writes.join('')).toContain('\x1b]777')
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
+    }
   })
 
   it('stays silent for a quick turn right after the user submitted (they are present)', async () => {
