@@ -16,6 +16,8 @@ const setup = (): {
   search: (params: Record<string, unknown>) => Promise<ToolResult>
   fetchUrl: (url: string) => Promise<ToolResult>
   fetchWith: (params: Record<string, unknown>, ctx?: unknown) => Promise<ToolResult>
+  fetchWithSignal: (url: string, signal: AbortSignal) => Promise<ToolResult>
+  searchWithSignal: (query: string, signal: AbortSignal) => Promise<ToolResult>
 } => {
   const tools = new Map<string, Execute>()
   webExtension({
@@ -30,6 +32,8 @@ const setup = (): {
     search: (params) => search('call-1', params),
     fetchUrl: (url) => fetchUrl('call-1', { url }),
     fetchWith: (params, ctx) => fetchUrl('call-1', params, undefined, undefined, ctx),
+    fetchWithSignal: (url, signal) => fetchUrl('call-1', { url }, signal),
+    searchWithSignal: (query, signal) => search('call-1', { query }, signal),
   }
 }
 
@@ -129,6 +133,64 @@ describe('web_fetch cache', () => {
 
     expect(ok.content[0].text).toBe('fine')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('cancellation', () => {
+  // execute() receives the tool call's own AbortSignal (fired on Esc); web_fetch declared
+  // the parameter but never passed it to the actual HTTP request, so Esc could not stop it
+  // mid-fetch and a slow or hanging host held the turn for the full per-hop timeout instead
+  // (up to 20s, and again on every redirect hop). web_search did not even accept a signal.
+  it('passes the caller-provided signal into the transport for web_fetch', async () => {
+    fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+    const controller = new AbortController()
+
+    await setup().fetchWithSignal('https://example.com/slow', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal.aborted).toBe(false)
+    controller.abort()
+    expect(opts.signal.aborted).toBe(true)
+  })
+
+  it('passes the caller-provided signal into the transport for web_search', async () => {
+    fetchMock.mockResolvedValue(respond('', { contentType: 'text/html' }))
+    const controller = new AbortController()
+
+    await setup().searchWithSignal('site:example.com', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal.aborted).toBe(false)
+    controller.abort()
+    expect(opts.signal.aborted).toBe(true)
+  })
+
+  it('aborts the actual request, not just the signal object, when the caller cancels', async () => {
+    const controller = new AbortController()
+    fetchMock.mockImplementation(
+      (_url, opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+          controller.abort() // Esc arrives mid-request, listener already attached
+        }),
+    )
+
+    await expect(setup().fetchWithSignal('https://example.com/hangs', controller.signal)).rejects.toThrow(/abort/i)
+  })
+
+  it('still enforces the per-hop timeout when the caller never cancels', async () => {
+    // The caller's signal only adds early cancellation; it must not replace the timeout
+    // ceiling that keeps a silently hanging host from holding the turn forever.
+    fetchMock.mockResolvedValue(respond('ok', { contentType: 'text/plain' }))
+    const controller = new AbortController()
+
+    await setup().fetchWithSignal('https://example.com/a', controller.signal)
+
+    const opts = fetchMock.mock.calls[0][1]
+    expect(opts.signal).toBeInstanceOf(AbortSignal)
+    // Neither the bare caller signal nor a bare 20s timeout alone: a combined signal
+    // aborts for either reason, which a same-identity check would miss.
+    expect(opts.signal).not.toBe(controller.signal)
   })
 })
 
