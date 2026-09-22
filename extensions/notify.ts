@@ -100,25 +100,44 @@ export default function notifyExtension(pi: ExtensionAPI) {
   // When the user last submitted a prompt, so a turn's duration can stand in for
   // Claude's "appear to be away" check. Undefined until the first prompt this session.
   let lastInputAt: number | undefined
+  // Set by agent_end, consumed and cleared by agent_settled. agent_end alone cannot
+  // tell a genuine "done, waiting for you" end from one an automatic retry, a /goal
+  // continuation, or a compaction is about to follow with no user involved: each of
+  // those fires its own agent_end too, with nobody ever actually waiting until the
+  // last one. agent_settled ("no automatic retry, compaction, or queued continuation
+  // will run") is that signal, but only firing there would delay the common, single-
+  // turn case behind a peer extension's agent_end handler blocking on a UI dialog
+  // (plan mode); capturing state at agent_end and only acting on it once agent_settled
+  // confirms this was the final step keeps both properties.
+  let pending = false
+  // Whether the run's own last assistant message ended with stopReason: 'aborted', i.e.
+  // the user pressed Esc: they are at the keyboard by definition, whatever isAway's
+  // timer-based guess would otherwise say.
+  let lastAborted = false
 
   pi.on('session_start', async (_event, _ctx) => {
     channel = resolveNotifChannel(readPreferredNotifChannel(os.homedir()))
     lastInputAt = undefined
+    pending = false
   })
 
-  pi.on('input', async () => {
+  pi.on('input', async (event) => {
+    // A goal continuation or a subagent's own prompt is not the user; only their own
+    // input is evidence they are at the keyboard (mirroring goal.ts's own check).
+    if (event.source === 'extension') return
     lastInputAt = Date.now()
   })
 
-  // Fires on agent_end rather than agent_settled deliberately: agent_settled is only
-  // emitted after every agent_end handler returns, and a peer extension (plan mode)
-  // blocks its agent_end handler on a UI dialog, which would starve this notification
-  // exactly when the user has stepped away. agent_end can fire slightly early before a
-  // rare automatic retry or compaction, which is a better failure than never notifying.
-  pi.on('agent_end', async () => {
-    if (channel === 'off') return
-    // Piped or headless stdout (pi -p, CI) must not receive raw escape bytes.
-    if (!process.stdout.isTTY) return
+  pi.on('agent_end', async (event) => {
+    const last = [...event.messages].reverse().find((message) => message.role === 'assistant')
+    lastAborted = last?.stopReason === 'aborted'
+    pending = channel !== 'off' && process.stdout.isTTY === true
+  })
+
+  pi.on('agent_settled', async () => {
+    if (!pending) return
+    pending = false
+    if (lastAborted) return
     if (!isAway(lastInputAt, Date.now(), AWAY_AFTER_MS)) return
     if (channel === 'bell') {
       process.stdout.write('\x07')

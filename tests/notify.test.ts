@@ -30,14 +30,25 @@ vi.mock('node:os', async (importOriginal) => {
 
 type Handler = (event: unknown, ctx: unknown) => Promise<void>
 
-function drive(): { sessionStart: (ctx?: unknown) => Promise<void>; input: () => Promise<void>; agentEnd: () => Promise<void>; agentSettled: () => Promise<void> } {
+function drive(): {
+  sessionStart: (ctx?: unknown) => Promise<void>
+  input: (source?: 'interactive' | 'extension') => Promise<void>
+  agentEnd: (stopReason?: string) => Promise<void>
+  agentSettled: () => Promise<void>
+} {
   const handlers = new Map<string, Handler>()
   notifyExtension({ on: (name: string, fn: Handler) => handlers.set(name, fn) } as never)
   const call =
     (name: string) =>
-    (ctx: unknown = {}) =>
-      handlers.get(name)?.({}, ctx) ?? Promise.resolve()
-  return { sessionStart: call('session_start'), input: () => call('input')(), agentEnd: () => call('agent_end')(), agentSettled: () => call('agent_settled')() }
+    (event: unknown = {}, ctx: unknown = {}) =>
+      handlers.get(name)?.(event, ctx) ?? Promise.resolve()
+  return {
+    sessionStart: (ctx) => call('session_start')({}, ctx),
+    input: (source = 'interactive') => call('input')({ source }),
+    // A run has at least one assistant message; only its stopReason matters here.
+    agentEnd: (stopReason = 'stop') => call('agent_end')({ messages: [{ role: 'assistant', stopReason }] }),
+    agentSettled: () => call('agent_settled')(),
+  }
 }
 
 describe('notify', () => {
@@ -61,13 +72,16 @@ describe('notify', () => {
     return writes
   }
 
-  it('emits an OSC 777 notification by default on agent_end', async () => {
+  it('emits an OSC 777 notification by default once the run settles', async () => {
     process.stdout.isTTY = true
     const writes = captureWrites()
     delete process.env.WT_SESSION
     delete process.env.KITTY_WINDOW_ID
 
-    await drive().agentEnd()
+    const d = drive()
+    await d.agentEnd()
+    expect(writes).toEqual([]) // agent_end alone never fires it; see below
+    await d.agentSettled()
     const out = writes.join('')
     expect(out).toContain('Ready for input')
     expect(out).toContain('\x1b]777')
@@ -79,7 +93,9 @@ describe('notify', () => {
     delete process.env.WT_SESSION
     process.env.KITTY_WINDOW_ID = '1'
 
-    await drive().agentEnd()
+    const d = drive()
+    await d.agentEnd()
+    await d.agentSettled()
     expect(writes.join('')).toContain('\x1b]99')
   })
 
@@ -90,20 +106,21 @@ describe('notify', () => {
     delete process.env.WT_SESSION
     delete process.env.KITTY_WINDOW_ID
 
-    await drive().agentEnd()
+    const d = drive()
+    await d.agentEnd()
+    await d.agentSettled()
     expect(writes).toEqual([])
   })
 
   it('sends the toast through PowerShell by absolute path when WT_SESSION is set', async () => {
-    // powershell.exe spawn fails on non-Windows, and the callback swallows that, so the
-    // observable part is the invocation itself: an absolute System32 path, never a PATH
-    // lookup, carrying the notification text.
     process.stdout.isTTY = true
-    process.env.WT_SESSION = 'x'
+    delete process.env.KITTY_WINDOW_ID
+    process.env.WT_SESSION = '1'
     hoisted.execCalls.length = 0
 
-    await drive().agentEnd()
-
+    const d = drive()
+    await d.agentEnd()
+    await d.agentSettled()
     const call = hoisted.execCalls.at(-1)
     expect(call?.file).toMatch(/System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/)
     expect(call?.args.join(' ')).toContain('Windows.UI.Notifications')
@@ -118,6 +135,7 @@ describe('notify', () => {
     const d = drive()
     await d.input() // records "now"; the turn that follows is far under the away threshold
     await d.agentEnd()
+    await d.agentSettled()
     expect(writes).toEqual([])
   })
 
@@ -133,6 +151,7 @@ describe('notify', () => {
     const d = drive()
     await d.sessionStart({ cwd: hoisted.home })
     await d.agentEnd() // no input this session, so the turn counts as away
+    await d.agentSettled()
     const out = writes.join('')
     expect(out).toContain('\x07')
     expect(out).not.toContain('\x1b]777')
@@ -151,6 +170,7 @@ describe('notify', () => {
     const d = drive()
     await d.sessionStart({ cwd: hoisted.home })
     await d.agentEnd()
+    await d.agentSettled()
     const out = writes.join('')
     expect(out).toContain('\x1b]777')
     // The OSC 777 sequence is terminated by a BEL byte of its own, so a plain
@@ -170,25 +190,132 @@ describe('notify', () => {
     const d = drive()
     await d.sessionStart({ cwd: hoisted.home })
     await d.agentEnd()
+    await d.agentSettled()
     expect(writes).toEqual([])
-    hoisted.home = ''
+  })
+
+  // agent_end fires once per internal step (an automatic retry, each turn of a /goal
+  // loop); agent_settled is pi's own "no automatic retry, compaction, or queued
+  // continuation will run" signal and fires exactly once for the whole chain. Firing
+  // straight off agent_end notified on every one of those steps, though nothing was
+  // ever actually waiting on the user until the last one.
+  describe('a run that continues itself one or more times before it is truly done', () => {
+    it('does not notify for an automatic retry, only once the run finally settles', async () => {
+      process.stdout.isTTY = true
+      delete process.env.WT_SESSION
+      delete process.env.KITTY_WINDOW_ID
+      const writes = captureWrites()
+
+      const d = drive()
+      await d.agentEnd() // the failed attempt
+      await d.agentEnd() // the retry's own end
+      expect(writes).toEqual([])
+      await d.agentSettled()
+      expect(writes.join('')).toContain('Ready for input')
+    })
+
+    it('fires only once for a /goal loop of several turns, not once per turn', async () => {
+      process.stdout.isTTY = true
+      delete process.env.WT_SESSION
+      delete process.env.KITTY_WINDOW_ID
+      const writes = captureWrites()
+
+      const d = drive()
+      for (let i = 0; i < 4; i++) await d.agentEnd() // four /goal-driven turns, none of them the last
+      expect(writes).toEqual([])
+      await d.agentSettled() // the goal condition is finally met
+      const notifyCount = writes.filter((w) => w.includes('Ready for input')).length
+      expect(notifyCount).toBe(1)
+    })
+
+    it('does not carry a settled notification over to the next run with nothing pending', async () => {
+      process.stdout.isTTY = true
+      delete process.env.WT_SESSION
+      delete process.env.KITTY_WINDOW_ID
+      const writes = captureWrites()
+
+      const d = drive()
+      await d.agentEnd()
+      await d.agentSettled()
+      writes.length = 0
+      await d.agentSettled() // e.g. a stray or duplicate event; nothing new to report
+      expect(writes).toEqual([])
+    })
+  })
+
+  // Esc produces stopReason: 'aborted' on the last assistant message (as goal.ts's own
+  // check for it does). The user just interrupted the run themselves, so they are at the
+  // keyboard by definition, whatever isAway's timer-based guess would otherwise say.
+  it('does not notify when the user interrupted the run themselves (Esc)', async () => {
+    process.stdout.isTTY = true
+    delete process.env.WT_SESSION
+    delete process.env.KITTY_WINDOW_ID
+    const writes = captureWrites()
+
+    const d = drive()
+    await d.agentEnd('aborted')
+    await d.agentSettled()
+    expect(writes).toEqual([])
+  })
+
+  it('does not leave a stale pending notification armed after an aborted settle', async () => {
+    process.stdout.isTTY = true
+    delete process.env.WT_SESSION
+    delete process.env.KITTY_WINDOW_ID
+    const writes = captureWrites()
+
+    const d = drive()
+    await d.agentEnd('aborted')
+    await d.agentSettled() // consumed and cleared, not just skipped
+    writes.length = 0
+    await d.agentSettled() // nothing re-armed it; a stray repeat must stay silent
+    expect(writes).toEqual([])
+  })
+
+  it('does not let an earlier aborted step in the same chain suppress the real notification', async () => {
+    // Only the last step before settling reflects why the run actually ended.
+    process.stdout.isTTY = true
+    delete process.env.WT_SESSION
+    delete process.env.KITTY_WINDOW_ID
+    const writes = captureWrites()
+
+    const d = drive()
+    await d.agentEnd('aborted')
+    await d.agentEnd('stop')
+    await d.agentSettled()
+    expect(writes.join('')).toContain('Ready for input')
+  })
+
+  // goal.ts's own continuation prompt carries source: 'extension'; only the user's own
+  // input is evidence they are at the keyboard.
+  it('does not count an extension-originated continuation as the user being present', async () => {
+    process.stdout.isTTY = true
+    delete process.env.WT_SESSION
+    delete process.env.KITTY_WINDOW_ID
+    const writes = captureWrites()
+
+    const d = drive()
+    await d.input('extension')
+    await d.agentEnd()
+    await d.agentSettled()
+    expect(writes.join('')).toContain('Ready for input')
   })
 })
 
 describe('resolveNotifChannel', () => {
   it('maps preferredNotifChannel values, defaulting to desktop', () => {
-    expect(resolveNotifChannel(undefined)).toBe('desktop')
-    expect(resolveNotifChannel('iterm2')).toBe('desktop')
+    expect(resolveNotifChannel('notifications_disabled')).toBe('off')
     expect(resolveNotifChannel('terminal_bell')).toBe('bell')
     expect(resolveNotifChannel('iterm2_with_bell')).toBe('both')
-    expect(resolveNotifChannel('notifications_disabled')).toBe('off')
+    expect(resolveNotifChannel('anything_else')).toBe('desktop')
+    expect(resolveNotifChannel(undefined)).toBe('desktop')
   })
 })
 
 describe('isAway', () => {
   it('treats an unrecorded or long-running turn as away, a quick one as present', () => {
     expect(isAway(undefined, 1_000_000, AWAY_AFTER_MS)).toBe(true)
-    expect(isAway(1_000_000, 1_000_000 + AWAY_AFTER_MS, AWAY_AFTER_MS)).toBe(true)
+    expect(isAway(0, AWAY_AFTER_MS, AWAY_AFTER_MS)).toBe(true)
     expect(isAway(1_000_000, 1_000_000 + AWAY_AFTER_MS - 1, AWAY_AFTER_MS)).toBe(false)
   })
 })
