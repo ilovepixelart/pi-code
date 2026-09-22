@@ -188,13 +188,16 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe('café!')
   })
 
-  it('falls back to response.text() when the response exposes no body stream', async () => {
+  it('falls back to response.arrayBuffer() when the response exposes no body stream', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
       body: null,
       headers: new Headers({ 'content-type': 'text/plain' }),
-      text: async () => 'body-less payload',
+      arrayBuffer: async () => {
+        const bytes = Buffer.from('body-less payload')
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      },
     } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/nobody')
     expect(result.content[0].text).toBe('body-less payload')
@@ -232,6 +235,56 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe('ab�')
   })
 
+  it('decodes a non-UTF-8 charset declared in the content-type header (streamed body)', async () => {
+    // A raw fetch response is always decoded as UTF-8 today, wherever the body's actual
+    // charset is declared. A Windows-1252 page (still common for older or non-English
+    // sites) came back as mojibake for every byte outside plain ASCII.
+    const body = Buffer.from([0x63, 0x61, 0x66, 0xe9]) // "caf" + 0xE9, Windows-1252 for é
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream, { contentType: 'text/plain; charset=windows-1252' }))
+
+    const result = await setup().fetchUrl('https://example.com/latin1')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('decodes a non-UTF-8 charset on the no-stream fallback path too', async () => {
+    const body = Buffer.from([0x63, 0x61, 0x66, 0xe9])
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/plain; charset=iso-8859-1' }),
+      url: 'https://example.com/latin1-2',
+      body: null,
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+    } as unknown as Response)
+
+    const result = await setup().fetchUrl('https://example.com/latin1-2')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('falls back to UTF-8 for a charset label TextDecoder does not recognize, instead of throwing', async () => {
+    fetchMock.mockResolvedValue(respond('café', { contentType: 'text/plain; charset=not-a-real-charset' }))
+
+    const result = await setup().fetchUrl('https://example.com/bogus-charset')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
+  it('defaults to UTF-8 when the content-type has no charset', async () => {
+    fetchMock.mockResolvedValue(respond('café', { contentType: 'text/plain' }))
+
+    const result = await setup().fetchUrl('https://example.com/no-charset')
+
+    expect(result.content[0].text).toBe('café')
+  })
+
   it('treats a missing content-type as non-html and skips html stripping', async () => {
     // Response() synthesizes text/plain for a string body, so a header-less
     // reply has to be duck-typed to actually reach the `?? ''` fallback.
@@ -241,7 +294,10 @@ describe('web_fetch responses', () => {
       headers: new Headers(),
       url: 'https://example.com/unknown',
       body: null,
-      text: async () => '<b>raw</b>',
+      arrayBuffer: async () => {
+        const bytes = Buffer.from('<b>raw</b>')
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      },
     } as unknown as Response)
     const result = await setup().fetchUrl('https://example.com/unknown')
     expect(result.content[0].text).toBe('<b>raw</b>')

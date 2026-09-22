@@ -178,11 +178,28 @@ async function resolveAndPin(url: URL): Promise<LookupFunction> {
 
 const MAX_REDIRECTS = 5
 
-/** Read a response body up to MAX_RAW_CHARS, then stop the download. Bounds memory and parsing cost. */
+/** The charset a content-type header declares, or 'utf-8' when it names none. */
+function declaredCharset(contentType: string): string {
+  const match = /charset=(?:"([^"]*)"|'([^']*)'|([^;\s]*))/i.exec(contentType)
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim() || 'utf-8'
+}
+
+/** A decoder for `contentType`'s declared charset, or the platform default (UTF-8) for a
+ * label TextDecoder does not recognize: a bad or made-up charset must not fail the fetch. */
+function decoderFor(contentType: string): TextDecoder {
+  try {
+    return new TextDecoder(declaredCharset(contentType))
+  } catch {
+    return new TextDecoder()
+  }
+}
+
+/** Read a response body up to MAX_RAW_CHARS, decoded as the content-type header's charset
+ * (UTF-8 when it names none), then stop the download. Bounds memory and parsing cost. */
 async function readCapped(response: Response): Promise<string> {
+  const decoder = decoderFor(response.headers.get('content-type') ?? '')
   const reader = response.body?.getReader()
-  if (!reader) return (await response.text()).slice(0, MAX_RAW_CHARS)
-  const decoder = new TextDecoder()
+  if (!reader) return decoder.decode(await response.arrayBuffer()).slice(0, MAX_RAW_CHARS)
   let text = ''
   while (text.length < MAX_RAW_CHARS) {
     const { done, value } = await reader.read()
