@@ -258,6 +258,14 @@ function readRules(rulesDir: string, isExcluded?: (realPath: string) => boolean)
   return { inline, scoped }
 }
 
+/** The user's rules directory as a pointer names it, so the model's read resolves: against
+ * `~` under home, and by its full path where CLAUDE_CONFIG_DIR moved it elsewhere. */
+function userRulesBase(rulesDir: string, home: string): string {
+  const relative = path.relative(home, rulesDir)
+  const outsideHome = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+  return outsideHome ? rulesDir : `~/${relative.split(path.sep).join('/')}`
+}
+
 /** The pointer list for a rule set's path-scoped rules. */
 function scopedPointers(rules: RuleSet, base: string): string {
   const scopedList = rules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, base)).join('\n')
@@ -320,6 +328,7 @@ export function pendingScopedRuleCount(): number {
 
 export default function claudeRulesExtension(pi: ExtensionAPI) {
   const globalRulesDir = path.join(claudeConfigDir(os.homedir()), 'rules')
+  const globalRulesBase = userRulesBase(globalRulesDir, os.homedir())
   let globalRules: RuleSet = EMPTY_RULES
   let projectRules: RuleSet = EMPTY_RULES
   let projectRulesDir: string | null = null
@@ -380,7 +389,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     // Global first: Claude loads user-level rules before project rules, so project
     // rules read later and take priority.
     const files = [...rulesContextFiles(globalRules, globalRulesDir), ...rulesContextFiles(projectRules, projectRulesDir ?? '')]
-    const pointers = [...(globalRules.scoped.length > 0 ? [scopedPointers(globalRules, '~/.claude/rules')] : []), ...(projectRules.scoped.length > 0 ? [scopedPointers(projectRules, projectRulesBase)] : [])].join('\n\n')
+    const pointers = [...(globalRules.scoped.length > 0 ? [scopedPointers(globalRules, globalRulesBase)] : []), ...(projectRules.scoped.length > 0 ? [scopedPointers(projectRules, projectRulesBase)] : [])].join('\n\n')
     if (files.length === 0 && pointers.length === 0) return
 
     // Rules join the options the prompt is built from. A provider that rebuilds the prompt
@@ -398,7 +407,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
       // reuses the options object next turn, so there the edit is undone.
       if (options.forceSystemPrompt === undefined) undo()
     }
-    const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
+    const addition = rulesSection('Global Rules', globalRules, globalRulesBase) + rulesSection('Project Rules', projectRules, projectRulesBase)
     return { systemPrompt: event.systemPrompt + addition }
   })
 

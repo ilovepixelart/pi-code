@@ -17,7 +17,7 @@ Context files and path-scoped rules, beyond what pi loads natively. Sources: [`e
 
 ## Rules
 
-- `~/.claude/rules` and `.claude/rules` (nearest at or above cwd).
+- `~/.claude/rules` and `.claude/rules` (nearest at or above cwd). A scoped pointer names the directory its rule was read from, so a pointer to a user rule follows `CLAUDE_CONFIG_DIR`.
 - Unscoped rules are inlined in full. On pi 0.86 and later they join the prompt options as context files, one per rule file, and the scoped pointers as appended instructions, so a provider that rebuilds the prompt from its options (such as `pi-claude-bridge`) keeps them. On pi before 0.86 they are appended to the prompt text instead. When an earlier extension forced the prompt on pi 0.86 and later, they do both.
 - `paths:`-scoped rules are surfaced as pointers and auto-attached: the rule body is appended to a read/edit/write result when a matching file is touched, once per rule, and again after a compaction or a `/tree` move takes the earlier result out of context (Claude reloads them "as Claude reads files they apply to").
 - Rule `paths` globs follow Claude's table: `*` stays in a segment, `**` crosses directories, and a slashless pattern (`*.md`, `README.md`) is the project root, so `**/*.md` is how a rule says any depth. A trailing slash (`docs/`) scopes to that directory's contents.

@@ -571,6 +571,31 @@ describe('extension wiring', () => {
     expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
   })
 
+  it('points at a scoped global rule where CLAUDE_CONFIG_DIR put it', async () => {
+    // The pointer is the path the model reads the rule from, and ~/.claude/rules names a
+    // file that is not there once the config directory moved.
+    const cfg = mkdtempSync(join(tmpdir(), 'rules-cfg-'))
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    mkdirSync(join(cfg, 'rules'), { recursive: true })
+    writeFileSync(join(cfg, 'rules', 'sql.md'), '---\npaths: ["db/**"]\n---\nUse parameterized queries.')
+
+    const prompt = await sessionPrompt(globalCtx())
+
+    expect(prompt).toContain(`- ${join(cfg, 'rules')}/sql.md — applies when working on: db/**`)
+    expect(prompt).not.toContain('~/.claude/rules')
+  })
+
+  it('writes a relocated config directory under home against ~ in the scoped pointer', async () => {
+    const cfg = join(hoisted.home, '.config', 'claude')
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    mkdirSync(join(cfg, 'rules'), { recursive: true })
+    writeFileSync(join(cfg, 'rules', 'sql.md'), '---\npaths: ["db/**"]\n---\nUse parameterized queries.')
+
+    const prompt = await sessionPrompt(globalCtx())
+
+    expect(prompt).toContain('- ~/.config/claude/rules/sql.md — applies when working on: db/**')
+  })
+
   it('skips an unreadable global rule instead of failing the session', async () => {
     // A directory where a rule file is expected: the read fails on every platform, unlike
     // chmod 0o000, which Windows ignores.
