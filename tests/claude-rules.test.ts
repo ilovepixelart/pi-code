@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import claudeRules, { formatRulePointer, parseFrontmatter, pathMatchesGlobs, pendingScopedRuleCount } from '../extensions/claude-rules.ts'
+import { instructionsBlock } from '../extensions/context-imports.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
 import { globCompileStats } from '../extensions/internal/path-rules.ts'
 
@@ -144,7 +145,7 @@ describe('extension wiring', () => {
       systemPromptOptions,
       get systemPrompt(): string {
         const addendum = systemPromptOptions.appendSystemPrompt ? [systemPromptOptions.appendSystemPrompt] : []
-        return ['BASE', ...addendum, ...systemPromptOptions.contextFiles.map((file) => `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>`)].join('\n\n')
+        return ['BASE', ...addendum, ...systemPromptOptions.contextFiles.map((file) => instructionsBlock(file.path, file.content))].join('\n\n')
       },
     }
   }
@@ -440,6 +441,20 @@ describe('extension wiring', () => {
     const event = renderingEvent('USER APPEND')
     await handlers.get('before_agent_start')?.(event, {})
     expect(event.systemPromptOptions.appendSystemPrompt).toBe('USER APPEND')
+  })
+
+  it('hands each run its own context file entries', async () => {
+    // The options belong to one run, so an entry a later handler rewrites there must not
+    // reach the next run.
+    const cwd = projectWithRule('Commit subjects use the imperative mood.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const first = renderingEvent()
+    await handlers.get('before_agent_start')?.(first, {})
+    first.systemPromptOptions.contextFiles[0].content = 'REWRITTEN'
+    const second = renderingEvent()
+    await handlers.get('before_agent_start')?.(second, {})
+    expect(second.systemPromptOptions.contextFiles.map((file) => file.content)).toEqual(['Commit subjects use the imperative mood.'])
   })
 
   it('appends the scoped pointers when the runtime does not re-render the prompt, leaving its options as found', async () => {
