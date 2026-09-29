@@ -911,6 +911,41 @@ function entryFor(file: ContextFile | undefined): ContextFile[] {
   return file === undefined || content.length === 0 ? [] : [{ path: file.path, content }]
 }
 
+/** What one turn loaded, by source. */
+interface LoadedMemory {
+  managedFile: string
+  /** The managed-settings `claudeMd` value, as found there. */
+  managedKey: unknown
+  user: ContextFile | undefined
+  native: ContextFile[]
+  siblings: ContextFile[]
+  alternate: ContextFile | undefined
+  locals: ContextFile[]
+  extras: ContextFile[]
+  imported: ImportedFile[]
+}
+
+/** The memory as context files in Claude's order, for a runtime that builds the prompt
+ * from its options. */
+function memoryEntries(memory: LoadedMemory, where: { config: string; cwd: string }): ContextFile[] {
+  const managedKey = typeof memory.managedKey === 'string' ? stripBlockComments(memory.managedKey) : ''
+  const ordered = inClaudeOrder([
+    ...memory.native.map((file) => placeByPath(file, where)),
+    ...memory.siblings.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.sibling, where)),
+    ...entryFor(memory.alternate).map((file) => place(file, path.dirname(path.dirname(file.path)), RANK.alternate, where)),
+    ...memory.locals.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.local, where)),
+  ])
+  const extras = memory.extras.map((extra) => ({ path: extra.path, content: extra.content }))
+  return [...entryFor({ path: managedClaudeMdPath(), content: memory.managedFile }), ...entryFor({ path: MANAGED_CLAUDE_MD_PATH, content: managedKey }), ...withImports([...entryFor(memory.user), ...ordered, ...extras], memory.imported)]
+}
+
+/** What is said about the imports that did not load. Not a file, so it travels as
+ * appended instructions, not as one of pi's custom prompt sections: a provider that
+ * rebuilds the prompt forwards the appended instructions and drops those sections. */
+function memoryNotices(budget: ImportBudget, refusedNotice: string): string {
+  return [budgetNotice(budget), refusedNotice.trim()].filter((notice) => notice.length > 0).join('\n\n')
+}
+
 /** Hand the memory over as the context files the prompt is built from, and say whether
  * that reached the prompt. pi >= 0.86 re-renders the prompt from the options, so there
  * the memory is in, in Claude's order, and a provider that rebuilds the prompt from the
@@ -1256,19 +1291,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const refusedNotice = refusedImportsAddition(budget.refused)
     addition += refusedNotice
 
-    // The same memory as context files, in Claude's order, for a runtime that builds the
-    // prompt from its options.
-    const where = { config: claudeConfigDir(home), cwd }
-    const managedKey = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
-    const ordered = inClaudeOrder([
-      ...rewrite.kept.map((file) => placeByPath(file, where)),
-      ...keptSiblings.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.sibling, where)),
-      ...entryFor(keptProjectDotClaude).map((file) => place(file, path.dirname(path.dirname(file.path)), RANK.alternate, where)),
-      ...keptLocals.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.local, where)),
-    ])
-    const entries = [...entryFor({ path: managedClaudeMdPath(), content: managedFile }), ...entryFor({ path: MANAGED_CLAUDE_MD_PATH, content: managedKey }), ...withImports([...entryFor(keptUser), ...ordered, ...extras.map((extra) => ({ path: extra.path, content: extra.content }))], imported)]
-    const notices = [budgetNotice(budget), refusedNotice.trim()].filter((notice) => notice.length > 0).join('\n\n')
-    if (deliverThroughOptions(event, entries, notices)) return
+    const entries = memoryEntries({ managedFile, managedKey: managed.claudeMd, user: keptUser, native: rewrite.kept, siblings: keptSiblings, alternate: keptProjectDotClaude, locals: keptLocals, extras, imported }, { config: claudeConfigDir(home), cwd })
+    if (deliverThroughOptions(event, entries, memoryNotices(budget, refusedNotice))) return
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }
