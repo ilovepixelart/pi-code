@@ -137,13 +137,14 @@ describe('extension wiring', () => {
   }
 
   /** A before_agent_start event shaped like pi >= 0.86's: systemPrompt re-renders from the
-   * mutable systemPromptOptions, so context files pushed onto them show up in it. */
-  const renderingEvent = () => {
-    const systemPromptOptions = { contextFiles: [] as Array<{ path: string; content: string }> }
+   * mutable systemPromptOptions, so what a handler adds to them shows up in it. */
+  const renderingEvent = (appendSystemPrompt = '') => {
+    const systemPromptOptions = { contextFiles: [] as Array<{ path: string; content: string }>, appendSystemPrompt }
     return {
       systemPromptOptions,
       get systemPrompt(): string {
-        return ['BASE', ...systemPromptOptions.contextFiles.map((file) => `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>`)].join('\n\n')
+        const addendum = systemPromptOptions.appendSystemPrompt ? [systemPromptOptions.appendSystemPrompt] : []
+        return ['BASE', ...addendum, ...systemPromptOptions.contextFiles.map((file) => `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>`)].join('\n\n')
       },
     }
   }
@@ -397,17 +398,27 @@ describe('extension wiring', () => {
     expect(rule?.content).toBe('Commit subjects use the imperative mood.')
   })
 
-  it('delivers the scoped pointers as a context file under the rules directory', async () => {
+  it('delivers the scoped pointers as appended instructions, not as a context file', async () => {
+    // The pointer list is not a file: a context file entry is announced, import-scanned and
+    // exclude-checked as one downstream, and claude-bridge forwards the appended
+    // instructions just as it does the context files.
     const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
     const handlers = wire()
     await handlers.get('session_start')?.({}, approvedCtx(cwd))
     const event = renderingEvent()
+    expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+    expect(event.systemPromptOptions.contextFiles).toEqual([])
+    expect(event.systemPromptOptions.appendSystemPrompt).toContain('testing.md — applies when working on: **/*.test.ts')
+    expect(event.systemPromptOptions.appendSystemPrompt).not.toContain('Tests must be deterministic.')
+  })
+
+  it('adds the scoped pointers after the instructions pi already appends', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent('USER APPEND')
     await handlers.get('before_agent_start')?.(event, {})
-    expect(event.systemPromptOptions.contextFiles).toHaveLength(1)
-    const [pointers] = event.systemPromptOptions.contextFiles
-    expect(pointers.path.endsWith(join('.claude', 'rules'))).toBe(true)
-    expect(pointers.content).toContain('testing.md — applies when working on: **/*.test.ts')
-    expect(pointers.content).not.toContain('Tests must be deterministic.')
+    expect(event.systemPromptOptions.appendSystemPrompt.startsWith('USER APPEND\n\nPath-scoped rules, available in ')).toBe(true)
   })
 
   it('appends the rules when the runtime does not re-render the prompt, leaving its options as found', async () => {
@@ -420,6 +431,36 @@ describe('extension wiring', () => {
     const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
     expect(result?.systemPrompt).toContain('Commit subjects use the imperative mood.')
     expect(event.systemPromptOptions.contextFiles).toEqual([{ path: 'AGENTS.md', content: 'native' }])
+  })
+
+  it('leaves the appended instructions alone when no rule is path-scoped', async () => {
+    const cwd = projectWithRule('Commit subjects use the imperative mood.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent('USER APPEND')
+    await handlers.get('before_agent_start')?.(event, {})
+    expect(event.systemPromptOptions.appendSystemPrompt).toBe('USER APPEND')
+  })
+
+  it('appends the scoped pointers when the runtime does not re-render the prompt, leaving its options as found', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = { systemPrompt: 'BASE', systemPromptOptions: { contextFiles: [], appendSystemPrompt: 'USER APPEND' } }
+    const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
+    expect(result?.systemPrompt).toContain('testing.md — applies when working on: **/*.test.ts')
+    expect(event.systemPromptOptions).toEqual({ contextFiles: [], appendSystemPrompt: 'USER APPEND' })
+  })
+
+  it('keeps the scoped pointers in the appended instructions when an earlier handler forced the prompt', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = { systemPrompt: 'FORCED', systemPromptOptions: { forceSystemPrompt: 'FORCED', contextFiles: [], appendSystemPrompt: '' } }
+    const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
+    expect(result?.systemPrompt).toContain('testing.md — applies when working on: **/*.test.ts')
+    expect(event.systemPromptOptions.contextFiles).toEqual([])
+    expect(event.systemPromptOptions.appendSystemPrompt).toContain('testing.md — applies when working on: **/*.test.ts')
   })
 
   it('keeps the rules in the context files when an earlier handler forced the prompt', async () => {

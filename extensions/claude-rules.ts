@@ -203,6 +203,7 @@ interface ContextFile {
  * a handler that returned a prompt forced it for the run. */
 interface PromptOptions {
   contextFiles?: ContextFile[]
+  appendSystemPrompt?: string
   forceSystemPrompt?: string
 }
 
@@ -274,12 +275,23 @@ function rulesSection(title: string, rules: RuleSet, base: string): string {
   return section
 }
 
-/** One rule set as context files: each unscoped rule under its own file, the way
- * Claude loads it, then the scoped pointers under the rules directory. */
-function rulesContextFiles(rules: RuleSet, dir: string, base: string): ContextFile[] {
-  const files = rules.inline.map((rule) => ({ path: path.join(dir, rule.rel), content: rule.body }))
-  if (rules.scoped.length > 0) files.push({ path: dir, content: scopedPointers(rules, base) })
-  return files
+/** One rule set's unscoped rules as context files, each under its own file, the way
+ * Claude loads it. */
+function rulesContextFiles(rules: RuleSet, dir: string): ContextFile[] {
+  return rules.inline.map((rule) => ({ path: path.join(dir, rule.rel), content: rule.body }))
+}
+
+/** Add the rules to the options a run's prompt is built from: the unscoped rules as context
+ * files and the scoped pointers, which are not a file, as appended instructions. Returns
+ * how to take them out again. */
+function addToOptions(options: PromptOptions, contextFiles: ContextFile[], files: ContextFile[], pointers: string): () => void {
+  const append = options.appendSystemPrompt
+  contextFiles.push(...files)
+  if (pointers.length > 0) options.appendSystemPrompt = append ? `${append}\n\n${pointers}` : pointers
+  return () => {
+    contextFiles.splice(contextFiles.length - files.length, files.length)
+    if (pointers.length > 0) options.appendSystemPrompt = append
+  }
 }
 
 /** A scoped rule resolved to the root its globs match against, ready to attach. */
@@ -367,23 +379,24 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
     // Global first: Claude loads user-level rules before project rules, so project
     // rules read later and take priority.
-    const files = [...rulesContextFiles(globalRules, globalRulesDir, '~/.claude/rules'), ...rulesContextFiles(projectRules, projectRulesDir ?? '', projectRulesBase)]
-    if (files.length === 0) return
+    const files = [...rulesContextFiles(globalRules, globalRulesDir), ...rulesContextFiles(projectRules, projectRulesDir ?? '')]
+    const pointers = [...(globalRules.scoped.length > 0 ? [scopedPointers(globalRules, '~/.claude/rules')] : []), ...(projectRules.scoped.length > 0 ? [scopedPointers(projectRules, projectRulesBase)] : [])].join('\n\n')
+    if (files.length === 0 && pointers.length === 0) return
 
-    // Rules join the context files, which Claude loads them alongside. A provider that
-    // rebuilds the prompt from its sections keeps them there, where text appended to the
-    // rendered prompt is dropped: claude-bridge hands Claude Code the context files only.
+    // Rules join the options the prompt is built from. A provider that rebuilds the prompt
+    // from them keeps the rules there, where text appended to the rendered prompt is
+    // dropped: claude-bridge hands Claude Code the context files and appended instructions.
     const options: PromptOptions | undefined = event.systemPromptOptions
     const contextFiles = options?.contextFiles
     if (options !== undefined && contextFiles !== undefined) {
       const before = event.systemPrompt
-      contextFiles.push(...files)
+      const undo = addToOptions(options, contextFiles, files, pointers)
       // pi >= 0.86 re-renders event.systemPrompt from the options, and the rules are in.
       if (event.systemPrompt !== before) return
       // A prompt an earlier handler forced stays fixed, but the options are that run's own
       // copy and still what a rebuilding provider reads, so they keep the rules. An older pi
-      // reuses the options object next turn, so there the push is undone.
-      if (options.forceSystemPrompt === undefined) contextFiles.splice(contextFiles.length - files.length, files.length)
+      // reuses the options object next turn, so there the edit is undone.
+      if (options.forceSystemPrompt === undefined) undo()
     }
     const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
     return { systemPrompt: event.systemPrompt + addition }
