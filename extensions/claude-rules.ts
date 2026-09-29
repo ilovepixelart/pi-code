@@ -2,8 +2,8 @@
  * Claude Rules Extension
  *
  * Replicates Claude Code's rules loading:
- * - Unscoped rules are inlined in full into the system prompt, global
- *   (~/.claude/rules/*.md) and approved-project (.claude/rules/*.md) alike:
+ * - Unscoped rules are inlined in full into the system prompt as context files,
+ *   global (~/.claude/rules/*.md) and approved-project (.claude/rules/*.md) alike:
  *   Claude loads rules without `paths:` frontmatter at launch with the same
  *   priority as .claude/CLAUDE.md.
  * - Path-scoped rules auto-attach: a rule file may declare `paths:` frontmatter
@@ -177,6 +177,11 @@ function findMarkdownFiles(dir: string, basePath = '', visited = new Set<string>
   return results
 }
 
+interface InlineRule {
+  rel: string
+  body: string
+}
+
 interface ScopedRule {
   rel: string
   paths: string[]
@@ -185,8 +190,13 @@ interface ScopedRule {
 }
 
 interface RuleSet {
-  inline: string[]
+  inline: InlineRule[]
   scoped: ScopedRule[]
+}
+
+interface ContextFile {
+  path: string
+  content: string
 }
 
 const EMPTY_RULES: RuleSet = { inline: [], scoped: [] }
@@ -211,7 +221,7 @@ function realpathOr(target: string): string {
  * (excluding another team's `.claude/rules/**`) relies on; the check runs on the
  * realpath so a symlink cannot dodge an exclusion. */
 function readRules(rulesDir: string, isExcluded?: (realPath: string) => boolean): RuleSet {
-  const inline: string[] = []
+  const inline: InlineRule[] = []
   const scoped: ScopedRule[] = []
   for (const file of findMarkdownFiles(rulesDir)) {
     if (isExcluded) {
@@ -235,9 +245,15 @@ function readRules(rulesDir: string, isExcluded?: (realPath: string) => boolean)
     // result's content is a block array (image-bearing results).
     if (body.length === 0) continue
     if (parsed.paths.length > 0) scoped.push({ rel: file, paths: parsed.paths, body })
-    else inline.push(body)
+    else inline.push({ rel: file, body })
   }
   return { inline, scoped }
+}
+
+/** The pointer list for a rule set's path-scoped rules. */
+function scopedPointers(rules: RuleSet, base: string): string {
+  const scopedList = rules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, base)).join('\n')
+  return `Path-scoped rules, available in ${base}/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
 }
 
 /** The system-prompt section for one rule set: inlined bodies, then scoped pointers. */
@@ -245,13 +261,18 @@ function rulesSection(title: string, rules: RuleSet, base: string): string {
   if (rules.inline.length === 0 && rules.scoped.length === 0) return ''
   let section = `\n\n## ${title}`
   if (rules.inline.length > 0) {
-    section += `\n\nThese rules always apply:\n\n${rules.inline.join('\n\n')}`
+    section += `\n\nThese rules always apply:\n\n${rules.inline.map((rule) => rule.body).join('\n\n')}`
   }
-  if (rules.scoped.length > 0) {
-    const scopedList = rules.scoped.map((rule) => formatRulePointer(rule.rel, rule.paths, base)).join('\n')
-    section += `\n\nPath-scoped rules, available in ${base}/:\n\n${scopedList}\n\nRead the relevant rule file with the read tool before working on the files it covers.`
-  }
+  if (rules.scoped.length > 0) section += `\n\n${scopedPointers(rules, base)}`
   return section
+}
+
+/** One rule set as context files: each unscoped rule under its own file, the way
+ * Claude loads it, then the scoped pointers under the rules directory. */
+function rulesContextFiles(rules: RuleSet, dir: string, base: string): ContextFile[] {
+  const files = rules.inline.map((rule) => ({ path: path.join(dir, rule.rel), content: rule.body }))
+  if (rules.scoped.length > 0) files.push({ path: dir, content: scopedPointers(rules, base) })
+  return files
 }
 
 /** A scoped rule resolved to the root its globs match against, ready to attach. */
@@ -282,6 +303,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   const globalRulesDir = path.join(claudeConfigDir(os.homedir()), 'rules')
   let globalRules: RuleSet = EMPTY_RULES
   let projectRules: RuleSet = EMPTY_RULES
+  let projectRulesDir: string | null = null
   // The base a scoped-rule pointer is written against, so the model's read resolves.
   // The project rules dir may sit at an ancestor of cwd, where a cwd-relative
   // '.claude/rules' would point the read at a path that does not exist.
@@ -309,7 +331,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     // Not the user's own rules dir: from $HOME (or under a dotfiles repo rooted there)
     // the nearest one is ~/.claude/rules, which the global load above already read.
     const nearestRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
-    const projectRulesDir = nearestRulesDir !== null && sameLocation(nearestRulesDir, globalRulesDir) ? null : nearestRulesDir
+    projectRulesDir = nearestRulesDir !== null && sameLocation(nearestRulesDir, globalRulesDir) ? null : nearestRulesDir
     projectRules = projectRulesDir ? readRules(projectRulesDir, isExcluded) : EMPTY_RULES
 
     // Global globs are relative to cwd; project globs to the project root (the dir
@@ -338,9 +360,23 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event) => {
     // Global first: Claude loads user-level rules before project rules, so project
     // rules read later and take priority.
-    const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
-    if (addition.length === 0) return
+    const files = [...rulesContextFiles(globalRules, globalRulesDir, '~/.claude/rules'), ...rulesContextFiles(projectRules, projectRulesDir ?? '', projectRulesBase)]
+    if (files.length === 0) return
 
+    // Rules join the context files, which Claude loads them alongside. A provider that
+    // rebuilds the prompt from its sections keeps them there, where text appended to the
+    // rendered prompt is dropped: claude-bridge hands Claude Code the context files only.
+    const contextFiles = event.systemPromptOptions?.contextFiles
+    if (contextFiles !== undefined) {
+      const before = event.systemPrompt
+      contextFiles.push(...files)
+      // pi >= 0.86 re-renders event.systemPrompt from the options. An older pi, or a prompt
+      // an earlier handler forced, leaves it fixed; an older pi also reuses the options
+      // object next turn, so the push is undone and the rules are appended instead.
+      if (event.systemPrompt !== before) return
+      contextFiles.splice(contextFiles.length - files.length, files.length)
+    }
+    const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
     return { systemPrompt: event.systemPrompt + addition }
   })
 

@@ -136,12 +136,25 @@ describe('extension wiring', () => {
     return cwd
   }
 
+  /** A before_agent_start event shaped like pi >= 0.86's: systemPrompt re-renders from the
+   * mutable systemPromptOptions, so context files pushed onto them show up in it. */
+  const renderingEvent = () => {
+    const systemPromptOptions = { contextFiles: [] as Array<{ path: string; content: string }> }
+    return {
+      systemPromptOptions,
+      get systemPrompt(): string {
+        return ['BASE', ...systemPromptOptions.contextFiles.map((file) => `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>`)].join('\n\n')
+      },
+    }
+  }
+
   const sessionPrompt = async (ctx: Record<string, unknown>): Promise<string> => {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     claudeRules({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
     await handlers.get('session_start')?.({}, ctx)
-    const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string } | undefined
-    return result?.systemPrompt ?? 'BASE'
+    const event = renderingEvent()
+    const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
+    return result?.systemPrompt ?? event.systemPrompt
   }
 
   /** Wire the extension and expose its handlers so a tool_result can be fired. */
@@ -370,6 +383,43 @@ describe('extension wiring', () => {
     const prompt = await sessionPrompt({ cwd, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async () => true } })
     expect(prompt).toContain('Commit subjects use the imperative mood.')
     expect(prompt).not.toContain('- .claude/rules/testing.md')
+  })
+
+  it('delivers an unscoped rule as a context file under its own path, not appended prompt text', async () => {
+    // A provider that rebuilds the prompt from its sections, like claude-bridge, keeps the
+    // context files and drops text appended to the rendered prompt.
+    const cwd = projectWithRule('Commit subjects use the imperative mood.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent()
+    expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+    const rule = event.systemPromptOptions.contextFiles.find((file) => file.path.endsWith(join('.claude', 'rules', 'testing.md')))
+    expect(rule?.content).toBe('Commit subjects use the imperative mood.')
+  })
+
+  it('delivers the scoped pointers as a context file under the rules directory', async () => {
+    const cwd = projectWithRule('---\npaths:\n  - "**/*.test.ts"\n---\nTests must be deterministic.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent()
+    await handlers.get('before_agent_start')?.(event, {})
+    expect(event.systemPromptOptions.contextFiles).toHaveLength(1)
+    const [pointers] = event.systemPromptOptions.contextFiles
+    expect(pointers.path.endsWith(join('.claude', 'rules'))).toBe(true)
+    expect(pointers.content).toContain('testing.md — applies when working on: **/*.test.ts')
+    expect(pointers.content).not.toContain('Tests must be deterministic.')
+  })
+
+  it('appends the rules when the runtime does not re-render the prompt, leaving its options as found', async () => {
+    // pi before 0.86, or a prompt an earlier handler forced: the pushed context files would
+    // not reach this turn's prompt, and an older pi reuses the options object next turn.
+    const cwd = projectWithRule('Commit subjects use the imperative mood.')
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = { systemPrompt: 'BASE', systemPromptOptions: { contextFiles: [{ path: 'AGENTS.md', content: 'native' }] } }
+    const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
+    expect(result?.systemPrompt).toContain('Commit subjects use the imperative mood.')
+    expect(event.systemPromptOptions.contextFiles).toEqual([{ path: 'AGENTS.md', content: 'native' }])
   })
 
   it('does not surface project rules for an untrusted project', async () => {
