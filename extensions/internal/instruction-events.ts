@@ -10,6 +10,8 @@
 
 import * as path from 'node:path'
 
+import { claudeConfigDir } from './config-dir.js'
+
 export const INSTRUCTIONS_CHANNEL = 'pi-code:instructions'
 
 /** Claude's memory_type vocabulary for InstructionsLoaded payloads. */
@@ -43,11 +45,17 @@ export function isInstructionLoadEvent(data: unknown): data is InstructionLoadEv
 }
 
 /** Claude's memory_type from a file's location: CLAUDE.local.md is Local wherever it
- * sits; a file under home but outside the project is User; everything else, the
- * project itself included (which commonly lives under home), is Project. */
+ * sits; the user's own CLAUDE.md and rules, and a file under home but outside the
+ * project, are User; everything else, the project itself included (which commonly
+ * lives under home), is Project. */
 export function memoryTypeForPath(filePath: string, home: string, projectRoot: string): InstructionMemoryType {
   if (path.basename(filePath) === 'CLAUDE.local.md') return 'Local'
   const isUnder = (root: string): boolean => root.length > 0 && (filePath === root || filePath.startsWith(root + path.sep))
+  // Ahead of the project check: CLAUDE_CONFIG_DIR may sit outside home, and a session
+  // rooted at home has the config directory inside its project root. Only the user's
+  // memory there, since a checkout under the config directory is still a project.
+  const config = claudeConfigDir(home)
+  if (filePath === path.join(config, 'CLAUDE.md') || isUnder(path.join(config, 'rules'))) return 'User'
   if (isUnder(projectRoot)) return 'Project'
   // Nested repositories: repoRoot stops at the nearest .git, so a session inside a
   // nested checkout reports it as the project root while the outer repository's
