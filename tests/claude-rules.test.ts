@@ -649,6 +649,65 @@ describe('extension wiring', () => {
     expect(prompt).toContain('Readable rule.')
   })
 
+  describe('CLAUDE_CODE_DISABLE_CLAUDE_MDS', () => {
+    // Claude Code loads no rule with the variable set: none at launch and none after a
+    // read of a file a scoped rule covers.
+    const projectWithBothRules = (): string => {
+      const cwd = projectWithRule('Commit subjects use the imperative mood.')
+      writeFileSync(join(cwd, '.claude', 'rules', 'sql.md'), '---\npaths: ["db/**"]\n---\nUse parameterized queries.')
+      return cwd
+    }
+
+    it('adds no rule to the options of a runtime that re-renders the prompt', async () => {
+      process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+      const cwd = projectWithBothRules()
+      const handlers = wire()
+      await handlers.get('session_start')?.({}, approvedCtx(cwd))
+      const event = renderingEvent()
+      expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+      expect(event.systemPromptOptions).toEqual({ contextFiles: [], appendSystemPrompt: '' })
+    })
+
+    it('appends no rule on a runtime that does not re-render the prompt', async () => {
+      process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+      const cwd = projectWithBothRules()
+      const handlers = wire()
+      await handlers.get('session_start')?.({}, approvedCtx(cwd))
+      const event = { systemPrompt: 'BASE', systemPromptOptions: { contextFiles: [] } }
+      expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+    })
+
+    it('attaches no scoped rule to a matching file', async () => {
+      process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+      const cwd = projectWithBothRules()
+      const handlers = wire()
+      await handlers.get('session_start')?.({}, approvedCtx(cwd))
+      expect(await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })).toBeUndefined()
+    })
+
+    it('does not report rules as loaded', async () => {
+      process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+      const cwd = projectWithBothRules()
+      const notify = vi.fn()
+      const handlers = wire()
+      await handlers.get('session_start')?.({}, { ...approvedCtx(cwd), ui: { notify, confirm: async () => true } })
+      expect(notify).not.toHaveBeenCalled()
+    })
+
+    it('honors the variable when it is set after the session started', async () => {
+      // A project's settings.json env reaches process.env in env-settings' session_start,
+      // which runs after this extension's.
+      const cwd = projectWithBothRules()
+      const handlers = wire()
+      await handlers.get('session_start')?.({}, approvedCtx(cwd))
+      process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+      const event = renderingEvent()
+      expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+      expect(event.systemPromptOptions).toEqual({ contextFiles: [], appendSystemPrompt: '' })
+      expect(await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })).toBeUndefined()
+    })
+  })
+
   describe('instruction load events', () => {
     /** Wire the extension against a stub pi that records shared-bus emissions. */
     const wireWithBus = () => {

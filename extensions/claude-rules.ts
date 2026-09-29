@@ -317,6 +317,13 @@ interface AttachTarget {
   memoryType: 'User' | 'Project'
 }
 
+/** CLAUDE_CODE_DISABLE_CLAUDE_MDS keeps every rule out of context, as it does in Claude
+ * Code. Read where a rule would be delivered rather than once at session start: a
+ * project's settings.json env reaches process.env after this extension's session_start. */
+function rulesDisabled(): boolean {
+  return process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1'
+}
+
 // Module level because the working list lives in each extension instance's closure.
 let pendingScopedRules = 0
 
@@ -380,12 +387,13 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
     const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
     const projectCount = projectRules.inline.length + projectRules.scoped.length
-    if (hasGlobal || projectCount > 0) {
+    if ((hasGlobal || projectCount > 0) && !rulesDisabled()) {
       ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectCount}`, 'info')
     }
   })
 
   pi.on('before_agent_start', async (event) => {
+    if (rulesDisabled()) return
     // Global first: Claude loads user-level rules before project rules, so project
     // rules read later and take priority.
     const files = [...rulesContextFiles(globalRules, globalRulesDir), ...rulesContextFiles(projectRules, projectRulesDir ?? '')]
@@ -426,7 +434,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   // This mirrors Claude Code, which attaches a scoped rule when a matching file is
   // read or edited rather than inlining it upfront.
   pi.on('tool_result', async (event, ctx) => {
-    if (attachTargets.length === 0) return
+    if (attachTargets.length === 0 || rulesDisabled()) return
     const rel = fileToolTarget(event)
     if (rel === undefined) return
     // Realpath both sides (roots canonicalise at session_start): a tool reporting
