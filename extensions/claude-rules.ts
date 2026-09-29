@@ -199,6 +199,13 @@ interface ContextFile {
   content: string
 }
 
+/** The prompt options this extension edits. pi sets `forceSystemPrompt` from 0.86, where
+ * a handler that returned a prompt forced it for the run. */
+interface PromptOptions {
+  contextFiles?: ContextFile[]
+  forceSystemPrompt?: string
+}
+
 const EMPTY_RULES: RuleSet = { inline: [], scoped: [] }
 
 /** The canonical form of a path. A target that does not exist yet (a write
@@ -366,15 +373,17 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     // Rules join the context files, which Claude loads them alongside. A provider that
     // rebuilds the prompt from its sections keeps them there, where text appended to the
     // rendered prompt is dropped: claude-bridge hands Claude Code the context files only.
-    const contextFiles = event.systemPromptOptions?.contextFiles
-    if (contextFiles !== undefined) {
+    const options: PromptOptions | undefined = event.systemPromptOptions
+    const contextFiles = options?.contextFiles
+    if (options !== undefined && contextFiles !== undefined) {
       const before = event.systemPrompt
       contextFiles.push(...files)
-      // pi >= 0.86 re-renders event.systemPrompt from the options. An older pi, or a prompt
-      // an earlier handler forced, leaves it fixed; an older pi also reuses the options
-      // object next turn, so the push is undone and the rules are appended instead.
+      // pi >= 0.86 re-renders event.systemPrompt from the options, and the rules are in.
       if (event.systemPrompt !== before) return
-      contextFiles.splice(contextFiles.length - files.length, files.length)
+      // A prompt an earlier handler forced stays fixed, but the options are that run's own
+      // copy and still what a rebuilding provider reads, so they keep the rules. An older pi
+      // reuses the options object next turn, so there the push is undone.
+      if (options.forceSystemPrompt === undefined) contextFiles.splice(contextFiles.length - files.length, files.length)
     }
     const addition = rulesSection('Global Rules', globalRules, '~/.claude/rules') + rulesSection('Project Rules', projectRules, projectRulesBase)
     return { systemPrompt: event.systemPrompt + addition }

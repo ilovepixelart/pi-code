@@ -18,7 +18,7 @@ Context files and path-scoped rules, beyond what pi loads natively. Sources: [`e
 ## Rules
 
 - `~/.claude/rules` and `.claude/rules` (nearest at or above cwd).
-- Unscoped rules are inlined in full as context files, one per rule file, and the scoped pointers as one under the rules directory, so a provider that rebuilds the prompt from its sections (such as `pi-claude-bridge`) keeps them. On pi before 0.86, or when an earlier extension forced the prompt, they are appended to the prompt instead.
+- Unscoped rules are inlined in full as context files, one per rule file, and the scoped pointers as one under the rules directory, so a provider that rebuilds the prompt from its sections (such as `pi-claude-bridge`) keeps them. On pi before 0.86 they are appended to the prompt instead. When an earlier extension forced the prompt on pi 0.86 and later, they do both.
 - `paths:`-scoped rules are surfaced as pointers and auto-attached: the rule body is appended to a read/edit/write result when a matching file is touched, once per rule, and again after a compaction or a `/tree` move takes the earlier result out of context (Claude reloads them "as Claude reads files they apply to").
 - Rule `paths` globs follow Claude's table: `*` stays in a segment, `**` crosses directories, and a slashless pattern (`*.md`, `README.md`) is the project root, so `**/*.md` is how a rule says any depth. A trailing slash (`docs/`) scopes to that directory's contents.
 - Rule `paths` globs support bracket expressions (`[jt]`, ranges, `[!...]` negation); an unreadable `[` makes the pattern invalid (matching nothing) and `\[` matches a literal bracket, as Claude documents. Attach matching compares realpaths, so a symlinked checkout still matches.
