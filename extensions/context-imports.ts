@@ -28,6 +28,13 @@
  * are removed along with their imports, and block-level HTML comments are stripped
  * from every surviving body (see internal/strip-comments).
  *
+ * Where the runtime builds the prompt from its options (pi 0.86 and later), the same
+ * memory is handed over as the options' context files instead, in Claude's order
+ * and with each import after its importer, and nothing is returned: the prompt is
+ * not forced, and a provider that rebuilds it from the options receives what a
+ * rewrite of the rendered text cannot give it. The text rewrite above remains for
+ * an older pi and for a prompt an earlier handler forced.
+ *
  * Security: context files can come from an untrusted project, so imports are
  * confined (after resolving symlinks) to the working directory plus its
  * repository root, and for user-config importers the user's own ~/.claude and
@@ -784,13 +791,18 @@ function refusedImportsAddition(refused: Set<string>): string {
   return `\n\n## Imports not loaded (@)\n\nThese files resolve outside what the file importing them may read, so their contents are not in context:\n\n${list}`
 }
 
+/** What the import budget could not pay for, or nothing when it paid for everything. */
+function budgetNotice(budget: ImportBudget): string {
+  return budget.dropped === 0 ? '' : `${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
+}
+
 /** The `## Imported context (@)` section for every resolved @import, with the
  * budget-exhaustion notice, announcing each as an `include`. Empty when nothing
  * was imported. */
 function importedAddition(imported: ImportedFile[], budget: ImportBudget, home: string, projectRoot: string, announce: (event: InstructionLoadEvent) => void): string {
   if (imported.length === 0) return ''
   const section = imported.map((entry) => `### ${entry.path}\n\n${stripBlockComments(entry.body)}`).join('\n\n')
-  const notice = budget.dropped === 0 ? '' : `\n\n${budget.dropped} further @imports were skipped: the import budget (${MAX_IMPORT_FILES} files, ${MAX_IMPORT_BYTES} bytes) is spent.`
+  const notice = budget.dropped === 0 ? '' : `\n\n${budgetNotice(budget)}`
   for (const entry of imported) {
     announce({ file_path: entry.path, memory_type: memoryTypeForPath(entry.path, home, projectRoot), load_reason: 'include', ...(entry.parent === undefined ? {} : { parent_file_path: entry.parent }) })
   }
@@ -824,6 +836,96 @@ function prependMemoryBlocks(prompt: string, changed: boolean, keptUser: { path:
     announce({ file_path: managedClaudeMdPath(), memory_type: 'Managed', load_reason: 'session_start' })
   }
   return { prompt, changed, managedFile }
+}
+
+interface ContextFile {
+  path: string
+  content: string
+}
+
+/** The prompt options this extension edits. pi sets `forceSystemPrompt` from 0.86, where
+ * a handler that returned a prompt forced it for the run. */
+interface PromptOptions {
+  contextFiles?: ContextFile[]
+  appendSystemPrompt?: string
+  forceSystemPrompt?: string
+}
+
+/** A file's rank among its directory's context files, in the order Claude loads them. */
+const RANK = { memory: 0, sibling: 1, alternate: 2, rule: 3, local: 4 } as const
+
+/** A context file with its place in Claude's load order: the user's own files, then each
+ * directory from the filesystem root down to cwd. */
+interface Placed {
+  file: ContextFile
+  /** How deep the file's directory sits on the way to cwd; 0 for the user's own files. */
+  depth: number
+  rank: number
+}
+
+function place(file: ContextFile, directory: string, rank: number, where: { config: string; cwd: string }): Placed {
+  const onTheWayToCwd = where.cwd === directory || where.cwd.startsWith(directory + path.sep)
+  const own = isUnder(file.path, [where.config]) || !onTheWayToCwd
+  return { file, depth: own ? 0 : directory.length, rank }
+}
+
+/** A file pi or another extension handed over, placed by the shape of its path. */
+function placeByPath(file: ContextFile, where: { config: string; cwd: string }): Placed {
+  const rules = file.path.lastIndexOf(`${path.sep}.claude${path.sep}rules${path.sep}`)
+  if (rules !== -1) return place(file, file.path.slice(0, rules), RANK.rule, where)
+  const directory = path.dirname(file.path)
+  if (path.basename(file.path) === 'CLAUDE.local.md') return place(file, directory, RANK.local, where)
+  if (path.basename(directory) === '.claude') return place(file, path.dirname(directory), RANK.alternate, where)
+  return place(file, directory, RANK.memory, where)
+}
+
+function inClaudeOrder(placed: Placed[]): ContextFile[] {
+  return placed
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => a.entry.depth - b.entry.depth || a.entry.rank - b.entry.rank || a.index - b.index)
+    .map(({ entry }) => entry.file)
+}
+
+/** Each file followed by what it imports, an import's own imports right after it: Claude
+ * loads an import "alongside the CLAUDE.md that references" it. */
+function withImports(files: ContextFile[], imported: ImportedFile[]): ContextFile[] {
+  const result: ContextFile[] = []
+  const add = (file: ContextFile): void => {
+    result.push(file)
+    for (const entry of imported) {
+      if (entry.parent === file.path) add({ path: entry.path, content: stripBlockComments(entry.body) })
+    }
+  }
+  for (const file of files) add(file)
+  return result
+}
+
+/** A body the prompt has room for: trimmed, and absent when nothing is left. */
+function entryFor(file: ContextFile | undefined): ContextFile[] {
+  const content = file?.content.trim() ?? ''
+  return file === undefined || content.length === 0 ? [] : [{ path: file.path, content }]
+}
+
+/** Hand the memory over as the context files the prompt is built from, and say whether
+ * that reached the prompt. pi >= 0.86 re-renders the prompt from the options, so there
+ * the memory is in, in Claude's order, and a provider that rebuilds the prompt from the
+ * options receives it too. A prompt an earlier handler forced stays fixed, but the options
+ * are that run's own copy, so they keep the memory. An older pi reuses the options object
+ * next turn, so there they are left as found. */
+function deliverThroughOptions(event: { systemPrompt: string; systemPromptOptions?: PromptOptions }, entries: ContextFile[], notices: string): boolean {
+  const options = event.systemPromptOptions
+  const contextFiles = options?.contextFiles
+  if (options === undefined || contextFiles === undefined) return false
+  const before = event.systemPrompt
+  const found = [...contextFiles]
+  const append = options.appendSystemPrompt
+  contextFiles.splice(0, contextFiles.length, ...entries)
+  if (notices.length > 0) options.appendSystemPrompt = append ? `${append}\n\n${notices}` : notices
+  if (event.systemPrompt !== before) return true
+  if (options.forceSystemPrompt !== undefined) return false
+  contextFiles.splice(0, contextFiles.length, ...found)
+  if (notices.length > 0) options.appendSystemPrompt = append
+  return false
 }
 
 /** Everything the import expansion depends on, hashed to a memo key: a turn whose inputs
@@ -1146,7 +1248,22 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     addition += localContextAddition(keptLocals, announce)
     addition += additionalDirsAddition(extras, announce)
     addition += importedAddition(imported, budget, home, projectRoot, announce)
-    addition += refusedImportsAddition(budget.refused)
+    const refusedNotice = refusedImportsAddition(budget.refused)
+    addition += refusedNotice
+
+    // The same memory as context files, in Claude's order, for a runtime that builds the
+    // prompt from its options.
+    const where = { config: claudeConfigDir(home), cwd }
+    const managedKey = typeof managed.claudeMd === 'string' ? stripBlockComments(managed.claudeMd).trim() : ''
+    const ordered = inClaudeOrder([
+      ...rewrite.kept.map((file) => placeByPath(file, where)),
+      ...keptSiblings.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.sibling, where)),
+      ...entryFor(keptProjectDotClaude).map((file) => place(file, path.dirname(path.dirname(file.path)), RANK.alternate, where)),
+      ...keptLocals.flatMap(entryFor).map((file) => place(file, path.dirname(file.path), RANK.local, where)),
+    ])
+    const entries = [...entryFor({ path: managedClaudeMdPath(), content: managedFile }), ...entryFor({ path: MANAGED_CLAUDE_MD_PATH, content: managedKey }), ...withImports([...entryFor(keptUser), ...ordered, ...extras.map((extra) => ({ path: extra.path, content: extra.content }))], imported)]
+    const notices = [budgetNotice(budget), refusedNotice.trim()].filter((notice) => notice.length > 0).join('\n\n')
+    if (deliverThroughOptions(event, entries, notices)) return
     if (!changed && addition.length === 0) return
 
     return { systemPrompt: prompt + addition }
