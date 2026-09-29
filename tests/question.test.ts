@@ -1,11 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createEventBus } from '@earendil-works/pi-coding-agent'
 import type { Text } from '@earendil-works/pi-tui'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
-import questionExtension, { askUserQuestionTimeoutMs, askViaOverlay, parseAskUserQuestionTimeout, QuestionParams, shortHeader } from '../extensions/question.ts'
+import questionExtension, { askUserQuestionTimeoutMs, askViaOverlay, parseAskUserQuestionTimeout, QuestionParams, REMOTE_QUESTION_CHANNEL, type RemoteQuestionOffer, shortHeader } from '../extensions/question.ts'
 
 interface Option {
   label: string
@@ -51,6 +52,23 @@ const setup = (): QuestionTool => {
   questionExtension({
     registerTool: (t: QuestionTool) => {
       if (t.name === 'question') tool = t
+    },
+  } as never)
+  if (!tool) throw new Error('question tool was not registered')
+  return tool
+}
+
+const setupRemote = (onOffer: (offer: RemoteQuestionOffer) => void, bus?: ReturnType<typeof createEventBus>): QuestionTool => {
+  let tool: QuestionTool | undefined
+  questionExtension({
+    registerTool: (t: QuestionTool) => {
+      if (t.name === 'question') tool = t
+    },
+    events: bus ?? {
+      emit: (channel: string, offer: RemoteQuestionOffer) => {
+        expect(channel).toBe(REMOTE_QUESTION_CHANNEL)
+        onOffer(offer)
+      },
     },
   } as never)
   if (!tool) throw new Error('question tool was not registered')
@@ -180,6 +198,331 @@ describe('question execute', () => {
     const result = await setup().execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, uiCtx(typed))
     expect(result.content).toEqual([{ type: 'text', text: 'User wrote: something else' }])
     expect(result.details).toEqual({ question: 'Pick one', options: ['Alpha', 'Beta'], answer: 'something else', wasCustom: true })
+  })
+})
+
+describe('question remote offer', () => {
+  const context = (custom: unknown, sessionManager: unknown = { getSessionId: () => 'session-1' }) => ({
+    hasUI: true,
+    mode: 'tui',
+    sessionManager,
+    ui: { custom },
+  })
+
+  /** A ui.custom that builds the real overlay and stays open until it finishes. */
+  const liveOverlay = () => {
+    let overlay: Overlay | undefined
+    const custom = vi.fn(
+      (factory: CustomFactory) =>
+        new Promise((resolve) => {
+          overlay = factory(fakeTui(), theme, {}, resolve)
+        }),
+    )
+    return { custom, input: (data: string) => overlay?.handleInput(data) }
+  }
+
+  const withManagedTimeout = async (value: string, run: () => Promise<void>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'q-remote-timeout-'))
+    const settings = join(dir, 'managed-settings.json')
+    writeFileSync(settings, JSON.stringify({ askUserQuestionTimeout: value }))
+    setManagedSettingsPath(settings)
+    try {
+      await run()
+    } finally {
+      setManagedSettingsPath(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps the local overlay open while a claimed responder is silent, and the local answer wins', async () => {
+    const live = liveOverlay()
+    let offer: RemoteQuestionOffer | undefined
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((request) => {
+      offer = request
+      settle = request.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+    expect(live.custom).toHaveBeenCalledOnce()
+    live.input(RAW.enter)
+    // Synchronously after the local answer, before askOne's own cleanup has run.
+    expect(settle?.({ action: 'answer', indices: [2] })).toBe(false)
+    expect(offer?.signal.aborted).toBe(true)
+    expect(offer?.touch()).toBe(false)
+    expect((await result).details).toMatchObject({ answer: 'Alpha', wasCustom: false })
+  })
+
+  it('closes the open local overlay with a remote answer, accepting only the first settlement', async () => {
+    const live = liveOverlay()
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((offer) => {
+      settle = offer.claim()
+      expect(settle).toBeDefined()
+      expect(offer.claim()).toBeUndefined()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+    expect(settle?.({ action: 'answer', indices: [2] })).toBe(true)
+    expect(settle?.({ action: 'answer', indices: [1] })).toBe(false)
+    expect((await result).details).toMatchObject({ answer: 'Beta', wasCustom: false })
+    expect(live.custom).toHaveBeenCalledOnce()
+  })
+
+  it('imposes no remote wait limit when no idle timeout is configured', async () => {
+    vi.useFakeTimers()
+    const live = liveOverlay()
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((offer) => {
+      settle = offer.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(settle?.({ action: 'answer', indices: [2] })).toBe(true)
+    expect((await result).details).toMatchObject({ answer: 'Beta' })
+  })
+
+  it('keeps the local overlay answerable after a remote pass or malformed reply', async () => {
+    for (const outcome of [{ action: 'pass' }, { action: 'answer', indices: [9] }]) {
+      const live = liveOverlay()
+      let settle: ReturnType<RemoteQuestionOffer['claim']>
+      const result = setupRemote((offer) => {
+        settle = offer.claim()
+      }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+      expect(settle?.(outcome as never)).toBe(outcome.action === 'pass')
+      expect(settle?.({ action: 'answer', indices: [2] })).toBe(false)
+      live.input(RAW.enter)
+      expect((await result).details).toMatchObject({ answer: 'Alpha' })
+    }
+  })
+
+  it('still cancels on a turn abort after the remote side withdrew', async () => {
+    const controller = new AbortController()
+    const live = liveOverlay()
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((offer) => {
+      settle = offer.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(live.custom))
+    expect(settle?.({ action: 'pass' })).toBe(true)
+    controller.abort()
+    expect((await result).details).toMatchObject({ answer: null })
+  })
+
+  it('answers with the indices it validated, read once from the outcome', async () => {
+    const reads = [[1], [99]]
+    const outcome = {
+      action: 'answer',
+      get indices() {
+        return reads.shift() ?? [99]
+      },
+    }
+    const live = liveOverlay()
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((offer) => {
+      settle = offer.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+    expect(settle?.(outcome as never)).toBe(true)
+    expect((await result).content[0].text).toBe('User selected: 1. Alpha')
+  })
+
+  it('leaves no abort listener on the turn signal once each question ends', async () => {
+    const controller = new AbortController()
+    const active = new Set<unknown>()
+    const add = controller.signal.addEventListener.bind(controller.signal)
+    const remove = controller.signal.removeEventListener.bind(controller.signal)
+    vi.spyOn(controller.signal, 'addEventListener').mockImplementation((type, listener, options) => {
+      active.add(listener)
+      add(type, listener, options)
+    })
+    vi.spyOn(controller.signal, 'removeEventListener').mockImplementation((type, listener, options) => {
+      active.delete(listener)
+      remove(type, listener, options)
+    })
+    const early = setupRemote((offer) => offer.claim()?.({ action: 'answer', indices: [1] }))
+    await early.execute('call-1', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(vi.fn()))
+    expect(active.size).toBe(0)
+    const live = liveOverlay()
+    const late = setupRemote((offer) => {
+      offer.claim()
+    }).execute('call-2', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(live.custom))
+    expect(active.size).toBe(1)
+    live.input(RAW.enter)
+    await late
+    expect(active.size).toBe(0)
+  })
+
+  it('withdraws a claimed offer when the overlay fails to open', async () => {
+    let offer: RemoteQuestionOffer | undefined
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const custom = vi.fn(async () => {
+      throw new Error('no terminal')
+    })
+    const result = setupRemote((request) => {
+      offer = request
+      settle = request.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    await expect(result).rejects.toThrow('no terminal')
+    expect(offer?.signal.aborted).toBe(true)
+    expect(settle?.({ action: 'answer', indices: [1] })).toBe(false)
+  })
+
+  it('does not open the overlay for an offer settled during emission or an aborted request', async () => {
+    const custom = vi.fn(async () => null)
+    const tool = setupRemote((offer) => offer.claim()?.({ action: 'answer', indices: [1] }))
+    expect((await tool.execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))).details).toMatchObject({ answer: 'Alpha' })
+    const controller = new AbortController()
+    controller.abort()
+    expect((await tool.execute('call-2', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(custom))).details).toMatchObject({ answer: null })
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('preserves the local overlay when nobody claims synchronously', async () => {
+    const seen: RemoteQuestionOffer[] = []
+    const custom = vi.fn(async () => ({ answer: 'Alpha', wasCustom: false, index: 1 }))
+    const result = await setupRemote((offer) => seen.push(offer)).execute('call-1', { question: 'Pick one', header: 'A long header', options: OPTIONS } as never, undefined, undefined, context(custom))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ version: 1, sessionId: 'session-1', question: 'Pick one', header: 'A long heade', options: OPTIONS, multiSelect: false, allowFreeText: true })
+    expect(seen[0].requestId).toEqual(expect.any(String))
+    expect(seen[0].claim()).toBeUndefined()
+    expect(custom).toHaveBeenCalledOnce()
+    expect(result.details).toMatchObject({ answer: 'Alpha' })
+  })
+
+  it('preserves ordered checkbox choices and free text', async () => {
+    const custom = vi.fn(async () => null)
+    const choose = setupRemote((offer) => {
+      expect(offer.multiSelect).toBe(true)
+      expect(offer.allowFreeText).toBe(false)
+      offer.claim()?.({ action: 'answer', indices: [2, 1] })
+    })
+    const selected = await choose.execute('call-1', { question: 'Pick some', options: OPTIONS, multiSelect: true } as never, undefined, undefined, context(custom))
+    expect(selected.details).toMatchObject({ answer: 'Alpha, Beta', multiSelect: true })
+    const typed = await setupRemote((offer) => offer.claim()?.({ action: 'text', text: ' another ' })).execute('call-2', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    expect(typed.details).toMatchObject({ answer: 'another', wasCustom: true })
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('ends a remote batch on explicit cancellation', async () => {
+    const seen: string[] = []
+    const custom = vi.fn(async () => null)
+    const result = await setupRemote((offer) => {
+      seen.push(offer.requestId)
+      offer.claim()?.({ action: 'cancel' })
+    }).execute(
+      'call-1',
+      {
+        questions: [
+          { question: 'First', options: OPTIONS },
+          { question: 'Second', options: OPTIONS },
+        ],
+      } as never,
+      undefined,
+      undefined,
+      context(custom),
+    )
+    expect(seen).toHaveLength(1)
+    expect(result.details).toMatchObject({ answer: null, questions: [{ answer: null }] })
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('falls back locally on malformed answers or a pass during emission', async () => {
+    const custom = vi.fn(async () => ({ answer: 'Alpha', wasCustom: false, index: 1 }))
+    const pastLast = await setupRemote((offer) => offer.claim()?.({ action: 'answer', indices: [OPTIONS.length + 1] })).execute('call-0', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    const invalid = await setupRemote((offer) => offer.claim()?.({ action: 'answer', indices: [0] })).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    const duplicate = await setupRemote((offer) => offer.claim()?.({ action: 'answer', indices: [1, 1] })).execute('call-2', { question: 'Pick some', options: OPTIONS, multiSelect: true } as never, undefined, undefined, context(custom))
+    const forbiddenText = await setupRemote((offer) => offer.claim()?.({ action: 'text', text: 'not allowed' })).execute('call-3', { question: 'Pick some', options: OPTIONS, multiSelect: true } as never, undefined, undefined, context(custom))
+    const declined = await setupRemote((offer) => offer.claim()?.({ action: 'pass' })).execute('call-4', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    for (const result of [pastLast, invalid, duplicate, forbiddenText, declined]) expect(result.details).toMatchObject({ answer: 'Alpha' })
+    expect(custom).toHaveBeenCalledTimes(5)
+  })
+
+  it('settles as cancelled on the abort that precedes session replacement, never reading the stale ctx', async () => {
+    // Pi aborts the running turn, then invalidates the old ctx: its getters throw from then on.
+    let stale = false
+    const sessionManager = {
+      getSessionId: () => {
+        if (stale) throw new Error('This extension ctx is stale after session replacement')
+        return 'session-1'
+      },
+    }
+    const controller = new AbortController()
+    const live = liveOverlay()
+    let offer: RemoteQuestionOffer | undefined
+    let settle: ReturnType<RemoteQuestionOffer['claim']>
+    const result = setupRemote((request) => {
+      offer = request
+      settle = request.claim()
+    }).execute('call-1', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(live.custom, sessionManager))
+    controller.abort()
+    stale = true
+    expect((await result).details).toMatchObject({ answer: null })
+    expect(offer?.signal.aborted).toBe(true)
+    expect(settle?.({ action: 'answer', indices: [1] })).toBe(false)
+  })
+
+  it('does not show an overlay after an abort during synchronous emission', async () => {
+    const controller = new AbortController()
+    const custom = vi.fn(async () => ({ answer: 'Alpha', wasCustom: false, index: 1 }))
+    const tool = setupRemote((offer) => {
+      controller.abort()
+      expect(offer.claim()).toBeUndefined()
+    })
+    const result = await tool.execute('call-1', { question: 'Pick one', options: OPTIONS }, controller.signal, undefined, context(custom))
+    expect(result.details).toMatchObject({ answer: null })
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('remote activity resets the overlay idle timer, which still auto-continues', async () => {
+    await withManagedTimeout('60s', async () => {
+      vi.useFakeTimers()
+      const live = liveOverlay()
+      let offer: RemoteQuestionOffer | undefined
+      let resolved = false
+      const result = setupRemote((request) => {
+        offer = request
+        request.claim()
+      }).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(live.custom))
+      void result.then(() => {
+        resolved = true
+      })
+      await vi.advanceTimersByTimeAsync(50_000)
+      expect(offer?.touch()).toBe(true)
+      await vi.advanceTimersByTimeAsync(50_000)
+      expect(resolved).toBe(false)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect((await result).details).toMatchObject({ answer: '', timedOut: true })
+      expect(offer?.signal.aborted).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('rejects malformed runtime data even when the real event bus catches handler errors', async () => {
+    const bus = createEventBus()
+    let accepted: boolean | undefined
+    bus.on(REMOTE_QUESTION_CHANNEL, (data) => {
+      accepted = (data as RemoteQuestionOffer).claim()?.(null as never)
+    })
+    const custom = vi.fn(async () => ({ answer: 'Alpha', wasCustom: false, index: 1 }))
+    const result = await setupRemote(() => {
+      throw new Error('unexpected mock event')
+    }, bus).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    bus.clear()
+    expect(accepted).toBe(false)
+    expect(result.details).toMatchObject({ answer: 'Alpha' })
+    expect(custom).toHaveBeenCalledOnce()
+  })
+
+  it('claims synchronously through the real Pi event bus', async () => {
+    const bus = createEventBus()
+    bus.on(REMOTE_QUESTION_CHANNEL, (data) => {
+      ;(data as RemoteQuestionOffer).claim()?.({ action: 'answer', indices: [2] })
+    })
+    const custom = vi.fn(async () => null)
+    const result = await setupRemote(() => {
+      throw new Error('unexpected mock event')
+    }, bus).execute('call-1', { question: 'Pick one', options: OPTIONS }, undefined, undefined, context(custom))
+    expect(result.details).toMatchObject({ answer: 'Beta' })
+    expect(custom).not.toHaveBeenCalled()
+    bus.clear()
   })
 })
 
