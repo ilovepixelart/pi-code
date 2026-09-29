@@ -74,7 +74,7 @@ On the bridge, `InstructionsLoaded` fires for the user `CLAUDE.md`, `.claude/CLA
 ## Risks
 
 - **Double delivery on the bridge.** Under the bridge Claude Code itself loads `CLAUDE.local.md` and `AGENTS.md`: the bridge excludes only `**/CLAUDE.md` and rules. Once `CLAUDE.local.md` is an entry, the bridge carries it twice until the bridge excludes it.
-- **Runs without `before_agent_start`.** pi rebuilds the prompt sections from its base options for a run started by `sendMessage` with `triggerTurn`. The entries are absent there, as the forced text is today, and each switch stores the `project_context` section again.
+- **Runs without `before_agent_start`.** A run an extension starts while the agent is idle (a goal kickoff after a user prompt) fires no `before_agent_start`. Measured on pi 0.87.1: with the memory written into the prompt text, that run carried the project `CLAUDE.md` only and lost the user `CLAUDE.md`, the rules and `.claude/CLAUDE.md`. With the memory in the options it carries all four, in one `<project_context>` block and with no added system message. Text other extensions append is still absent from such a run.
 - **Import confinement.** Delivery changes, the roots an importer may read must not. CTX-012 guards it.
 
 ## Decisions
