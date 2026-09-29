@@ -213,6 +213,27 @@ describe('on a runtime that re-renders the prompt from its options', () => {
     expect(paths(event.systemPromptOptions.contextFiles)).toEqual([userRule, homeLevel, memory])
   })
 
+  it('orders a project inside the user config directory by its directories', async () => {
+    // A checkout under ~/.claude is a project: only the user's own rules there are user
+    // memory.
+    const root = join(hoisted.home, '.claude', 'checkout')
+    mkdirSync(join(root, '.git'), { recursive: true })
+    const cwd = join(root, 'packages', 'app')
+    const rootMemory = write(root, 'CLAUDE.md', 'ROOT MEMORY')
+    const rootLocal = write(root, 'CLAUDE.local.md', 'ROOT LOCAL')
+    const appMemory = write(cwd, 'CLAUDE.md', 'APP MEMORY')
+    const appLocal = write(cwd, 'CLAUDE.local.md', 'APP LOCAL')
+    const session = await startedIn(cwd)
+    const event = renderingEvent(cwd, [
+      { path: rootMemory, content: 'ROOT MEMORY' },
+      { path: appMemory, content: 'APP MEMORY' },
+    ])
+
+    expect(await session.turn(event)).toBeUndefined()
+
+    expect(paths(event.systemPromptOptions.contextFiles)).toEqual([rootMemory, rootLocal, appMemory, appLocal])
+  })
+
   it('places a file handed over by another loader by what its path says it is', async () => {
     const { cwd, native } = projectWith('PROJECT MEMORY')
     const handedOver = [{ path: join(cwd, 'CLAUDE.local.md'), content: 'LOCAL' }, { path: join(cwd, '.claude', 'CLAUDE.md'), content: 'ALTERNATE' }, ...native]

@@ -869,7 +869,8 @@ interface Placed {
 
 function place(file: ContextFile, directory: string, rank: number, where: { config: string; cwd: string }): Placed {
   const onTheWayToCwd = where.cwd === directory || where.cwd.startsWith(directory + path.sep)
-  const own = isUnder(file.path, [where.config]) || !onTheWayToCwd
+  // The user's rules only: a checkout under the config directory is still a project.
+  const own = isUnder(file.path, [path.join(where.config, 'rules')]) || !onTheWayToCwd
   return { file, depth: own ? 0 : directory.length, rank }
 }
 
