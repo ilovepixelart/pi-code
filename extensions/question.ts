@@ -392,6 +392,23 @@ function offerRemoteQuestion(params: QuestionSpec, allOptions: DisplayOption[], 
   }
 }
 
+/** ui.custom() is terminal-only: with a UI but no terminal (RPC mode) it resolves
+ * undefined immediately, which would read as a cancel without ever asking. Ask
+ * through the dialog primitives there instead. askUserQuestionTimeout is a TUI
+ * concept (a countdown, a keypress resetting it): the dialog-primitive fallback
+ * has no keyboard or visible countdown to drive it, so it is not applied there. */
+async function collectAnswer(params: QuestionSpec, ctx: ExtensionContext, allOptions: DisplayOption[], multiSelect: boolean, events?: ExtensionAPI['events'], signal?: AbortSignal): Promise<QuestionAnswer> {
+  if (ctx.mode !== 'tui') return askViaDialogs(params, ctx, allOptions, multiSelect)
+  const offer = offerRemoteQuestion(params, allOptions, ctx, events, signal)
+  if (offer?.kind === 'settled') return offer.value
+  const remote = offer?.remote
+  try {
+    return await askViaOverlay(params, ctx, allOptions, multiSelect, askUserQuestionTimeoutMs(), remote)
+  } finally {
+    remote?.close()
+  }
+}
+
 async function askOne(params: QuestionSpec, ctx: ExtensionContext, events?: ExtensionAPI['events'], signal?: AbortSignal): Promise<{ content: Array<{ type: 'text'; text: string }>; details: QuestionDetails }> {
   if (!ctx.hasUI) {
     return {
@@ -415,25 +432,7 @@ async function askOne(params: QuestionSpec, ctx: ExtensionContext, events?: Exte
   // The free-text option does not compose with checkbox selection, so it is single-select only.
   const allOptions: DisplayOption[] = multiSelect ? [...params.options] : [...params.options, { label: 'Type something.', isOther: true }]
 
-  // ui.custom() is terminal-only: with a UI but no terminal (RPC mode) it resolves
-  // undefined immediately, which would read as a cancel without ever asking. Ask
-  // through the dialog primitives there instead. askUserQuestionTimeout is a TUI
-  // concept (a countdown, a keypress resetting it): the dialog-primitive fallback
-  // has no keyboard or visible countdown to drive it, so it is not applied there.
-  const offer = ctx.mode === 'tui' ? offerRemoteQuestion(params, allOptions, ctx, events, signal) : undefined
-  let result: QuestionAnswer
-  if (offer?.kind === 'settled') {
-    result = offer.value
-  } else if (ctx.mode === 'tui') {
-    const remote = offer?.remote
-    try {
-      result = await askViaOverlay(params, ctx, allOptions, multiSelect, askUserQuestionTimeoutMs(), remote)
-    } finally {
-      remote?.close()
-    }
-  } else {
-    result = await askViaDialogs(params, ctx, allOptions, multiSelect)
-  }
+  const result = await collectAnswer(params, ctx, allOptions, multiSelect, events, signal)
 
   // Build simple options list for details; header/multiSelect appear only when set,
   // so single-select details are unchanged.
