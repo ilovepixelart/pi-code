@@ -5,8 +5,9 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import claudeRules, { formatRulePointer, parseFrontmatter, pathMatchesGlobs, pendingScopedRuleCount } from '../extensions/claude-rules.ts'
-import { instructionsBlock } from '../extensions/context-imports.ts'
+import contextImports, { instructionsBlock, setManagedClaudeMdPath } from '../extensions/context-imports.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
+import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { globCompileStats } from '../extensions/internal/path-rules.ts'
 
 // Global rules load from the home directory; point it at a throwaway dir so the
@@ -434,6 +435,18 @@ describe('extension wiring', () => {
     expect(event.systemPromptOptions.contextFiles).toEqual([{ path: 'AGENTS.md', content: 'native' }])
   })
 
+  it('leaves the prompt and its options alone when there are no rules', async () => {
+    // A returned prompt forces it for the run on pi >= 0.86, so returning the prompt
+    // unchanged is not the same as returning nothing.
+    const cwd = mkdtempSync(join(tmpdir(), 'rules-cwd-'))
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent('USER APPEND')
+    expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
+    expect(event.systemPromptOptions).toEqual({ contextFiles: [], appendSystemPrompt: 'USER APPEND' })
+    expect(await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { contextFiles: [] } }, {})).toBeUndefined()
+  })
+
   it('leaves the appended instructions alone when no rule is path-scoped', async () => {
     const cwd = projectWithRule('Commit subjects use the imperative mood.')
     const handlers = wire()
@@ -586,6 +599,68 @@ describe('extension wiring', () => {
     expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
   })
 
+  /** A project with an unscoped and a scoped rule, under a home that has one of each too. */
+  const projectAndGlobalRules = (): string => {
+    const rulesDir = join(hoisted.home, '.claude', 'rules')
+    mkdirSync(rulesDir, { recursive: true })
+    writeFileSync(join(rulesDir, 'style.md'), 'Prefer guard clauses.')
+    writeFileSync(join(rulesDir, 'sql.md'), '---\npaths: ["db/**"]\n---\nUse parameterized queries.')
+    const cwd = projectWithRule('Commit subjects use the imperative mood.')
+    writeFileSync(join(cwd, '.claude', 'rules', 'tests.md'), '---\npaths: ["**/*.test.ts"]\n---\nTests must be deterministic.')
+    return cwd
+  }
+
+  it('appends the global section, then the project section, when the runtime does not re-render the prompt', async () => {
+    // Pins the text every pi before 0.86 receives: a section per rule set, global first,
+    // each with its unscoped bodies and then its scoped pointers.
+    const cwd = projectAndGlobalRules()
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = { systemPrompt: 'BASE', systemPromptOptions: { contextFiles: [] } }
+    const result = (await handlers.get('before_agent_start')?.(event, {})) as { systemPrompt: string } | undefined
+    const projectBase = join('.claude', 'rules')
+    expect(result?.systemPrompt).toBe(
+      [
+        'BASE',
+        '## Global Rules',
+        'These rules always apply:',
+        'Prefer guard clauses.',
+        'Path-scoped rules, available in ~/.claude/rules/:',
+        '- ~/.claude/rules/sql.md — applies when working on: db/**',
+        'Read the relevant rule file with the read tool before working on the files it covers.',
+        '## Project Rules',
+        'These rules always apply:',
+        'Commit subjects use the imperative mood.',
+        `Path-scoped rules, available in ${projectBase}/:`,
+        `- ${projectBase}/tests.md — applies when working on: **/*.test.ts`,
+        'Read the relevant rule file with the read tool before working on the files it covers.',
+      ].join('\n\n'),
+    )
+  })
+
+  it('adds global rules ahead of project rules to the options of a runtime that re-renders the prompt', async () => {
+    const cwd = projectAndGlobalRules()
+    const handlers = wire()
+    await handlers.get('session_start')?.({}, approvedCtx(cwd))
+    const event = renderingEvent()
+    await handlers.get('before_agent_start')?.(event, {})
+    expect(event.systemPromptOptions.contextFiles).toEqual([
+      { path: join(hoisted.home, '.claude', 'rules', 'style.md'), content: 'Prefer guard clauses.' },
+      { path: join(cwd, '.claude', 'rules', 'testing.md'), content: 'Commit subjects use the imperative mood.' },
+    ])
+    const projectBase = join('.claude', 'rules')
+    expect(event.systemPromptOptions.appendSystemPrompt).toBe(
+      [
+        'Path-scoped rules, available in ~/.claude/rules/:',
+        '- ~/.claude/rules/sql.md — applies when working on: db/**',
+        'Read the relevant rule file with the read tool before working on the files it covers.',
+        `Path-scoped rules, available in ${projectBase}/:`,
+        `- ${projectBase}/tests.md — applies when working on: **/*.test.ts`,
+        'Read the relevant rule file with the read tool before working on the files it covers.',
+      ].join('\n\n'),
+    )
+  })
+
   it('points at a scoped global rule where CLAUDE_CONFIG_DIR put it', async () => {
     // The pointer is the path the model reads the rule from, and ~/.claude/rules names a
     // file that is not there once the config directory moved.
@@ -720,6 +795,100 @@ describe('extension wiring', () => {
       expect(await handlers.get('before_agent_start')?.(event, {})).toBeUndefined()
       expect(event.systemPromptOptions).toEqual({ contextFiles: [], appendSystemPrompt: '' })
       expect(await handlers.get('tool_result')?.(readResult('db/schema.sql'), { cwd })).toBeUndefined()
+    })
+  })
+
+  describe('beside context-imports on a runtime that re-renders the prompt', () => {
+    // context-imports treats every context file as an instruction file pi loaded: it
+    // announces it, scans it for @imports and checks it against the excludes. The rules
+    // reach it through the same options, so what claude-rules puts there has to be a file.
+    beforeEach(() => {
+      setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
+      setManagedClaudeMdPath(join(hoisted.home, 'CLAUDE.md'))
+    })
+    afterEach(() => {
+      setManagedSettingsPath(undefined)
+      setManagedClaudeMdPath(undefined)
+    })
+
+    type Handlers = Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>
+
+    /** One turn through both extensions in pi's load order, the way pi >= 0.86 runs
+     * before_agent_start: the prompt re-renders from the options until a handler returns one. */
+    const runTurn = async (cwd: string) => {
+      const emitted: Array<{ channel: string; data: unknown }> = []
+      const wired = [claudeRules, contextImports].map((extension) => {
+        const handlers: Handlers = new Map()
+        extension({
+          on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+          events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
+        } as never)
+        return handlers
+      })
+      const ctx = approvedCtx(cwd)
+      for (const handlers of wired) await handlers.get('session_start')?.({}, ctx)
+
+      const options = { cwd, contextFiles: [] as Array<{ path: string; content: string }>, appendSystemPrompt: '', forceSystemPrompt: undefined as string | undefined }
+      const event = {
+        systemPromptOptions: options,
+        get systemPrompt(): string {
+          if (options.forceSystemPrompt !== undefined) return options.forceSystemPrompt
+          const blocks = options.contextFiles.map((entry) => `${instructionsBlock(entry.path, entry.content)}\n\n`).join('')
+          return `BASE\n\n${options.appendSystemPrompt}\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n${blocks}</project_context>\n`
+        },
+      }
+      for (const handlers of wired) {
+        const result = (await handlers.get('before_agent_start')?.(event, ctx)) as { systemPrompt?: string } | undefined
+        if (result?.systemPrompt !== undefined) options.forceSystemPrompt = result.systemPrompt
+      }
+      const events = emitted.filter((entry) => entry.channel === INSTRUCTIONS_CHANNEL).map((entry) => entry.data as { file_path: string; memory_type: string; load_reason: string; parent_file_path?: string })
+      return { prompt: event.systemPrompt, events }
+    }
+
+    it('announces each unscoped rule as a load of its own file, and nothing for the scoped pointers', async () => {
+      // Claude Code fires InstructionsLoaded at session start for the unscoped rule files
+      // only; a scoped rule is announced when it attaches, and no directory ever is.
+      const cwd = projectAndGlobalRules()
+
+      const { prompt, events } = await runTurn(cwd)
+
+      expect(events).toEqual([
+        { file_path: join(hoisted.home, '.claude', 'rules', 'style.md'), memory_type: 'User', load_reason: 'session_start' },
+        { file_path: join(cwd, '.claude', 'rules', 'testing.md'), memory_type: 'Project', load_reason: 'session_start' },
+      ])
+      expect(prompt).toContain('- ~/.claude/rules/sql.md — applies when working on: db/**')
+      expect(prompt).toContain('tests.md — applies when working on: **/*.test.ts')
+    })
+
+    it('announces a rule from a config directory outside home as User', async () => {
+      const cfg = mkdtempSync(join(tmpdir(), 'rules-cfg-'))
+      process.env.CLAUDE_CONFIG_DIR = cfg
+      mkdirSync(join(cfg, 'rules'), { recursive: true })
+      writeFileSync(join(cfg, 'rules', 'style.md'), 'Prefer guard clauses.')
+
+      const { events } = await runTurn(mkdtempSync(join(tmpdir(), 'rules-cwd-')))
+
+      expect(events).toEqual([{ file_path: join(cfg, 'rules', 'style.md'), memory_type: 'User', load_reason: 'session_start' }])
+    })
+
+    it('expands an @import in a rule file, announced as an include of that rule', async () => {
+      // Claude Code expands imports in rule files as it does in CLAUDE.md, the imported
+      // file loading after the rule that names it.
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'rules-')))
+      mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true })
+      mkdirSync(join(cwd, 'docs'))
+      writeFileSync(join(cwd, '.claude', 'rules', 'style.md'), 'Follow the guide.\n\n@../../docs/guide.md\n')
+      writeFileSync(join(cwd, 'docs', 'guide.md'), 'Guide: two spaces, no tabs.')
+
+      const { prompt, events } = await runTurn(cwd)
+
+      expect(prompt).toContain('Follow the guide.')
+      expect(prompt).toContain('Guide: two spaces, no tabs.')
+      const rule = join(cwd, '.claude', 'rules', 'style.md')
+      expect(events).toEqual([
+        { file_path: rule, memory_type: 'Project', load_reason: 'session_start' },
+        { file_path: join(cwd, 'docs', 'guide.md'), memory_type: 'Project', load_reason: 'include', parent_file_path: rule },
+      ])
     })
   })
 
