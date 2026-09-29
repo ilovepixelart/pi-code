@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
@@ -69,6 +69,28 @@ describe('memoryTypeForPath', () => {
 
   it('keeps a home-level context file User even though home is an ancestor of the project', () => {
     expect(memoryTypeForPath(join(home, 'AGENTS.md'), home, join(home, 'proj'))).toBe('User')
+  })
+
+  it("classifies the user's rules and CLAUDE.md in a config directory outside home as User", () => {
+    // CLAUDE_CONFIG_DIR relocates the user's config, which Claude still reports as User.
+    const config = resolve('/opt', 'claude')
+    process.env.CLAUDE_CONFIG_DIR = config
+    expect(memoryTypeForPath(join(config, 'rules', 'style.md'), home, repo)).toBe('User')
+    expect(memoryTypeForPath(join(config, 'rules', 'backend', 'sql.md'), home, repo)).toBe('User')
+    expect(memoryTypeForPath(join(config, 'CLAUDE.md'), home, repo)).toBe('User')
+  })
+
+  it("classifies the user's rules and CLAUDE.md as User in a session rooted at home", () => {
+    expect(memoryTypeForPath(join(home, '.claude', 'rules', 'style.md'), home, home)).toBe('User')
+    expect(memoryTypeForPath(join(home, '.claude', 'CLAUDE.md'), home, home)).toBe('User')
+  })
+
+  it('classifies a project inside the user config directory as Project', () => {
+    // Claude reports a checkout under ~/.claude as the project it is: only the user's own
+    // CLAUDE.md and rules there are user memory.
+    const project = join(home, '.claude', 'myproj')
+    expect(memoryTypeForPath(join(project, 'CLAUDE.md'), home, project)).toBe('Project')
+    expect(memoryTypeForPath(join(project, '.claude', 'rules', 'p.md'), home, project)).toBe('Project')
   })
 
   it('falls back to Project for a path under neither root', () => {
