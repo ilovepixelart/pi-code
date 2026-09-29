@@ -366,6 +366,19 @@ describe('on a runtime that re-renders the prompt from its options', () => {
     expect(event.systemPromptOptions.appendSystemPrompt).toBe('')
   })
 
+  it('puts the user CLAUDE.md into the one <project_context> of a forced prompt', async () => {
+    // A forced prompt is text in the layout pi 0.86 and later renders, where one newline
+    // follows the opener.
+    write(hoisted.home, '.claude/CLAUDE.md', 'USER MEMORY')
+    const { cwd, native } = projectWith('PROJECT MEMORY')
+    const session = await startedIn(cwd)
+    const event = renderingEvent(cwd, native, { forceSystemPrompt: renderingEvent(cwd, native).systemPrompt })
+
+    const result = await session.turn(event)
+
+    expect(result?.systemPrompt).toBe(`BASE PROMPT\n\n<project_context>\nProject-specific instructions and guidelines:\n\n${instructionsBlock(join(hoisted.home, '.claude', 'CLAUDE.md'), 'USER MEMORY')}\n\n${instructionsBlock(native[0].path, 'PROJECT MEMORY')}\n</project_context>`)
+  })
+
   it('adds additional directory memory as context files', async () => {
     process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'
     const extraDir = tempDir('options-extra-')

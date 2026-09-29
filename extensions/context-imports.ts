@@ -417,6 +417,10 @@ export function instructionsBlock(filePath: string, content: string): string {
 /** pi's <project_context> opener, the anchor the managed block is inserted after. */
 const CONTEXT_OPENER = '<project_context>\n\nProject-specific instructions and guidelines:\n\n'
 
+/** The opener as pi 0.86 and later renders it, which is the layout a forced prompt has
+ * there: one newline after the tag. */
+const SECTION_OPENER = '<project_context>\nProject-specific instructions and guidelines:\n\n'
+
 /** Remove a context block, preferring the shape pi assembles (trailing blank line). */
 function removeBlock(prompt: string, wrapper: string): string | null {
   for (const needle of [`${wrapper}\n\n`, wrapper]) {
@@ -440,7 +444,7 @@ function replaceBlock(prompt: string, wrapper: string, replacement: string): str
  * key) and the user CLAUDE.md. Each call prepends, so the last block inserted ends
  * up highest, which is how the managed/user/native order is built (see caller). */
 function withTopBlock(prompt: string, block: string): string {
-  for (const anchor of [CONTEXT_OPENER, '<project_context>\n\n']) {
+  for (const anchor of [CONTEXT_OPENER, SECTION_OPENER, '<project_context>\n\n']) {
     const at = prompt.indexOf(anchor)
     if (at === -1) continue
     const insert = at + anchor.length
