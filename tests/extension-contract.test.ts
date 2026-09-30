@@ -168,12 +168,29 @@ describe('the peer version floor', () => {
     const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
       peerDependencies: Record<string, string>
     }
-    const peers = Object.entries(pkg.peerDependencies)
+    const peers = Object.entries(pkg.peerDependencies).filter(([name]) => name.startsWith('@earendil-works/'))
     expect(peers.length).toBeGreaterThan(0)
 
     for (const [name, range] of peers) {
       expect([name, atLeast(parseMinimum(range), AGENT_SETTLED_SINCE)]).toEqual([name, true])
     }
+  })
+})
+
+// pi's resource loader (HOST_PROVIDED_EXTENSION_PACKAGES in core/resource-loader.js) warns on
+// every start when a package lists one of these in `dependencies`: an installed copy bypasses the
+// loader's redirect to the host module and can create a duplicate runtime. They belong in
+// peerDependencies, and typebox, which has no pi version floor, with the "*" range the warning asks for.
+describe('host-provided packages', () => {
+  const HOST_PROVIDED = ['@earendil-works/pi-agent-core', '@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', '@mariozechner/pi-agent-core', '@mariozechner/pi-ai', '@mariozechner/pi-coding-agent', '@mariozechner/pi-tui', '@sinclair/typebox', 'typebox']
+
+  it('are peers, never runtime dependencies', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
+      dependencies: Record<string, string>
+      peerDependencies: Record<string, string>
+    }
+    expect(Object.keys(pkg.dependencies).filter((name) => HOST_PROVIDED.includes(name))).toEqual([])
+    expect(pkg.peerDependencies.typebox).toBe('*')
   })
 
   it('still has extensions depending on agent_settled, the reason for that floor', () => {
