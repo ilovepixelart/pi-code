@@ -139,7 +139,8 @@ describe('pi session replacement contract', () => {
   })
 })
 
-// pi added `agent_settled` in 0.80.4 (its CHANGELOG: "Added extension and RPC
+// pi added `agent_settled` in 0.80.4, which was never published; 0.80.5 is the first
+// release with it (its CHANGELOG: "Added extension and RPC
 // agent_settled events plus session-level idle waiting for fully settled agent runs").
 // Several extensions rely on it unconditionally, so on an older runtime it simply never
 // arrives and the work it gates never happens: a command's tool restrictions and an

@@ -87,12 +87,14 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   // pi 0.99 and later connect MCP servers themselves (docs/specs/mcp-native.md). Decided
-  // at load, since registering /mcp here is what drops pi's own; project settings count
-  // only once approved, so the policy read here is the managed and user one.
-  const native = nativeMode(pi, loadManagedMcpServers(), mcpAllowDeny(claudeSettingsChain(process.cwd(), os.homedir(), false)))
+  // at load, since registering /mcp here is what drops pi's own, which is before project
+  // approval: the project's settings are read here even unapproved. A list there can only
+  // keep pi-code's own client, where session_start applies it once the project is approved.
+  const native = nativeMode(pi, loadManagedMcpServers(), mcpAllowDeny(claudeSettingsChain(process.cwd(), os.homedir(), true)))
   // Whether pi's /mcp is running this session, and the names handed to pi.registerMcpServer.
   let nativeActive = false
   const nativeRegistered = new Set<string>()
+  let waitedForNative = false
   // Names with a connect in flight. A name enters `clients` only once its connect
   // resolves, and shutdown clears that map without awaiting anything in flight, so
   // without this set a session switch during a slow connect (or a backoff sleep) let
@@ -461,9 +463,23 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   function registerWithPi(servers: Record<string, ServerConfig>): Record<string, ServerConfig> {
     const own: Record<string, ServerConfig> = {}
     for (const [name, config] of Object.entries(servers)) {
-      const translated = toNativeServer(name, config, sessionDirs)
+      // A malformed entry (a non-string arg or env value, no url) stays with pi-code's
+      // client, whose per-server connect reports it as failed without stopping the rest.
+      let translated: ReturnType<typeof toNativeServer>
+      try {
+        translated = toNativeServer(name, config, sessionDirs)
+      } catch {
+        own[name] = config
+        continue
+      }
       if (!('native' in translated)) {
         own[name] = config
+        continue
+      }
+      // pi replaces a name this extension registers again, so the first scope to register
+      // a name keeps it, as connectServers keeps the first client (local over project).
+      if (nativeRegistered.has(translated.native.name)) {
+        console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
       if (config.pluginDataDir !== undefined) {
@@ -490,7 +506,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       // A later scope must not take the name of a server that already connected: it
       // would evict that client from the map, leaking it at shutdown, and misreport
       // the earlier server's status.
-      if (clients.has(name)) {
+      if (clients.has(name) || nativeRegistered.has(name)) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
@@ -689,6 +705,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: checkoutRoot(ctx.cwd), launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
     nativeActive = native && piMcpRunning(pi.getCommands())
+    waitedForNative = false
     const authUi = authUiFor(ctx)
     sessionAuthUi = authUi
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They
@@ -755,6 +772,31 @@ export default async function mcpExtension(pi: ExtensionAPI) {
       }
     }
     nativeRegistered.clear()
+  })
+
+  /** Resolves once every server handed to pi has a tool registered, or at the deadline. */
+  function waitForNativeTools(deadline: number): Promise<void> {
+    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every((name) => pi.getAllTools().some((tool) => tool.name.startsWith(`mcp__${name}__`)))
+    return new Promise((resolve) => {
+      if (settled()) {
+        resolve()
+        return
+      }
+      const timer = setInterval(() => {
+        if (!settled()) return
+        clearInterval(timer)
+        resolve()
+      }, 100)
+    })
+  }
+
+  // pi waits at most 10 s for its servers before the first turn. A headless run has no
+  // later turn to use a server that connects after it, so it waits for the servers handed
+  // to pi as long as one connect may take, as session_start waits for pi-code's own.
+  pi.on('before_agent_start', async (_event, ctx) => {
+    if (!nativeActive || ctx.hasUI || waitedForNative) return
+    waitedForNative = true
+    await waitForNativeTools(Date.now() + connectTimeoutMs())
   })
 
   // pi's MCP tools register as their servers connect, after session_start; each turn
