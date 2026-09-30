@@ -50,7 +50,7 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
   }
   setCliSettingsReader(read)
 
-  pi.on('session_start', async (_event, ctx: ExtensionContext) => {
+  pi.on('session_start', (_event, ctx: ExtensionContext) => {
     const { errors } = read()
     if (errors.length === 0) return
     for (const error of errors) {
