@@ -73,10 +73,16 @@ jobs:
             -Dsonar.qualitygate.wait=true
 
   smoke:
-    name: Headless e2e smoke
+    name: Headless e2e smoke (pi ${{ matrix.pi }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # locked is the devDependency. 0.85.1 keeps a real pi from before the prompt
+        # options (0.86) and native MCP (0.99) under test: the unit suite fakes those paths.
+        pi: [locked, 0.85.1]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +97,12 @@ jobs:
 
       - name: Installing dependencies
         run: npm ci --ignore-scripts
+
+      - name: Install pi ${{ matrix.pi }}
+        if: matrix.pi != 'locked'
+        env:
+          PI_VERSION: ${{ matrix.pi }}
+        run: npm install --no-save --ignore-scripts "@earendil-works/pi-agent-core@$PI_VERSION" "@earendil-works/pi-ai@$PI_VERSION" "@earendil-works/pi-coding-agent@$PI_VERSION" "@earendil-works/pi-tui@$PI_VERSION"
 
       - name: Run the deterministic smoke
         # Boots the pi devDependency headless against a dead-port model and
