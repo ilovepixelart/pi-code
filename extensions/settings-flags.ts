@@ -52,6 +52,7 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
     // some platforms, and an exit right after the write can lose the message.
     const terminal = ctx.hasUI && process.stdout.isTTY === true
     const end = terminal ? () => ctx.shutdown() : () => process.exit(1)
-    process.stderr.write(`${errors.map((error) => `pi-code: ${error}`).join('\n')}\n`, end)
+    const report = errors.map((error) => `pi-code: ${error}`).join('\n')
+    process.stderr.write(`${report}\n`, end)
   })
 }
