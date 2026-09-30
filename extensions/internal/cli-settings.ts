@@ -18,8 +18,14 @@
  * JSON object is a path, resolved against cwd; a missing file is "Settings file not
  * found: <path>"; every other refusal is "Cannot use settings file (<reason>): <path>";
  * an unknown source is "Invalid setting source: <name>. Valid options are: user,
- * project, local". Claude exits 1 on each; the settings-flags extension reports them
- * and shuts pi down.
+ * project, local". Claude exits 1 on each before anything runs; here the extensions
+ * loaded earlier have already begun their session start when settings-flags reports
+ * the refusal and ends the session, so a refusal fails closed: no file source loads
+ * in that window.
+ *
+ * The resolution is memoized process-wide by the raw flag values: pi loads fresh
+ * extension instances on /new and /reload and hands them the same values, and a
+ * fresh instance must reuse the copy rather than read the original again.
  *
  * The resolved value travels through a process-wide slot (see shared-slot): pi exposes
  * a flag's value only to the extension that registered it, and every extension holds
@@ -55,7 +61,7 @@ function noFlags(): CliSettings {
 }
 
 /** The sources a `--setting-sources` value names. Whitespace and repeats are
- * tolerated; an unknown name refuses the whole flag, which then loads every source. */
+ * tolerated; an unknown name refuses the whole flag, and nothing loads. */
 export function parseSettingSources(raw: string | undefined): { sources: Set<SettingSource>; error?: string } {
   if (raw === undefined) return { sources: new Set(SETTING_SOURCES) }
   const sources = new Set<SettingSource>()
@@ -63,7 +69,7 @@ export function parseSettingSources(raw: string | undefined): { sources: Set<Set
     const name = token.trim()
     if (name === '') continue
     if (!(SETTING_SOURCES as readonly string[]).includes(name)) {
-      return { sources: new Set(SETTING_SOURCES), error: `Invalid setting source: ${name}. Valid options are: ${SETTING_SOURCES.join(', ')}` }
+      return { sources: new Set(), error: `Invalid setting source: ${name}. Valid options are: ${SETTING_SOURCES.join(', ')}` }
     }
     sources.add(name as SettingSource)
   }
@@ -137,7 +143,8 @@ export function resolveSettingsFlag(raw: string, cwd: string): { file: string } 
 }
 
 /** Both flags as pi hands them over (a string when given with a value, true when
- * given bare, undefined when absent), resolved once for the session. */
+ * given bare, undefined when absent). Any refusal fails closed: no file source, no
+ * snapshot, nothing forwarded, only the errors. */
 export function resolveCliSettings(flags: { settings?: unknown; settingSources?: unknown }, cwd: string): CliSettings {
   const result = noFlags()
   if (typeof flags.settings === 'string') {
@@ -156,7 +163,28 @@ export function resolveCliSettings(flags: { settings?: unknown; settingSources?:
       result.forwardArgs.push('--setting-sources', flags.settingSources)
     }
   }
+  if (result.errors.length > 0) return { ...noFlags(), sources: new Set(), errors: result.errors }
   return result
+}
+
+// One resolution per raw pair for the whole process, whichever extension instance
+// asks: a fresh instance after /new or /reload gets the same copy, not a re-read.
+const resolvedSlot = sharedSlot<Map<string, CliSettings>>('cli-settings-resolved')
+
+/** resolveCliSettings, memoized process-wide by the raw flag values. */
+export function resolveCliSettingsOnce(flags: { settings?: unknown; settingSources?: unknown }, cwd: string): CliSettings {
+  let memo = resolvedSlot.get()
+  if (memo === undefined) {
+    memo = new Map()
+    resolvedSlot.set(memo)
+  }
+  const key = JSON.stringify([flags.settings, flags.settingSources])
+  let resolved = memo.get(key)
+  if (resolved === undefined) {
+    resolved = resolveCliSettings(flags, cwd)
+    memo.set(key, resolved)
+  }
+  return resolved
 }
 
 const readerSlot = sharedSlot<() => CliSettings>('cli-settings')

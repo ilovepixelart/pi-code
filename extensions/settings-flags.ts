@@ -9,13 +9,14 @@
  *
  * A refused value is reported the way Claude does ("Settings file not found: ...",
  * "Invalid setting source: ...") and the session ends: Claude exits 1 rather than run
- * with settings the caller did not ask for. Interactively that is pi's own shutdown;
- * headless, where pi binds no shutdown handler (pi dist/modes/print-mode), the process
- * exits 1 itself.
+ * with settings the caller did not ask for. In a terminal session that is pi's own
+ * shutdown, which restores the terminal. Elsewhere the process exits 1 itself: print
+ * mode binds no shutdown handler (pi dist/modes/print-mode), and rpc mode only marks
+ * the session to end after the first turn settles (pi dist/modes/rpc-mode).
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { type CliSettings, resolveCliSettings, setCliSettingsReader } from './internal/cli-settings.js'
+import { type CliSettings, resolveCliSettingsOnce, setCliSettingsReader } from './internal/cli-settings.js'
 
 export default function settingsFlagsExtension(pi: ExtensionAPI) {
   // Optional-called so the extension still wires under stub hosts without flags.
@@ -28,8 +29,7 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
     type: 'string',
   })
 
-  let resolved: CliSettings | undefined
-  let resolvedFor: string | undefined
+  let last: CliSettings | undefined
   const read = (): CliSettings => {
     let flags: { settings?: unknown; settingSources?: unknown }
     try {
@@ -37,14 +37,10 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
     } catch {
       // After a session replacement this instance's pi is stale and every call throws;
       // the last answer stands until the fresh instance registers its own reader.
-      return resolved ?? resolveCliSettings({}, process.cwd())
+      return last ?? resolveCliSettingsOnce({}, process.cwd())
     }
-    const key = JSON.stringify([flags.settings, flags.settingSources])
-    if (resolved === undefined || resolvedFor !== key) {
-      resolved = resolveCliSettings(flags, process.cwd())
-      resolvedFor = key
-    }
-    return resolved
+    last = resolveCliSettingsOnce(flags, process.cwd())
+    return last
   }
   setCliSettingsReader(read)
 
@@ -54,7 +50,8 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
     for (const error of errors) ctx.ui.notify(error, 'error')
     // The session ends once the report has flushed: piped stderr is asynchronous on
     // some platforms, and an exit right after the write can lose the message.
-    const end = ctx.hasUI ? () => ctx.shutdown() : () => process.exit(1)
+    const terminal = ctx.hasUI && process.stdout.isTTY === true
+    const end = terminal ? () => ctx.shutdown() : () => process.exit(1)
     process.stderr.write(`${errors.map((error) => `pi-code: ${error}`).join('\n')}\n`, end)
   })
 }

@@ -45,8 +45,14 @@ function wire(values: Record<string, unknown> = {}, guard: () => void = () => {}
   }
 }
 
+const readJson = (file: string): unknown => JSON.parse(fs.readFileSync(file, 'utf-8'))
+const savedTty = process.stdout.isTTY
+
 describe('settings-flags extension', () => {
-  afterEach(() => setCliSettingsReader(undefined))
+  afterEach(() => {
+    setCliSettingsReader(undefined)
+    process.stdout.isTTY = savedTty
+  })
 
   it("registers Claude's two flags as string flags", () => {
     const { flags } = wire()
@@ -90,10 +96,27 @@ describe('settings-flags extension', () => {
     expect(cliSettings().sources).toEqual(new Set(['project']))
   })
 
+  it('a fresh instance with the same flags reuses the copy and never re-reads the original', async () => {
+    // pi loads new extension instances on /new and /reload and hands them the same raw
+    // values; the snapshot has to survive the original being deleted in between.
+    const cwd = fs.mkdtempSync(join(tmpdir(), 'flags-'))
+    fs.writeFileSync(join(cwd, 'gen.json'), '{"a":1}')
+    const values = { settings: join(cwd, 'gen.json') }
+    await wire(values).start()
+    const copy = cliSettings().settingsFile as string
+    fs.rmSync(join(cwd, 'gen.json'))
+    const second = wire(values)
+    await second.start()
+    expect(second.notifications).toEqual([])
+    expect(cliSettings().settingsFile).toBe(copy)
+    expect(readJson(copy)).toEqual({ a: 1 })
+  })
+
   it('reports each refused flag on stderr and in the UI, then shuts the session down once the write has flushed', async () => {
     // A relative name: the flag resolves against the process cwd, and a POSIX absolute
     // path would gain a drive letter on Windows.
     const { start, notifications, shutdown, written, flush } = wire({ settings: 'missing-settings.json', 'setting-sources': 'bogus' })
+    process.stdout.isTTY = true
     await start()
     const missing = resolve(process.cwd(), 'missing-settings.json')
     expect(notifications).toEqual([
@@ -115,6 +138,17 @@ describe('settings-flags extension', () => {
     await start(false)
     expect(written).toEqual([`pi-code: Settings file not found: ${resolve(process.cwd(), 'missing-settings.json')}\n`])
     expect(exit).not.toHaveBeenCalled()
+    flush()
+    expect(exit).toHaveBeenCalledWith(1)
+    expect(shutdown).not.toHaveBeenCalled()
+  })
+
+  it('exits with status 1 when the host has a UI but no terminal, as in rpc mode, where a shutdown request waits for the first turn', async () => {
+    // pi's rpc mode passes a UI context, but its shutdown handler only marks the
+    // session for shutdown at agent_settled; the first turn would run on the fallback.
+    const { start, shutdown, exit, flush } = wire({ settings: 'missing-settings.json' })
+    process.stdout.isTTY = false
+    await start(true)
     flush()
     expect(exit).toHaveBeenCalledWith(1)
     expect(shutdown).not.toHaveBeenCalled()

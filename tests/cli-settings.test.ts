@@ -27,10 +27,12 @@ describe('parseSettingSources', () => {
     expect(parseSettingSources(' user , local,user ')).toEqual({ sources: new Set(['user', 'local']) })
   })
 
-  it('rejects an unknown source with Claude Code 2.1.285 wording and falls back to every source', () => {
+  it('rejects an unknown source with Claude Code 2.1.285 wording and loads no source', () => {
     // Measured: `claude --setting-sources bogus` prints "Error processing --setting-sources:
     // Invalid setting source: bogus. Valid options are: user, project, local" and exits 1.
-    expect(parseSettingSources('user,bogus')).toEqual({ sources: ALL, error: 'Invalid setting source: bogus. Valid options are: user, project, local' })
+    // Nothing runs there; here the session ends after the handlers already running, so
+    // the refusal fails closed rather than loading every source in the meantime.
+    expect(parseSettingSources('user,bogus')).toEqual({ sources: new Set(), error: 'Invalid setting source: bogus. Valid options are: user, project, local' })
   })
 })
 
@@ -135,15 +137,24 @@ describe('resolveCliSettings', () => {
     expect(resolveCliSettings({ settingSources: '' }, dir()).forwardArgs).toEqual(['--setting-sources', ''])
   })
 
-  it('collects both errors, applies neither flag, and forwards nothing', () => {
+  it('collects both errors, loads no file source, and forwards nothing', () => {
     const cwd = dir()
     const resolved = resolveCliSettings({ settings: 'missing.json', settingSources: 'nope' }, cwd)
     expect(resolved).toEqual({
       settingsFile: undefined,
-      sources: ALL,
+      sources: new Set(),
       forwardArgs: [],
       errors: [`Settings file not found: ${join(cwd, 'missing.json')}`, 'Invalid setting source: nope. Valid options are: user, project, local'],
     })
+  })
+
+  it('fails closed on a refused --settings alone: no file source loads until the session ends', () => {
+    // Handlers of extensions loaded before settings-flags run their session start on
+    // this result before the refusal ends the session.
+    const cwd = dir()
+    const resolved = resolveCliSettings({ settings: 'missing.json', settingSources: 'user' }, cwd)
+    expect(resolved.sources).toEqual(new Set())
+    expect(resolved.forwardArgs).toEqual([])
   })
 
   it('ignores a boolean flag value (a bare --settings with no value)', () => {
