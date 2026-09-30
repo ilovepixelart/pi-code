@@ -195,7 +195,7 @@ describe("escaped values through pi's own resolver (MCPN-003)", () => {
     const { resolveConfigValueOrThrow } = await loadResolver()
     // The characters pi treats specially, mixed with plain text.
     const value = fc.stringMatching(/^[!$a-zA-Z{}_ ]{1,24}$/)
-    fc.assert(
+    void fc.assert(
       fc.property(value, (text) => {
         const translated = toNativeServer('h', { type: 'http', url: 'https://example.com/mcp', headers: { 'X-V': text } }, undefined, {})
         const sent = 'native' in translated ? (translated.native.config as { headers: Record<string, string> }).headers['X-V'] : ''
