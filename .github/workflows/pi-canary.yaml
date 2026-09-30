@@ -1,6 +1,6 @@
 name: pi canary
 
-# The pi peer range is open-ended (>=0.79.1) while npm ci pins CI to the
+# The pi peer range is open-ended ("*") while npm ci pins CI to the
 # lockfile snapshot, so a new pi release can break users before any check runs
 # against it. This job tries the latest pi packages weekly and on demand.
 on:
