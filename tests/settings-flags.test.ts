@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { cliSettings, setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
@@ -57,14 +57,17 @@ describe('settings-flags extension', () => {
   })
 
   it('reports each refused flag and shuts the session down, as Claude exits 1', async () => {
-    const { start, notifications, shutdown } = wire({ settings: '/nonexistent/settings.json', 'setting-sources': 'bogus' })
+    // A relative name: the flag resolves against the process cwd, and a POSIX absolute
+    // path would gain a drive letter on Windows.
+    const { start, notifications, shutdown } = wire({ settings: 'missing-settings.json', 'setting-sources': 'bogus' })
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     await start()
+    const missing = resolve(process.cwd(), 'missing-settings.json')
     expect(notifications).toEqual([
-      { message: 'Settings file not found: /nonexistent/settings.json', type: 'error' },
+      { message: `Settings file not found: ${missing}`, type: 'error' },
       { message: 'Invalid setting source: bogus. Valid options are: user, project, local', type: 'error' },
     ])
-    expect(error.mock.calls.map((call) => call[0])).toEqual(['pi-code: Settings file not found: /nonexistent/settings.json', 'pi-code: Invalid setting source: bogus. Valid options are: user, project, local'])
+    expect(error.mock.calls.map((call) => call[0])).toEqual([`pi-code: Settings file not found: ${missing}`, 'pi-code: Invalid setting source: bogus. Valid options are: user, project, local'])
     expect(shutdown).toHaveBeenCalledTimes(1)
   })
 
