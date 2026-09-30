@@ -55,11 +55,12 @@ export function projectServerPolicy(cwd: string, home: string, projectApproved: 
   // and settings.local.json from the main checkout, with the chain's legacy cwd copy
   // read too. Resolving them by nearest-file here gave a subdirectory session an
   // ancestor's project file and a worktree session its own local file instead.
-  const sources = claudeSettingsSources(cwd, home, true)
-  const settingsIn = (...scopes: string[]): Record<string, unknown>[] => sources.filter((source) => scopes.includes(source.scope)).map((source) => read(source.file))
+  // Each file read once: a warning for an unparsable file must not repeat.
+  const sources = claudeSettingsSources(cwd, home, true).map((source) => ({ scope: source.scope, settings: read(source.file) }))
+  const settingsIn = (...scopes: string[]): Record<string, unknown>[] => sources.filter((source) => scopes.includes(source.scope)).map((source) => source.settings)
   const userLevel = settingsIn('user', 'flag')
   const localSettings = settingsIn('local')
-  const disabled = new Set(sources.flatMap((source) => names(read(source.file).disabledMcpjsonServers)))
+  const disabled = new Set(sources.flatMap((source) => names(source.settings.disabledMcpjsonServers)))
   const consentSources = projectApproved ? [...userLevel, ...localSettings] : userLevel
   const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
   const consentAll = consentSources.some((settings) => settings.enableAllProjectMcpServers === true)

@@ -725,6 +725,15 @@ describe('projectServerPolicy under the command-line flags', () => {
     expect(projectServerPolicy(fresh('mcp-proj-'), fresh('mcp-home-'), true).disabled.has('noisy')).toBe(true)
   })
 
+  it('reads each settings file once, so an unparsable one warns once', () => {
+    const home = fresh('mcp-home-')
+    mkdirSync(join(home, '.claude'))
+    writeFileSync(join(home, '.claude', 'settings.json'), '{ not json')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    projectServerPolicy(fresh('mcp-proj-'), home, true)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
   it("--setting-sources project leaves the user file's consent out", () => {
     const home = fresh('mcp-home-')
     mkdirSync(join(home, '.claude'))
