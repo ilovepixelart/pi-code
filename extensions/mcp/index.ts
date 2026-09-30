@@ -774,10 +774,20 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     nativeRegistered.clear()
   })
 
-  /** Polls until every server handed to pi has a tool registered, or the deadline. */
-  async function waitForNativeTools(deadline: number): Promise<void> {
-    const missing = (): string[] => [...nativeRegistered].filter((name) => !pi.getAllTools().some((tool) => tool.name.startsWith(`mcp__${name}__`)))
-    while (missing().length > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
+  /** Resolves once every server handed to pi has a tool registered, or at the deadline. */
+  function waitForNativeTools(deadline: number): Promise<void> {
+    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every((name) => pi.getAllTools().some((tool) => tool.name.startsWith(`mcp__${name}__`)))
+    return new Promise((resolve) => {
+      if (settled()) {
+        resolve()
+        return
+      }
+      const timer = setInterval(() => {
+        if (!settled()) return
+        clearInterval(timer)
+        resolve()
+      }, 100)
+    })
   }
 
   // pi waits at most 10 s for its servers before the first turn. A headless run has no
