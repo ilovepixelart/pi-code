@@ -19,6 +19,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { claudeConfigDir } from './config-dir.js'
 import { readManagedSettings } from './managed-settings.js'
+import { userSettingsFiles } from './settings-chain.js'
 import { statToken } from './stat-token.js'
 import { errorMessage, isRecord } from './values.js'
 
@@ -242,7 +243,7 @@ function pluginFingerprint(cacheDir: string, settingsFiles: string[], index: Map
  */
 export function installedPlugins(home: string, extraSettingsFiles: string[] = []): InstalledPlugin[] {
   const cacheDir = path.join(claudeConfigDir(home), 'plugins', 'cache')
-  const settingsFiles = [path.join(claudeConfigDir(home), 'settings.json'), ...extraSettingsFiles]
+  const settingsFiles = [...userSettingsFiles(home), ...extraSettingsFiles]
   const key = [home, ...extraSettingsFiles].join('\n')
   const index = readInstallIndex(home)
   const fingerprint = pluginFingerprint(cacheDir, settingsFiles, index)

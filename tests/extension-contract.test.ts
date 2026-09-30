@@ -70,6 +70,18 @@ describe('cross-extension seams meet across module graphs', () => {
     }
   })
 
+  it('the --settings flags reach the chain from the extension that registered them', async () => {
+    type Seam = typeof import('../extensions/internal/cli-settings.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/cli-settings.ts')
+    const resolved = { settingsFile: '/copy/settings.json', sources: new Set(['user'] as const), forwardArgs: [], errors: [] }
+    registrar.setCliSettingsReader(() => resolved)
+    try {
+      expect(consumer.cliSettings()).toBe(resolved)
+    } finally {
+      registrar.setCliSettingsReader(undefined)
+    }
+  })
+
   it('a subagent spawn reaches the SubagentStart runner the hooks extension registered', async () => {
     type Seam = typeof import('../extensions/internal/subagent-hooks.ts')
     const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/subagent-hooks.ts')

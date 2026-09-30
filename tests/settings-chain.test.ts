@@ -1,9 +1,10 @@
 import fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
-import { claudeSettingsChain, readSettingsChain } from '../extensions/internal/settings-chain.ts'
+import { type CliSettings, type SettingSource, setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
+import { claudeSettingsChain, claudeSettingsSources, readSettingsChain, userSettingsFiles } from '../extensions/internal/settings-chain.ts'
 
 describe('readSettingsChain', () => {
   const write = (dir: string, name: string, body: string): string => {
@@ -110,5 +111,78 @@ describe('claudeSettingsChain local file placement', () => {
     fs.writeFileSync(join(main, '.git', 'worktrees', 'feature', 'gitdir'), `${join(tree, '.git')}\n`)
 
     expect(localFiles(claudeSettingsChain(tree, '/home/u', true, 'linux', owned))).toEqual([join(tree, '.claude', 'settings.local.json'), join(main, '.claude', 'settings.local.json')])
+  })
+})
+
+describe('claudeSettingsChain under the command-line flags', () => {
+  const owned = () => true
+  const all = new Set<SettingSource>(['user', 'project', 'local'])
+  const flags = (over: Partial<CliSettings>): CliSettings => ({ settingsFile: undefined, sources: all, forwardArgs: [], errors: [], ...over })
+  // Outside a repository the local file sits beside the project file, so the chain is
+  // exactly one file per source.
+  const plainCwd = () => fs.mkdtempSync(join(tmpdir(), 'sc-flags-'))
+  const user = join('/home/u', '.claude', 'settings.json')
+
+  afterEach(() => setCliSettingsReader(undefined))
+
+  it('reads the --settings copy last, so it wins over local, project and user', () => {
+    // Claude: "applies it above your user, project, and local files and below managed settings".
+    const cwd = plainCwd()
+    const chain = claudeSettingsChain(cwd, '/home/u', true, 'linux', owned, flags({ settingsFile: '/copy/settings.json' }))
+    expect(chain).toEqual([user, join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json'), '/copy/settings.json'])
+  })
+
+  it("reads the --settings copy without project approval: it is the user's own input", () => {
+    const cwd = plainCwd()
+    expect(claudeSettingsChain(cwd, '/home/u', false, 'linux', owned, flags({ settingsFile: '/copy/settings.json' }))).toEqual([user, '/copy/settings.json'])
+  })
+
+  it('--setting-sources user drops the project files of an approved project', () => {
+    const cwd = plainCwd()
+    expect(claudeSettingsChain(cwd, '/home/u', true, 'linux', owned, flags({ sources: new Set(['user']) }))).toEqual([user])
+  })
+
+  it('--setting-sources project,local drops the user file', () => {
+    const cwd = plainCwd()
+    expect(claudeSettingsChain(cwd, '/home/u', true, 'linux', owned, flags({ sources: new Set(['project', 'local']) }))).toEqual([join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')])
+  })
+
+  it('an empty source list reads no file, leaving only the --settings copy', () => {
+    const cwd = plainCwd()
+    expect(claudeSettingsChain(cwd, '/home/u', true, 'linux', owned, flags({ sources: new Set(), settingsFile: '/copy/settings.json' }))).toEqual(['/copy/settings.json'])
+  })
+
+  it('names the scope of each file', () => {
+    const cwd = plainCwd()
+    expect(claudeSettingsSources(cwd, '/home/u', true, 'linux', owned, flags({ settingsFile: '/copy/settings.json' }))).toEqual([
+      { file: user, scope: 'user' },
+      { file: join(cwd, '.claude', 'settings.json'), scope: 'project' },
+      { file: join(cwd, '.claude', 'settings.local.json'), scope: 'local' },
+      { file: '/copy/settings.json', scope: 'flag' },
+    ])
+  })
+
+  it('reads the flags the settings-flags extension registered when a caller passes none', () => {
+    setCliSettingsReader(() => flags({ settingsFile: '/copy/settings.json', sources: new Set(['user']) }))
+    expect(claudeSettingsChain(plainCwd(), '/home/u', true, 'linux', owned)).toEqual([user, '/copy/settings.json'])
+  })
+})
+
+describe('userSettingsFiles', () => {
+  const all = new Set<SettingSource>(['user', 'project', 'local'])
+  const flags = (over: Partial<CliSettings>): CliSettings => ({ settingsFile: undefined, sources: all, forwardArgs: [], errors: [], ...over })
+  const user = join('/home/u', '.claude', 'settings.json')
+
+  it('is the user file, then the --settings copy: the levels a repository cannot write', () => {
+    // Claude: --settings "can set any key your user settings file can set".
+    expect(userSettingsFiles('/home/u', flags({ settingsFile: '/copy/settings.json' }))).toEqual([user, '/copy/settings.json'])
+  })
+
+  it('omits the user file when --setting-sources excludes user', () => {
+    expect(userSettingsFiles('/home/u', flags({ sources: new Set(['project']), settingsFile: '/copy/settings.json' }))).toEqual(['/copy/settings.json'])
+  })
+
+  it('is just the user file without the flags', () => {
+    expect(userSettingsFiles('/home/u', flags({}))).toEqual([user])
   })
 })

@@ -5,6 +5,7 @@ import { createEventBus } from '@earendil-works/pi-coding-agent'
 import type { Text } from '@earendil-works/pi-tui'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import questionExtension, { askUserQuestionTimeoutMs, askViaOverlay, parseAskUserQuestionTimeout, QuestionParams, REMOTE_QUESTION_CHANNEL, type RemoteQuestionOffer, shortHeader } from '../extensions/question.ts'
 
@@ -987,6 +988,23 @@ describe('askUserQuestionTimeoutMs', () => {
 
   it('returns undefined with no settings file, and does not throw', () => {
     expect(askUserQuestionTimeoutMs(tempDir())).toBeUndefined()
+  })
+
+  it('reads the --settings value over the user file, and skips the user file when --setting-sources excludes it', () => {
+    // Claude: --settings "can set any key your user settings file can set".
+    const home = tempDir()
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ askUserQuestionTimeout: '5m' }))
+    const flag = join(tempDir(), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ askUserQuestionTimeout: '30s' }))
+    try {
+      setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+      expect(askUserQuestionTimeoutMs(home)).toBe(30_000)
+      setCliSettingsReader(() => ({ settingsFile: undefined, sources: new Set(['project']), forwardArgs: [], errors: [] }))
+      expect(askUserQuestionTimeoutMs(home)).toBeUndefined()
+    } finally {
+      setCliSettingsReader(undefined)
+    }
   })
 
   it('prefers the managed value over the user file, as every managed setting does', () => {

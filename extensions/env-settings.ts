@@ -3,8 +3,9 @@
  *
  * Claude Code lets any settings scope carry an `env` object whose keys are exported
  * into the session's environment. This extension applies that chain to process.env:
- * managed-settings.json (enterprise policy), ~/.claude/settings.json (user), and the
- * project's .claude/settings.json plus settings.local.json.
+ * managed-settings.json (enterprise policy), ~/.claude/settings.json (user), the
+ * project's .claude/settings.json plus settings.local.json, and the `--settings` flag
+ * (internal/cli-settings).
  *
  * Two things run this. The factory body applies managed + user immediately (as pi
  * loads extensions), so those variables are present before the first turn; a session
@@ -13,11 +14,12 @@
  * approval-gated on purpose: a checked-out repository's env can redirect providers
  * (ANTHROPIC_BASE_URL and friends), so an untrusted repo must not reach process.env.
  *
- * Precedence is per key, managed > project (settings.local.json overlaying
- * settings.json inside the project scope) > user, matching Claude's settings
- * precedence: a scope only supplies keys it names and never wipes another scope's
- * keys. Values must be strings; a number or boolean is coerced via String,
- * anything else is skipped.
+ * Precedence is per key, managed > `--settings` > project (settings.local.json
+ * overlaying settings.json inside the project scope) > user, matching Claude's
+ * settings precedence: a scope only supplies keys it names and never wipes another
+ * scope's keys. The flag's env is the user's own input and is not sanitized. Values
+ * must be strings; a number or boolean is coerced via String, anything else is
+ * skipped.
  *
  * A settings value replaces a value inherited from the shell, as Claude documents
  * ("Claude Code writes each env entry into the process environment, replacing the
@@ -34,12 +36,10 @@
 
 import * as fs from 'node:fs'
 import * as os from 'node:os'
-import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
-import { claudeSettingsChain } from './internal/settings-chain.js'
+import { claudeSettingsChain, claudeSettingsSources, type SettingsScope, type SettingsSource } from './internal/settings-chain.js'
 import { watchSettingsFiles } from './internal/settings-watch.js'
 import { isRecord } from './internal/values.js'
 
@@ -56,11 +56,12 @@ export function envFromSettings(settings: unknown): Record<string, string> {
   return out
 }
 
-/** Merge the three env scopes with Claude's per-key settings precedence managed >
- * project > user: lower scopes are laid down first and higher ones overlay, so each
- * key takes its highest-precedence value and no scope wipes another's keys. */
-export function mergeEnvScopes(managed: Record<string, string>, user: Record<string, string>, project: Record<string, string>): Record<string, string> {
-  return { ...user, ...project, ...managed }
+/** Merge the env scopes with Claude's per-key settings precedence managed >
+ * `--settings` > project > user: lower scopes are laid down first and higher ones
+ * overlay, so each key takes its highest-precedence value and no scope wipes
+ * another's keys. */
+export function mergeEnvScopes(managed: Record<string, string>, user: Record<string, string>, project: Record<string, string>, flag: Record<string, string> = {}): Record<string, string> {
+  return { ...user, ...project, ...flag, ...managed }
 }
 
 /** Assign the merged env into `env`. Every settings value applies, replacing a
@@ -94,9 +95,13 @@ function readSettingsFile(file: string): Record<string, unknown> {
   return {}
 }
 
-/** The user scope's env: ~/.claude/settings.json (relocated by CLAUDE_CONFIG_DIR). */
-function userEnv(home: string): Record<string, string> {
-  return envFromSettings(readSettingsFile(path.join(claudeConfigDir(home), 'settings.json')))
+/** The env of the chain entries in the given scopes, later files winning. */
+function scopeEnv(sources: SettingsSource[], scopes: readonly SettingsScope[]): Record<string, string> {
+  const merged: Record<string, string> = {}
+  for (const source of sources) {
+    if (scopes.includes(source.scope)) Object.assign(merged, envFromSettings(readSettingsFile(source.file)))
+  }
+  return merged
 }
 
 /** Keys a checked-out repository must not control even once trusted, per Claude's
@@ -146,28 +151,25 @@ export function sanitizeProjectEnv(env: Record<string, string>, warn: (key: stri
   return kept
 }
 
-/** The project scope's env, resolved through the shared settings chain so placement
- * matches every other consumer: the shared settings.json comes from the session's own
- * directory and never an ancestor, settings.local.json from the repository root. Later
- * files win. */
-function projectEnv(cwd: string, home: string): Record<string, string> {
-  const merged: Record<string, string> = {}
-  for (const file of claudeSettingsChain(cwd, home, true).slice(1)) Object.assign(merged, envFromSettings(readSettingsFile(file)))
-  return sanitizeProjectEnv(merged)
-}
-
 export default function envSettingsExtension(pi: ExtensionAPI) {
   const owned = new Map<string, string | undefined>()
   /** Stops the watcher of the previous session, as the hooks extension does. */
   let disposeWatch: () => void = () => {}
 
-  const apply = (home: string, project: Record<string, string>): void => {
-    applyEnvSettings(mergeEnvScopes(envFromSettings(readManagedSettings()), userEnv(home), project), process.env, owned)
+  /** Every scope resolved through the shared chain, so placement and the
+   * `--setting-sources` filter match every other consumer: the shared settings.json
+   * comes from the session's own directory and never an ancestor, settings.local.json
+   * from the repository root. The project scope is read only when approved. */
+  const apply = (home: string, cwd: string, approved: boolean): void => {
+    const sources = claudeSettingsSources(cwd, home, approved)
+    const project = sanitizeProjectEnv(scopeEnv(sources, ['project', 'local']))
+    applyEnvSettings(mergeEnvScopes(envFromSettings(readManagedSettings()), scopeEnv(sources, ['user']), project, scopeEnv(sources, ['flag'])), process.env, owned)
   }
 
   // Factory time: managed + user only. Approval needs the session ctx, so the project
-  // scope waits for session_start; running here means these vars land before the first turn.
-  apply(os.homedir(), {})
+  // scope waits for session_start; running here means these vars land before the first
+  // turn. pi parses flags after loading, so the --settings level also waits.
+  apply(os.homedir(), process.cwd(), false)
 
   pi.on('session_start', async (_event, ctx: ExtensionContext) => {
     const home = os.homedir()
@@ -177,7 +179,7 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
     const cwd = ctx.cwd
     // A reload asks again rather than reusing `approved`: see approvalRecheck.
     const stillApproved = approvalRecheck(ctx)
-    const reapply = (): void => apply(home, approved && stillApproved() ? projectEnv(cwd, home) : {})
+    const reapply = (): void => apply(home, cwd, approved && stillApproved())
     reapply()
     // Claude: "Claude Code watches your settings files and reloads them when they change,
     // so it applies most edits to the running session without a restart." `env` is not

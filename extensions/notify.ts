@@ -17,11 +17,9 @@
 
 import { execFile } from 'node:child_process'
 import * as os from 'node:os'
-import * as path from 'node:path'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { claudeConfigDir } from './internal/config-dir.js'
-import { readSettingsFile } from './internal/settings-chain.js'
+import { readUserSetting } from './internal/settings-chain.js'
 
 /** How a finished turn is announced, from Claude's `preferredNotifChannel`. */
 export type NotifChannel = 'desktop' | 'bell' | 'both' | 'off'
@@ -53,10 +51,10 @@ export function isAway(lastInputAt: number | undefined, now: number, thresholdMs
 }
 
 /** The `preferredNotifChannel` from the user's settings. This is a personal terminal
- * preference, so only user scope is read; a checked-out repo does not get to silence
- * or change your notifications. */
+ * preference, so only the user-level files are read (the user file and the `--settings`
+ * flag); a checked-out repo does not get to silence or change your notifications. */
 function readPreferredNotifChannel(home: string): unknown {
-  return readSettingsFile(path.join(claudeConfigDir(home), 'settings.json'))?.preferredNotifChannel
+  return readUserSetting(home, 'preferredNotifChannel')
 }
 
 function windowsToastScript(title: string, body: string): string {

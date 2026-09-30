@@ -21,8 +21,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from '@earendil-works/pi-coding-agent'
-import { claudeConfigDir } from './internal/config-dir.js'
-import { readSettingsFile } from './internal/settings-chain.js'
+import { readUserSetting } from './internal/settings-chain.js'
 import { fileToolTarget } from './internal/tool-target.js'
 import { contentText, errorMessage } from './internal/values.js'
 
@@ -52,11 +51,12 @@ interface Checkpoint {
 export const CHECKPOINT_RETENTION_DAYS = 30
 
 /** The retention period in effect: Claude keeps checkpoints for 30 days and says to
- * "change the period with cleanupPeriodDays". Read from the user scope, which is where a
- * setting about the user's own disk belongs; a non-positive or unreadable value keeps the
- * default rather than sweeping everything away. */
+ * "change the period with cleanupPeriodDays". Read from the user-level files (the user
+ * file and the `--settings` flag), which is where a setting about the user's own disk
+ * belongs; a non-positive or unreadable value keeps the default rather than sweeping
+ * everything away. */
 export function checkpointRetentionDays(home: string = os.homedir()): number {
-  const declared = readSettingsFile(path.join(claudeConfigDir(home), 'settings.json'))?.cleanupPeriodDays
+  const declared = readUserSetting(home, 'cleanupPeriodDays')
   if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) return declared
   return CHECKPOINT_RETENTION_DAYS
 }

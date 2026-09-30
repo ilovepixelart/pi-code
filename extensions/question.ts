@@ -10,13 +10,11 @@
 
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
-import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
-import { claudeConfigDir } from './internal/config-dir.js'
 import { readManagedSettings } from './internal/managed-settings.js'
-import { readSettingsFile } from './internal/settings-chain.js'
+import { readUserSetting } from './internal/settings-chain.js'
 
 interface OptionWithDesc {
   label: string
@@ -119,7 +117,7 @@ export function askUserQuestionTimeoutMs(home: string = os.homedir()): number | 
   const managed = readManagedSettings() as { askUserQuestionTimeout?: unknown }
   const fromManaged = parseAskUserQuestionTimeout(managed.askUserQuestionTimeout)
   if (fromManaged !== undefined) return fromManaged
-  return parseAskUserQuestionTimeout(readSettingsFile(path.join(claudeConfigDir(home), 'settings.json'))?.askUserQuestionTimeout)
+  return parseAskUserQuestionTimeout(readUserSetting(home, 'askUserQuestionTimeout'))
 }
 
 function checkbox(checked: boolean | undefined): string {

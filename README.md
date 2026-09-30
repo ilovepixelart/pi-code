@@ -47,7 +47,7 @@ Each topic links to its own doc with the full contract and any divergences from 
 - **[Skills](docs/skills.md)** — `.claude/skills` discovery plus the same dynamic content commands get.
 - **[Subagents](docs/subagents.md)** — built-in and custom agents, background runs, per-agent memory, worktree isolation.
 - **[CLAUDE.md, @imports, and rules](docs/claude-md.md)** — the context files and path-scoped rules pi does not load natively.
-- **[Settings `env`](docs/settings-env.md)** — env blocks from every settings scope, exported with Claude's precedence.
+- **[Settings `env` and flags](docs/settings-env.md)** — env blocks from every settings scope, exported with Claude's precedence, plus Claude's `--settings` and `--setting-sources` flags.
 - **[Output styles](docs/output-styles.md)** — replace semantics, bundled built-ins, `/output-style`.
 - **[Persistent memory](docs/memory.md)** — a per-repository store with a session-injected index.
 - **[Statusline](docs/statusline.md)** — your Claude `statusLine` command with the documented stdin JSON.

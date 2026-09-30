@@ -2,8 +2,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { type CliSettings, setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import {
   applyServerPolicy,
   formatPromptCommandName,
@@ -697,5 +698,47 @@ describe('connect misconfiguration diagnostics', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('projectServerPolicy under the command-line flags', () => {
+  const all = new Set(['user', 'project', 'local'] as const)
+  const flags = (over: Partial<CliSettings>): void => setCliSettingsReader(() => ({ settingsFile: undefined, sources: all, forwardArgs: [], errors: [], ...over }))
+  const flagFile = (settings: unknown): string => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-flag-')), 'settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    return file
+  }
+  const fresh = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
+
+  afterEach(() => setCliSettingsReader(undefined))
+
+  it('counts consent from the --settings file before the project is approved, as from the user file', () => {
+    // Claude: --settings "can set any key your user settings file can set", and consent
+    // keys count from the user's own settings whether or not the project is approved.
+    flags({ settingsFile: flagFile({ enabledMcpjsonServers: ['generated'] }) })
+    expect(projectServerPolicy(fresh('mcp-proj-'), fresh('mcp-home-'), false).consented.has('generated')).toBe(true)
+  })
+
+  it('counts a disable from the --settings file', () => {
+    flags({ settingsFile: flagFile({ disabledMcpjsonServers: ['noisy'] }) })
+    expect(projectServerPolicy(fresh('mcp-proj-'), fresh('mcp-home-'), true).disabled.has('noisy')).toBe(true)
+  })
+
+  it('reads each settings file once, so an unparsable one warns once', () => {
+    const home = fresh('mcp-home-')
+    mkdirSync(join(home, '.claude'))
+    writeFileSync(join(home, '.claude', 'settings.json'), '{ not json')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    projectServerPolicy(fresh('mcp-proj-'), home, true)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it("--setting-sources project leaves the user file's consent out", () => {
+    const home = fresh('mcp-home-')
+    mkdirSync(join(home, '.claude'))
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enableAllProjectMcpServers: true }))
+    flags({ sources: new Set(['project']) })
+    expect(projectServerPolicy(fresh('mcp-proj-'), home, true).consentAll).toBe(false)
   })
 })
