@@ -231,7 +231,7 @@ interface Harness {
   /** Servers handed to pi.registerMcpServer, in order (native harness only). */
   nativeRegistered: Array<{ name: string; config: Record<string, unknown> }>
   nativeUnregistered: string[]
-  fire: (event: string) => Promise<void>
+  fire: (event: string, hasUI?: boolean) => Promise<void>
 }
 
 const writeServers = (file: string, servers: Record<string, unknown>): void => {
@@ -335,8 +335,8 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
     input: async (text: string) => handlers.get('input')?.({ text, source: 'interactive' }, makeCtx(true)),
     nativeRegistered,
     nativeUnregistered,
-    fire: async (event: string) => {
-      await handlers.get(event)?.({}, makeCtx(true))
+    fire: async (event: string, hasUI = true) => {
+      await handlers.get(event)?.({}, makeCtx(true, true, true, hasUI))
     },
   }
 }
@@ -3220,6 +3220,20 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     expect(harness.toolNames()).toEqual(['srv_go'])
   })
 
+  it("stays on its own client when the project's settings set a deny list (MCPN-001)", async () => {
+    // pi would connect the servers in its own mcp.json outside the project's list.
+    const cwd = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ deniedMcpServers: [{ serverName: 'piglobal' }] }))
+    vi.spyOn(process, 'cwd').mockReturnValue(cwd)
+    withTools([{ name: 'go' }])
+    const harness = await setup({ cwd, user: { srv: { command: 'node' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true)
+
+    expect(harness.commandNames()).toContain('mcp')
+    expect(harness.nativeRegistered).toEqual([])
+  })
+
   it("publishes pi's mcp__ tools on the roster hooks and subagents read, once they connect (MCPN-008)", async () => {
     // pi registers a server's tools when it connects, after session_start.
     const piTools: string[] = []
@@ -3230,6 +3244,76 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
 
     const rosters = harness.emitted.filter((entry) => entry.channel === 'pi-code:mcp-tools')
     expect(rosters.at(-1)?.data).toEqual([{ pi: 'mcp__srv__go', claude: 'mcp__srv__go' }])
+  })
+
+  it('isolates a server entry it cannot translate, so the rest of the scope and the project still register', async () => {
+    const harness = await setup({ user: { bad: { command: 'x', args: ['--port', 8080] }, good: { command: 'y' } }, project: { proj: { command: 'p' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true, true)
+
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['good', 'proj'])
+  })
+
+  it('starts a headless session despite a server entry it cannot translate', async () => {
+    const harness = await setup({ user: { bad: { type: 'http' }, good: { command: 'y' } }, native: { builtinMcp: true } })
+    await expect(harness.sessionStart(true, true, false)).resolves.toBeUndefined()
+
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['good'])
+  })
+
+  it('keeps the local scope server when an approved project server takes the same name', async () => {
+    const harness = await setup({ project: { shared: { command: 'from-project' } }, native: { builtinMcp: true } })
+    writeFileSync(join(harness.home, '.claude.json'), JSON.stringify({ projects: { [harness.cwd]: { mcpServers: { shared: { command: 'from-local' } } } } }))
+    await harness.sessionStart(true, true)
+
+    expect(harness.nativeRegistered.map((entry) => [entry.name, entry.config.command])).toEqual([['shared', 'from-local']])
+  })
+
+  it('does not connect a project SSE server under a name the local scope already gave pi', async () => {
+    const harness = await setup({ project: { shared: { type: 'sse', url: 'https://example.com/sse' } }, native: { builtinMcp: true } })
+    writeFileSync(join(harness.home, '.claude.json'), JSON.stringify({ projects: { [harness.cwd]: { mcpServers: { shared: { command: 'from-local' } } } } }))
+    await harness.sessionStart(true, true)
+
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['shared'])
+    expect(hoisted.transports).toEqual([])
+  })
+
+  it('holds a headless run until the servers it handed to pi have tools', async () => {
+    // pi itself waits at most 10 s before the first turn; a -p run gets no later turn.
+    setEnv('MCP_TIMEOUT', '5000')
+    const piTools: string[] = []
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: piTools } })
+    await harness.sessionStart(true, true, false)
+    let released = false
+    const waiting = harness.fire('before_agent_start', false).then(() => {
+      released = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(released).toBe(false)
+
+    piTools.push('mcp__srv__go')
+    await waiting
+    expect(released).toBe(true)
+  })
+
+  it('stops holding a headless run after MCP_TIMEOUT', async () => {
+    setEnv('MCP_TIMEOUT', '200')
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: [] } })
+    await harness.sessionStart(true, true, false)
+    const started = Date.now()
+    await harness.fire('before_agent_start', false)
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(180)
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
+  it('does not hold an interactive session for the servers it handed to pi', async () => {
+    setEnv('MCP_TIMEOUT', '5000')
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: [] } })
+    await harness.sessionStart(true, true)
+    const started = Date.now()
+    await harness.fire('before_agent_start', true)
+
+    expect(Date.now() - started).toBeLessThan(150)
   })
 
   it('unregisters its servers from pi at session shutdown', async () => {

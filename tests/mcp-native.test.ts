@@ -75,7 +75,17 @@ describe('toNativeServer (MCPN-003)', () => {
     const result = toNativeServer('o', { type: 'http', url: 'https://example.com/mcp', oauth: { clientId: 'cid', callbackPort: 8765, scopes: 'read write' } }, undefined, { MCP_CLIENT_SECRET: 's$cret' })
 
     expect(result).toEqual({
-      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { clientId: 'cid', clientSecret: 's$$cret', callbackPort: 8765, scope: 'read write' }, exposure: 'direct', timeout: 300 } },
+      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { clientId: 'cid', clientSecret: 's$$cret', callbackUrl: 'http://localhost:8765/callback', scope: 'read write' }, exposure: 'direct', timeout: 300 } },
+    })
+  })
+
+  it.each([['8080/../x'], ['80@evil.example'], [0], [65536], [1.5]])('keeps a server with oauth.callbackPort %j on pi-code', (port) => {
+    expect(toNativeServer('o', { type: 'http', url: 'https://example.com/mcp', oauth: { clientId: 'c', callbackPort: port as number } }, undefined, {})).toEqual({ reason: 'oauth.callbackPort' })
+  })
+
+  it('redirects to localhost on MCP_OAUTH_CALLBACK_PORT when the server names no port', () => {
+    expect(toNativeServer('o', { type: 'http', url: 'https://example.com/mcp' }, undefined, { MCP_OAUTH_CALLBACK_PORT: '9000' })).toEqual({
+      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://localhost:9000/callback' }, exposure: 'direct', timeout: 300 } },
     })
   })
 
@@ -102,6 +112,12 @@ describe('toNativeServer timeout (MCPN-003)', () => {
   it('uses CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT as the budget', () => {
     vi.stubEnv('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT', '90000')
     expect(toNativeServer('h', { type: 'http', url: 'https://example.com/mcp' }, undefined, {})).toMatchObject({ native: { config: { timeout: 90 } } })
+  })
+
+  it('caps the timeout so pi never arms a timer past the 32-bit limit', () => {
+    vi.stubEnv('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT', '0')
+    vi.stubEnv('MCP_TOOL_TIMEOUT', '3000000000')
+    expect(toNativeServer('h', { type: 'http', url: 'https://example.com/mcp' }, undefined, {})).toMatchObject({ native: { config: { timeout: 2_147_483 } } })
   })
 
   it('falls back to the MCP_TOOL_TIMEOUT wall budget when the idle timeout is disabled', () => {

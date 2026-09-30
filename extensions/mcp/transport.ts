@@ -40,7 +40,7 @@ const DEFAULT_STDIO_CALL_IDLE_TIMEOUT_MS = 1_800_000
 /** The longest delay setTimeout holds: it keeps the delay in 32 bits, and a larger one fires
  * after 1 ms. A user's "never" (3000000000) made every call time out at once, so a timeout
  * is clamped to this, about 24.8 days. */
-const MAX_TIMER_MS = 2_147_483_647
+export const MAX_TIMER_MS = 2_147_483_647
 
 /** A positive-integer env override, or the default when unset or unparseable. */
 function envTimeout(name: string, fallback: number): number {

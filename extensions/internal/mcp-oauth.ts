@@ -73,8 +73,8 @@ function storeFileFor(serverName: string, endpoint?: string): string {
 }
 
 /** MCP_OAUTH_CALLBACK_PORT parsed, or undefined when unset or not a plain integer. */
-function envCallbackPort(): number | undefined {
-  const raw = process.env.MCP_OAUTH_CALLBACK_PORT
+export function envCallbackPort(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env.MCP_OAUTH_CALLBACK_PORT
   if (raw === undefined || raw.trim() === '') return undefined
   const parsed = Number(raw)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined

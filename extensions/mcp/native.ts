@@ -6,9 +6,10 @@
 import * as os from 'node:os'
 import type { McpServerConfig } from '@earendil-works/pi-coding-agent'
 import type { McpToolAlias } from '../internal/mcp-alias.js'
+import { envCallbackPort } from '../internal/mcp-oauth.js'
 import { type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
 import type { McpPolicy } from './policy.js'
-import { callBudgetMs, type SessionDirs } from './transport.js'
+import { callBudgetMs, MAX_TIMER_MS, type SessionDirs } from './transport.js'
 
 export interface NativeServer {
   name: string
@@ -66,16 +67,20 @@ function httpConfig(config: HttpServerConfig, fill: (value: string) => string, e
   if (token) headers.Authorization = `Bearer ${token}`
   const oauth = config.oauth
   const secret = env.MCP_CLIENT_SECRET
+  // pi's own redirect host is 127.0.0.1; pi-code's client sends localhost (mcp-oauth.ts
+  // redirectUrl), the form a pre-registered redirect URI is matched against.
+  const port = oauth?.callbackPort ?? envCallbackPort(env)
+  const redirect = port === undefined ? {} : { callbackUrl: `http://localhost:${port}/callback` }
   return {
     url: fill(config.url),
     ...(Object.keys(headers).length > 0 ? { headers: mapValues(headers, literal) } : {}),
-    ...(oauth
+    ...(oauth || port !== undefined
       ? {
           oauth: {
-            ...(oauth.clientId === undefined ? {} : { clientId: oauth.clientId }),
-            ...(oauth.clientId !== undefined && secret ? { clientSecret: literal(secret) } : {}),
-            ...(oauth.callbackPort === undefined ? {} : { callbackPort: oauth.callbackPort }),
-            ...(oauth.scopes === undefined ? {} : { scope: oauth.scopes }),
+            ...(oauth?.clientId === undefined ? {} : { clientId: oauth.clientId }),
+            ...(oauth?.clientId !== undefined && secret ? { clientSecret: literal(secret) } : {}),
+            ...redirect,
+            ...(oauth?.scopes === undefined ? {} : { scope: oauth.scopes }),
           },
         }
       : {}),
@@ -86,8 +91,17 @@ function unsupported(config: ServerConfig): string | undefined {
   if ('url' in config) {
     if (config.type === 'sse' || config.type === 'ws' || config.type === 'websocket') return `${config.type} transport`
     if (config.headersHelper !== undefined) return 'headersHelper'
+    // The port becomes part of the redirect URI pi sends, so only a real port is passed on.
+    const port = config.oauth?.callbackPort
+    if (port !== undefined && !(Number.isInteger(port) && port >= 1 && port <= 65535)) return 'oauth.callbackPort'
   }
   return undefined
+}
+
+/** pi's timeout is in seconds and arms a timer in ms, which fires at once past the 32-bit
+ * limit, so the budget is capped below it. */
+function timeoutSeconds(config: ServerConfig): number {
+  return Math.min(Math.ceil(callBudgetMs(config) / 1000), Math.floor(MAX_TIMER_MS / 1000))
 }
 
 /** The config pi connects for this server, or the reason pi-code keeps it: pi has no SSE
@@ -99,7 +113,7 @@ export function toNativeServer(name: string, config: ServerConfig, session?: Ses
   if (!NATIVE_NAME.test(registered)) return { reason: 'server name' }
   const fill = (value: string): string => interpolateEnv(value, env)
   const transport = 'url' in config ? httpConfig(config, fill, env) : stdioConfig(config, fill, session)
-  return { native: { name: registered, config: { ...transport, exposure: 'direct', timeout: Math.ceil(callBudgetMs(config) / 1000) } as McpServerConfig } }
+  return { native: { name: registered, config: { ...transport, exposure: 'direct', timeout: timeoutSeconds(config) } as McpServerConfig } }
 }
 
 /** Whether pi connects the servers: its API exists (pi 0.99 and later) and no MCP policy
