@@ -228,6 +228,10 @@ interface Harness {
   commandNames: () => string[]
   runSlash: (name: string, args: string, idle?: boolean) => Promise<void>
   input: (text: string) => Promise<unknown>
+  /** Servers handed to pi.registerMcpServer, in order (native harness only). */
+  nativeRegistered: Array<{ name: string; config: Record<string, unknown> }>
+  nativeUnregistered: string[]
+  fire: (event: string) => Promise<void>
 }
 
 const writeServers = (file: string, servers: Record<string, unknown>): void => {
@@ -236,7 +240,14 @@ const writeServers = (file: string, servers: Record<string, unknown>): void => {
 }
 
 /** Boots a fresh extension instance against temp-dir user/project config. */
-const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown>; confirm?: () => Promise<boolean>; cwd?: string } = {}): Promise<Harness> => {
+/** pi 0.99's MCP API: `builtinMcp` puts pi's own /mcp among the commands; `tools` are the
+ * names pi.getAllTools() reports. */
+interface NativeApi {
+  builtinMcp: boolean
+  tools?: string[]
+}
+
+const setup = async (opts: { user?: Record<string, unknown>; project?: Record<string, unknown>; confirm?: () => Promise<boolean>; cwd?: string; native?: NativeApi } = {}): Promise<Harness> => {
   const home = mkdtempSync(join(tmpdir(), 'mcp-home-'))
   const cwd = opts.cwd ?? mkdtempSync(join(tmpdir(), 'mcp-proj-'))
   tempDirs.push(home, cwd)
@@ -252,6 +263,17 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
   const sentOptions: unknown[] = []
   const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>()
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+  const nativeRegistered: Array<{ name: string; config: Record<string, unknown> }> = []
+  const nativeUnregistered: string[] = []
+  const native = opts.native
+  const nativeApi = native
+    ? {
+        registerMcpServer: (name: string, config: Record<string, unknown>) => nativeRegistered.push({ name, config }),
+        unregisterMcpServer: (name: string) => nativeUnregistered.push(name),
+        getCommands: () => (native.builtinMcp ? [{ name: 'mcp', source: 'extension', sourceInfo: { path: 'builtin:mcp', source: 'builtin', scope: 'user', origin: 'package' } }] : []),
+        getAllTools: () => [...(native.tools ?? []), 'read', 'bash'].map((name) => ({ name, description: '', parameters: {} })),
+      }
+    : {}
 
   vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
     warnings.push(args.join(' '))
@@ -284,6 +306,7 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
       sentOptions.push(options)
     },
     events: { emit: (channel: string, data: unknown) => emitted.push({ channel, data }), on: () => () => {} },
+    ...nativeApi,
   } as never)
 
   return {
@@ -310,6 +333,11 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
       await commands.get(name)?.handler(args, makeCtx(true, true, idle))
     },
     input: async (text: string) => handlers.get('input')?.({ text, source: 'interactive' }, makeCtx(true)),
+    nativeRegistered,
+    nativeUnregistered,
+    fire: async (event: string) => {
+      await handlers.get(event)?.({}, makeCtx(true))
+    },
   }
 }
 
@@ -3116,5 +3144,99 @@ describe('an unconfigured remote server', () => {
     const [line] = await statusLinesOf(harness)
     expect(line).toContain('not configured')
     expect(line).not.toContain('Invalid URL')
+  })
+})
+
+describe("native mode: pi 0.99's MCP connects the servers", () => {
+  const managedWith = (settings: unknown): void => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mcp-managed-')), 'managed-settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    setManagedSettingsPath(file)
+  }
+  afterEach(() => setManagedSettingsPath(undefined))
+
+  it('leaves /mcp to pi and registers a stdio server with pi instead of connecting it (MCPN-002, MCPN-003)', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { srv: { command: 'node', args: ['s.js'] } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+
+    expect(harness.commandNames()).not.toContain('mcp')
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['srv'])
+    expect(harness.nativeRegistered[0].config).toMatchObject({ command: 'node', args: ['s.js'], exposure: 'direct' })
+    expect(hoisted.transports).toEqual([])
+    expect(harness.toolNames()).toEqual([])
+  })
+
+  it('keeps an SSE server on its own client, without the resource tools pi owns (MCPN-005, MCPN-002)', async () => {
+    withTools([{ name: 'go' }])
+    hoisted.control.getServerCapabilities = () => ({ tools: {}, resources: {} })
+    const harness = await setup({ user: { feed: { type: 'sse', url: 'https://example.com/sse' } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+
+    expect(harness.nativeRegistered).toEqual([])
+    expect(hoisted.transports.map((transport) => transport.kind)).toEqual(['sse'])
+    expect(harness.toolNames()).toEqual(['feed_go'])
+  })
+
+  it("reads neither of pi's own mcp.json files (MCPN-006)", async () => {
+    const agentDir = process.env.PI_CODING_AGENT_DIR as string
+    writeServers(join(agentDir, 'mcp.json'), { piglobal: { command: 'a' } })
+    const harness = await setup({ user: { claudeuser: { command: 'b' } }, native: { builtinMcp: true } })
+    writeServers(join(harness.cwd, '.pi', 'mcp.json'), { piproject: { command: 'c' } })
+    await harness.sessionStart(true)
+
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['claudeuser'])
+    expect(hoisted.transports).toEqual([])
+  })
+
+  it('registers a project .mcp.json server only once the project is approved (MCPN-007)', async () => {
+    const declined = await setup({ project: { proj: { command: 'p' } }, native: { builtinMcp: true } })
+    await declined.sessionStart(true, false)
+    const approved = await setup({ project: { proj: { command: 'p' } }, native: { builtinMcp: true } })
+    await approved.sessionStart(true, true)
+
+    expect(declined.nativeRegistered).toEqual([])
+    expect(approved.nativeRegistered.map((entry) => entry.name)).toEqual(['proj'])
+  })
+
+  it("connects everything itself when pi's /mcp is not running (MCPN-009)", async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: false } })
+    await harness.sessionStart()
+
+    expect(harness.nativeRegistered).toEqual([])
+    expect(hoisted.transports.map((transport) => transport.kind)).toEqual(['stdio'])
+    expect(harness.toolNames()).toEqual(['srv_go'])
+  })
+
+  it('stays on its own client and keeps /mcp when an MCP deny list is set (MCPN-001)', async () => {
+    withTools([{ name: 'go' }])
+    managedWith({ deniedMcpServers: [{ serverName: 'other' }] })
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+
+    expect(harness.commandNames()).toContain('mcp')
+    expect(harness.nativeRegistered).toEqual([])
+    expect(harness.toolNames()).toEqual(['srv_go'])
+  })
+
+  it("publishes pi's mcp__ tools on the roster hooks and subagents read, once they connect (MCPN-008)", async () => {
+    // pi registers a server's tools when it connects, after session_start.
+    const piTools: string[] = []
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: piTools } })
+    await harness.sessionStart()
+    piTools.push('mcp__srv__go')
+    await harness.fire('turn_start')
+
+    const rosters = harness.emitted.filter((entry) => entry.channel === 'pi-code:mcp-tools')
+    expect(rosters.at(-1)?.data).toEqual([{ pi: 'mcp__srv__go', claude: 'mcp__srv__go' }])
+  })
+
+  it('unregisters its servers from pi at session shutdown', async () => {
+    const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+    await harness.shutdown()
+
+    expect(harness.nativeUnregistered).toEqual(['srv'])
   })
 })

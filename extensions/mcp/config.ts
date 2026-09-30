@@ -90,19 +90,34 @@ function claudeJsonPath(home: string): string {
   return override && override.trim().length > 0 ? path.join(claudeConfigDir(home), '.claude.json') : path.join(home, '.claude.json')
 }
 
+/** Claude's own user-scoped MCP config, without pi's mcp.json: what pi-code reads when
+ * pi's native MCP reads pi's files itself. */
+export function claudeUserConfigPaths(home: string): string[] {
+  return [claudeJsonPath(home)]
+}
+
 /** User-scoped MCP config (the user's own; safe to load without project trust). The .pi
  * tree is pi's own and is not relocated by CLAUDE_CONFIG_DIR. */
 export function userConfigPaths(home: string): string[] {
   // mcp.json lives in pi's agent directory, which PI_CODING_AGENT_DIR relocates; the
   // other agent-directory readers (trust store, OAuth tokens) already follow it.
-  return [claudeJsonPath(home), path.join(getAgentDir(), 'mcp.json')]
+  return [...claudeUserConfigPaths(home), path.join(getAgentDir(), 'mcp.json')]
 }
 
 /** Project-scoped MCP config, each file the nearest of its name at or above cwd
  * (bounded at the repository root, matching the approval walk). Loaded only for
  * trusted projects: a server's `command` runs on connect. */
 export function projectConfigPaths(cwd: string): string[] {
-  return ['.mcp.json', path.join('.pi', 'mcp.json')].map((rel) => findNearestFile(cwd, rel) ?? path.join(cwd, rel))
+  return [...claudeProjectConfigPaths(cwd), nearestConfig(cwd, path.join('.pi', 'mcp.json'))]
+}
+
+/** Claude's own project MCP config, without pi's .pi/mcp.json. */
+export function claudeProjectConfigPaths(cwd: string): string[] {
+  return [nearestConfig(cwd, '.mcp.json')]
+}
+
+function nearestConfig(cwd: string, rel: string): string {
+  return findNearestFile(cwd, rel) ?? path.join(cwd, rel)
 }
 
 /** The object entries of a raw `mcpServers` map. A string or null entry (a JSON "comment"
@@ -140,8 +155,8 @@ export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
  * Both are the user's own config, so neither needs project trust; local wins on a name
  * clash (Claude's precedence is local over user).
  */
-export function loadUserScope(home: string, cwd: string): Record<string, ServerConfig> {
-  const servers = loadConfigFrom(userConfigPaths(home))
+export function loadUserScope(home: string, cwd: string, files: string[] = userConfigPaths(home)): Record<string, ServerConfig> {
+  const servers = loadConfigFrom(files)
   Object.assign(servers, serverEntries(projectRecord(home, cwd).mcpServers, claudeJsonPath(home)))
   return servers
 }

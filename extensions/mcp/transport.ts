@@ -98,6 +98,15 @@ export function callRequestOptions(wall: number, tuning: ServerCallTuning = {}):
   return { timeout: idle, resetTimeoutOnProgress: true, maxTotalTimeout: wall, onprogress: () => {} }
 }
 
+/** The single timeout a server's calls get where only one can be set (pi's native MCP,
+ * whose timeout resets on progress): the idle window, or the wall budget when the idle
+ * timeout is disabled or looser than it. */
+export function callBudgetMs(config: ServerConfig): number {
+  const wall = callTimeoutMs()
+  const idle = idleTimeoutMs(serverCallTuning(config))
+  return idle === 0 || idle >= wall ? wall : idle
+}
+
 /** The tuning one server's config yields: its transport kind, and its declared
  * per-server timeout. Per Claude, timeout values below 1000 are ignored and fall
  * through to MCP_TOOL_TIMEOUT. */
