@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -726,12 +727,20 @@ describe('pi wrapper format regression', () => {
   // wrapper it reconstructs from path+content. These tests pin pi's wrapper format:
   // if pi ever changes it, they must fail loudly, because every rewrite silently
   // degrades to a no-op skip.
-  it('pins the wrapper pi assembles in its own source', () => {
-    const source = readFileSync(join(import.meta.dirname, '..', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'system-prompt.js'), 'utf-8')
-    expect(source).toContain('`<project_instructions path="${filePath}">\\n${content}\\n</project_instructions>\\n\\n`')
-    expect(source).toContain('"\\n\\n<project_context>\\n\\n"')
-    expect(source).toContain('"Project-specific instructions and guidelines:\\n\\n"')
-    expect(source).toContain('"</project_context>\\n"')
+  it('finds the reconstructed wrapper in the prompt pi itself builds', async () => {
+    // pi's package index does not export buildSystemPrompt, so it is loaded from the dist file.
+    const { buildSystemPrompt } = (await import(pathToFileURL(join(import.meta.dirname, '..', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'system-prompt.js')).href)) as {
+      buildSystemPrompt: (options: { cwd: string; contextFiles: Array<{ path: string; content: string }> }) => string
+    }
+    const files = [
+      { path: '/repo/CLAUDE.md', content: 'Root rules.' },
+      { path: '/repo/sub/CLAUDE.md', content: 'Sub rules.\nSecond line.' },
+    ]
+    const prompt = buildSystemPrompt({ cwd: '/repo', contextFiles: files })
+
+    for (const file of files) expect(prompt).toContain(instructionsBlock(file.path, file.content))
+    // The two openers the managed-block anchor looks for: before and from pi 0.86.
+    expect(['<project_context>\n\nProject-specific instructions and guidelines:\n\n', '<project_context>\nProject-specific instructions and guidelines:\n\n'].some((opener) => prompt.includes(opener))).toBe(true)
   })
 
   it('finds the reconstructed wrapper inside a realistically assembled prompt', () => {
