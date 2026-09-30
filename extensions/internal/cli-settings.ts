@@ -117,11 +117,12 @@ function privateCopy(text: string): string {
   fs.writeFileSync(file, text, { mode: 0o600 })
   let copies = copiesSlot.get()
   if (copies === undefined) {
-    copies = new Set()
-    copiesSlot.set(copies)
+    const created = new Set<string>()
+    copiesSlot.set(created)
     process.once('exit', () => {
-      for (const copyDir of copies ?? []) fs.rmSync(copyDir, { recursive: true, force: true })
+      for (const copyDir of created) fs.rmSync(copyDir, { recursive: true, force: true })
     })
+    copies = created
   }
   copies.add(dir)
   return file

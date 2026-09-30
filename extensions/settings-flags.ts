@@ -30,17 +30,15 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
 
   let resolved: CliSettings | undefined
   let resolvedFor: string | undefined
-  const rawFlags = (): { settings?: unknown; settingSources?: unknown } => {
-    // After a session replacement this instance's pi is stale and every call throws;
-    // the last answer stands until the fresh instance registers its own reader.
-    try {
-      return { settings: pi.getFlag?.('settings'), settingSources: pi.getFlag?.('setting-sources') }
-    } catch {
-      return {}
-    }
-  }
   const read = (): CliSettings => {
-    const flags = rawFlags()
+    let flags: { settings?: unknown; settingSources?: unknown }
+    try {
+      flags = { settings: pi.getFlag?.('settings'), settingSources: pi.getFlag?.('setting-sources') }
+    } catch {
+      // After a session replacement this instance's pi is stale and every call throws;
+      // the last answer stands until the fresh instance registers its own reader.
+      return resolved ?? resolveCliSettings({}, process.cwd())
+    }
     const key = JSON.stringify([flags.settings, flags.settingSources])
     if (resolved === undefined || resolvedFor !== key) {
       resolved = resolveCliSettings(flags, process.cwd())
@@ -53,11 +51,10 @@ export default function settingsFlagsExtension(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     const { errors } = read()
     if (errors.length === 0) return
-    for (const error of errors) {
-      console.error(`pi-code: ${error}`)
-      ctx.ui.notify(error, 'error')
-    }
-    if (ctx.hasUI) ctx.shutdown()
-    else process.exit(1)
+    for (const error of errors) ctx.ui.notify(error, 'error')
+    // The session ends once the report has flushed: piped stderr is asynchronous on
+    // some platforms, and an exit right after the write can lose the message.
+    const end = ctx.hasUI ? () => ctx.shutdown() : () => process.exit(1)
+    process.stderr.write(`${errors.map((error) => `pi-code: ${error}`).join('\n')}\n`, end)
   })
 }
