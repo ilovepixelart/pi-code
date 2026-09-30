@@ -175,6 +175,17 @@ describe('the peer version floor', () => {
       expect([name, atLeast(parseMinimum(range), AGENT_SETTLED_SINCE)]).toEqual([name, true])
     }
   })
+
+  it('still has extensions depending on agent_settled, the reason for that floor', () => {
+    // If this ever finds none, the floor above may be loosened deliberately; until then
+    // the pin has a live reason rather than being folklore.
+    const users = fs
+      .readdirSync(extensionsDir, { recursive: true, encoding: 'utf-8' })
+      .filter((entry) => entry.endsWith('.ts'))
+      .filter((entry) => fs.readFileSync(path.join(extensionsDir, entry), 'utf-8').includes("pi.on('agent_settled'"))
+
+    expect(users.length).toBeGreaterThan(0)
+  })
 })
 
 // pi's resource loader (HOST_PROVIDED_EXTENSION_PACKAGES in core/resource-loader.js) warns on
@@ -191,16 +202,5 @@ describe('host-provided packages', () => {
     }
     expect(Object.keys(pkg.dependencies).filter((name) => HOST_PROVIDED.includes(name))).toEqual([])
     expect(pkg.peerDependencies.typebox).toBe('*')
-  })
-
-  it('still has extensions depending on agent_settled, the reason for that floor', () => {
-    // If this ever finds none, the floor above may be loosened deliberately; until then
-    // the pin has a live reason rather than being folklore.
-    const users = fs
-      .readdirSync(extensionsDir, { recursive: true, encoding: 'utf-8' })
-      .filter((entry) => entry.endsWith('.ts'))
-      .filter((entry) => fs.readFileSync(path.join(extensionsDir, entry), 'utf-8').includes("pi.on('agent_settled'"))
-
-    expect(users.length).toBeGreaterThan(0)
   })
 })
