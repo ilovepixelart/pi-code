@@ -32,6 +32,7 @@
  * so the byte cap stands in for it.
  */
 
+import * as fs from 'node:fs'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -48,6 +49,7 @@ import { errorMessage } from '../internal/values.js'
 import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
+import { nativeMode, nativeToolAliases, piMcpRunning, toNativeServer } from './native.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
 import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isConnectionLost, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
@@ -84,6 +86,13 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
 
 export default async function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
+  // pi 0.99 and later connect MCP servers themselves (docs/specs/mcp-native.md). Decided
+  // at load, since registering /mcp here is what drops pi's own; project settings count
+  // only once approved, so the policy read here is the managed and user one.
+  const native = nativeMode(pi, loadManagedMcpServers(), mcpAllowDeny(claudeSettingsChain(process.cwd(), os.homedir(), false)))
+  // Whether pi's /mcp is running this session, and the names handed to pi.registerMcpServer.
+  let nativeActive = false
+  const nativeRegistered = new Set<string>()
   // Names with a connect in flight. A name enters `clients` only once its connect
   // resolves, and shutdown clears that map without awaiting anything in flight, so
   // without this set a session switch during a slow connect (or a backoff sleep) let
@@ -135,6 +144,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   const registered = new Map<string, string>()
   // Original server/tool names per registered pi name, for Claude-style hook matchers.
   const aliases: McpToolAlias[] = []
+  // The roster other extensions read: pi-code's own aliases plus the tools pi connected.
+  const roster = (): McpToolAlias[] => [...aliases, ...(nativeActive ? nativeToolAliases(pi.getAllTools()) : [])]
 
   /** How many tools a server actually has registered. Counted from `registered` (the
    * durable owner map) rather than registerTools' return, so a reconnect on a second
@@ -367,6 +378,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * fetched live on every call, so a resources list_changed needs no cache
    * invalidation; its handler only re-checks this gate (see subscribeToResourceChanges). */
   function ensureResourceTools(): void {
+    // pi registers list_mcp_resources and read_mcp_resource for the servers it connects.
+    if (nativeActive) return
     if (resourceToolsRegistered || resourceServers().length === 0) return
     resourceToolsRegistered = true
     pi.registerTool({
@@ -433,7 +446,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
           if (added === 0) return
           const current = status.get(name)
           status.set(name, { state: current?.state ?? 'connected', tools: serverToolCount(name) })
-          pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
+          pi.events.emit(MCP_TOOLS_CHANNEL, roster())
         } catch (error) {
           console.warn(`pi-code-mcp: tool refresh failed for ${name}: ${errorMessage(error)}`)
         }
@@ -443,9 +456,37 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** Hands every server pi can connect to pi.registerMcpServer and returns the rest, which
+   * pi-code connects itself. */
+  function registerWithPi(servers: Record<string, ServerConfig>): Record<string, ServerConfig> {
+    const own: Record<string, ServerConfig> = {}
+    for (const [name, config] of Object.entries(servers)) {
+      const translated = toNativeServer(name, config, sessionDirs)
+      if (!('native' in translated)) {
+        own[name] = config
+        continue
+      }
+      if (config.pluginDataDir !== undefined) {
+        try {
+          fs.mkdirSync(config.pluginDataDir, { recursive: true })
+        } catch {
+          // The server still starts; one that needs the directory reports its own failure.
+        }
+      }
+      try {
+        pi.registerMcpServer(translated.native.name, translated.native.config)
+        nativeRegistered.add(translated.native.name)
+      } catch (error) {
+        console.warn(`pi-code-mcp: pi did not accept server ${name} (${errorMessage(error)}); connecting it directly`)
+        own[name] = config
+      }
+    }
+    return own
+  }
+
   async function connectServers(servers: Record<string, ServerConfig>, authUi?: AuthUi, noRetry = false): Promise<void> {
     const pending: [string, ServerConfig][] = []
-    for (const [name, config] of Object.entries(servers)) {
+    for (const [name, config] of Object.entries(nativeActive ? registerWithPi(servers) : servers)) {
       // A later scope must not take the name of a server that already connected: it
       // would evict that client from the map, leaking it at shutdown, and misreport
       // the earlier server's status.
@@ -565,7 +606,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)
-    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd) }).filter(([name]) => !disabled.has(name)))
+    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, !nativeActive) }).filter(([name]) => !disabled.has(name)))
     const scoped = applyServerPolicy(merged, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
@@ -579,7 +620,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), projectApproved)
     // Tag the scope on each project server: a repository-supplied headersHelper runs
     // with credential variables stripped, unlike a user-scope one.
-    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(projectConfigPaths(ctx.cwd))).map(([name, config]) => [name, { ...config, projectScope: true }]))
+    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(projectConfigPaths(ctx.cwd, !nativeActive))).map(([name, config]) => [name, { ...config, projectScope: true }]))
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
@@ -619,7 +660,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * then) and again when a still-connecting tail finishes, so a server that connects
    * late still gets its aliases published and counted. */
   function publishConnectionSummary(ctx: ExtensionContext): void {
-    pi.events.emit(MCP_TOOLS_CHANNEL, [...aliases])
+    pi.events.emit(MCP_TOOLS_CHANNEL, roster())
     const connected = [...status.values()].filter((s) => s.state === 'connected')
     const failed = [...status.entries()].filter(([, s]) => s.state !== 'connected' && s.state !== 'connecting')
     if (connected.length > 0 || failed.length > 0) {
@@ -647,6 +688,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: checkoutRoot(ctx.cwd), launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
+    nativeActive = native && piMcpRunning(pi.getCommands())
     const authUi = authUiFor(ctx)
     sessionAuthUi = authUi
     // The allow/deny lists filter every scope, including a managed-mcp.json set. They
@@ -705,6 +747,20 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // closure on a closed client. session_start resets status too, so a switch rebuilds it.
     clients.clear()
     status.clear()
+    for (const name of nativeRegistered) {
+      try {
+        pi.unregisterMcpServer(name)
+      } catch {
+        // pi is tearing the session down; a name it no longer knows needs no removal.
+      }
+    }
+    nativeRegistered.clear()
+  })
+
+  // pi's MCP tools register as their servers connect, after session_start; each turn
+  // republishes the roster so hook matchers and subagent patterns see them.
+  pi.on('turn_start', async () => {
+    if (nativeActive) pi.events.emit(MCP_TOOLS_CHANNEL, roster())
   })
 
   // Claude references MCP resources with @server:uri mentions, fetched into the
@@ -735,15 +791,17 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     return { action: 'transform', text: `${event.text}\n\n${sections.join('\n\n')}` }
   })
 
-  pi.registerCommand('mcp', {
-    description: 'Show MCP server status and tools',
-    handler: async (_args, ctx) => {
-      if (status.size === 0) {
-        ctx.ui.notify('No MCP servers configured. Add them to .mcp.json, .pi/mcp.json, ~/.claude.json, or ~/.pi/agent/mcp.json', 'info')
-        return
-      }
-      const lines = [...status.entries()].map(([name, s]) => `${name}: ${s.state} (${s.tools} tools)`)
-      ctx.ui.notify(lines.join('\n'), 'info')
-    },
-  })
+  // In native mode /mcp is pi's.
+  if (!native)
+    pi.registerCommand('mcp', {
+      description: 'Show MCP server status and tools',
+      handler: async (_args, ctx) => {
+        if (status.size === 0) {
+          ctx.ui.notify('No MCP servers configured. Add them to .mcp.json, .pi/mcp.json, ~/.claude.json, or ~/.pi/agent/mcp.json', 'info')
+          return
+        }
+        const lines = [...status.entries()].map(([name, s]) => `${name}: ${s.state} (${s.tools} tools)`)
+        ctx.ui.notify(lines.join('\n'), 'info')
+      },
+    })
 }
