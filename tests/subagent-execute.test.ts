@@ -6,6 +6,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, setKnownMcpAliases, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
 
 // The agent-memory tests read settings and stores under the home directory; point
@@ -2233,5 +2234,30 @@ describe('getPiInvocation packaging fallbacks', () => {
     withProcess('/nonexistent/script-gone.js', '/usr/local/bin/node', () => {
       expect(getPiInvocation(['-p', 'task'])).toEqual({ command: 'pi', args: ['-p', 'task'] })
     })
+  })
+})
+
+describe('subagent children under the command-line flags', () => {
+  // Claude runs subagents in-process, so they see the parent's --settings and
+  // --setting-sources; pi-code's children are fresh pi processes and must be told.
+  const forward = ['--settings', '/copy/settings.json', '--setting-sources', 'user']
+  const flags = (): void => setCliSettingsReader(() => ({ settingsFile: '/copy/settings.json', sources: new Set(['user']), forwardArgs: forward, errors: [] }))
+  const forwarded = (args: string[]): string[] => args.slice(args.indexOf('--settings'), args.indexOf('--settings') + forward.length)
+
+  afterEach(() => setCliSettingsReader(undefined))
+
+  it('hands a foreground child the --settings snapshot and the source list', async () => {
+    flags()
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
+    script('inspect', { stdout: [say('ok')], exitCode: 0 })
+    await runAgent({ prompt: 'inspect', model: 'fast-1' })
+    expect(forwarded(piArgs(spawnCalls[0]))).toEqual(forward)
+  })
+
+  it('hands a background child the same flags', async () => {
+    flags()
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ model: 'sonnet', tools: ['read', 'bash'] })], projectAgentsDir: null })
+    await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    expect(forwarded(startBackgroundRunMock.mock.calls[0][2].args)).toEqual(forward)
   })
 })

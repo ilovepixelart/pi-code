@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import envSettingsExtension, { applyEnvSettings, envFromSettings, mergeEnvScopes } from '../extensions/env-settings.ts'
+import { type CliSettings, setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', approved: false }))
@@ -505,5 +506,88 @@ describe('sanitizeProjectEnv', () => {
   it('keeps ordinary keys untouched (the guard must not block normal work)', async () => {
     const { sanitizeProjectEnv } = await import('../extensions/env-settings.ts')
     expect(sanitizeProjectEnv({ ANTHROPIC_BASE_URL: 'https://proxy', DEBUG: '1' }, () => {})).toEqual({ ANTHROPIC_BASE_URL: 'https://proxy', DEBUG: '1' })
+  })
+})
+
+describe('env-settings under the command-line flags', () => {
+  const tempDirs: string[] = []
+  const tempDir = (prefix: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), prefix))
+    tempDirs.push(dir)
+    return dir
+  }
+  const usedKeys = ['ENVTEST_A', 'ENVTEST_B', 'ENVTEST_C', 'ENVTEST_P', 'ENVTEST_U', 'PI_CODE_ENVTEST']
+  const writeSettings = (dir: string, name: string, env: unknown): void => {
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    writeFileSync(join(dir, '.claude', name), JSON.stringify({ env }))
+  }
+  /** The --settings snapshot: any file outside every discovered location. */
+  const flagFile = (env: unknown): string => {
+    const file = join(tempDir('env-flag-'), 'settings.json')
+    writeFileSync(file, JSON.stringify({ env }))
+    return file
+  }
+  const all = new Set(['user', 'project', 'local'] as const)
+  const flags = (over: Partial<CliSettings>): void => setCliSettingsReader(() => ({ settingsFile: undefined, sources: all, forwardArgs: [], errors: [], ...over }))
+
+  type Handler = (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>
+  const start = async (cwd: string): Promise<void> => {
+    const handlers = new Map<string, Handler>()
+    envSettingsExtension({ on: (name: string, fn: Handler) => handlers.set(name, fn) } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd })
+  }
+
+  beforeEach(() => {
+    hoisted.home = tempDir('env-home-')
+    hoisted.approved = false
+    setManagedSettingsPath(join(hoisted.home, 'managed-settings.json'))
+  })
+
+  afterEach(() => {
+    setCliSettingsReader(undefined)
+    for (const key of usedKeys) delete process.env[key]
+    setManagedSettingsPath(undefined)
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('applies the --settings env above the project scope and below managed', async () => {
+    // Claude: the command line "sits above every file except managed".
+    hoisted.approved = true
+    const project = tempDir('env-proj-')
+    writeSettings(project, 'settings.json', { ENVTEST_A: 'project', ENVTEST_B: 'project' })
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ env: { ENVTEST_B: 'managed' } }))
+    flags({ settingsFile: flagFile({ ENVTEST_A: 'flag', ENVTEST_B: 'flag', ENVTEST_C: 'flag' }) })
+    await start(project)
+    expect([process.env.ENVTEST_A, process.env.ENVTEST_B, process.env.ENVTEST_C]).toEqual(['flag', 'managed', 'flag'])
+  })
+
+  it("does not sanitize the --settings env and needs no project approval: it is the user's input, not the repository's", async () => {
+    // A PI_CODE_ key is dropped from a project's env (sanitizeProjectEnv); the flag is the
+    // same level as the user's own file, which may set it.
+    flags({ settingsFile: flagFile({ PI_CODE_ENVTEST: 'kept' }) })
+    await start(tempDir('env-proj-'))
+    expect(process.env.PI_CODE_ENVTEST).toBe('kept')
+  })
+
+  it("--setting-sources user leaves an approved project's env out", async () => {
+    hoisted.approved = true
+    const project = tempDir('env-proj-')
+    writeSettings(project, 'settings.json', { ENVTEST_P: 'project' })
+    flags({ sources: new Set(['user']) })
+    await start(project)
+    expect(process.env.ENVTEST_P).toBeUndefined()
+  })
+
+  it('--setting-sources project leaves the user env out', async () => {
+    writeSettings(hoisted.home, 'settings.json', { ENVTEST_U: 'user' })
+    flags({ sources: new Set(['project']) })
+    await start(tempDir('env-proj-'))
+    expect(process.env.ENVTEST_U).toBeUndefined()
+  })
+})
+
+describe('mergeEnvScopes with the command-line level', () => {
+  it('lays the flag level over the project scope and under managed', () => {
+    expect(mergeEnvScopes({ A: 'm' }, { A: 'u', B: 'u', C: 'u', D: 'u' }, { B: 'p', C: 'p' }, { A: 'f', C: 'f' })).toEqual({ A: 'm', B: 'p', C: 'f', D: 'u' })
   })
 })

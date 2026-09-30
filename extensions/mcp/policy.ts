@@ -7,7 +7,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { managedSettingsFile } from '../internal/managed-settings.js'
-import { claudeSettingsChain } from '../internal/settings-chain.js'
+import { claudeSettingsSources } from '../internal/settings-chain.js'
 import { errorMessage, escapeRegExp, isRecord } from '../internal/values.js'
 import { interpolateEnv, type ServerConfig } from './config.js'
 
@@ -20,7 +20,8 @@ export interface ProjectServerPolicy {
 /** Claude's per-server approvals for project .mcp.json servers.
  *
  * Consent-granting keys (enabledMcpjsonServers, enableAllProjectMcpServers) count
- * from the user's own settings always, and from the project's settings.local.json
+ * from the user's own settings always (the user file and the `--settings` flag, the
+ * two levels a repository cannot write), and from the project's settings.local.json
  * only once the project itself is approved. That file is gitignored by convention,
  * not by enforcement: a repository can commit one, and honoring it unconditionally
  * let a hostile repo self-approve a server whose `command` runs on connect, even
@@ -54,12 +55,12 @@ export function projectServerPolicy(cwd: string, home: string, projectApproved: 
   // and settings.local.json from the main checkout, with the chain's legacy cwd copy
   // read too. Resolving them by nearest-file here gave a subdirectory session an
   // ancestor's project file and a worktree session its own local file instead.
-  const [userFile, projectFile, ...localFiles] = claudeSettingsChain(cwd, home, true)
-  const userSettings = read(userFile)
-  const projectSettings = read(projectFile)
-  const localSettings = localFiles.map(read)
-  const disabled = new Set([...names(userSettings.disabledMcpjsonServers), ...names(projectSettings.disabledMcpjsonServers), ...localSettings.flatMap((settings) => names(settings.disabledMcpjsonServers))])
-  const consentSources = projectApproved ? [userSettings, ...localSettings] : [userSettings]
+  const sources = claudeSettingsSources(cwd, home, true)
+  const settingsIn = (...scopes: string[]): Record<string, unknown>[] => sources.filter((source) => scopes.includes(source.scope)).map((source) => read(source.file))
+  const userLevel = settingsIn('user', 'flag')
+  const localSettings = settingsIn('local')
+  const disabled = new Set(sources.flatMap((source) => names(read(source.file).disabledMcpjsonServers)))
+  const consentSources = projectApproved ? [...userLevel, ...localSettings] : userLevel
   const consented = new Set(consentSources.flatMap((settings) => names(settings.enabledMcpjsonServers)))
   const consentAll = consentSources.some((settings) => settings.enableAllProjectMcpServers === true)
   return { disabled, consented, consentAll }

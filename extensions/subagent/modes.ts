@@ -10,7 +10,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-
+import { cliSettings } from '../internal/cli-settings.js'
 import { capForContext } from '../internal/output-guard.js'
 import { isProjectApproved } from '../internal/project-approval.js'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.js'
@@ -156,6 +156,8 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
   // projectApproved gated; see the foreground path for why runCwd must not be used.
   const memorySection = agentMemoryPromptSection(agent, defaultCwd, projectApproved)
   const args = agentInvocationArgs(memorySection ? { ...agent, tools: withMemoryTools(agent.tools) } : agent, resolveModelAlias(agent.modelAlias, availableModels))
+  // The parent's --settings and --setting-sources, as for a foreground child (run.ts).
+  args.push(...cliSettings().forwardArgs)
   let tmpPrompt: { dir: string; filePath: string } | undefined
   const promptBody = childPromptBody(agent, skillRoots, memorySection)
   if (promptBody.trim()) {

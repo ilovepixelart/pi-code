@@ -2,7 +2,7 @@
 
 Runs Claude Code's `.claude/settings.json` hooks on pi's lifecycle events. Source: [`extensions/hooks/`](../extensions/hooks) (the module header in `index.ts` is the authoritative contract).
 
-Hook locations (settings.json from the session's primary working directory, settings.local.json at the repository root, per Claude's placement rules): settings files, managed policy settings, plugins, skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run), and agent frontmatter (passed to the subagent child via env, running only while it runs, with `Stop` converted to `SubagentStop`).
+Hook locations (settings.json from the session's primary working directory, settings.local.json at the repository root, per Claude's placement rules): settings files, the `--settings` flag ([settings-env.md](settings-env.md#command-line-flags)), managed policy settings, plugins, skill frontmatter (registered at invocation for the rest of the session, with `once` removing a hook after its first successful run), and agent frontmatter (passed to the subagent child via env, running only while it runs, with `Stop` converted to `SubagentStop`).
 
 ## Events
 

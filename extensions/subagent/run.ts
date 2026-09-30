@@ -17,7 +17,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { Message } from '@earendil-works/pi-ai'
 import { withFileMutationQueue } from '@earendil-works/pi-coding-agent'
-
+import { cliSettings } from '../internal/cli-settings.js'
 import { killProcessTree } from '../internal/process-tree.js'
 import { runSubagentStartHooks } from '../internal/subagent-hooks.js'
 import { type AgentConfig, resolveModelAlias } from './agents.js'
@@ -243,6 +243,9 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   // agent pins a tools allowlist.
   const invocationAgent = memorySection ? { ...agent, tools: withMemoryTools(agent.tools) } : agent
   const args = agentInvocationArgs(invocationAgent, resolveModelAlias(agent.modelAlias, options.availableModels ?? []))
+  // Claude's subagents run in-process and see the parent's --settings and
+  // --setting-sources; a child pi process has to be handed them.
+  args.push(...cliSettings().forwardArgs)
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
