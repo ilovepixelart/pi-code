@@ -42,7 +42,7 @@ One `pi install` and everything below loads on the next start. `pi list` shows w
 Each topic links to its own doc with the full contract and any divergences from Claude Code.
 
 - **[Hooks](docs/hooks.md)** — your `.claude/settings.json` hooks on every lifecycle event, with Claude's tool vocabulary, decision fields, and background hooks.
-- **[MCP servers](docs/mcp.md)** — every Claude config scope, all four transports, OAuth, managed policy, timeouts, prompts, and resources.
+- **[MCP servers](docs/mcp.md)** — every Claude config scope, all four transports, OAuth, managed policy, timeouts, prompts, and resources. On pi 0.99 and later the servers are handed to pi's own MCP support.
 - **[Custom slash commands](docs/commands.md)** — `.claude/commands` with arguments, bash spans, `@file` inlining, frontmatter, and model invocation.
 - **[Skills](docs/skills.md)** — `.claude/skills` discovery plus the same dynamic content commands get.
 - **[Subagents](docs/subagents.md)** — built-in and custom agents, background runs, per-agent memory, worktree isolation.

@@ -52,6 +52,12 @@ json.dump({"packages": [repo], "defaultModel": "dead-model", "defaultProvider": 
 json.dump({fx: True}, open(f"{agent}/trust.json", "w"))
 PY
 
+# A user-scope stdio MCP server. On a pi with native MCP (pi.registerMcpServer, pi 0.99
+# and later) pi-code hands it to pi, which declares it as mcp__smoke__echo; older pi gets
+# pi-code's own smoke_echo.
+printf '{"mcpServers":{"smoke":{"type":"stdio","command":"node","args":["%s/scripts/lib/mcp-echo-server.mjs"]}}}' "$REPO" > "$HOMEDIR/.claude.json"
+if grep -q 'registerMcpServer' "$REPO/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts" 2>/dev/null; then MCP_TOOL=mcp__smoke__echo; else MCP_TOOL=smoke_echo; fi
+
 run_pi() {
   (cd "$FX" && env -u PI_CODING_AGENT_DIR -u CLAUDE_CONFIG_DIR HOME="$HOMEDIR" PI_E2E_WIRE="$WIRE" PI_SKIP_VERSION_CHECK=1 perl -e 'alarm 150; exec @ARGV' "$@" < /dev/null)
 }
@@ -68,6 +74,8 @@ if wire_has 'ZANZIBAR'; then ok "smoke: @import chain content on the wire"; else
 if wire_has 'PERSONAL LOCAL NOTE MARKER'; then ok "smoke: CLAUDE.local.md on the wire"; else bad "smoke: local marker missing from payload"; fi
 if wire_has 'Tests must be deterministic'; then ok "smoke: project rule on the wire"; else bad "smoke: project rule missing from payload"; fi
 if wire_has 'available_skills' && wire_has 'greet'; then ok "smoke: skills listing on the wire"; else bad "smoke: skills listing missing from payload"; fi
+if wire_has "\"$MCP_TOOL\""; then ok "smoke: MCP server tool declared as $MCP_TOOL"; else bad "smoke: MCP tool $MCP_TOOL missing from payload"; fi
+if grep -q 'builtin:mcp' "$SMOKE/pi-out.log"; then bad "smoke: pi reports pi-code replacing its built-in MCP"; else ok "smoke: no built-in MCP replacement warning"; fi
 
 printf '\n'
 printf 'e2e-smoke finished: %s passed, %s failed\n' "$PASS" "$FAIL"

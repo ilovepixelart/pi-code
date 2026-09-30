@@ -2,6 +2,20 @@
 
 Connects Claude Code's MCP configuration and registers each server's tools in pi. Source: [`extensions/mcp/`](../extensions/mcp).
 
+## Native mode (pi 0.99 and later)
+
+pi 0.99 has its own MCP support. When it is running and no MCP policy is set, pi-code reads Claude's configuration as below, applies approval, scopes and the disabled lists, and hands each server to pi with `pi.registerMcpServer()` (`exposure: "direct"`). pi connects it, owns `/mcp`, `list_mcp_resources` and `read_mcp_resource`, and reads its own `~/.pi/agent/mcp.json` and `.pi/mcp.json`, which pi-code then leaves alone. Source: [`extensions/mcp/native.ts`](../extensions/mcp/native.ts).
+
+- Tools are named as in Claude: `mcp__<server>__<tool>`, and `mcp__plugin_<plugin>_<server>__<tool>` for a plugin's server.
+- pi-code expands `${VAR}` and `${VAR:-default}` itself and escapes every `env` and header value, so pi never runs a value starting with `!` or expands a `$` in it.
+- The call timeout pi applies (reset by progress) is pi-code's idle budget below, or the wall budget when the idle timeout is disabled.
+- pi starts a stdio server with the full parent environment plus its `env`, as Claude does by default; the baseline-environment rule under Configuration scopes applies to servers pi-code connects itself.
+- pi-code keeps connecting what pi cannot: `sse`, `ws` and `websocket` servers, servers with a `headersHelper`, and names outside `[A-Za-z0-9_-]`. Their tools keep the `<server>_<tool>` names.
+- Not available for servers pi connects: prompts as `/mcp__server__prompt` commands, `@server:uri` mentions, `mcp_tool` hooks, `MCP_TIMEOUT`/`MCP_CONNECT_TIMEOUT_MS` and the reconnect schedule below. OAuth tokens live in pi's store, so an OAuth server needs one sign-in through pi's `/mcp`.
+- pi-code stays on its own client for every server when `managed-mcp.json`, `allowedMcpServers` or `deniedMcpServers` is set (pi would connect its own `mcp.json` servers outside those rules), when pi's `/mcp` is disabled (`-builtin:mcp`) or replaced, and on pi before 0.99. `/mcp` belongs to pi-code only in the policy and pre-0.99 cases.
+
+Everything below describes pi-code's own client.
+
 ## Configuration scopes
 
 - User: `~/.claude.json` (including the per-project `projects[cwd].mcpServers` local scope) and `mcp.json` in pi's agent directory (`~/.pi/agent`, relocated by `PI_CODING_AGENT_DIR`). The per-project `disabledMcpServers` toggle list mutes a user or plugin server without removing it.
