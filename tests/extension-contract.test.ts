@@ -147,13 +147,15 @@ describe('pi session replacement contract', () => {
 // fires. Unlike the `ctx.isProjectTrusted` floor, which a runtime feature check guards
 // (internal/project-approval.ts), this one cannot be feature-detected: registering a
 // handler for an event that never fires looks identical to one that has not fired yet.
-// The declared floor is therefore the only guard, so it is pinned here with its reason.
-describe('the peer version floor', () => {
+// pi installs packages with peer resolution disabled (--omit=peer, --legacy-peer-deps), so a
+// peerDependencies range cannot enforce it either. The README's stated floor is therefore the
+// only guard, so it is pinned here with its reason.
+describe('the documented pi version floor', () => {
   const AGENT_SETTLED_SINCE = [0, 80, 4]
 
-  const parseMinimum = (range: string): number[] => {
-    const match = /^>=\s*(\d+)\.(\d+)\.(\d+)/.exec(range)
-    if (!match) throw new Error(`peer range ${range} is not a >=x.y.z floor this test can read`)
+  const parseMinimum = (readme: string): number[] => {
+    const match = /pi `>=\s*(\d+)\.(\d+)\.(\d+)`/.exec(readme)
+    if (!match) throw new Error('README states no pi `>=x.y.z` floor this test can read')
     return [Number(match[1]), Number(match[2]), Number(match[3])]
   }
 
@@ -165,15 +167,9 @@ describe('the peer version floor', () => {
   }
 
   it('covers every runtime feature the extensions use unconditionally', () => {
-    const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
-      peerDependencies: Record<string, string>
-    }
-    const peers = Object.entries(pkg.peerDependencies).filter(([name]) => name.startsWith('@earendil-works/'))
-    expect(peers.length).toBeGreaterThan(0)
+    const readme = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'README.md'), 'utf-8')
 
-    for (const [name, range] of peers) {
-      expect([name, atLeast(parseMinimum(range), AGENT_SETTLED_SINCE)]).toEqual([name, true])
-    }
+    expect(atLeast(parseMinimum(readme), AGENT_SETTLED_SINCE)).toBe(true)
   })
 
   it('still has extensions depending on agent_settled, the reason for that floor', () => {
@@ -190,17 +186,17 @@ describe('the peer version floor', () => {
 
 // pi's resource loader (HOST_PROVIDED_EXTENSION_PACKAGES in core/resource-loader.js) warns on
 // every start when a package lists one of these in `dependencies`: an installed copy bypasses the
-// loader's redirect to the host module and can create a duplicate runtime. They belong in
-// peerDependencies, and typebox, which has no pi version floor, with the "*" range the warning asks for.
+// loader's redirect to the host module and can create a duplicate runtime. pi's docs/packages.md
+// asks for them in peerDependencies with a "*" range instead.
 describe('host-provided packages', () => {
   const HOST_PROVIDED = ['@earendil-works/pi-agent-core', '@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', '@mariozechner/pi-agent-core', '@mariozechner/pi-ai', '@mariozechner/pi-coding-agent', '@mariozechner/pi-tui', '@sinclair/typebox', 'typebox']
 
-  it('are peers, never runtime dependencies', () => {
+  it('are peers with a "*" range, never runtime dependencies', () => {
     const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
       dependencies: Record<string, string>
       peerDependencies: Record<string, string>
     }
     expect(Object.keys(pkg.dependencies).filter((name) => HOST_PROVIDED.includes(name))).toEqual([])
-    expect(pkg.peerDependencies.typebox).toBe('*')
+    expect(Object.entries(pkg.peerDependencies).filter(([name, range]) => !HOST_PROVIDED.includes(name) || range !== '*')).toEqual([])
   })
 })

@@ -524,7 +524,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * file first edited in that turn had its baseline folded into the discarded ref. */
   function continuedCheckpoint(ctx: ExtensionContext): Checkpoint | undefined {
     // A queued follow-up is a new user message and needs its own snapshot. Optional: the
-    // peer range reaches runtimes that may not have the method.
+    // supported pi range reaches runtimes that may not have the method.
     if (ctx.hasPendingMessages?.()) return undefined
     const target = findLastUserMessage(ctx)
     return target ? checkpoints.get(target.entryId) : undefined
