@@ -46,7 +46,7 @@ import { isProjectApproved, isProjectApprovedSilently } from '../internal/projec
 import { checkoutRoot } from '../internal/project-root.js'
 import { claudeSettingsChain } from '../internal/settings-chain.js'
 import { errorMessage } from '../internal/values.js'
-import { disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, warnOnTypelessUrl } from './config.js'
+import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
 import { nativeMode, nativeToolAliases, piMcpRunning, toNativeServer } from './native.js'
@@ -606,7 +606,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)
-    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, !nativeActive) }).filter(([name]) => !disabled.has(name)))
+    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name)))
     const scoped = applyServerPolicy(merged, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
@@ -620,7 +620,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), projectApproved)
     // Tag the scope on each project server: a repository-supplied headersHelper runs
     // with credential variables stripped, unlike a user-scope one.
-    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(projectConfigPaths(ctx.cwd, !nativeActive))).map(([name, config]) => [name, { ...config, projectScope: true }]))
+    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd))).map(([name, config]) => [name, { ...config, projectScope: true }]))
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
@@ -759,7 +759,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
 
   // pi's MCP tools register as their servers connect, after session_start; each turn
   // republishes the roster so hook matchers and subagent patterns see them.
-  pi.on('turn_start', async () => {
+  pi.on('turn_start', () => {
     if (nativeActive) pi.events.emit(MCP_TOOLS_CHANNEL, roster())
   })
 

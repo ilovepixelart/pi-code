@@ -54,9 +54,15 @@ function stdioConfig(config: StdioServerConfig, fill: (value: string) => string,
   }
 }
 
+/** An inline bearerToken (expanded) wins over bearerTokenEnv, which names a variable read as is. */
+function bearerToken(config: HttpServerConfig, fill: (value: string) => string, env: NodeJS.ProcessEnv): string | undefined {
+  if (config.bearerToken) return fill(config.bearerToken)
+  return config.bearerTokenEnv ? env[config.bearerTokenEnv] : undefined
+}
+
 function httpConfig(config: HttpServerConfig, fill: (value: string) => string, env: NodeJS.ProcessEnv): McpServerConfig {
   const headers = mapValues(config.headers ?? {}, fill)
-  const token = config.bearerToken ? fill(config.bearerToken) : config.bearerTokenEnv ? env[config.bearerTokenEnv] : undefined
+  const token = bearerToken(config, fill, env)
   if (token) headers.Authorization = `Bearer ${token}`
   const oauth = config.oauth
   const secret = env.MCP_CLIENT_SECRET
