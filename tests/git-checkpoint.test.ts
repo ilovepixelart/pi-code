@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-
 import gitCheckpoint, { CHECKPOINT_RETENTION_DAYS, capCheckpoints, checkpointRetentionDays, MAX_CHECKPOINTS_PER_SESSION, pruneCheckpointRepos, sessionSlug } from '../extensions/git-checkpoint.ts'
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 
 type Handler = (event: any, ctx: any) => Promise<unknown>
 
@@ -131,6 +131,24 @@ describe('checkpoint retention', () => {
       expect(checkpointRetentionDays(home)).toBe(CHECKPOINT_RETENTION_DAYS)
     }
     expect(checkpointRetentionDays(mkdtempSync(join(tmpdir(), 'gcs-empty-home-')))).toBe(CHECKPOINT_RETENTION_DAYS)
+  })
+})
+
+describe('checkpointRetentionDays under the command-line flags', () => {
+  it('reads cleanupPeriodDays from the --settings value over the user file, and not from a user file --setting-sources excludes', () => {
+    const home = mkdtempSync(join(tmpdir(), 'gcs-home-'))
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ cleanupPeriodDays: 7 }))
+    const flag = join(mkdtempSync(join(tmpdir(), 'gcs-flag-')), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ cleanupPeriodDays: 3 }))
+    try {
+      setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+      expect(checkpointRetentionDays(home)).toBe(3)
+      setCliSettingsReader(() => ({ settingsFile: undefined, sources: new Set(['project']), forwardArgs: [], errors: [] }))
+      expect(checkpointRetentionDays(home)).toBe(CHECKPOINT_RETENTION_DAYS)
+    } finally {
+      setCliSettingsReader(undefined)
+    }
   })
 })
 

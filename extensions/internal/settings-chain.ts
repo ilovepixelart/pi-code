@@ -84,6 +84,17 @@ export function claudeSettingsChain(cwd: string, home: string, includeProject: b
   return claudeSettingsSources(cwd, home, includeProject, platform, owned, cli).map((source) => source.file)
 }
 
+/** The files a repository cannot write, for the keys only the user may set (a
+ * notification channel, a question timeout, a retention period, plugin enablement):
+ * the user settings.json unless `--setting-sources` excludes it, then the `--settings`
+ * snapshot, which Claude lets set "any key your user settings file can set". */
+export function userSettingsFiles(home: string, cli: CliSettings = cliSettings()): string[] {
+  const files: string[] = []
+  if (cli.sources.has('user')) files.push(path.join(claudeConfigDir(home), 'settings.json'))
+  if (cli.settingsFile !== undefined) files.push(cli.settingsFile)
+  return files
+}
+
 /** The settings.local.json the chain reads last, which is also where a setting a
  * command persists (an output-style choice, an MCP consent) must be written for the
  * chain to read it back: a file at any other level is never consulted. */
@@ -91,13 +102,15 @@ export function localSettingsFile(cwd: string, home: string, platform: NodeJS.Pl
   return path.join(localSettingsDir(cwd, home, platform, owned), '.claude', 'settings.local.json')
 }
 
-/** One settings file as a JSON object, or undefined when missing, unparseable or not
- * an object: the single-file case of the chain, for the user-only settings a
- * repository must not influence (a notification channel, a question timeout, a
- * retention period). */
-export function readSettingsFile(file: string): Record<string, unknown> | undefined {
-  const first = readSettingsChain([file]).next()
-  return first.done ? undefined : first.value
+/** The last value the user-level files (userSettingsFiles) set for `key`, or
+ * undefined when none does: for the settings a repository must not influence (a
+ * notification channel, a question timeout, a retention period). */
+export function readUserSetting(home: string, key: string, cli: CliSettings = cliSettings()): unknown {
+  let found: unknown
+  for (const settings of readSettingsChain(userSettingsFiles(home, cli))) {
+    if (key in settings) found = settings[key]
+  }
+  return found
 }
 
 /** Every readable settings object in the chain, in order, so the last one a caller

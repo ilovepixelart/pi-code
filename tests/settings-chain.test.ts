@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { type CliSettings, type SettingSource, setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
-import { claudeSettingsChain, claudeSettingsSources, readSettingsChain } from '../extensions/internal/settings-chain.ts'
+import { claudeSettingsChain, claudeSettingsSources, readSettingsChain, userSettingsFiles } from '../extensions/internal/settings-chain.ts'
 
 describe('readSettingsChain', () => {
   const write = (dir: string, name: string, body: string): string => {
@@ -165,5 +165,24 @@ describe('claudeSettingsChain under the command-line flags', () => {
   it('reads the flags the settings-flags extension registered when a caller passes none', () => {
     setCliSettingsReader(() => flags({ settingsFile: '/copy/settings.json', sources: new Set(['user']) }))
     expect(claudeSettingsChain(plainCwd(), '/home/u', true, 'linux', owned)).toEqual([user, '/copy/settings.json'])
+  })
+})
+
+describe('userSettingsFiles', () => {
+  const all = new Set<SettingSource>(['user', 'project', 'local'])
+  const flags = (over: Partial<CliSettings>): CliSettings => ({ settingsFile: undefined, sources: all, forwardArgs: [], errors: [], ...over })
+  const user = join('/home/u', '.claude', 'settings.json')
+
+  it('is the user file, then the --settings copy: the levels a repository cannot write', () => {
+    // Claude: --settings "can set any key your user settings file can set".
+    expect(userSettingsFiles('/home/u', flags({ settingsFile: '/copy/settings.json' }))).toEqual([user, '/copy/settings.json'])
+  })
+
+  it('omits the user file when --setting-sources excludes user', () => {
+    expect(userSettingsFiles('/home/u', flags({ sources: new Set(['project']), settingsFile: '/copy/settings.json' }))).toEqual(['/copy/settings.json'])
+  })
+
+  it('is just the user file without the flags', () => {
+    expect(userSettingsFiles('/home/u', flags({}))).toEqual([user])
   })
 })

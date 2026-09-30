@@ -16,6 +16,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync }
 })
 
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import { installedPlugins, pluginComponentPath, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
 
 describe('substitutePluginVars user_config', () => {
@@ -115,6 +116,20 @@ describe('installedPlugins', () => {
     enable(h, { linter: false })
 
     expect(installedPlugins(h, []).map((p) => p.name)).toEqual(['formatter'])
+  })
+
+  it('honors an enabledPlugins entry from the --settings value', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    install(h, 'community', 'linter', '1.0.0')
+    const flag = join(mkdtempSync(join(tmpdir(), 'plugins-flag-')), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ enabledPlugins: { linter: false } }))
+    try {
+      setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+      expect(installedPlugins(h, []).map((p) => p.name)).toEqual(['formatter'])
+    } finally {
+      setCliSettingsReader(undefined)
+    }
   })
 
   it('honors marketplace-qualified enablement and picks the newest version', () => {

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import notifyExtension, { AWAY_AFTER_MS, isAway, resolveNotifChannel } from '../extensions/notify.ts'
 
 // The channel is read from the mocked home's ~/.claude/settings.json; default '' falls
@@ -207,6 +208,26 @@ describe('notify', () => {
     // explicit bell the 'both' channel adds.
     expect(out.split('\x07').length - 1).toBe(2)
     hoisted.home = ''
+  })
+
+  it('reads preferredNotifChannel from the --settings value over the user file', async () => {
+    hoisted.home = mkdtempSync(join(tmpdir(), 'notify-home-'))
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ preferredNotifChannel: 'terminal_bell' }))
+    const flag = join(mkdtempSync(join(tmpdir(), 'notify-flag-')), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ preferredNotifChannel: 'notifications_disabled' }))
+    setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+    process.stdout.isTTY = true
+    const writes = captureWrites()
+    try {
+      const d = drive()
+      await d.sessionStart({ cwd: hoisted.home })
+      await d.agentEnd()
+      await d.agentSettled()
+      expect(writes).toEqual([])
+    } finally {
+      setCliSettingsReader(undefined)
+    }
   })
 
   it('emits nothing when notifications are disabled', async () => {
