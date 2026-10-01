@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
-import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
+import statusLine, { activeStatusLine, readStatusLineConfig } from '../extensions/status-line.ts'
 import { makeWorktree } from './worktree-fixture.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, settingsChanged: undefined as (() => void) | undefined, fsReads: [] as string[], kills: [] as number[] }))
@@ -101,6 +101,34 @@ describe('readStatusLineConfig', () => {
     const bad = join(tempDir(), 'bad.json')
     writeFileSync(bad, JSON.stringify({ statusLine: { type: 'command' } }))
     expect(readStatusLineConfig([bad])).toBeUndefined()
+  })
+})
+
+// Claude: "If disableAllHooks is true outside managed settings ..., Claude Code runs only a
+// statusLine from managed settings, and with no managed statusLine the status line is
+// disabled."
+describe('activeStatusLine under disableAllHooks', () => {
+  const userFile = (settings: Record<string, unknown>): string => {
+    const file = join(tempDir(), 'settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    return file
+  }
+  const managed = { statusLine: { type: 'command', command: 'managed.sh' } }
+
+  it('still runs the managed statusLine when a user file disables hooks', () => {
+    expect(activeStatusLine([userFile({ disableAllHooks: true, statusLine: { command: 'user.sh' } })], managed)?.command).toBe('managed.sh')
+  })
+
+  it('runs nothing when a user file disables hooks and nothing is managed', () => {
+    expect(activeStatusLine([userFile({ disableAllHooks: true, statusLine: { command: 'user.sh' } })], {})).toBeUndefined()
+  })
+
+  it('runs nothing when managed settings disable hooks', () => {
+    expect(activeStatusLine([userFile({ statusLine: { command: 'user.sh' } })], { ...managed, disableAllHooks: true })).toBeUndefined()
+  })
+
+  it('reads the files as usual without the setting', () => {
+    expect(activeStatusLine([userFile({ statusLine: { command: 'user.sh' } })], {})?.command).toBe('user.sh')
   })
 })
 
@@ -590,6 +618,19 @@ describe('statusLine disableAllHooks', () => {
     await vi.advanceTimersByTimeAsync(400)
 
     expect(hoisted.runs).toHaveLength(1)
+  })
+
+  it('runs the managed statusLine when the user disables hooks', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { disableAllHooks: true, statusLine: { type: 'command', command: 'seg.sh' } })
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'managed.sh' } }))
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs.map((run) => run.command)).toEqual(['managed.sh'])
   })
 
   it('honors a managed-settings disableAllHooks', async () => {

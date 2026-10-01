@@ -31,7 +31,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { hookFiles, readSettingsDisableAllHooks, runHookCommand } from './hooks/index.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
@@ -199,6 +199,15 @@ export function readStatusLineConfig(files: string[], managed: Record<string, un
   let found: StatusLineConfig | undefined
   for (const settings of readSettingsChain(files)) found = parseStatusLineEntry(settings.statusLine) ?? found
   return found
+}
+
+/** The statusLine that runs. Claude: with disableAllHooks set outside managed settings,
+ * "Claude Code runs only a statusLine from managed settings, and with no managed
+ * statusLine the status line is disabled"; set in managed settings, nothing runs. */
+export function activeStatusLine(files: string[], managed: Record<string, unknown> = readManagedSettings()): StatusLineConfig | undefined {
+  if (managed.disableAllHooks === true) return undefined
+  if (readSettingsDisableAllHooks(files)) return parseStatusLineEntry(managed.statusLine)
+  return readStatusLineConfig(files, managed)
 }
 
 export default function statusLine(pi: ExtensionAPI) {
@@ -499,7 +508,7 @@ export default function statusLine(pi: ExtensionAPI) {
     const files = hookFiles(ctx.cwd, os.homedir(), trusted)
     // Claude's disableAllHooks also turns off the custom statusLine command; the
     // built-in segment still renders as the fallback.
-    config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
+    config = activeStatusLine(files)
     // Re-armed rather than armed once: a refreshInterval added or changed mid-session
     // had no effect until the next session, though Claude applies a settings change as
     // soon as the file is saved.
@@ -518,7 +527,7 @@ export default function statusLine(pi: ExtensionAPI) {
     disposeSettingsWatch = watchSettingsFiles(files, () => {
       const previousCommand = config?.command
       const liveFiles = hookFiles(watchCwd, os.homedir(), trusted && stillApproved())
-      config = readDisableAllHooks(liveFiles) ? undefined : readStatusLineConfig(liveFiles)
+      config = activeStatusLine(liveFiles)
       armRefresh()
       // With the setting gone nothing runs again, so the last script output would stay.
       if (!config) {
