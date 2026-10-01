@@ -4,7 +4,6 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import contextImports, {
   additionalDirContextFiles,
   additionalDirsClaudeMdEnabled,
@@ -25,6 +24,7 @@ import contextImports, {
   rootsForImporter,
   setManagedClaudeMdPath,
 } from '../extensions/context-imports.ts'
+import { addDirFlagValue, setAddDirReader } from '../extensions/internal/add-dir-flag.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
 import { managedSettingsPath, readManagedSettings, setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { makeWorktree } from './worktree-fixture.ts'
@@ -1062,6 +1062,16 @@ describe('--add-dir additional directories', () => {
     expect(flags[0].options.type).toBe('string')
   })
 
+  it('publishes the --add-dir value for the status line', async () => {
+    const extra = tempDir()
+    wire(extra)
+    try {
+      expect(addDirFlagValue()).toBe(extra)
+    } finally {
+      setAddDirReader(undefined)
+    }
+  })
+
   it('appends an additional dir CLAUDE.md as a project_instructions block when the env gate is set', async () => {
     process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'
     const extra = tempDir()
@@ -1070,6 +1080,39 @@ describe('--add-dir additional directories', () => {
     const prompt = await wire(extra).fire(tempDir())
 
     expect(prompt).toContain(instructionsBlock(join(extra, 'CLAUDE.md'), 'EXTRA DIR RULES'))
+  })
+
+  // The external-import approval is stored for the project and widens project files;
+  // --add-dir changes per run, so its files' refusals are reported, not asked about: a
+  // yes given here would cover whatever directory a later run adds.
+  it("reports an additional dir file's external import without asking about it", async () => {
+    process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'
+    const extra = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'shared.md'), 'SHARED BODY')
+    writeFileSync(join(extra, 'CLAUDE.md'), `EXTRA DIR RULES\n@${join(outside, 'shared.md')}\n`)
+    const cwd = tempDir()
+    const asked: string[] = []
+    const ctx = {
+      cwd,
+      isProjectTrusted: () => true,
+      hasUI: true,
+      ui: {
+        notify: () => {},
+        confirm: async (title: string) => {
+          asked.push(title)
+          return true
+        },
+      },
+    }
+
+    const wired = wire(extra)
+    await wired.handlers.get('session_start')?.({}, ctx)
+    const result = (await wired.handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: [] } }, ctx)) as { systemPrompt?: string } | undefined
+
+    expect(asked).not.toContain(EXTERNAL_IMPORT_PROMPT_TITLE)
+    expect(result?.systemPrompt).not.toContain('SHARED BODY')
+    expect(result?.systemPrompt).toContain('## Imports not loaded (@)')
   })
 
   it('does not load additional dir context without the env gate', async () => {
@@ -2142,6 +2185,21 @@ describe('subdirectory context files load on demand', () => {
     expect(texts(second).join('\n')).not.toContain('SRC RULES')
   })
 
+  // Claude: CLAUDE_CODE_DISABLE_CLAUDE_MDS prevents "loading any CLAUDE.md memory files
+  // into context, including user, project, and auto memory files".
+  it('attaches no subdirectory CLAUDE.md when CLAUDE.md memory is disabled', async () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CLAUDE_MDS', '1')
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('SRC RULES')
+    expect(wired.instructionEvents()).toEqual([])
+  })
+
   // Claude: after /compact "nested CLAUDE.md files in subdirectories and rules with paths:
   // frontmatter reload as Claude reads files they apply to". Compaction folds the tool result
   // that carried the memory into a summary, and /tree moves to a branch that never had it, so
@@ -2865,5 +2923,61 @@ describe('managed-settings.d drop-ins', () => {
     expect(merged.model).toBe('haiku')
     expect((merged.permissions as { deny: string[] }).deny).toEqual(['Bash(rm *)', 'WebFetch'])
     expect(merged.env).toEqual({ A: '1', B: '2', C: '3' })
+  })
+})
+
+// Claude matches claudeMdExcludes against the file a path names; a symlink has two
+// spellings, and a glob written against either must exclude it, as the rules loader does.
+describe('claudeMdExcludes through a symlink', () => {
+  const layout = () => {
+    const root = mkdtempSync(join(tmpdir(), 'ex-link-'))
+    mkdirSync(join(root, 'shared'))
+    mkdirSync(join(root, 'docs'))
+    writeFileSync(join(root, 'shared', 'x.md'), 'LINKED BODY')
+    symlinkSync(join(root, 'shared', 'x.md'), join(root, 'docs', 'link.md'))
+    return realpathSync(root)
+  }
+
+  it('excludes a symlinked file by a glob naming its target', () => {
+    const root = layout()
+    expect(isExcludedPath(join(root, 'docs', 'link.md'), ['**/shared/x.md'], '/home/u')).toBe(true)
+  })
+
+  it('still loads a symlinked import no exclude names', () => {
+    const root = layout()
+    const imported = collectImports('@docs/link.md', root, '/home/u', [root], new Set(), { isExcluded: (abs) => isExcludedPath(abs, ['**/other.md'], '/home/u') })
+    expect(imported.map((entry) => entry.body)).toContain('LINKED BODY')
+  })
+
+  it('refuses an import whose symlink path an exclude names', () => {
+    const root = layout()
+    const imported = collectImports('@docs/link.md', root, '/home/u', [root], new Set(), { isExcluded: (abs) => isExcludedPath(abs, ['**/docs/link.md'], '/home/u') })
+    expect(imported.map((entry) => entry.body)).not.toContain('LINKED BODY')
+  })
+})
+
+// A session started through a symlinked directory: the roots are real paths, the importing
+// file's directory is the linked spelling.
+describe('a missing import under a symlinked working directory', () => {
+  const linked = () => {
+    const real = realpathSync(mkdtempSync(join(tmpdir(), 'ci-real-')))
+    const link = join(mkdtempSync(join(tmpdir(), 'ci-link-')), 'project')
+    symlinkSync(real, link)
+    return { real, link }
+  }
+
+  it('is not reported as resolving outside the project', () => {
+    const { real, link } = linked()
+    const budget = createImportBudget()
+    collectImports('@docs/missing.md', link, '/home/u', [real], new Set(), { budget })
+    expect([...budget.refused]).toEqual([])
+  })
+
+  it('still reports a missing import that does point outside', () => {
+    const { real, link } = linked()
+    const budget = createImportBudget()
+    const outside = join(mkdtempSync(join(tmpdir(), 'ci-out-')), 'missing.md')
+    collectImports(`@${outside}`, link, '/home/u', [real], new Set(), { budget })
+    expect([...budget.refused]).toEqual([outside])
   })
 })

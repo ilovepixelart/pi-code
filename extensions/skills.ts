@@ -213,16 +213,39 @@ async function runForkedSkill(name: string, filePath: string, expanded: string, 
  * pass the input through to pi untouched. The expanded body is wrapped in pi's
  * skill-block format so downstream behavior (the baseDir note for relative
  * references) matches an untouched invocation. */
-async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
+/** Whether pi resolved this skill name to another file: pi loads its own skill directories
+ * ahead of the ones this extension adds and the first name wins, so its listing then
+ * shows that skill, and the invocation is left to pi's own expansion of it. */
+function shadowedByPi(pi: ExtensionAPI, name: string, filePath: string): boolean {
+  const loaded = pi.getCommands?.().find((command) => command.source === 'skill' && command.name === `skill:${name}`)
+  if (loaded === undefined) return false
+  const real = (target: string): string => {
+    try {
+      return fs.realpathSync(target)
+    } catch {
+      return path.resolve(target)
+    }
+  }
+  return real(loaded.sourceInfo.path) !== real(filePath)
+}
+
+/** The skill name and arguments of a `/skill:<name> <args>` input, or undefined. */
+function parseSkillInvocation(rawText: string): { name: string; args: string } | undefined {
   const text = rawText.trimStart()
-  if (!text.startsWith('/skill:')) return
+  if (!text.startsWith('/skill:')) return undefined
   const space = text.indexOf(' ')
   const name = (space === -1 ? text.slice(7) : text.slice(7, space)).trim()
-  const args = space === -1 ? '' : text.slice(space + 1).trim()
-  if (!name) return
+  if (!name) return undefined
+  return { name, args: space === -1 ? '' : text.slice(space + 1).trim() }
+}
+
+async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
+  const invocation = parseSkillInvocation(rawText)
+  if (!invocation) return
+  const { name, args } = invocation
   const trusted = isProjectApprovedSilently(ctx)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
-  if (!found) return
+  if (!found || shadowedByPi(pi, name, found.filePath)) return
   const refused = refusedByOverride(name, ctx, trusted)
   if (refused) return refused
   let parsed: ReturnType<typeof parseCommandFile>
@@ -244,7 +267,16 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   if (declaredHooks !== null && typeof declaredHooks === 'object' && !Array.isArray(declaredHooks)) {
     pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })
   }
-  const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  let expanded: string
+  try {
+    expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  } catch (error) {
+    // A failed injected command aborts the invocation, as it does for a command: pi logs a
+    // throwing input handler and continues with the raw text, which would send the body
+    // unexpanded. The notify carries the failure message.
+    ctx.ui.notify(errorMessage(error), 'error')
+    return { action: 'handled' }
+  }
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
     const agentName = typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined
     if (forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)

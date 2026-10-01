@@ -277,7 +277,7 @@ export function promptContext(stdout: string): string {
 
 /** Run UserPromptSubmit hooks, in parallel as Claude does: the first blocking
  * verdict in config order wins; otherwise their additional context is concatenated
- * in config order for injection ahead of the prompt. The event has no matcher
+ * in config order and delivered with the prompt. The event has no matcher
  * support (a stray matcher is ignored) and an `if`-carrying hook never runs here. */
 export async function runUserPromptSubmit(config: HooksConfig, prompt: string, runner: HookRunner, onSystemMessage?: SystemMessageSink): Promise<PromptDecision> {
   const commands = allCommands(config.UserPromptSubmit).filter((command) => passesIfFilter(command, undefined))

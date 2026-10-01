@@ -3,7 +3,7 @@
  * Extracted for testability.
  */
 
-import { hasSubstitution, splitSegments } from '../internal/shell-split.js'
+import { hasAnsiCNumericEscape, hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, shellWords, splitSegments } from '../internal/shell-split.js'
 
 // Destructive commands blocked in plan mode. Tested against the segment's command word,
 // the one word that runs: an allowlisted head never executes its arguments, so `code`
@@ -24,6 +24,7 @@ const DESTRUCTIVE_PATTERNS = [
   /\bdd\b/i,
   /\bshred\b/i,
   /\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
+  /\bnpm\s+audit\s+fix\b/i,
   /\byarn\s+(add|remove|install|publish)/i,
   /\bpnpm\s+(add|remove|install|publish)/i,
   /\bpip\s+(install|uninstall)/i,
@@ -42,8 +43,9 @@ const DESTRUCTIVE_PATTERNS = [
   /\b(vim?|nano|emacs|code|subl)\b/i,
 ].map((pattern) => new RegExp(String.raw`^\s*(?:${pattern.source})`, pattern.flags))
 
-// A redirect writes wherever it points, from any position in the segment.
-const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/]
+// A redirect writes wherever it points, from any position in the segment, and `<>` opens
+// its target for reading and writing, creating it.
+const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/, /<>/]
 
 // Redirections that write nothing: onto /dev/null, and a descriptor duplicated onto
 // another (`2>&1`, `>&2`, `>&-`). `>&file` is not one: it writes the file. Every run is
@@ -109,24 +111,33 @@ const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprint0|fprint
 // Flags that turn an allowlisted read into a write or an execution, per command.
 const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
   [/^\s*find\b/, FIND_ACTIONS],
-  [/^\s*sort\b/, /\s(-[a-zA-Z]*o|--output\b|--compress-program\b)/],
+  // -o ends a cluster of value-less flags (-ro); in -to, o is -t's separator.
+  [/^\s*sort\b/, /\s(-[bdfghiMnRrsVcCmuz]*o|--output\b|--compress-program\b)/],
   [/^\s*tree\b/, /\s-[a-zA-Z]*o/],
   [/^\s*rg\b/, /\s--(pre|hostname-bin)\b/],
   [/^\s*git\s/, /\s--output(=|\s|$)/],
+  // -x/--exec runs a command per result, -X/--exec-batch once for all; it may end a cluster
+  // of value-less flags (-Hx), while in -tx or -etsx the x is the value of -t or -e.
+  [/^\s*fd\b/, /\s(-[HIusigFaLlpq0]*[xX](?=\s|$)|--exec(-batch)?(?==|\s|$))/],
+  // --pager names the program bat runs when it pages.
+  [/^\s*bat\b/, /\s--pager(?==|\s|$)/],
 ]
 
 /** `segment` with its quoted spans removed, so a `>` or a flag inside a pattern reads as
  * text. Follows splitSegments: a backslash outside quotes escapes the next character,
- * and inside quotes only the closing quote matters. */
+ * and inside "..." and $'...' too, while '...' has no escapes. */
 function withoutQuoted(segment: string): string {
   let bare = ''
-  let quote: string | undefined
+  let quote: Quote | undefined
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]
+    const opened = quote === undefined ? quoteOpensAt(segment, i) : undefined
     if (quote !== undefined) {
-      if (ch === quote) quote = undefined
-    } else if (ch === "'" || ch === '"') {
-      quote = ch
+      if (ch === '\\' && quoteEscapes(quote)) i++
+      else if (ch === quoteCloser(quote)) quote = undefined
+    } else if (opened !== undefined) {
+      quote = opened.quote
+      i += opened.length - 1
     } else if (ch === '\\') {
       i++
     } else {
@@ -176,9 +187,14 @@ function gitRemoteWrites(args: string[]): boolean {
 
 /** Whether an allowlisted command carries a flag or operand that makes it write. */
 function writesThroughOperands(segment: string): boolean {
-  const bare = withoutQuoted(segment)
-  if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flag.test(bare))) return true
-  const [command = '', subcommand = '', ...rest] = segment.trim().split(/\s+/)
+  // Flags are read from the words the command receives: bash removes quotes first, so a
+  // quoted '-delete' is the flag itself, while a flag-like run inside a quoted argument
+  // ("x -delete") is not a word of its own.
+  const words = shellWords(segment)
+  // A flag is the start of a word: text inside a quoted value ("%h --output x") is not.
+  const flagged = (flag: RegExp): boolean => words.some((word) => word.startsWith('-') && flag.exec(` ${word}`)?.index === 0)
+  if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flagged(flag))) return true
+  const [command = '', subcommand = '', ...rest] = words
   if (command === 'uniq') return uniqWrites([subcommand, ...rest].filter(Boolean))
   if (command !== 'git') return false
   if (subcommand === 'branch') return gitBranchWrites(rest)
@@ -200,7 +216,7 @@ function isSafeSegment(segment: string): boolean {
  * containing a determined one. Only OS-level isolation would be a boundary.
  */
 export function isSafeCommand(command: string): boolean {
-  if (hasSubstitution(command)) return false
+  if (hasSubstitution(command) || hasAnsiCNumericEscape(command)) return false
   const segments = splitSegments(command)
   return segments.length > 0 && segments.every(isSafeSegment)
 }

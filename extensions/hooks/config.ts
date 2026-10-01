@@ -27,7 +27,7 @@ export interface HookCommand {
    * the background but keeps its timeout, and wakes the model when the hook exits 2
    * (stderr, or stdout when stderr is empty, feeds back as a new turn). Background hooks
    * render no decision; their JSON `systemMessage`/`additionalContext` reach the model on
-   * the next turn, and any still running are killed at session end. */
+   * the next turn, and any still running when a headless run ends are killed. */
   async?: boolean
   asyncRewake?: boolean
   /** Claude's permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`): evaluated only
@@ -59,6 +59,8 @@ export interface HookCommand {
   once?: boolean
   /** Set after a once-hook's first successful run; collection skips spent hooks. */
   spent?: boolean
+  /** Names one declared hook of an origin across re-parses (see stampOrigin). */
+  declarationKey?: string
 }
 export interface HookMatcher {
   matcher?: string
@@ -73,9 +75,9 @@ export function isBackgroundHook(hook: HookCommand): boolean {
 }
 export type HooksConfig = Record<string, HookMatcher[]>
 
-/** Settings files to read, newest-winning. Project files load only when trusted, each
- * the nearest of its name at or above cwd (bounded at the repository root, matching
- * the approval walk), so a subdirectory session reads the settings that gated it. */
+/** Settings files to read, newest-winning, through the shared settings chain: project
+ * files load only when trusted, the shared settings.json from cwd and settings.local.json
+ * from the repository root, as Claude places them. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
   return claudeSettingsChain(cwd, home, trusted)
 }
@@ -180,9 +182,16 @@ export function loadHooks(files: string[], sources?: Map<HookMatcher, string>): 
 
 /** Claude dedups identical handlers across settings files only; a plugin's copy
  * stays separate, so plugin entries carry their origin into the dedup key. */
-function stampOrigin(entries: HookMatcher[], origin: string): void {
-  for (const entry of entries) {
-    for (const hook of entry.hooks ?? []) if (isRecord(hook)) hook.origin = origin
+function stampOrigin(entries: HookMatcher[], origin: string, event: string): void {
+  for (const [entryIndex, entry] of entries.entries()) {
+    for (const [hookIndex, hook] of (entry.hooks ?? []).entries()) {
+      if (!isRecord(hook)) continue
+      // A stable name for this one declared hook, the same however often its source is
+      // parsed again: a settings reload re-merges skill hooks, and a spent once-hook has
+      // to stay spent without matching a sibling that only shares its command.
+      hook.declarationKey = JSON.stringify([origin, event, entryIndex, entry.matcher ?? null, hookIndex, hook])
+      hook.origin = origin
+    }
   }
 }
 
@@ -214,7 +223,7 @@ function mergeHooksJson(config: HooksConfig, raw: string, source: string, source
     // call for the rest of the session fails with an opaque type error.
     const usable = matchers.filter((entry) => isUsableMatcher(entry, source, event))
     if (usable.length === 0) continue
-    if (origin !== undefined) stampOrigin(usable, origin)
+    if (origin !== undefined) stampOrigin(usable, origin, event)
     if (plugin !== undefined) stampPluginPaths(usable, plugin)
     config[event] = [...(config[event] ?? []), ...usable]
     // Each parse produces fresh entry objects, so object identity keys the /hooks

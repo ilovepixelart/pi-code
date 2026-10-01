@@ -324,6 +324,26 @@ describe('agent hook runner', () => {
     expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'both')
   })
 
+  it("preloads a named agent's skills when a fork skill runs it, as the tool path does", async () => {
+    // A context: fork skill naming an agent goes through this seam; the agent's skills:
+    // list must resolve against the same skill roots the subagent tool uses.
+    osHoisted.home = fs.mkdtempSync(join(tmpdir(), 'seam-home-'))
+    fs.mkdirSync(join(osHoisted.home, '.claude', 'skills', 'house-style'), { recursive: true })
+    fs.writeFileSync(join(osHoisted.home, '.claude', 'skills', 'house-style', 'SKILL.md'), '---\nname: house-style\ndescription: style\n---\nUSE TABS')
+    discoverAgentsMock.mockReturnValue({ agents: [{ ...agentConfig({ name: 'reviewer', systemPrompt: 'Review.' }), skills: ['house-style'] }], projectAgentsDir: null })
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    script('look', { stdout: [say('done')], exitCode: 0 })
+
+    try {
+      await runAgent({ prompt: 'look', agent: 'reviewer' })
+    } finally {
+      osHoisted.home = ''
+    }
+
+    expect(spawnCalls[0].promptFile?.content).toContain('USE TABS')
+    expect(spawnCalls[0].promptFile?.content).not.toContain('(skill not found)')
+  })
+
   it('refuses to run inside a subagent session', async () => {
     await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
     const saved = process.env.PI_CODE_SUBAGENT
@@ -1803,6 +1823,19 @@ describe('agent memory', () => {
     expect(content).not.toContain('DECOY')
   })
 
+  it('gives a named agent run by a fork skill its project memory once the project is approved', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'scout', systemPrompt: 'Be terse.', memory: 'project' })], projectAgentsDir: null })
+    const repo = fs.mkdtempSync(join(tmpdir(), 'sa-seam-'))
+    fs.mkdirSync(join(repo, '.git'))
+    writeStore(agentMemoryDir('project', 'scout', repo, home), '- seam store\n')
+    await eventHandlers.get('session_start')?.({}, { cwd: repo, isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    script('inspect', { stdout: [say('ok')] })
+
+    await runAgent({ prompt: 'inspect', agent: 'scout' })
+
+    expect(spawnCalls[0].promptFile?.content).toContain('- seam store')
+  })
+
   it('keeps a user-scoped store even when the project is not approved', async () => {
     discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ systemPrompt: 'Be terse.', memory: 'user' })], projectAgentsDir: null })
     writeStore(agentMemoryDir('user', 'scout', '/repo', home), '- crosses projects\n')
@@ -2031,6 +2064,27 @@ describe('subagent run semantics conformance', () => {
     expect(text(result)).toContain('partial')
     expect(text(result)).not.toMatch(/^Agent /)
     expect((result as { isError?: boolean }).isError).not.toBe(true)
+  })
+
+  it("keeps the subagent's last text when the capped turn was a tool call alone", async () => {
+    // A capped run usually stops mid-work, on a turn that only calls a tool. The note
+    // used to land on that text-less message, so the output became the note alone.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 2 })], projectAgentsDir: null })
+    const toolTurn = messageEnd({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.ts' } }] })
+    script('inspect', { stdout: [say('FINDINGS SO FAR: a.ts leaks a handle'), toolTurn], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('FINDINGS SO FAR: a.ts leaks a handle')
+    expect(text(result)).toContain('[Output is partial: the subagent stopped at its maxTurns limit.]')
+  })
+
+  it('still shows the partial note when no capped turn produced any text', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 1 })], projectAgentsDir: null })
+    const toolTurn = messageEnd({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.ts' } }] })
+    script('inspect', { stdout: [toolTurn], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('[Output is partial: the subagent stopped at its maxTurns limit.]')
   })
 
   it('does not mark an uncapped clean run as partial', async () => {

@@ -11,7 +11,7 @@ Outcome: on pi 0.99 and later with the built-in active, pi-code keeps reading Cl
 - The built-in registers only the `/mcp` command during load; `mcp__*`, `list_mcp_resources` and `read_mcp_resource` are registered on connect (`dist/extensions/mcp/index.js`).
 - It reads registered servers on `session_start` and connects later registrations on `mcp_servers_change`. A registration no extension handles `mcp_servers_change` for is reported as an extension error (`core/extensions/runner.js`, `reportUnhandledMcpServers`).
 - `McpServerConfig` takes stdio (`command`, `args`, `env`, `cwd`) or streamable HTTP (`url`, `headers`, `oauth`), plus `exposure`, `toolExposure`, `enabled`, `timeout` in seconds (resets on progress, default 60). SSE is rejected; there is no WebSocket and no header helper. Names match `[A-Za-z0-9_-]+`.
-- Tool names are `mcp__<server>__<tool>`, characters outside `[A-Za-z0-9_-]` folded to `_`: Claude's own naming.
+- Tool names are `mcp__<server>__<tool>`, characters outside `[A-Za-z0-9_-]` folded to `_`: Claude's own naming. pi 0.99.2 also folds `-` to `_`; the roster maps a registered server back to its configured name, and the headless wait accepts either spelling.
 - `pi.getCommands()` carries each command's source, so a running built-in `/mcp` is observable after load.
 
 ## Acceptance clauses

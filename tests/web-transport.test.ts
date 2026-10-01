@@ -1,5 +1,5 @@
 import { createServer as createHttpServer } from 'node:http'
-import type { AddressInfo, LookupFunction } from 'node:net'
+import { type AddressInfo, createServer as createTcpServer, type LookupFunction } from 'node:net'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -54,6 +54,20 @@ describe('httpFetch pins the connection to the validated address', () => {
     await new Promise<void>((r) => server.close(() => r()))
 
     await expect(httpFetch(new URL(`http://blocked.internal.test:${deadPort}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toMatchObject({ code: 'ECONNREFUSED' })
+  })
+
+  it.each([600, 999])('rejects a status outside 200-599 instead of crashing pi, here %i', async (status) => {
+    // node's parser accepts any three-digit status, and the Response constructor throws a
+    // RangeError for one outside 200-599 inside the response callback, where an uncaught
+    // throw would end pi. A raw socket is the only way to send one.
+    const server = createTcpServer((socket) => {
+      socket.once('data', () => socket.end(`HTTP/1.1 ${status} Odd\r\ncontent-length: 2\r\n\r\nok`))
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    closers.push(() => server.close())
+    const port = (server.address() as AddressInfo).port
+
+    await expect(httpFetch(new URL(`http://odd.internal.test:${port}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })).rejects.toBeInstanceOf(RangeError)
   })
 
   it.each([204, 205, 304])('returns a bodyless response for null-body status %i without crashing', async (status) => {

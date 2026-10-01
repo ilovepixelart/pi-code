@@ -17,7 +17,7 @@ vi.mock('node:fs', async (importOriginal) => {
 })
 
 import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
-import { installedPlugins, pluginComponentPath, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
+import { installedPlugins, managedForceEnabled, pluginComponentPath, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
 
 describe('substitutePluginVars user_config', () => {
   const plugin = { name: 'p', root: '/r', dataDir: '/d', manifest: {}, userConfig: { token: 'secret-x', region: 'eu' } }
@@ -76,7 +76,7 @@ describe('substitutePluginVars escaping', () => {
     const root = String.raw`C:\Users\me\1.0.0\uv`
     const raw = JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/scripts/format.sh' }] }] } })
 
-    const substituted = substitutePluginVars(raw, { name: 'fmt', root, dataDir: '/d', manifest: {} }, jsonEscape)
+    const substituted = substitutePluginVars(raw, { name: 'fmt', root, dataDir: '/d', manifest: {}, enablementKeys: { qualified: 'fmt@m', directory: 'fmt' } }, jsonEscape)
 
     const parsed = JSON.parse(substituted) as { hooks: { PostToolUse: Array<{ hooks: Array<{ command: string }> }> } }
     expect(parsed.hooks.PostToolUse[0].hooks[0].command).toBe(`${root}/scripts/format.sh`)
@@ -472,5 +472,46 @@ describe('plugin default enablement and managed control', () => {
     } finally {
       setManagedSettingsPath(undefined)
     }
+  })
+})
+
+// Claude exempts "plugins force-enabled in managed settings enabledPlugins" from
+// allowManagedHooksOnly. A key names one plugin the way enablement reads keys: the
+// qualified `<plugin>@<marketplace>` or the bare plugin directory.
+describe('managedForceEnabled', () => {
+  const forced = async (managed: Record<string, boolean>, setup: (h: string) => void): Promise<string[]> => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const h = home()
+    setManagedSettingsPath(join(h, 'managed-settings.json'))
+    try {
+      setup(h)
+      writeFileSync(join(h, 'managed-settings.json'), JSON.stringify({ enabledPlugins: managed }))
+      resetInstalledPluginsCache()
+      return managedForceEnabled(installedPlugins(h, [])).map((plugin) => plugin.name)
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  }
+
+  it('does not exempt a same-named plugin from another marketplace', async () => {
+    expect(await forced({ 'foo@corp': true }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual([])
+  })
+
+  it('exempts the plugin its qualified key names', async () => {
+    expect(await forced({ 'foo@community': true }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual(['foo'])
+  })
+
+  it('exempts a plugin named by its directory when the manifest name differs', async () => {
+    expect(await forced({ 'fmt-dir': true }, (h) => install(h, 'community', 'fmt-dir', '1.0.0', { name: 'Formatter' }))).toEqual(['Formatter'])
+  })
+
+  it('does not exempt a plugin whose managed entry is not true', async () => {
+    // A non-boolean entry is ignored by enablement, so the plugin still loads; it must not
+    // count as a force-enable either.
+    expect(await forced({ 'foo@community': 'yes' as unknown as boolean }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual([])
+  })
+
+  it('does not exempt a plugin whose managed entry is false', async () => {
+    expect(await forced({ 'foo@community': false }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual([])
   })
 })

@@ -92,7 +92,7 @@ const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ comman
 const assistantTurn = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
 
 describe('background run lifecycle', () => {
-  it('records a synchronous spawn failure as failed instead of leaving a phantom running run', () => {
+  it('records a synchronous spawn failure as failed instead of leaving a phantom running run', async () => {
     // On Linux spawn() throws synchronously for E2BIG (posix_spawn detects it before
     // returning). The run was already registered as running, so the throw escaped the
     // tool call and the record held a cap slot forever: no kill, no eviction, and
@@ -106,9 +106,38 @@ describe('background run lifecycle', () => {
     })
 
     expect(id).not.toBeNull()
+    expect(activeBackgroundRuns()).toBe(0)
+    await Promise.resolve()
     expect(done?.state).toBe('failed')
     expect(done?.stderr).toBe('spawn E2BIG')
-    expect(activeBackgroundRuns()).toBe(0)
+  })
+
+  // The caller announces the run (the subagent start event) once the call returns, and
+  // listeners pair start with stop: /goal holds its evaluation while a run it saw start
+  // has not stopped. A completion delivered inside the call arrived first and left a
+  // started run that never stopped.
+  it('delivers a synchronous spawn failure only after the start call has returned', async () => {
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+    const events: string[] = []
+    startBackgroundRun('scout', 'find', spec(), () => events.push('stop'))
+    events.push('start')
+    await Promise.resolve()
+    expect(events).toEqual(['start', 'stop'])
+  })
+
+  it('delivers a synchronous spawn failure on resume only after the resume call has returned', async () => {
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.emit('close', 0)
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+    const events: string[] = []
+    expect(resumeBackgroundRun(id ?? '', 'two', () => events.push('stop'))).toBe('resumed')
+    events.push('start')
+    await Promise.resolve()
+    expect(events).toEqual(['start', 'stop'])
   })
 
   it('reports the final text of a stdout stream whose chunks split lines', () => {
@@ -213,6 +242,19 @@ describe('background run lifecycle', () => {
     }
     expect(resumeBackgroundRun(finished!.id, 'again', () => {})).toBe('at-capacity')
     for (const child of live) child.emit('close', 0)
+  })
+
+  it('caps a resumed task below the per-argument limit, as a fresh start does', () => {
+    // Linux refuses any single argv string over MAX_ARG_STRLEN (32 pages, 128 KiB) with
+    // E2BIG; a fresh start caps the task, and a resume must not send it whole.
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id ?? '', 'x'.repeat(200 * 1024), () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)?.[1] as string[]
+    const task = args.at(-1) ?? ''
+    expect(Buffer.byteLength(task, 'utf-8')).toBeLessThan(128 * 1024)
+    expect(task.startsWith('Task: xxx')).toBe(true)
+    expect(task.endsWith('[truncated: too long for the child process to receive]')).toBe(true)
   })
 
   it('replaces the task on a resume even when start-hook context precedes it', () => {

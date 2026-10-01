@@ -13,7 +13,8 @@
  * checkpoint persisted as {entryId, ref, prompt, createdAt} in the session
  * file, so /rewind works across restarts, resumes, and forks. Code restore
  * checks the snapshot out over the working tree, resetting file contents to
- * the checkpoint (files created after the checkpoint are left in place).
+ * the checkpoint; a file first edited after the checkpoint is put back from the
+ * baseline recorded before that edit, and files created after it are left in place.
  */
 
 import { createHash } from 'node:crypto'
@@ -49,6 +50,34 @@ interface Checkpoint {
  * snapshot per edited file, so unbounded retention grows under $HOME for the life of
  * the machine. */
 export const CHECKPOINT_RETENTION_DAYS = 30
+
+/** The message of a commit that records a file's content before its first edit. */
+const BASELINE_MESSAGE = 'baseline'
+
+/** Marks a commit header in ADDED_FILES_LOG output, which no file name can contain. */
+const COMMIT_MARK = '\x01'
+
+/** `git log` arguments listing, oldest first, the files each commit added: with -z the
+ * names arrive raw and NUL-terminated rather than C-quoted ("caf\303\251.md"), which no
+ * checkout could name. */
+const ADDED_FILES_LOG = ['log', '-z', '--reverse', '--diff-filter=A', '--name-only', `--format=${COMMIT_MARK}%H %s`]
+
+/** For each file ADDED_FILES_LOG lists, the first commit that added it, skipping files the
+ * checkpoint already holds. */
+function firstAdditions(log: string, skip: ReadonlySet<string>): Map<string, { sha: string; baseline: boolean }> {
+  const first = new Map<string, { sha: string; baseline: boolean }>()
+  let commit: { sha: string; baseline: boolean } | undefined
+  for (const raw of log.split('\0')) {
+    // git separates a commit's header from its names with a newline.
+    const token = raw.startsWith('\n') ? raw.slice(1) : raw
+    if (token.startsWith(COMMIT_MARK)) {
+      const header = token.slice(1)
+      const space = header.indexOf(' ')
+      commit = space === -1 ? undefined : { sha: header.slice(0, space), baseline: header.slice(space + 1) === BASELINE_MESSAGE }
+    } else if (commit !== undefined && token !== '' && !skip.has(token) && !first.has(token)) first.set(token, commit)
+  }
+  return first
+}
 
 /** The retention period in effect: Claude keeps checkpoints for 30 days and says to
  * "change the period with cleanupPeriodDays". Read from the user-level files (the user
@@ -349,8 +378,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if ((await withoutIgnored([rel])).length === 0) return
     if (!(await addPaths([rel]))) return
     // A commit, never an amend: the run's checkpoint can be a commit an earlier
-    // checkpoint also points at, and rewriting it would strand that one.
-    const commit = await commitShadow([])
+    // checkpoint also points at, and rewriting it would strand that one. Its own message
+    // lets a rewind to an earlier checkpoint find the file's content there.
+    const commit = await commitShadow([], BASELINE_MESSAGE)
     if (commit.code !== 0) return
     const sha = await gitShadow(['rev-parse', 'HEAD'])
     if (sha.code === 0) await gitShadow(['update-ref', runRef, sha.stdout.trim()])
@@ -428,8 +458,28 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   }
 
   /** Commit in the shadow repo, isolated from the user's global signing and hook config. */
-  function commitShadow(extra: string[]): ReturnType<ExtensionAPI['exec']> {
-    return gitShadow(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', ...extra, '-m', 'checkpoint'])
+  function commitShadow(extra: string[], message = 'checkpoint'): ReturnType<ExtensionAPI['exec']> {
+    return gitShadow(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', ...extra, '-m', message])
+  }
+
+  /** A file the session first edited after this checkpoint was on disk, untouched, when it
+   * was taken, but the checkpoint's tree does not hold it: only files touched so far are
+   * snapshotted. The baseline commit that first recorded it after the checkpoint holds that
+   * content. A file created after the checkpoint first appears in a snapshot commit instead
+   * and is left in place, as documented. */
+  async function restoreLaterBaselines(ref: string): Promise<void> {
+    const inRef = await gitShadow(['ls-tree', '-r', '-z', '--name-only', ref])
+    const added = await gitShadow([...ADDED_FILES_LOG, `${ref}..HEAD`])
+    if (inRef.code !== 0 || added.code !== 0) return
+    const atCheckpoint = new Set(inRef.stdout.split('\0').filter(Boolean))
+    const bySha = new Map<string, string[]>()
+    for (const [file, commit] of firstAdditions(added.stdout, atCheckpoint)) {
+      if (commit.baseline) bySha.set(commit.sha, [...(bySha.get(commit.sha) ?? []), file])
+    }
+    for (const [sha, files] of bySha) {
+      // Sequential on purpose: each checkout takes the shadow repo's index lock.
+      await gitShadow(['checkout', '-f', sha, '--', ...files]) // NOSONAR typescript:S9382 - git's index lock forbids parallel checkouts
+    }
   }
 
   async function restoreCode(ctx: ExtensionCommandContext, checkpoint: Checkpoint): Promise<boolean> {
@@ -446,6 +496,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Code restore failed: ${result.stderr.trim()}`, 'warning')
       return false
     }
+    await restoreLaterBaselines(checkpoint.ref)
     return true
   }
 
@@ -509,7 +560,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // Snapshot code state before the LLM acts, once per run. The user message that
   // started the turn is not persisted yet at turn_start (it lands on message_end), so
   // the checkpoint is only keyed and saved at turn_end. The snapshot is awaited here so
-  // `git add -A` captures the tree before the model's first edit; turn_end reads the
+  // it captures the touched files before the model's first edit; turn_end reads the
   // resolved value.
   // Only a prompt fires before_agent_start. A provider retry, an overflow recovery and a
   // queued follow-up all re-enter through agent.continue(), with agent_start alone.

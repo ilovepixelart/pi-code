@@ -61,8 +61,8 @@
  * stderr (stdout when stderr is empty) as a new turn; any other background
  * completion delivers the JSON response's systemMessage/additionalContext to the
  * model on the next turn, shown to nobody else. No timeout is enforced on `async`
- * (asyncRewake keeps its own), and hooks still running at session end are killed,
- * as Claude does at teardown.
+ * (asyncRewake keeps its own), and hooks still running when a headless run ends are
+ * killed, as Claude does with -p; an interactive session leaves them to finish.
  *
  * SubagentStart runs through the pre-spawn seam (internal/subagent-hooks) so its
  * additionalContext reaches the child before its first prompt; it cannot block a
@@ -95,7 +95,7 @@
  */
 
 import * as os from 'node:os'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
 import { claudeEffortLevel } from '../internal/effort.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
@@ -194,6 +194,31 @@ function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: bo
   return { block: false, reason: '' }
 }
 
+/**
+ * A PreToolUse `updatedInput` on a direct `!` command. pi runs the event's own command
+ * unless the handler returns operations, so a rewrite that only changed the payload ran the
+ * typed command. The rewrite is honoured by running pi's local executor on the rewritten
+ * command, with the shell pi itself would use (its settings, the project's only when pi
+ * trusts the project) and the command prefix pi prepends kept. pi shows the typed command,
+ * so the user is told what actually runs.
+ */
+function rewrittenUserBash(typed: string, rewritten: unknown, ctx: ExtensionContext): UserBashEventResult | undefined {
+  if (typeof rewritten !== 'string' || rewritten === typed) return undefined
+  ctx.ui.notify(`A PreToolUse hook rewrote this command; running: ${rewritten}`, 'warning')
+  let shellPath: string | undefined
+  try {
+    shellPath = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true }).getShellPath()
+  } catch {
+    shellPath = undefined
+  }
+  const local = createLocalBashOperations({ shellPath })
+  return {
+    operations: {
+      exec: (command, cwd, options) => local.exec(command.endsWith(typed) ? `${command.slice(0, command.length - typed.length)}${rewritten}` : rewritten, cwd, options),
+    },
+  }
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -223,6 +248,11 @@ export default function hooksExtension(pi: ExtensionAPI) {
   let managedHooksOnly = false
   /** Skill hooks registered this session, re-applied when a settings edit reloads. */
   const registeredSkillHooks: Array<{ skillName: string; hooks: Record<string, unknown> }> = []
+  /** Skill once-hooks spent this session, by origin and command. A settings reload rebuilds
+   * the config and re-merges the skill hooks from their declarations, so the spent mark on
+   * the parsed hook does not survive it; this does. */
+  const spentOnce = new Set<string>()
+  const onceKey = (hook: HookCommand): string => hook.declarationKey ?? `${hook.origin ?? ''}\0${hook.command ?? ''}`
   /** Whether this process is a subagent's child. Claude runs settings hooks inside a
    * subagent for tool events, but Stop is the main agent's, a subagent completes with
    * SubagentStop, and a subagent run is neither a session (SessionStart, SessionEnd) nor
@@ -295,7 +325,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
       // successful run; a failure, block, or timeout leaves it in place.
       const markOnce = async (run: Promise<HookRunResult>): Promise<HookRunResult> => {
         const result = await run
-        if (hook.once === true && hook.origin?.startsWith('skill:') === true && result.code === 0 && !result.timedOut) hook.spent = true
+        if (hook.once === true && hook.origin?.startsWith('skill:') === true && result.code === 0 && !result.timedOut) {
+          hook.spent = true
+          spentOnce.add(onceKey(hook))
+        }
         return result
       }
       if (!isBackgroundHook(hook)) return markOnce(dispatch())
@@ -440,8 +473,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // env (Stop already converted to SubagentStop, per Claude); they run only for
     // this child process.
     agentIdentity = mergeAgentEnvHooks(config, hookSources)
-    // A reload must not drop the skill hooks the session already registered.
+    // A reload must not drop the skill hooks the session already registered, nor revive
+    // the once-hooks among them that already ran.
     for (const skill of registeredSkillHooks) mergeSkillHooks(config, skill.skillName, skill.hooks, hookSources)
+    for (const hook of Object.values(config).flatMap((matchers) => matchers.flatMap((matcher) => matcher.hooks ?? []))) {
+      if (hook.once === true && spentOnce.has(onceKey(hook))) hook.spent = true
+    }
   }
 
   pi.on('session_start', async (event, ctx) => {
@@ -454,6 +491,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     stopHookBlockCount = 0
     pendingToolContext.clear()
     registeredSkillHooks.length = 0
+    spentOnce.clear()
     const trusted = await isProjectApproved(ctx)
     // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
     // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
@@ -585,16 +623,16 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // no execution result and fires only before the command runs, so there is deliberately
   // no PostToolUse for it.
   pi.on('user_bash', async (event, ctx) => {
-    const decision = await runPreToolUse(config, 'bash', { command: event.command }, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'), { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() })
-    if (!decision.block) return undefined
+    const input: { command?: unknown } = { command: event.command }
+    const decision = await runPreToolUse(config, 'bash', input, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'), { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() })
     // Claude's "ask": prompt before running and let the command through on approval; with
     // no UI (headless) the block stands, the same safe default as the tool_call path.
-    if (decision.ask && ctx.hasUI) {
-      const approved = await ctx.ui.confirm('Allow this command?', decision.reason ?? 'A hook asks you to confirm this command.')
-      if (approved) return undefined
+    const approved = decision.block && decision.ask && ctx.hasUI && (await ctx.ui.confirm('Allow this command?', decision.reason ?? 'A hook asks you to confirm this command.'))
+    if (decision.block && !approved) {
+      const reason = decision.reason ?? 'Command blocked by hook'
+      return { result: { output: `Blocked by hook: ${reason}`, exitCode: 1, cancelled: false, truncated: false } }
     }
-    const reason = decision.reason ?? 'Command blocked by hook'
-    return { result: { output: `Blocked by hook: ${reason}`, exitCode: 1, cancelled: false, truncated: false } }
+    return rewrittenUserBash(event.command, input.command, ctx)
   })
 
   pi.on('input', async (event, ctx) => {

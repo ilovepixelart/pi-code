@@ -196,3 +196,75 @@ describe('isSafeCommand respects quoting', () => {
     expect(isSafeCommand('grep "unterminated')).toBe(false)
   })
 })
+
+describe('isSafeCommand follows bash escapes inside quotes', () => {
+  it('blocks a command hidden after an escaped double quote', () => {
+    expect(isSafeCommand('echo "\\"" ; touch PWN ; echo \\"')).toBe(false)
+  })
+
+  it('blocks a command hidden after an escaped quote in an ANSI-C string', () => {
+    expect(isSafeCommand("echo $'\\'' ; touch PWN ; echo \\'")).toBe(false)
+  })
+
+  it('sees a redirect that follows a string ending in an escaped quote', () => {
+    expect(isSafeCommand('echo "\\"" > out')).toBe(false)
+  })
+
+  it('still allows a read whose quoted argument contains an escaped quote', () => {
+    expect(isSafeCommand('grep "a\\"b" file')).toBe(true)
+  })
+})
+
+describe('isSafeCommand blocks the write and exec forms of allowlisted tools', () => {
+  // fd(1): -x/--exec runs a command per result, -X/--exec-batch once with all of them.
+  it.each(['fd -e tmp -x rm {}', 'fd -X wc -l', 'fd --exec echo {}', 'fd --exec-batch ls', 'fd -Hx rm'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // npm-audit(1): `npm audit fix` installs packages.
+  it.each(['npm audit fix', 'npm audit fix --force'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // bat(1): --pager names the program bat runs when it pages.
+  it.each(['bat --paging=always --pager "touch y" f', 'bat --pager=less f'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // bash(1) REDIRECTION: [n]<>word opens word for reading and writing, creating it.
+  it.each(['cat <>newfile', 'echo hi 1<>existing'])('blocks the read-write redirect in %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+})
+
+describe('isSafeCommand still allows the read-only forms of those tools', () => {
+  it.each(['fd -e ts', 'fd --extension x src', 'fd -H pattern', 'fd --exclude node_modules x', 'npm audit', 'npm audit --json', 'bat --paging=never f', 'bat -n f', 'cat < input.txt'])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+})
+
+// bash removes quotes before the command sees its arguments: '-delete', "-o", -de'lete'
+// and $'-o' are the flags themselves, and $'\x2do' is -o spelled in hex.
+describe('isSafeCommand reads a quoted flag as the flag the command receives', () => {
+  it.each([`find . '-delete'`, `find . -de'lete'`, `find . "-exec" rm {} \\;`, `sort "-o" out in`, `sort $'-o' out in`, `sort $'\\x2do' out in`, `rg '--pre' cat x`, `fd "-x" rm {}`, `bat "--pager" x f`, `git log "--output=x"`, `git branch "-D" main`])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  it.each([`find . -name "*-delete*"`, `find . -name "x -delete"`, `sort -k2 "file -o"`, `git branch "--list"`, `git log --grep="-o"`])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+})
+
+// Read-only commands the stricter flag and escape checks must not catch. `$'` is ANSI-C
+// quoting only where it is unquoted; fd's -t and -e and sort's -t take a value, so a cluster
+// ending in that value is not -x or -o; a flag is the start of a word, never text inside a
+// quoted value.
+describe('isSafeCommand keeps allowing read-only commands near the blocked forms', () => {
+  it.each([`grep -rn "\\$'\\033" .`, `grep -rn "PS1=\\$'\\x1b" .`, `echo \\$'\\x41'`, `echo "$'\\x41'"`, 'fd -tx', 'fd -etsx', `git log --format="%h --output x"`, `sort -t'o' f`])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+
+  it.each([`sort $'\\x2do' out in`, 'fd -Hx rm', 'fd -x rm', 'sort -o out in', 'sort -ro out in', 'git log --output=x'])('still blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+})

@@ -13,6 +13,7 @@ import * as path from 'node:path'
 import { killProcessTree } from '../internal/process-tree.js'
 import { sharedSlot } from '../internal/shared-slot.js'
 import { errorMessage } from '../internal/values.js'
+import { taskWithStartContext } from './child.js'
 import { spawnChild, utf8Chunks } from './run.js'
 
 export interface BackgroundRun {
@@ -222,7 +223,9 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   // The task prompt is always the final argument: both spawn paths push it last and the
   // invocation helper only prepends. A 'Task: ' prefix match is wrong whenever
   // SubagentStart hooks placed their context ahead of it.
-  const args = rebuilt.args.map((arg, index) => (index === rebuilt.args.length - 1 ? `Task: ${task}` : arg))
+  // Capped as a fresh start caps it: one argv string over Linux's per-argument limit
+  // fails the spawn with E2BIG.
+  const args = rebuilt.args.map((arg, index) => (index === rebuilt.args.length - 1 ? taskWithStartContext(task, []) : arg))
   run.state = 'running'
   run.task = task
   run.output = undefined
@@ -299,7 +302,10 @@ export function startBackgroundRun(agent: string, task: string, invocation: Back
 function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (run: BackgroundRun) => void): void {
   // Node fires both 'error' and 'close' on a spawn failure (ENOENT); complete once.
   let completed = false
-  const complete = (): void => {
+  // `deferNotice` holds the notification until the start or resume call has returned: the
+  // caller announces the run after that, and a completion delivered first left listeners
+  // with a run that started and never stopped. The record itself settles at once.
+  const complete = (deferNotice = false): void => {
     if (completed) return
     completed = true
     run.finishedAt = ++state.finishSequence
@@ -310,11 +316,15 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     // error reaches Node as an uncaughtException and takes pi down with it. The run
     // state is already recorded by this point, so there is nothing to do but drop the
     // notification for a session that is no longer there to receive it.
-    try {
-      onComplete(run)
-    } catch {
-      // the session that asked for this run is gone
+    const notify = (): void => {
+      try {
+        onComplete(run)
+      } catch {
+        // the session that asked for this run is gone
+      }
     }
+    if (deferNotice) queueMicrotask(notify)
+    else notify()
   }
   // The marker in env lets the child's subagent tool refuse to nest further. The run is
   // already registered as running by the caller, so a spawn that throws synchronously
@@ -326,7 +336,7 @@ function driveRun(run: BackgroundRun, invocation: BackgroundSpawn, onComplete: (
     run.state = 'failed'
     run.exitCode = 1
     run.stderr = spawned.error.message
-    complete()
+    complete(true)
     return
   }
   const proc = spawned.proc

@@ -131,7 +131,23 @@ export function piMcpRunning(commands: ReadonlyArray<{ name: string; sourceInfo?
   return commands.some((command) => command.name === 'mcp' && command.sourceInfo?.path === 'builtin:mcp')
 }
 
-/** pi's MCP tools already carry Claude's mcp__<server>__<tool> names, so each is its own alias. */
-export function nativeToolAliases(tools: ReadonlyArray<{ name: string }>): McpToolAlias[] {
-  return tools.filter((tool) => tool.name.startsWith('mcp__')).map((tool) => ({ pi: tool.name, claude: tool.name }))
+/** The prefixes pi gives a registered server's tools. pi 0.99.2 replaces `-` with `_`
+ * (`mcp__my-srv__x` became `mcp__my_srv__x`, pi CHANGELOG #10239); earlier versions keep
+ * the name as registered. Both are accepted, since the pi peer range is open. */
+export function nativeToolPrefixes(server: string): string[] {
+  return [...new Set([`mcp__${server}__`, `mcp__${server.replaceAll('-', '_')}__`])]
+}
+
+/** pi's MCP tools under Claude's `mcp__<server>__<tool>` names, with each server pi-code
+ * registered spelled as configured, so a hook matcher written for `mcp__my-srv__.*` still
+ * fires on pi 0.99.2. The longest prefix wins, so `a` cannot claim the tools of `a__b`.
+ * A tool of a server pi connects from its own mcp.json keeps pi's name. */
+export function nativeToolAliases(tools: ReadonlyArray<{ name: string }>, servers: Iterable<string>): McpToolAlias[] {
+  const prefixes = [...servers].flatMap((server) => nativeToolPrefixes(server).map((prefix) => ({ prefix, claude: `mcp__${server}__` }))).sort((a, b) => b.prefix.length - a.prefix.length)
+  return tools
+    .filter((tool) => tool.name.startsWith('mcp__'))
+    .map((tool) => {
+      const match = prefixes.find((entry) => tool.name.startsWith(entry.prefix))
+      return { pi: tool.name, claude: match ? `${match.claude}${tool.name.slice(match.prefix.length)}` : tool.name }
+    })
 }

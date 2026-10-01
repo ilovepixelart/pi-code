@@ -198,7 +198,23 @@ describe('piMcpRunning (MCPN-009)', () => {
 
 describe('nativeToolAliases (MCPN-008)', () => {
   it("lists pi's mcp__ tools under their own names and nothing else", () => {
-    expect(nativeToolAliases([{ name: 'mcp__srv__go' }, { name: 'read' }, { name: 'srv_go' }])).toEqual([{ pi: 'mcp__srv__go', claude: 'mcp__srv__go' }])
+    expect(nativeToolAliases([{ name: 'mcp__srv__go' }, { name: 'read' }, { name: 'srv_go' }], ['srv'])).toEqual([{ pi: 'mcp__srv__go', claude: 'mcp__srv__go' }])
+  })
+
+  it('reports the configured server name when pi 0.99.2 underscores it', () => {
+    expect(nativeToolAliases([{ name: 'mcp__my_srv__go' }], ['my-srv'])).toEqual([{ pi: 'mcp__my_srv__go', claude: 'mcp__my-srv__go' }])
+  })
+
+  it("keeps pi 0.99.1's name, which already is the configured one", () => {
+    expect(nativeToolAliases([{ name: 'mcp__my-srv__go' }], ['my-srv'])).toEqual([{ pi: 'mcp__my-srv__go', claude: 'mcp__my-srv__go' }])
+  })
+
+  it('maps a tool to the server with the longest matching prefix', () => {
+    expect(nativeToolAliases([{ name: 'mcp__x__y_z__t' }], ['x', 'x__y-z'])).toEqual([{ pi: 'mcp__x__y_z__t', claude: 'mcp__x__y-z__t' }])
+  })
+
+  it("keeps a plugin server's name, which pi builds from the registered plugin_ name", () => {
+    expect(nativeToolAliases([{ name: 'mcp__plugin_my_plug_db__q' }], ['plugin_my-plug_db'])).toEqual([{ pi: 'mcp__plugin_my_plug_db__q', claude: 'mcp__plugin_my-plug_db__q' }])
   })
 })
 

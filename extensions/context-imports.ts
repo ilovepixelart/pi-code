@@ -75,6 +75,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { ADD_DIR_FLAG, ADD_DIR_FLAG_OPTIONS, setAddDirReader } from './internal/add-dir-flag.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { AGENTS_FILE_NAMES } from './internal/context-files.js'
 import { externalImportDecision, externalImportKey, rememberExternalImportDecision } from './internal/external-imports.js'
@@ -88,6 +89,7 @@ import { claudeSettingsChain, readSettingsChain } from './internal/settings-chai
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
 import { fileToolTarget } from './internal/tool-target.js'
+import { realpathOr } from './internal/values.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
@@ -209,7 +211,10 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     // reported never depends on whether it exists: a notice that named only the
     // existing ones would enumerate the filesystem for any repo-controlled file
     // willing to write one @line per guess.
-    if (!isUnder(resolved, allowedRoots)) refuse(false)
+    // Compared through its nearest existing ancestor's real path, as the roots are: a
+    // session reached through a symlink otherwise reported its own missing files as
+    // outside the project.
+    if (!isUnder(realpathOr(resolved), allowedRoots)) refuse(false)
     return null
   }
   if (seen.has(real)) return null
@@ -220,7 +225,9 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
-  if (isExcluded?.(real)) return null
+  // Both spellings count, as the rules loader does: a glob written against the symlink's
+  // own path and one written against its target each exclude it.
+  if (isExcluded?.(real) || isExcluded?.(resolved)) return null
   try {
     // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
     const body = fs.readFileSync(real, 'utf-8')
@@ -483,6 +490,18 @@ export function readClaudeMdExcludes(files: string[], managed: Record<string, un
  * Matching runs on the path without its leading slash so `**` and `**\/`, which
  * span whole segments, can reach a root-anchored path. */
 export function isExcludedPath(absPath: string, globs: string[], home: string): boolean {
+  if (globs.length === 0) return false
+  // A symlink is excluded by a glob naming either spelling, as the rules loader does.
+  let real = absPath
+  try {
+    real = fs.realpathSync(absPath)
+  } catch {
+    // not on disk: only the given spelling exists
+  }
+  return matchesExcludeGlob(absPath, globs, home) || (real !== absPath && matchesExcludeGlob(real, globs, home))
+}
+
+function matchesExcludeGlob(absPath: string, globs: string[], home: string): boolean {
   const target = absPath.split(path.sep).join('/').replace(/^\//, '')
   return globs.some((raw) => {
     let glob = expandHome(raw.trim(), home).split(path.sep).join('/')
@@ -567,11 +586,19 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
     const allowedRoots = rootsForImporter(file.path, run.home, run.cwd, run.externalApproved)
     imported.push(...collectImports(file.content, path.dirname(file.path), run.home, allowedRoots, run.seen, { ...options, importer: file.path }))
   }
+  // An additional dir's refusals are reported but not asked about: the approval is stored
+  // for the project and widens project files only, and --add-dir changes per run, so a
+  // yes here would cover whatever directory a later run adds. They stay in `refused` for
+  // the notice; only the dialog's list drops them.
+  const askable = new Set(run.budget.refusedPresent)
   for (const extra of extras) {
     // The additional dir itself is an allowed root, so its files' relative imports
     // resolve even from .claude/rules two levels down.
     const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, run.home, run.cwd)]
     imported.push(...collectImports(extra.content, path.dirname(extra.path), run.home, allowedRoots, run.seen, { ...options, importer: extra.path }))
+  }
+  for (const file of run.budget.refusedPresent) {
+    if (!askable.has(file)) run.budget.refusedPresent.delete(file)
   }
   return imported
 }
@@ -1115,9 +1142,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // Claude's --add-dir. Only the memory-loading half is meaningful here: pi has
   // no path-based permission system, so there is no access grant to mirror.
   // Optional-called so the extension still wires under stub hosts without flags.
-  pi.registerFlag?.('add-dir', {
-    description: 'Additional working directories; with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD set, their CLAUDE.md memory files load too (comma-separated)',
-    type: 'string',
+  pi.registerFlag?.(ADD_DIR_FLAG, ADD_DIR_FLAG_OPTIONS)
+  setAddDirReader(() => {
+    // A replaced session's pi throws on every call; the next instance registers its own.
+    try {
+      return pi.getFlag?.(ADD_DIR_FLAG)
+    } catch {
+      return undefined
+    }
   })
 
   /** The session-scope memory session_start loads: the user's own CLAUDE.md, plus
@@ -1306,6 +1338,8 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // rule. Once per file per session, ordered shallowest first so the deepest
   // instructions are read last, matching the launch-time ordering.
   pi.on('tool_result', async (event, ctx) => {
+    // A nested file is a CLAUDE.md memory file too, which this variable turns off.
+    if (process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1') return
     const rel = fileToolTarget(event)
     if (rel === undefined) return
     // Repo-controlled text, gated like every other project file this extension adds.

@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 /** The message of a thrown value, whatever was thrown. */
 export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -51,4 +52,16 @@ export function parseNumericEnv(raw: string | undefined): number | undefined {
   if (cleaned.trim() === '') return undefined
   const value = Number(cleaned)
   return Number.isFinite(value) ? value : undefined
+}
+
+/** `target` with its nearest existing ancestor resolved through symlinks and the missing
+ * rest appended, so a path that does not exist yet still compares against real roots. */
+export function realpathOr(target: string): string {
+  try {
+    return fs.realpathSync(target)
+  } catch {
+    const dir = path.dirname(target)
+    if (dir === target) return target
+    return path.join(realpathOr(dir), path.basename(target))
+  }
 }

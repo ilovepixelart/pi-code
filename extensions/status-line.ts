@@ -21,8 +21,8 @@
  * session start, accumulated per message_end, and reseeded when compaction or
  * /tree navigation reshapes the branch, so it stays correct across navigation
  * and forks without re-walking the branch on every render. The built-in segment is also
- * the fallback while a configured command produces no output. Multi-line output
- * is truncated to its first line: the segment is one footer row in pi.
+ * the fallback while a configured command produces no output. Multi-line output is
+ * joined into the one footer row pi gives the segment.
  *
  * Docs: https://code.claude.com/docs/en/statusline.md
  */
@@ -31,9 +31,11 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { hookFiles, readDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { hookFiles, readSettingsDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { addDirFlagValue } from './internal/add-dir-flag.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
+import { PACKAGE_VERSION } from './internal/package-version.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
 import { checkoutRoot, gitRoot } from './internal/project-root.js'
@@ -46,26 +48,24 @@ const DEBOUNCE_MS = 300
 
 /** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
  * checkout there, and a directory in an ordinary clone. */
-function isGitWorktree(cwd: string): boolean {
+/** git's name for the linked worktree cwd is in: the directory under .git/worktrees that
+ * the worktree's `.git` file points at. Undefined in a main checkout (whose `.git` is a
+ * directory) and outside a repository. */
+function gitWorktreeName(cwd: string): string | undefined {
   // gitRoot, not repoRoot: repoRoot resolves a worktree to its main checkout, which is
   // exactly the thing this needs to see before it is resolved away.
   const root = gitRoot(cwd)
-  if (root === undefined) return false
+  if (root === undefined) return undefined
   try {
-    return fs.statSync(path.join(root, '.git')).isFile()
+    const line = fs
+      .readFileSync(path.join(root, '.git'), 'utf-8')
+      .split('\n')
+      .find((entry) => entry.startsWith('gitdir:'))
+    return line === undefined ? undefined : path.basename(line.slice('gitdir:'.length).trim())
   } catch {
-    return false
+    return undefined
   }
 }
-
-/** Claude sends its CLI version; pi-code's own version is the honest analogue. */
-const PACKAGE_VERSION = (() => {
-  try {
-    return String(JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf-8')).version ?? '')
-  } catch {
-    return ''
-  }
-})()
 
 interface UsageEntry {
   type: string
@@ -201,6 +201,26 @@ export function readStatusLineConfig(files: string[], managed: Record<string, un
   return found
 }
 
+/** The statusLine that runs. Claude: with disableAllHooks set outside managed settings,
+ * "Claude Code runs only a statusLine from managed settings, and with no managed
+ * statusLine the status line is disabled"; set in managed settings, nothing runs. */
+export function activeStatusLine(files: string[], managed: Record<string, unknown> = readManagedSettings()): StatusLineConfig | undefined {
+  if (managed.disableAllHooks === true) return undefined
+  if (readSettingsDisableAllHooks(files)) return parseStatusLineEntry(managed.statusLine)
+  return readStatusLineConfig(files, managed)
+}
+
+/** The --add-dir directories, the flag context-imports registers for Claude's additional
+ * working directories. Empty when none were given, which is the documented shape. */
+function addedDirs(): string[] {
+  const raw = addDirFlagValue()
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(',')
+    .map((dir) => dir.trim())
+    .filter(Boolean)
+}
+
 export default function statusLine(pi: ExtensionAPI) {
   let turnCount = 0
   let config: StatusLineConfig | undefined
@@ -253,16 +273,6 @@ export default function statusLine(pi: ExtensionAPI) {
     ctx.ui.setStatus('pi-code-status', commandLine ?? builtIn)
   }
 
-  /** The --add-dir directories, the flag pi-code registers for Claude's additional
-   * working directories. Empty when none were given, which is the documented shape. */
-  function addedDirs(): string[] {
-    const raw = String(pi.getFlag?.('add-dir') ?? '')
-    return raw
-      .split(',')
-      .map((dir) => dir.trim())
-      .filter(Boolean)
-  }
-
   /** The stdin payload per Claude's documented statusline contract. */
   function buildPayload(ctx: ExtensionContext): Record<string, unknown> {
     const usage = ctx.getContextUsage() ?? { tokens: null, contextWindow: 0, percent: null }
@@ -272,19 +282,21 @@ export default function statusLine(pi: ExtensionAPI) {
       styleName = readActiveStyleName(styleFiles)
       styleDirty = false
     }
+    const worktreeName = gitWorktreeName(ctx.cwd)
     const payload: Record<string, unknown> = {
       hook_event_name: 'Status',
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
+      // Claude sends its CLI version; pi-code's own version is the honest analogue.
       version: PACKAGE_VERSION,
       // project_dir is the repository, not the directory the session started in: a
       // script labelling the project showed whichever subdirectory it was launched
-      // from. git_worktree reports the .git file a worktree carries in place of a
-      // directory. added_dirs comes from the --add-dir flag pi-code registers.
+      // from. git_worktree names a linked worktree and is absent in a main checkout, as
+      // Claude sends it. added_dirs comes from the --add-dir flag pi-code registers.
       workspace: {
         current_dir: ctx.cwd,
         project_dir: checkoutRoot(ctx.cwd),
-        git_worktree: isGitWorktree(ctx.cwd),
+        ...(worktreeName === undefined ? {} : { git_worktree: worktreeName }),
         added_dirs: addedDirs(),
       },
       // Both fields, per Claude's documented contract: published statusline scripts
@@ -499,7 +511,7 @@ export default function statusLine(pi: ExtensionAPI) {
     const files = hookFiles(ctx.cwd, os.homedir(), trusted)
     // Claude's disableAllHooks also turns off the custom statusLine command; the
     // built-in segment still renders as the fallback.
-    config = readDisableAllHooks(files) ? undefined : readStatusLineConfig(files)
+    config = activeStatusLine(files)
     // Re-armed rather than armed once: a refreshInterval added or changed mid-session
     // had no effect until the next session, though Claude applies a settings change as
     // soon as the file is saved.
@@ -518,8 +530,17 @@ export default function statusLine(pi: ExtensionAPI) {
     disposeSettingsWatch = watchSettingsFiles(files, () => {
       const previousCommand = config?.command
       const liveFiles = hookFiles(watchCwd, os.homedir(), trusted && stillApproved())
-      config = readDisableAllHooks(liveFiles) ? undefined : readStatusLineConfig(liveFiles)
+      config = activeStatusLine(liveFiles)
       armRefresh()
+      // With the setting gone nothing runs again, so the last script output would stay.
+      // Only a removal resets the segment: with no statusLine before either, the built-in
+      // segment is already showing and keeps its state.
+      if (!config) {
+        if (previousCommand === undefined) return
+        commandLine = undefined
+        show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
+        return
+      }
       // The debounce batches rapid triggers, but a command the user just edited has
       // nothing to batch with: run it now so the result of the edit is immediate.
       if (config?.command !== previousCommand) void runCommand(ctx)
@@ -558,8 +579,11 @@ export default function statusLine(pi: ExtensionAPI) {
   })
 
   pi.on('session_compact', async (_event, ctx) => {
-    // Compaction replaces the branch entries; reseed the total from what remains.
+    // Compaction replaces the branch entries; reseed the total from what remains. The last
+    // response's usage describes the context that was just replaced: Claude sends
+    // current_usage null until the next API call.
     costTotal = sessionCost(ctx)
+    lastUsage = undefined
     scheduleRefresh()
   })
 

@@ -30,6 +30,9 @@ export interface InstalledPlugin {
   /** ${CLAUDE_PLUGIN_DATA}; may not exist yet. */
   dataDir: string
   manifest: Record<string, unknown>
+  /** The keys `enabledPlugins` names this plugin by: `<directory>@<marketplace>`, then the
+   * bare directory, which can differ from the manifest `name`. */
+  enablementKeys: { qualified: string; directory: string }
   /** Resolved `pluginConfigs[id].options` values, exposed as `${user_config.KEY}`. */
   userConfig?: Record<string, string>
 }
@@ -267,10 +270,16 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
  * hooks to run. Keys are matched the way pluginEnabled matches them, by the qualified
  * `name@marketplace` or the bare directory name, so the two cannot drift apart. */
 export function managedForceEnabled(plugins: InstalledPlugin[]): InstalledPlugin[] {
-  const managedEntry = readManagedSettings().enabledPlugins
-  if (managedEntry === null || typeof managedEntry !== 'object') return []
-  const entries = managedEntry as Record<string, unknown>
-  return plugins.filter((plugin) => Object.entries(entries).some(([key, value]) => value === true && (key === plugin.name || key.startsWith(`${plugin.name}@`))))
+  const managed = readManagedSettings().enabledPlugins
+  return plugins.filter((plugin) => enablementEntry(managed, plugin.enablementKeys.qualified, plugin.enablementKeys.directory) === true)
+}
+
+/** The value an `enabledPlugins` object holds for one plugin: its qualified key first,
+ * then its bare directory. */
+function enablementEntry(entries: unknown, qualified: string, directory: string): unknown {
+  if (entries === null || typeof entries !== 'object') return undefined
+  const record = entries as Record<string, unknown>
+  return record[qualified] ?? record[directory]
 }
 
 /** The plugin's effective enablement per Claude's precedence: a managed
@@ -278,11 +287,8 @@ export function managedForceEnabled(plugins: InstalledPlugin[]): InstalledPlugin
  * manifest's defaultEnabled, which defaults to true ("starts in an enabled state
  * when the user has not set one"). */
 function pluginEnabled(qualified: string, pluginDir: string, enabled: Record<string, boolean>, manifest: Record<string, unknown>): boolean {
-  const managedEntry = readManagedSettings().enabledPlugins
-  if (managedEntry !== null && typeof managedEntry === 'object') {
-    const managedState = (managedEntry as Record<string, unknown>)[qualified] ?? (managedEntry as Record<string, unknown>)[pluginDir]
-    if (typeof managedState === 'boolean') return managedState
-  }
+  const managedState = enablementEntry(readManagedSettings().enabledPlugins, qualified, pluginDir)
+  if (typeof managedState === 'boolean') return managedState
   const userState = enabled[qualified] ?? enabled[pluginDir]
   if (typeof userState === 'boolean') return userState
   return manifest.defaultEnabled !== false
@@ -301,7 +307,7 @@ function resolvePlugin(home: string, cacheDir: string, marketplace: string, plug
   // _, and - replaced by -", one dash per character, underscores kept.
   const id = qualified.replace(/[^A-Za-z0-9_-]/g, '-')
   const userConfig = configs[qualified] ?? configs[pluginDir] ?? configs[name]
-  return { name, root, dataDir: path.join(claudeConfigDir(home), 'plugins', 'data', id), manifest, ...(userConfig ? { userConfig } : {}) }
+  return { name, root, dataDir: path.join(claudeConfigDir(home), 'plugins', 'data', id), manifest, enablementKeys: { qualified, directory: pluginDir }, ...(userConfig ? { userConfig } : {}) }
 }
 
 /** A plugin component path, resolved inside the plugin root. Claude "rejects a component

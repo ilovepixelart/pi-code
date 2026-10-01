@@ -28,6 +28,14 @@ export const INDEX_FILE = 'MEMORY.md'
 
 /** Claude loads the first 200 lines or 25KB of the memory index at startup. */
 export const INDEX_MAX_LINES = 200
+
+/** The index's lines: the text after a final newline is not a line of its own, and the
+ * index is always written with one. */
+function indexLines(text: string): string[] {
+  const lines = text.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
 export const INDEX_MAX_BYTES = 25_000
 
 /** Windows drive letters are case-insensitive, so C:\x and c:\x are one project. */
@@ -171,7 +179,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
   if (isUpdate) return false
   // Only the loaded content counts: frontmatter and comments are stripped first.
   const next = stripNonLoaded(upsertIndexLine(index, name, description))
-  return next.split('\n').length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
+  return indexLines(next).length > INDEX_MAX_LINES || Buffer.byteLength(next, 'utf-8') > INDEX_MAX_BYTES
 }
 
 /** Where the index stands against the read limits, measured on the loaded content
@@ -179,7 +187,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
  * 10% of one, else 'ok'. Claude reminds near a limit and errors over it. */
 function indexReadState(index: string): 'ok' | 'near' | 'over' {
   const loaded = stripNonLoaded(index)
-  const lines = loaded.split('\n').length
+  const lines = indexLines(loaded).length
   const bytes = Buffer.byteLength(loaded, 'utf-8')
   if (lines > INDEX_MAX_LINES || bytes > INDEX_MAX_BYTES) return 'over'
   if (lines > INDEX_MAX_LINES * 0.9 || bytes > INDEX_MAX_BYTES * 0.9) return 'near'
@@ -272,8 +280,9 @@ async function deleteMemory(dir: string, indexPath: string, name: string): Promi
 /** The index as injected into the prompt, bounded like Claude's startup load. */
 export function capIndexForPrompt(index: string): string {
   const loaded = stripNonLoaded(index)
-  const withinLines = loaded.split('\n').slice(0, INDEX_MAX_LINES)
-  let dropped = loaded.split('\n').length - withinLines.length
+  const all = indexLines(loaded)
+  const withinLines = all.slice(0, INDEX_MAX_LINES)
+  let dropped = all.length - withinLines.length
   let text = withinLines.join('\n')
   while (Buffer.byteLength(text, 'utf-8') > INDEX_MAX_BYTES && withinLines.length > 1) {
     withinLines.pop()

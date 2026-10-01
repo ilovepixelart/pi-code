@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -819,8 +819,9 @@ describe('mcp transport selection', () => {
   })
 
   it('falls back to SSE when the streamable transport fails to connect', async () => {
+    // What the SDK throws for an HTTP error status: StreamableHTTPError, the status as code.
     hoisted.control.connect = async (transport) => {
-      if (transport.kind === 'http') throw new Error('404 Not Found')
+      if (transport.kind === 'http') throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Not Found'), { code: 404 })
     }
     withTools([{ name: 'go' }])
     const harness = await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok' } } })
@@ -830,6 +831,37 @@ describe('mcp transport selection', () => {
     expect(sse.url?.href).toBe('https://example.com/mcp')
     expect((sse.options.requestInit as { headers: Record<string, string> }).headers.Authorization).toBe('Bearer tok')
     expect(harness.toolNames()).toEqual(['remote_go'])
+  })
+
+  // The SDK's backwards-compatible client "tries Streamable HTTP first, then falls back to
+  // SSE on 4xx responses". Anything else is the server's real failure, not a transport
+  // mismatch, and retrying over SSE doubled the wait and reported the wrong cause.
+  it('falls back to SSE on another 4xx, 405 Method Not Allowed', async () => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Method Not Allowed'), { code: 405 })
+    }
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp' } } })
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http', 'sse'])
+  })
+
+  it.each([
+    ['a refused connection', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })],
+    ['a server error', Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Internal Server Error'), { code: 500 })],
+  ])('does not retry over SSE after %s', async (_label, error) => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw error
+    }
+    vi.useFakeTimers()
+    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp' } } })
+    const started = harness.sessionStart()
+    // Both are transient, so the connect is retried three times, 1 s doubling, first.
+    await vi.advanceTimersByTimeAsync(8000)
+    await started
+    expect(hoisted.transports.length).toBeGreaterThan(1)
+    expect(hoisted.transports.every((t) => t.kind === 'http')).toBe(true)
+    const [line] = await statusLinesOf(harness)
+    expect(line).toContain((error as Error).message)
   })
 
   it('connects an explicit type sse server over SSE directly', async () => {
@@ -884,6 +916,39 @@ describe('mcp transport selection', () => {
     const [line] = await statusLinesOf(harness)
     expect(line.startsWith('remote: failed: ')).toBe(true)
     expect(line.endsWith(' (0 tools)')).toBe(true)
+  })
+})
+
+describe('MCP client identity', () => {
+  it("reports pi-code's own version to the server", async () => {
+    // The version in package.json is the one packaging publishes.
+    const manifest = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf-8')) as { version: string }
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { srv: { command: 'node' } } })
+    expect(hoisted.clients[0].info).toEqual({ name: 'pi-code-mcp', version: manifest.version })
+  })
+})
+
+describe('silent OAuth connect', () => {
+  it('hands the transport a provider that asks for a login rather than registering a client', async () => {
+    // The silent connect refreshes stored tokens. When the server has forgotten the
+    // client, the SDK clears the credentials and asks this provider for client
+    // information before registering one; a provider with no callback port would
+    // register http://localhost:0/callback.
+    const { FileOAuthProvider } = await import('../extensions/internal/mcp-oauth.ts')
+    const { UnauthorizedError } = await import('@modelcontextprotocol/sdk/client/auth.js')
+    const url = 'https://silent.example.com/mcp'
+    const seed = new FileOAuthProvider('remote', () => {}, undefined, url)
+    seed.bindRedirectPort(5555)
+    seed.saveClientInformation({ client_id: 'old', redirect_uris: ['http://localhost:5555/callback'] })
+    seed.saveTokens({ access_token: 'a', token_type: 'bearer', refresh_token: 'r' })
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { remote: { type: 'http', url } } })
+
+    const provider = (hoisted.transports[0].options as { authProvider?: InstanceType<typeof FileOAuthProvider> }).authProvider
+    expect(provider).toBeDefined()
+    provider?.invalidateCredentials('all')
+    expect(() => provider?.clientInformation()).toThrow(UnauthorizedError)
   })
 })
 
@@ -3293,6 +3358,31 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     piTools.push('mcp__srv__go')
     await waiting
     expect(released).toBe(true)
+  })
+
+  // pi 0.99.2 names a server's tools with `-` replaced by `_` (mcp__my-srv__x became
+  // mcp__my_srv__x, CHANGELOG #10239); pi 0.99.1 kept the configured name.
+  it.each(['mcp__my_srv__go', 'mcp__my-srv__go'])('releases a headless run as soon as a hyphenated server has tools named %s', async (toolName) => {
+    setEnv('MCP_TIMEOUT', '5000')
+    const piTools: string[] = []
+    const harness = await setup({ user: { 'my-srv': { command: 'node' } }, native: { builtinMcp: true, tools: piTools } })
+    await harness.sessionStart(true, true, false)
+    const waiting = harness.fire('before_agent_start', false)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    piTools.push(toolName)
+    const pushed = Date.now()
+    await waiting
+    expect(Date.now() - pushed).toBeLessThan(1000)
+  })
+
+  // Claude: the first scope to name a server keeps it. A user-scope sse server stays on
+  // pi-code's own client, so pi must not also get the project's server of that name.
+  it("does not hand pi a project server whose name pi-code's own client already holds", async () => {
+    const harness = await setup({ user: { shared: { type: 'sse', url: 'https://example.com/sse' } }, project: { shared: { command: 'from-project' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true, true)
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['sse'])
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual([])
+    expect(harness.warnings.some((warning) => warning.includes('duplicate server name shared'))).toBe(true)
   })
 
   it('stops holding a headless run after MCP_TIMEOUT', async () => {

@@ -26,17 +26,17 @@
  *   `stdout` with an empty `stderr`.
  */
 
-import * as os from 'node:os'
 import * as path from 'node:path'
+import { asPiReadsIt } from '../internal/tool-target.js'
 
 export { claudeToolName } from '../internal/claude-tool-names.js'
 
-/** Claude file-tool paths are always absolute with `~` expanded before hooks run,
- * so a path guard cannot be bypassed by a relative or `~` spelling of the same path. */
+/** Claude file-tool paths are always absolute before hooks run, and resolved the way pi's
+ * tools resolve them (a leading @ stripped, `~` expanded, a file:// URL decoded), so a
+ * path guard judges the file pi opens rather than another spelling of it. */
 function absolutePath(value: unknown, cwd: string): unknown {
   if (typeof value !== 'string' || value.length === 0) return value
-  const expanded = value === '~' || value.startsWith('~/') ? path.join(os.homedir(), value.slice(1)) : value
-  return path.resolve(cwd, expanded)
+  return path.resolve(cwd, asPiReadsIt(value))
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined => (value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined)

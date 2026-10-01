@@ -4,8 +4,9 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setAddDirReader } from '../extensions/internal/add-dir-flag.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
-import statusLine, { readStatusLineConfig } from '../extensions/status-line.ts'
+import statusLine, { activeStatusLine, readStatusLineConfig } from '../extensions/status-line.ts'
 import { makeWorktree } from './worktree-fixture.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, settingsChanged: undefined as (() => void) | undefined, fsReads: [] as string[], kills: [] as number[] }))
@@ -104,6 +105,34 @@ describe('readStatusLineConfig', () => {
   })
 })
 
+// Claude: "If disableAllHooks is true outside managed settings ..., Claude Code runs only a
+// statusLine from managed settings, and with no managed statusLine the status line is
+// disabled."
+describe('activeStatusLine under disableAllHooks', () => {
+  const userFile = (settings: Record<string, unknown>): string => {
+    const file = join(tempDir(), 'settings.json')
+    writeFileSync(file, JSON.stringify(settings))
+    return file
+  }
+  const managed = { statusLine: { type: 'command', command: 'managed.sh' } }
+
+  it('still runs the managed statusLine when a user file disables hooks', () => {
+    expect(activeStatusLine([userFile({ disableAllHooks: true, statusLine: { command: 'user.sh' } })], managed)?.command).toBe('managed.sh')
+  })
+
+  it('runs nothing when a user file disables hooks and nothing is managed', () => {
+    expect(activeStatusLine([userFile({ disableAllHooks: true, statusLine: { command: 'user.sh' } })], {})).toBeUndefined()
+  })
+
+  it('runs nothing when managed settings disable hooks', () => {
+    expect(activeStatusLine([userFile({ statusLine: { command: 'user.sh' } })], { ...managed, disableAllHooks: true })).toBeUndefined()
+  })
+
+  it('reads the files as usual without the setting', () => {
+    expect(activeStatusLine([userFile({ statusLine: { command: 'user.sh' } })], {})?.command).toBe('user.sh')
+  })
+})
+
 type Handler = (event: Record<string, unknown>, ctx?: unknown) => Promise<void>
 
 const setup = (cwd: string) => {
@@ -147,6 +176,38 @@ describe('statusLine command contract', () => {
     await vi.advanceTimersByTimeAsync(1400)
 
     expect(hoisted.runs.length).toBeGreaterThan(afterReload)
+  })
+
+  it('leaves the built-in segment alone when settings change and no statusLine is configured', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', {})
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const before = status.at(-1)
+
+    writeSettings(hoisted.home, 'settings.json', { outputStyle: 'Explanatory' })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toBe(before)
+  })
+
+  it('drops the custom segment when the statusLine setting is removed mid-session', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'CUSTOM SEGMENT\n', stderr: '', timedOut: false }
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toContain('CUSTOM SEGMENT')
+
+    writeSettings(hoisted.home, 'settings.json', {})
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).not.toContain('CUSTOM SEGMENT')
   })
 
   it('runs the configured command with the session payload and shows every line it printed, padded', async () => {
@@ -271,6 +332,28 @@ describe('statusLine command contract', () => {
     expect(cw.total_output_tokens).toBe(20)
   })
 
+  it('sends current_usage null and drops the old total right after /compact', async () => {
+    // Claude: current_usage is "null ... again after /compact until the next API call
+    // repopulates it"; exceeds_200k_tokens is about "the most recent API response".
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 240_000, output: 1_000, cacheRead: 0, cacheWrite: 0, totalTokens: 241_000 } } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const before = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(before.exceeds_200k_tokens).toBe(true)
+
+    await handlers.get('session_compact')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.context_window as Record<string, unknown>).current_usage).toBeNull()
+    expect(payload.exceeds_200k_tokens).toBe(false)
+  })
+
   it('flags exceeds_200k_tokens from the combined usage total', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
@@ -320,17 +403,29 @@ describe('statusLine command contract', () => {
     expect(workspace.project_dir).toBe(repo)
   })
 
-  it('reports whether the session is in a git worktree', async () => {
-    const repo = tempDir()
-    // A worktree carries a .git file pointing at the main checkout, not a directory.
-    writeFileSync(join(repo, '.git'), 'gitdir: /elsewhere/.git/worktrees/feature\n')
+  // Claude: workspace.git_worktree is the "Git worktree name when the current directory is
+  // inside a linked worktree created with git worktree add. Absent in the main working tree."
+  const workspaceAt = async (cwd: string): Promise<Record<string, unknown>> => {
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
-    const { handlers, ctx } = setup(repo)
+    const { handlers, ctx } = setup(cwd)
     vi.useFakeTimers()
     await handlers.get('session_start')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
+    return (hoisted.runs[0].payload as { workspace: Record<string, unknown> }).workspace
+  }
 
-    expect((hoisted.runs[0].payload as { workspace: { git_worktree: boolean } }).workspace.git_worktree).toBe(true)
+  it("names the linked worktree the session is in, by git's name for it", async () => {
+    // git names a worktree by its directory under .git/worktrees, which the worktree's
+    // .git file points at; it need not match the folder the worktree was checked out to.
+    const tree = tempDir()
+    writeFileSync(join(tree, '.git'), 'gitdir: /elsewhere/main/.git/worktrees/feature-xyz\n')
+    expect((await workspaceAt(tree)).git_worktree).toBe('feature-xyz')
+  })
+
+  it('leaves git_worktree out in the main working tree', async () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    expect('git_worktree' in (await workspaceAt(repo))).toBe(false)
   })
 
   it('reports the context window as zero-output and no usage before the first response', async () => {
@@ -552,6 +647,19 @@ describe('statusLine disableAllHooks', () => {
     await vi.advanceTimersByTimeAsync(400)
 
     expect(hoisted.runs).toHaveLength(1)
+  })
+
+  it('runs the managed statusLine when the user disables hooks', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { disableAllHooks: true, statusLine: { type: 'command', command: 'seg.sh' } })
+    writeFileSync(join(hoisted.home, 'managed-settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'managed.sh' } }))
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    expect(hoisted.runs.map((run) => run.command)).toEqual(['managed.sh'])
   })
 
   it('honors a managed-settings disableAllHooks', async () => {
@@ -850,6 +958,22 @@ describe('statusLine payload and expiry conformance', () => {
 
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
     expect(payload.rate_limits).toBeUndefined()
+  })
+
+  it('reports the --add-dir directories as workspace.added_dirs', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    // context-imports owns the flag and publishes its value; the status line reads that.
+    setAddDirReader(() => '/work/api, /work/web')
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    setAddDirReader(undefined)
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.workspace as { added_dirs?: unknown }).added_dirs).toEqual(['/work/api', '/work/web'])
   })
 
   it('reports workspace.added_dirs as an empty array and maps pi effort levels onto the documented vocabulary', async () => {

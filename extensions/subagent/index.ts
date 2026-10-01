@@ -73,6 +73,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // hook must respect project trust the way the tool path does, or an unapproved repo's
   // .claude/agents entry (which wins a name clash) would run on its own say-so.
   let hookAgentScope: AgentScope = 'user'
+  // The same session values the tool path computes per call: a named agent's skills: list
+  // resolves against these roots, and its project or local memory needs the approval.
+  let hookApproved = false
+  let hookSkillRoots: string[] = []
 
   // Discovery walks the plugin cache, the builtin dir, and every agent dir, parsing
   // each file: dozens of fs ops per call. The roster injection below runs every turn
@@ -84,7 +88,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     rosterCache = null
     hookCwd = ctx.cwd
-    hookAgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
+    hookApproved = isProjectApprovedSilently(ctx)
+    hookAgentScope = hookApproved ? 'both' : 'user'
+    hookSkillRoots = skillDirs(ctx.cwd, os.homedir(), hookApproved)
     try {
       hookModels = ctx.modelRegistry?.getAvailable?.() ?? []
     } catch {
@@ -106,6 +112,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
         signal: request.signal,
         makeDetails: (results): SubagentDetails => ({ mode: 'single', agentScope: 'user', projectAgentsDir: null, results }),
         availableModels: hookModels,
+        skillRoots: hookSkillRoots,
+        projectApproved: hookApproved,
       })
       return getFinalOutput(result.messages)
     })
@@ -116,8 +124,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
     // spending tokens) with its completion swallowed: SIGTERM every live run, killing the
     // process group the way a cancel does. On a same-process session switch
     // (new/resume/fork) the children keep running under the new session, so leave them be
-    // and warn once that they are still spending; /tasks inspects them. reload re-imports
-    // this module (losing the registry), so it neither kills nor warns.
+    // and warn once that they are still spending; /tasks inspects them. reload keeps the
+    // registry (held on globalThis, see background.ts), so its runs stay listed and
+    // cancellable and it neither kills nor warns.
     if (event.reason === 'quit') {
       cancelAllBackgroundRuns()
       return

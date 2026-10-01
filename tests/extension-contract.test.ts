@@ -82,6 +82,17 @@ describe('cross-extension seams meet across module graphs', () => {
     }
   })
 
+  it('the --add-dir value reaches the status line from context-imports, which owns the flag', async () => {
+    type Seam = typeof import('../extensions/internal/add-dir-flag.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/add-dir-flag.ts')
+    registrar.setAddDirReader(() => '/work/api')
+    try {
+      expect(consumer.addDirFlagValue()).toBe('/work/api')
+    } finally {
+      registrar.setAddDirReader(undefined)
+    }
+  })
+
   it('a subagent spawn reaches the SubagentStart runner the hooks extension registered', async () => {
     type Seam = typeof import('../extensions/internal/subagent-hooks.ts')
     const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/subagent-hooks.ts')
@@ -211,5 +222,56 @@ describe('host-provided packages', () => {
     }
     expect(Object.keys(pkg.dependencies).filter((name) => HOST_PROVIDED.includes(name))).toEqual([])
     expect(Object.entries(pkg.peerDependencies).filter(([name, range]) => !HOST_PROVIDED.includes(name) || range !== '*')).toEqual([])
+  })
+})
+
+// context-imports reads the rule files claude-rules adds to the prompt options in the same
+// before_agent_start, so claude-rules has to load first. pi loads a package directory in
+// readdir order (pi dist/core/package-manager collectAutoExtensionEntries), which APFS
+// sorts and ext4 does not, so the manifest names claude-rules ahead of the directory.
+describe('pi load order', () => {
+  const repo = path.resolve(import.meta.dirname, '..')
+
+  it('names claude-rules ahead of the extensions directory in the package manifest', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf-8')) as { pi: { extensions: string[] } }
+    expect(manifest.pi.extensions.indexOf('./extensions/claude-rules.ts')).toBeGreaterThanOrEqual(0)
+    expect(manifest.pi.extensions.indexOf('./extensions/claude-rules.ts')).toBeLessThan(manifest.pi.extensions.indexOf('./extensions'))
+  })
+
+  it("loads every extension once through pi's own resolver, claude-rules before context-imports", async () => {
+    const { DefaultPackageManager, SettingsManager } = await import('@earendil-works/pi-coding-agent')
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'order-agent-'))
+    const manager = new DefaultPackageManager({ cwd: repo, agentDir, settingsManager: SettingsManager.inMemory() })
+    const resolved = await manager.resolveExtensionSources([repo], { temporary: true })
+    const loaded = resolved.extensions.filter((entry) => entry.enabled).map((entry) => path.relative(repo, entry.path))
+    expect(new Set(loaded).size).toBe(loaded.length)
+    expect(loaded.indexOf(path.join('extensions', 'claude-rules.ts'))).toBeLessThan(loaded.indexOf(path.join('extensions', 'context-imports.ts')))
+    expect(loaded.length).toBe(scannedEntries().length)
+  })
+})
+
+// pi provides its own packages to an installed package, which declares them as "*" peers
+// (pi docs/packages.md); anything else must be a dependency. A missing declaration breaks
+// the install the moment an import stops being type-only.
+describe('package manifest', () => {
+  it('declares every package the extensions import', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(extensionsDir, '..', 'package.json'), 'utf-8')) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }
+    const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})])
+    const imported = new Set<string>()
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (entry.name.endsWith('.ts')) {
+          for (const match of fs.readFileSync(full, 'utf-8').matchAll(/^import [^'"]*from '([^'.][^']*)'/gm)) {
+            const specifier = match[1]
+            if (specifier.startsWith('node:')) continue
+            imported.add(specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0])
+          }
+        }
+      }
+    }
+    walk(extensionsDir)
+    expect([...imported].filter((name) => !declared.has(name)).sort()).toEqual([])
   })
 })

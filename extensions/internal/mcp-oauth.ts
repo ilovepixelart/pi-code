@@ -16,7 +16,7 @@ import * as fs from 'node:fs'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { errorMessage } from './values.js'
 
@@ -91,10 +91,15 @@ export class FileOAuthProvider implements OAuthClientProvider {
   // page cannot inject an authorization code into this login (RFC 8252 8.9).
   private readonly loginState = crypto.randomBytes(16).toString('hex')
 
-  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void, oauth?: OAuthServerConfig, endpoint?: string) {
+  /** The silent connect's provider: it refreshes stored tokens and never logs in, so it
+   * must not register a client (see clientInformation). */
+  private readonly refreshOnly: boolean
+
+  constructor(serverName: string, onRedirect: (authorizationUrl: URL) => void, oauth?: OAuthServerConfig, endpoint?: string, options: { refreshOnly?: boolean } = {}) {
     this.storePath = storeFileFor(serverName, endpoint)
     this.onRedirect = onRedirect
     this.oauth = oauth
+    this.refreshOnly = options.refreshOnly === true
     try {
       this.data = JSON.parse(fs.readFileSync(this.storePath, 'utf-8'))
     } catch {
@@ -167,6 +172,12 @@ export class FileOAuthProvider implements OAuthClientProvider {
       const secret = this.clientSecret()
       return { client_id: this.oauth.clientId, ...(secret ? { client_secret: secret } : {}) }
     }
+    // The SDK registers a client whenever this answers nothing, using redirectUrl. The
+    // refresh-only provider never binds a callback port, so it would register
+    // http://localhost:0/callback and save it, and every later login would send a redirect
+    // the server never saw. It asks for a login instead; only the interactive provider,
+    // with its real port, registers.
+    if (this.data.client === undefined && this.refreshOnly) throw new UnauthorizedError('login required: no OAuth client is registered')
     return this.data.client
   }
 

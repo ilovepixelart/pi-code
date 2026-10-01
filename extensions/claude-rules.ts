@@ -32,6 +32,7 @@ import { isProjectApproved } from './internal/project-approval.js'
 import { findNearestDir, sameLocation } from './internal/project-root.js'
 import { stripBlockComments } from './internal/strip-comments.js'
 import { fileToolTarget } from './internal/tool-target.js'
+import { realpathOr } from './internal/values.js'
 
 export interface Frontmatter {
   paths: string[]
@@ -213,20 +214,6 @@ interface PromptOptions {
 }
 
 const EMPTY_RULES: RuleSet = { inline: [], scoped: [] }
-
-/** The canonical form of a path. A target that does not exist yet (a write
- * creating a new file) canonicalises its nearest existing ancestor and keeps the
- * remaining segments, so both sides of the attach match compare realpaths even
- * for brand-new files in a symlinked checkout. */
-function realpathOr(target: string): string {
-  try {
-    return fs.realpathSync(target)
-  } catch {
-    const dir = path.dirname(target)
-    if (dir === target) return target
-    return path.join(realpathOr(dir), path.basename(target))
-  }
-}
 
 /** Unscoped rules are inlined; path-scoped ones keep their scope as pointers,
  * mirroring Claude Code, where scoped rules attach only to matching files. Files

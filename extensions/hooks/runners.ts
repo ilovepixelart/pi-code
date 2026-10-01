@@ -66,8 +66,8 @@ const MAX_TIMEOUT_S = 2_147_483
 export function timeoutMs(command: HookCommand): number {
   // Claude does not enforce `timeout` on an `async` command hook (it does on
   // `asyncRewake`), so the budget is the Node timer ceiling: the timer exists only
-  // so the delay never clamps, not as a deadline. Still-running background hooks
-  // are killed at session end instead.
+  // so the delay never clamps, not as a deadline. Background hooks still running when
+  // a headless run ends are killed instead.
   if (isBackgroundHook(command) && command.asyncRewake !== true) return MAX_TIMEOUT_S * 1000
   // Non-positive values fall back to the default: a 0ms timer would fire before the
   // hook runs, and a timed-out PreToolUse hook fails closed, bricking the tool.
@@ -79,8 +79,11 @@ export function timeoutMs(command: HookCommand): number {
 
 /** Claude's SessionEnd budget: hooks share 1.5 seconds so session exit (and /new,
  * /resume) cannot stall on a slow hook; a declared per-hook `timeout` raises the
- * budget to match, up to 60 seconds. */
+ * budget to match, up to 60 seconds. An `async` command hook is the exception Claude
+ * names ("apart from a command hook you run with async: true"): it runs in the
+ * background, holds up nothing, and gets timeoutMs's no-deadline ceiling. */
 export function sessionEndTimeoutMs(command: HookCommand): number {
+  if (isBackgroundHook(command) && command.asyncRewake !== true) return timeoutMs(command)
   const declared = command.timeout
   if (typeof declared === 'number' && declared > 0) return Math.min(declared, 60) * 1000
   return 1500
@@ -228,9 +231,9 @@ function interpolateHeaders(headers: Record<string, string> | undefined, allowed
 /**
  * Claude's `type: "http"` hook: the payload POSTs as JSON and only a 2xx response
  * with a valid JSON body renders a decision, read exactly like command stdout.
- * Everything else, including non-2xx statuses, connection failures and timeouts,
- * is a non-blocking error by contract, so none of these outcomes ever reports
- * `timedOut`, which PreToolUse fails closed on. Claude's `allowedHttpHookUrls`
+ * Everything else, including non-2xx statuses and connection failures, is a
+ * non-blocking error by contract; a timeout alone reports `timedOut`, so a gated event
+ * fails closed on it as it does for a command hook that ran out of time. Claude's `allowedHttpHookUrls`
  * allowlist gates the fetch itself: a URL matching no entry is never contacted,
  * so a settings file cannot point a hook at an arbitrary endpoint and exfiltrate
  * the payload; when the setting is absent there are no restrictions, as Claude
@@ -345,8 +348,9 @@ function substituteInputPaths(value: unknown, payload: unknown): unknown {
 /**
  * Claude's `type: "mcp_tool"` hook: call a tool on an already-connected MCP server
  * and treat its text output like command stdout. pi reaches the server through the
- * mcp-call seam the mcp extension registers. Like http, it never fails closed: a
- * missing server, a tool error, or the deadline is non-blocking.
+ * mcp-call seam the mcp extension registers. Like http, a missing server or a tool
+ * error is non-blocking, and the deadline reports `timedOut`, so a gated event fails
+ * closed on it.
  */
 export async function runMcpToolHook(hook: HookCommand, payload: unknown, timeoutMs: number): Promise<HookRunResult> {
   if (!hook.server || !hook.tool) return { code: 1, stdout: '', stderr: 'mcp_tool hook needs server and tool', timedOut: false }

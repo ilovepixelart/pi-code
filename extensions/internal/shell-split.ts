@@ -22,6 +22,34 @@ function separatorAt(command: string, i: number): number {
   return ch === ';' || ch === '|' || ch === '&' || ch === '\n' ? 1 : 0
 }
 
+/** The quoting bash applies: '...' with no escapes, "..." where a backslash escapes the
+ * next character, and ANSI-C $'...' where a backslash escapes anything, `\'` included. */
+export type Quote = "'" | '"' | "$'"
+
+/** The quote that opens at `i`, if any, and how many characters open it. */
+export function quoteOpensAt(command: string, i: number): { quote: Quote; length: number } | undefined {
+  const ch = command[i]
+  if (ch === "'" || ch === '"') return { quote: ch, length: 1 }
+  if (ch === '$' && command[i + 1] === "'") return { quote: "$'", length: 2 }
+  return undefined
+}
+
+/** Whether a backslash inside this quote escapes the character after it. */
+export const quoteEscapes = (quote: Quote): boolean => quote !== "'"
+
+/** The character that closes this quote. */
+export const quoteCloser = (quote: Quote): string => (quote === '"' ? '"' : "'")
+
+/** One step inside a quote at `i`: an escape takes the backslash and the character after
+ * it (where this quote has escapes), anything else one character, which may close it. */
+function stepInQuote(text: string, i: number, quote: Quote): { taken: number; closes: boolean } {
+  if (text[i] === '\\' && quoteEscapes(quote) && i + 1 < text.length) return { taken: 2, closes: false }
+  return { taken: 1, closes: text[i] === quoteCloser(quote) }
+}
+
+/** Characters an unquoted step at `i` takes: a backslash and the character it escapes, or one. */
+const unquotedStep = (text: string, i: number): number => (text[i] === '\\' && i + 1 < text.length ? 2 : 1)
+
 /**
  * Split on the shell separators Claude Code documents (`&&`, `||`, `;`, `|`, `|&`, `&`,
  * newline) so every subcommand is checked on its own, ignoring separators inside quotes:
@@ -31,37 +59,111 @@ function separatorAt(command: string, i: number): number {
  * A shell AST would be exact; this is the honest approximation for a quoting-only concern.
  */
 export function splitSegments(command: string): string[] {
-  const segments: string[] = []
-  let current = ''
-  let quote: "'" | '"' | undefined
+  const state: SplitState = { segments: [], current: '', quote: undefined }
+  for (let i = 0; i < command.length; ) i += splitStep(command, i, state)
+  if (state.quote !== undefined) return []
+  state.segments.push(state.current)
+  return state.segments.map((segment) => segment.trim()).filter(Boolean)
+}
 
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
-    if (quote !== undefined) {
-      current += ch
-      if (ch === quote) quote = undefined
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      current += ch
-      continue
-    }
-    if (ch === '\\' && i + 1 < command.length) {
-      current += ch + command[++i]
-      continue
-    }
-    const separator = separatorAt(command, i)
-    if (separator > 0) {
-      segments.push(current)
-      current = ''
-      i += separator - 1
-      continue
-    }
-    current += ch
+interface SplitState {
+  segments: string[]
+  current: string
+  quote: Quote | undefined
+}
+
+/** One step of splitSegments at `i`, returning how many characters it took. */
+function splitStep(command: string, i: number, state: SplitState): number {
+  if (state.quote !== undefined) {
+    const step = stepInQuote(command, i, state.quote)
+    state.current += command.slice(i, i + step.taken)
+    if (step.closes) state.quote = undefined
+    return step.taken
   }
+  const opened = quoteOpensAt(command, i)
+  const separator = opened === undefined ? separatorAt(command, i) : 0
+  const taken = opened?.length ?? (separator > 0 ? separator : unquotedStep(command, i))
+  if (separator > 0) {
+    state.segments.push(state.current)
+    state.current = ''
+  } else state.current += command.slice(i, i + taken)
+  if (opened !== undefined) state.quote = opened.quote
+  return taken
+}
 
-  if (quote !== undefined) return []
-  segments.push(current)
-  return segments.map((segment) => segment.trim()).filter(Boolean)
+// Characters a backslash escapes inside "...": everything else keeps its backslash.
+const DOUBLE_QUOTE_ESCAPABLE = new Set(['$', '`', '"', '\\', '\n'])
+
+/** One escaped character as bash reads it: inside "..." the backslash stays unless it
+ * escapes one of DOUBLE_QUOTE_ESCAPABLE; elsewhere only the character is kept. ANSI-C
+ * escapes beyond `\'` and `\\` (`\n`, `\x2d`) keep the bare character, which is enough
+ * to read flags; callers that must not guess refuse those with hasAnsiCNumericEscape. */
+function escaped(quote: Quote | undefined, next: string): string {
+  return quote === '"' && !DOUBLE_QUOTE_ESCAPABLE.has(next) ? `\\${next}` : next
+}
+
+/** The characters an unquoted step at `i` adds to a word: an escaped character alone. */
+const wordChars = (text: string, i: number): string => (unquotedStep(text, i) === 2 ? escaped(undefined, text[i + 1]) : text[i])
+
+/**
+ * The words of one segment as the command receives them, after bash's quote removal:
+ * `'-delete'`, `-de'lete'` and `$'-o'` are the words `-delete` and `-o`, so a flag cannot
+ * hide behind quoting. An empty quoted argument is still a word.
+ */
+export function shellWords(segment: string): string[] {
+  // `word` is undefined between words; a quoted empty argument is the word ''.
+  const state: WordState = { words: [], word: undefined, quote: undefined }
+  for (let i = 0; i < segment.length; ) i += wordStep(segment, i, state)
+  if (state.word !== undefined) state.words.push(state.word)
+  return state.words
+}
+
+interface WordState {
+  words: string[]
+  word: string | undefined
+  quote: Quote | undefined
+}
+
+/** One step of shellWords at `i`, returning how many characters it took. */
+function wordStep(segment: string, i: number, state: WordState): number {
+  if (state.quote !== undefined) {
+    const step = stepInQuote(segment, i, state.quote)
+    if (step.taken === 2) state.word = `${state.word ?? ''}${escaped(state.quote, segment[i + 1])}`
+    else if (!step.closes) state.word = `${state.word ?? ''}${segment[i]}`
+    if (step.closes) state.quote = undefined
+    return step.taken
+  }
+  const opened = quoteOpensAt(segment, i)
+  if (opened !== undefined) {
+    state.quote = opened.quote
+    state.word = state.word ?? ''
+    return opened.length
+  }
+  if (/\s/.test(segment[i])) {
+    if (state.word !== undefined) state.words.push(state.word)
+    state.word = undefined
+    return 1
+  }
+  state.word = `${state.word ?? ''}${wordChars(segment, i)}`
+  return unquotedStep(segment, i)
+}
+
+/** Whether an ANSI-C $'...' string uses a numeric or control escape (`\x2d`, `\055`,
+ * `\u002d`, `\cA`), which can spell any character, a flag's dash included. Only a `$'`
+ * bash reads as ANSI-C counts: one inside "..." or after `\$` is plain text. */
+export function hasAnsiCNumericEscape(command: string): boolean {
+  let quote: Quote | undefined
+  for (let i = 0; i < command.length; ) {
+    if (quote === undefined) {
+      const opened = quoteOpensAt(command, i)
+      quote = opened?.quote
+      i += opened?.length ?? unquotedStep(command, i)
+      continue
+    }
+    if (quote === "$'" && command[i] === '\\' && /[xuU0-7c]/.test(command[i + 1] ?? '')) return true
+    const step = stepInQuote(command, i, quote)
+    if (step.closes) quote = undefined
+    i += step.taken
+  }
+  return false
 }

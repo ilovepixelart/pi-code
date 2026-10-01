@@ -17,6 +17,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
+import { PACKAGE_VERSION } from '../internal/package-version.js'
 import { resolveShell } from '../internal/shell-resolve.js'
 import { parseNumericEnv } from '../internal/values.js'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
@@ -160,8 +161,9 @@ export interface SessionDirs {
  * with the session's launch directory. pi's directory set is static, so no
  * roots/list_changed notification is ever sent. */
 function makeClient(session?: SessionDirs): Client {
-  if (!session) return new Client({ name: 'pi-code-mcp', version: '0.1.0' })
-  const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' }, { capabilities: { roots: {} } })
+  const info = { name: 'pi-code-mcp', version: PACKAGE_VERSION }
+  if (!session) return new Client(info)
+  const client = new Client(info, { capabilities: { roots: {} } })
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(session.launchDir).href }] }))
   return client
 }
@@ -312,10 +314,19 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   try {
     return await connectHttpFamily(name, config, (authProvider) => new StreamableHTTPClientTransport(url, { requestInit: { headers }, authProvider }), `connect ${name}`, configuredAuth, authUi, session)
   } catch (error) {
-    // An explicitly declared streamable transport must not silently degrade to SSE.
-    if (config.type !== undefined || isUnauthorized(error)) throw error
+    // An explicitly declared streamable transport must not silently degrade to SSE. A
+    // typeless one falls back only on a 4xx, as the SDK's backwards-compatible client does:
+    // a legacy SSE server answers the streamable POST with one, while a refused connection,
+    // a timeout or a 5xx is the server's real failure and is reported as such.
+    if (config.type !== undefined || isUnauthorized(error) || !isClientErrorStatus(error)) throw error
     return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, configuredAuth, authUi, session)
   }
+}
+
+/** Whether the SDK reported an HTTP 4xx: StreamableHTTPError carries the status as `code`. */
+function isClientErrorStatus(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'number' && code >= 400 && code < 500
 }
 
 /** Transport-level failure codes worth another attempt. */
@@ -456,7 +467,7 @@ async function connectHttpFamily(name: string, config: { url: string; oauth?: OA
   // dynamic registration, keeping it bound to the real callback port. A
   // pre-configured client (oauth.clientId) rides the silent provider too, so its
   // stored tokens refresh with the configured credentials.
-  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth, config.url)
+  const silent = hasConfiguredAuth ? undefined : new FileOAuthProvider(name, () => {}, config.oauth, config.url, { refreshOnly: true })
   try {
     const client = newClient()
     await connectWithTimeout(client, makeTransport(silent?.hasTokens() ? silent : undefined), label)
