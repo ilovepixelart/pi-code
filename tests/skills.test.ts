@@ -178,6 +178,25 @@ describe('Claude skill invocation expansion', () => {
     expect(result.text).not.toContain('$ARGUMENTS')
   })
 
+  it('aborts the invocation when an injected command fails, as a command does', async () => {
+    // docs/commands.md: a failed !`cmd` span aborts the invocation and the model never sees
+    // a half-expanded body. pi logs a throwing input handler and carries on with the raw
+    // text, so an uncaught failure sent SKILL.md unexpanded.
+    const cwd = tempDir('cs-proj-')
+    hoisted.home = tempDir('cs-home-')
+    mkdirSync(join(hoisted.home, '.claude', 'skills', 'greet'), { recursive: true })
+    writeFileSync(join(hoisted.home, '.claude', 'skills', 'greet', 'SKILL.md'), '---\nname: greet\ndescription: greets\n---\nDiff: !`git diff HEAD`\nHello $ARGUMENTS')
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    skillsExt({ on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: 'fatal: bad revision', code: 128 }) } as never)
+    const notes: Array<{ message: string; level?: string }> = []
+    const result = await handlers.get('input')?.({ text: '/skill:greet world', source: 'interactive' }, { cwd, ui: { notify: (message: string, level?: string) => notes.push({ message, level }) } })
+
+    expect(result).toEqual({ action: 'handled' })
+    expect(notes).toHaveLength(1)
+    expect(notes[0].level).toBe('error')
+    expect(notes[0].message).toContain('git diff HEAD')
+  })
+
   it('expands a skill whose directory is a symlink, as pi loads it', async () => {
     // `npx skills add` installs under .agents/skills and links into .claude/skills, and
     // dotfile managers link the whole tree. pi's loader follows the link and registers the

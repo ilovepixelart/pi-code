@@ -244,7 +244,16 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   if (declaredHooks !== null && typeof declaredHooks === 'object' && !Array.isArray(declaredHooks)) {
     pi.events?.emit(SKILL_HOOKS_CHANNEL, { skillName: name, hooks: declaredHooks })
   }
-  const expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  let expanded: string
+  try {
+    expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+  } catch (error) {
+    // A failed injected command aborts the invocation, as it does for a command: pi logs a
+    // throwing input handler and continues with the raw text, which would send the body
+    // unexpanded. The notify carries the failure message.
+    ctx.ui.notify(errorMessage(error), 'error')
+    return { action: 'handled' }
+  }
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
     const agentName = typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined
     if (forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)
