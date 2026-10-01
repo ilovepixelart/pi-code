@@ -287,6 +287,28 @@ describe('statusLine command contract', () => {
     expect(cw.total_output_tokens).toBe(20)
   })
 
+  it('sends current_usage null and drops the old total right after /compact', async () => {
+    // Claude: current_usage is "null ... again after /compact until the next API call
+    // repopulates it"; exceeds_200k_tokens is about "the most recent API response".
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('message_end')?.({ type: 'message_end', message: { usage: { input: 240_000, output: 1_000, cacheRead: 0, cacheWrite: 0, totalTokens: 241_000 } } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const before = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect(before.exceeds_200k_tokens).toBe(true)
+
+    await handlers.get('session_compact')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.context_window as Record<string, unknown>).current_usage).toBeNull()
+    expect(payload.exceeds_200k_tokens).toBe(false)
+  })
+
   it('flags exceeds_200k_tokens from the combined usage total', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })

@@ -564,8 +564,11 @@ export default function statusLine(pi: ExtensionAPI) {
   })
 
   pi.on('session_compact', async (_event, ctx) => {
-    // Compaction replaces the branch entries; reseed the total from what remains.
+    // Compaction replaces the branch entries; reseed the total from what remains. The last
+    // response's usage describes the context that was just replaced: Claude sends
+    // current_usage null until the next API call.
     costTotal = sessionCost(ctx)
+    lastUsage = undefined
     scheduleRefresh()
   })
 
