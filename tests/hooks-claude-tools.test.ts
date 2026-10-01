@@ -129,3 +129,27 @@ describe('todo tool aliases', () => {
     expect(normalizeToolName(name)).toBe('todo')
   })
 })
+
+// The oracle is pi itself: every file tool resolves its path through resolveToCwd before
+// opening it (pi dist/core/tools/path-utils), so a hook judging any other spelling judges
+// a different file than the one pi touches.
+describe('hook file paths name the file pi opens', () => {
+  const cwd = '/proj'
+  const spellings = ['@~/.ssh/id_rsa', '@/etc/hosts', 'file:///etc/hosts', 'notes draft.md', '~/x', 'src/a.ts', '/abs/b.ts']
+
+  it.each(spellings)('read %s', async (spelling) => {
+    const { resolveToCwd } = await import('../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js')
+    expect(claudeToolInput('read', { path: spelling }, cwd)?.file_path).toBe(resolveToCwd(spelling, cwd))
+  })
+
+  it.each(['write', 'edit', 'grep', 'find'])('%s uses the same resolution', async (tool) => {
+    const { resolveToCwd } = await import('../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js')
+    const input = claudeToolInput(tool, { path: '@~/.ssh/id_rsa', pattern: 'x', content: '', edits: [] }, cwd)
+    expect(input?.file_path ?? input?.path).toBe(resolveToCwd('@~/.ssh/id_rsa', cwd))
+  })
+
+  it('reports the written file the same way in the response', async () => {
+    const { resolveToCwd } = await import('../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js')
+    expect(claudeToolResponse('write', { path: 'file:///etc/hosts' }, '', false, cwd)?.filePath).toBe(resolveToCwd('file:///etc/hosts', cwd))
+  })
+})
