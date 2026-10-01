@@ -2925,3 +2925,33 @@ describe('managed-settings.d drop-ins', () => {
     expect(merged.env).toEqual({ A: '1', B: '2', C: '3' })
   })
 })
+
+// Claude matches claudeMdExcludes against the file a path names; a symlink has two
+// spellings, and a glob written against either must exclude it, as the rules loader does.
+describe('claudeMdExcludes through a symlink', () => {
+  const layout = () => {
+    const root = mkdtempSync(join(tmpdir(), 'ex-link-'))
+    mkdirSync(join(root, 'shared'))
+    mkdirSync(join(root, 'docs'))
+    writeFileSync(join(root, 'shared', 'x.md'), 'LINKED BODY')
+    symlinkSync(join(root, 'shared', 'x.md'), join(root, 'docs', 'link.md'))
+    return realpathSync(root)
+  }
+
+  it('excludes a symlinked file by a glob naming its target', () => {
+    const root = layout()
+    expect(isExcludedPath(join(root, 'docs', 'link.md'), ['**/shared/x.md'], '/home/u')).toBe(true)
+  })
+
+  it('still loads a symlinked import no exclude names', () => {
+    const root = layout()
+    const imported = collectImports('@docs/link.md', root, '/home/u', [root], new Set(), { isExcluded: (abs) => isExcludedPath(abs, ['**/other.md'], '/home/u') })
+    expect(imported.map((entry) => entry.body)).toContain('LINKED BODY')
+  })
+
+  it('refuses an import whose symlink path an exclude names', () => {
+    const root = layout()
+    const imported = collectImports('@docs/link.md', root, '/home/u', [root], new Set(), { isExcluded: (abs) => isExcludedPath(abs, ['**/docs/link.md'], '/home/u') })
+    expect(imported.map((entry) => entry.body)).not.toContain('LINKED BODY')
+  })
+})

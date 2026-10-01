@@ -221,7 +221,9 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
   // Checked before the read so an excluded file contributes nothing: no body, no
   // transitive imports, no budget spend, no announce. A post-collection filter
   // would drop the file itself but keep its children.
-  if (isExcluded?.(real)) return null
+  // Both spellings count, as the rules loader does: a glob written against the symlink's
+  // own path and one written against its target each exclude it.
+  if (isExcluded?.(real) || isExcluded?.(resolved)) return null
   try {
     // real may be a directory (EISDIR) or vanish after the realpath (ENOENT/EACCES).
     const body = fs.readFileSync(real, 'utf-8')
@@ -484,6 +486,18 @@ export function readClaudeMdExcludes(files: string[], managed: Record<string, un
  * Matching runs on the path without its leading slash so `**` and `**\/`, which
  * span whole segments, can reach a root-anchored path. */
 export function isExcludedPath(absPath: string, globs: string[], home: string): boolean {
+  if (globs.length === 0) return false
+  // A symlink is excluded by a glob naming either spelling, as the rules loader does.
+  let real = absPath
+  try {
+    real = fs.realpathSync(absPath)
+  } catch {
+    // not on disk: only the given spelling exists
+  }
+  return matchesExcludeGlob(absPath, globs, home) || (real !== absPath && matchesExcludeGlob(real, globs, home))
+}
+
+function matchesExcludeGlob(absPath: string, globs: string[], home: string): boolean {
   const target = absPath.split(path.sep).join('/').replace(/^\//, '')
   return globs.some((raw) => {
     let glob = expandHome(raw.trim(), home).split(path.sep).join('/')
