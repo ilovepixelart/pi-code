@@ -249,3 +249,29 @@ describe('pi load order', () => {
     expect(loaded.length).toBe(scannedEntries().length)
   })
 })
+
+// pi provides its own packages to an installed package, which declares them as "*" peers
+// (pi docs/packages.md); anything else must be a dependency. A missing declaration breaks
+// the install the moment an import stops being type-only.
+describe('package manifest', () => {
+  it('declares every package the extensions import', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(extensionsDir, '..', 'package.json'), 'utf-8')) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }
+    const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})])
+    const imported = new Set<string>()
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (entry.name.endsWith('.ts')) {
+          for (const match of fs.readFileSync(full, 'utf-8').matchAll(/^import [^'"]*from '([^'.][^']*)'/gm)) {
+            const specifier = match[1]
+            if (specifier.startsWith('node:')) continue
+            imported.add(specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0])
+          }
+        }
+      }
+    }
+    walk(extensionsDir)
+    expect([...imported].filter((name) => !declared.has(name)).sort()).toEqual([])
+  })
+})
