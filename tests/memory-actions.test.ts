@@ -38,6 +38,19 @@ describe('memory tool actions', () => {
 
   const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, ui: { notify: () => {} } })
 
+  it('saves the entry that brings the index to exactly 200 lines without calling it over the limit', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    mkdirSync(dir, { recursive: true })
+    const entries = Array.from({ length: 198 }, (_, i) => `- [m${i}](m${i}.md): entry ${i}`)
+    writeFileSync(join(dir, 'MEMORY.md'), `${['# Memory index', ...entries].join('\n')}\n`)
+
+    const saved = await tool.execute('1', { action: 'save', name: 'fresh', description: 'the 200th line', content: 'body' })
+
+    expect(saved.content[0].text).toContain('Saved memory fresh')
+    expect(saved.content[0].text).not.toContain('over its read limit')
+  })
+
   it('truncates a memory larger than the context budget on read', async () => {
     const { handlers, tool, cwd } = setup()
     await start(handlers, cwd)

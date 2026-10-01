@@ -547,3 +547,22 @@ describe('managed autoMemory settings', () => {
     expect(merged.autoMemoryDirectory).toBe('/managed/dir')
   })
 })
+
+// Claude loads "the first 200 lines" of MEMORY.md. The index is written one entry per line
+// with a final newline, so a header plus 199 entries is exactly 200 lines.
+describe('the 200-line bound counts lines, not newline-separated pieces', () => {
+  const index = (entries: number): string => `${['# Memory index', ...Array.from({ length: entries }, (_, i) => `- [m${i}](m${i}.md): entry ${i}`)].join('\n')}\n`
+
+  it('injects a 200-line index whole', () => {
+    expect(capIndexForPrompt(index(199))).toBe(index(199))
+  })
+
+  it('drops one entry from a 201-line index', () => {
+    expect(capIndexForPrompt(index(200))).toContain('(1 more memories not shown')
+  })
+
+  it('accepts the entry that brings the index to 200 lines and refuses the next', () => {
+    expect(indexWouldOverflow(index(198), 'fresh', 'new entry')).toBe(false)
+    expect(indexWouldOverflow(index(199), 'fresh', 'new entry')).toBe(true)
+  })
+})
