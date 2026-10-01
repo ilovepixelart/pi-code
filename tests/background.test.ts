@@ -244,6 +244,19 @@ describe('background run lifecycle', () => {
     for (const child of live) child.emit('close', 0)
   })
 
+  it('caps a resumed task below the per-argument limit, as a fresh start does', () => {
+    // Linux refuses any single argv string over MAX_ARG_STRLEN (32 pages, 128 KiB) with
+    // E2BIG; a fresh start caps the task, and a resume must not send it whole.
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.emit('close', 0)
+    expect(resumeBackgroundRun(id ?? '', 'x'.repeat(200 * 1024), () => {})).toBe('resumed')
+    const args = spawnMock.mock.calls.at(-1)?.[1] as string[]
+    const task = args.at(-1) ?? ''
+    expect(Buffer.byteLength(task, 'utf-8')).toBeLessThan(128 * 1024)
+    expect(task.startsWith('Task: xxx')).toBe(true)
+    expect(task.endsWith('[truncated: too long for the child process to receive]')).toBe(true)
+  })
+
   it('replaces the task on a resume even when start-hook context precedes it', () => {
     // SubagentStart hooks put their context ahead of the prompt, so the argument reads
     // "<context>\n\nTask: <task>". Matching a "Task: " prefix missed that shape and the

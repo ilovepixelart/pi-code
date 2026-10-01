@@ -13,6 +13,7 @@ import * as path from 'node:path'
 import { killProcessTree } from '../internal/process-tree.js'
 import { sharedSlot } from '../internal/shared-slot.js'
 import { errorMessage } from '../internal/values.js'
+import { taskWithStartContext } from './child.js'
 import { spawnChild, utf8Chunks } from './run.js'
 
 export interface BackgroundRun {
@@ -222,7 +223,9 @@ export function resumeBackgroundRun(id: string, task: string, onComplete: (run: 
   // The task prompt is always the final argument: both spawn paths push it last and the
   // invocation helper only prepends. A 'Task: ' prefix match is wrong whenever
   // SubagentStart hooks placed their context ahead of it.
-  const args = rebuilt.args.map((arg, index) => (index === rebuilt.args.length - 1 ? `Task: ${task}` : arg))
+  // Capped as a fresh start caps it: one argv string over Linux's per-argument limit
+  // fails the spawn with E2BIG.
+  const args = rebuilt.args.map((arg, index) => (index === rebuilt.args.length - 1 ? taskWithStartContext(task, []) : arg))
   run.state = 'running'
   run.task = task
   run.output = undefined
