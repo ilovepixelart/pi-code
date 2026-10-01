@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setAddDirReader } from '../extensions/internal/add-dir-flag.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { activeStatusLine, readStatusLineConfig } from '../extensions/status-line.ts'
 import { makeWorktree } from './worktree-fixture.ts'
@@ -941,6 +942,22 @@ describe('statusLine payload and expiry conformance', () => {
 
     const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
     expect(payload.rate_limits).toBeUndefined()
+  })
+
+  it('reports the --add-dir directories as workspace.added_dirs', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    // context-imports owns the flag and publishes its value; the status line reads that.
+    setAddDirReader(() => '/work/api, /work/web')
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+
+    setAddDirReader(undefined)
+    const payload = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    expect((payload.workspace as { added_dirs?: unknown }).added_dirs).toEqual(['/work/api', '/work/web'])
   })
 
   it('reports workspace.added_dirs as an empty array and maps pi effort levels onto the documented vocabulary', async () => {

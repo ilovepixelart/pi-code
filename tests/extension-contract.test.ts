@@ -82,6 +82,17 @@ describe('cross-extension seams meet across module graphs', () => {
     }
   })
 
+  it('the --add-dir value reaches the status line from context-imports, which owns the flag', async () => {
+    type Seam = typeof import('../extensions/internal/add-dir-flag.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/add-dir-flag.ts')
+    registrar.setAddDirReader(() => '/work/api')
+    try {
+      expect(consumer.addDirFlagValue()).toBe('/work/api')
+    } finally {
+      registrar.setAddDirReader(undefined)
+    }
+  })
+
   it('a subagent spawn reaches the SubagentStart runner the hooks extension registered', async () => {
     type Seam = typeof import('../extensions/internal/subagent-hooks.ts')
     const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/subagent-hooks.ts')

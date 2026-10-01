@@ -4,7 +4,6 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import contextImports, {
   additionalDirContextFiles,
   additionalDirsClaudeMdEnabled,
@@ -25,6 +24,7 @@ import contextImports, {
   rootsForImporter,
   setManagedClaudeMdPath,
 } from '../extensions/context-imports.ts'
+import { addDirFlagValue, setAddDirReader } from '../extensions/internal/add-dir-flag.ts'
 import { INSTRUCTIONS_CHANNEL } from '../extensions/internal/instruction-events.ts'
 import { managedSettingsPath, readManagedSettings, setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { makeWorktree } from './worktree-fixture.ts'
@@ -1060,6 +1060,16 @@ describe('--add-dir additional directories', () => {
     expect(flags).toHaveLength(1)
     expect(flags[0].name).toBe('add-dir')
     expect(flags[0].options.type).toBe('string')
+  })
+
+  it('publishes the --add-dir value for the status line', async () => {
+    const extra = tempDir()
+    wire(extra)
+    try {
+      expect(addDirFlagValue()).toBe(extra)
+    } finally {
+      setAddDirReader(undefined)
+    }
   })
 
   it('appends an additional dir CLAUDE.md as a project_instructions block when the env gate is set', async () => {

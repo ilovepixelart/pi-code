@@ -32,6 +32,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { hookFiles, readSettingsDisableAllHooks, runHookCommand } from './hooks/index.js'
+import { addDirFlagValue } from './internal/add-dir-flag.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
@@ -266,10 +267,10 @@ export default function statusLine(pi: ExtensionAPI) {
     ctx.ui.setStatus('pi-code-status', commandLine ?? builtIn)
   }
 
-  /** The --add-dir directories, the flag pi-code registers for Claude's additional
+  /** The --add-dir directories, the flag context-imports registers for Claude's additional
    * working directories. Empty when none were given, which is the documented shape. */
   function addedDirs(): string[] {
-    const raw = String(pi.getFlag?.('add-dir') ?? '')
+    const raw = String(addDirFlagValue() ?? '')
     return raw
       .split(',')
       .map((dir) => dir.trim())

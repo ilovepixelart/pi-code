@@ -75,6 +75,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { ADD_DIR_FLAG, ADD_DIR_FLAG_OPTIONS, setAddDirReader } from './internal/add-dir-flag.js'
 import { claudeConfigDir } from './internal/config-dir.js'
 import { AGENTS_FILE_NAMES } from './internal/context-files.js'
 import { externalImportDecision, externalImportKey, rememberExternalImportDecision } from './internal/external-imports.js'
@@ -1123,9 +1124,14 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // Claude's --add-dir. Only the memory-loading half is meaningful here: pi has
   // no path-based permission system, so there is no access grant to mirror.
   // Optional-called so the extension still wires under stub hosts without flags.
-  pi.registerFlag?.('add-dir', {
-    description: 'Additional working directories; with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD set, their CLAUDE.md memory files load too (comma-separated)',
-    type: 'string',
+  pi.registerFlag?.(ADD_DIR_FLAG, ADD_DIR_FLAG_OPTIONS)
+  setAddDirReader(() => {
+    // A replaced session's pi throws on every call; the next instance registers its own.
+    try {
+      return pi.getFlag?.(ADD_DIR_FLAG)
+    } catch {
+      return undefined
+    }
   })
 
   /** The session-scope memory session_start loads: the user's own CLAUDE.md, plus
