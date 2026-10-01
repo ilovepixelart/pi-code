@@ -3295,6 +3295,21 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     expect(released).toBe(true)
   })
 
+  // pi 0.99.2 names a server's tools with `-` replaced by `_` (mcp__my-srv__x became
+  // mcp__my_srv__x, CHANGELOG #10239); pi 0.99.1 kept the configured name.
+  it.each(['mcp__my_srv__go', 'mcp__my-srv__go'])('releases a headless run as soon as a hyphenated server has tools named %s', async (toolName) => {
+    setEnv('MCP_TIMEOUT', '5000')
+    const piTools: string[] = []
+    const harness = await setup({ user: { 'my-srv': { command: 'node' } }, native: { builtinMcp: true, tools: piTools } })
+    await harness.sessionStart(true, true, false)
+    const waiting = harness.fire('before_agent_start', false)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    piTools.push(toolName)
+    const pushed = Date.now()
+    await waiting
+    expect(Date.now() - pushed).toBeLessThan(1000)
+  })
+
   it('stops holding a headless run after MCP_TIMEOUT', async () => {
     setEnv('MCP_TIMEOUT', '200')
     const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: [] } })

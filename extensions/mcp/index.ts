@@ -49,7 +49,7 @@ import { errorMessage } from '../internal/values.js'
 import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.js'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.js'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.js'
-import { nativeMode, nativeToolAliases, piMcpRunning, toNativeServer } from './native.js'
+import { nativeMode, nativeToolAliases, nativeToolPrefixes, piMcpRunning, toNativeServer } from './native.js'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.js'
 import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isConnectionLost, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.js'
 
@@ -147,7 +147,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // Original server/tool names per registered pi name, for Claude-style hook matchers.
   const aliases: McpToolAlias[] = []
   // The roster other extensions read: pi-code's own aliases plus the tools pi connected.
-  const roster = (): McpToolAlias[] => [...aliases, ...(nativeActive ? nativeToolAliases(pi.getAllTools()) : [])]
+  const roster = (): McpToolAlias[] => [...aliases, ...(nativeActive ? nativeToolAliases(pi.getAllTools(), nativeRegistered) : [])]
 
   /** How many tools a server actually has registered. Counted from `registered` (the
    * durable owner map) rather than registerTools' return, so a reconnect on a second
@@ -776,7 +776,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
 
   /** Resolves once every server handed to pi has a tool registered, or at the deadline. */
   function waitForNativeTools(deadline: number): Promise<void> {
-    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every((name) => pi.getAllTools().some((tool) => tool.name.startsWith(`mcp__${name}__`)))
+    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every((name) => nativeToolPrefixes(name).some((prefix) => pi.getAllTools().some((tool) => tool.name.startsWith(prefix))))
     return new Promise((resolve) => {
       if (settled()) {
         resolve()

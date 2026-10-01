@@ -6,7 +6,7 @@ Connects Claude Code's MCP configuration and registers each server's tools in pi
 
 pi 0.99 has its own MCP support. When it is running and no MCP policy is set, pi-code reads Claude's configuration as below, applies approval, scopes and the disabled lists, and hands each server to pi with `pi.registerMcpServer()` (`exposure: "direct"`). pi connects it, owns `/mcp`, `list_mcp_resources` and `read_mcp_resource`, and reads its own `~/.pi/agent/mcp.json` and `.pi/mcp.json`, which pi-code then leaves alone. Source: [`extensions/mcp/native.ts`](../extensions/mcp/native.ts).
 
-- Tools are named as in Claude: `mcp__<server>__<tool>`, and `mcp__plugin_<plugin>_<server>__<tool>` for a plugin's server.
+- Tools are named as in Claude: `mcp__<server>__<tool>`, and `mcp__plugin_<plugin>_<server>__<tool>` for a plugin's server. From pi 0.99.2 pi spells a `-` in those names as `_` (`mcp__my_server__x`); hook matchers and subagent patterns still see Claude's spelling with the server name as configured, while a `-` in a tool's own name stays `_`.
 - pi-code expands `${VAR}` and `${VAR:-default}` itself and escapes every `env` and header value, so pi never runs a value starting with `!` or expands a `$` in it.
 - The call timeout pi applies (reset by progress) is pi-code's idle budget below, or the wall budget when the idle timeout is disabled, capped at about 24.8 days.
 - A headless run (`pi -p`, and every subagent) waits before its first turn until each server handed to pi has registered tools, for up to `MCP_TIMEOUT` (30s): pi's own wait is 10s, and such a run has no later turn.
