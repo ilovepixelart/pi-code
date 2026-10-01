@@ -24,6 +24,7 @@ const DESTRUCTIVE_PATTERNS = [
   /\bdd\b/i,
   /\bshred\b/i,
   /\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
+  /\bnpm\s+audit\s+fix\b/i,
   /\byarn\s+(add|remove|install|publish)/i,
   /\bpnpm\s+(add|remove|install|publish)/i,
   /\bpip\s+(install|uninstall)/i,
@@ -42,8 +43,9 @@ const DESTRUCTIVE_PATTERNS = [
   /\b(vim?|nano|emacs|code|subl)\b/i,
 ].map((pattern) => new RegExp(String.raw`^\s*(?:${pattern.source})`, pattern.flags))
 
-// A redirect writes wherever it points, from any position in the segment.
-const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/]
+// A redirect writes wherever it points, from any position in the segment, and `<>` opens
+// its target for reading and writing, creating it.
+const REDIRECT_PATTERNS = [/(^|[^<])>(?!>)/, />>/, /<>/]
 
 // Redirections that write nothing: onto /dev/null, and a descriptor duplicated onto
 // another (`2>&1`, `>&2`, `>&-`). `>&file` is not one: it writes the file. Every run is
@@ -113,6 +115,10 @@ const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
   [/^\s*tree\b/, /\s-[a-zA-Z]*o/],
   [/^\s*rg\b/, /\s--(pre|hostname-bin)\b/],
   [/^\s*git\s/, /\s--output(=|\s|$)/],
+  // -x/--exec runs a command per result, -X/--exec-batch once for all; a short flag may end a cluster.
+  [/^\s*fd\b/, /\s(-[a-zA-Z]*[xX](?=\s|$)|--exec(-batch)?(?==|\s|$))/],
+  // --pager names the program bat runs when it pages.
+  [/^\s*bat\b/, /\s--pager(?==|\s|$)/],
 ]
 
 /** `segment` with its quoted spans removed, so a `>` or a flag inside a pattern reads as

@@ -214,3 +214,31 @@ describe('isSafeCommand follows bash escapes inside quotes', () => {
     expect(isSafeCommand('grep "a\\"b" file')).toBe(true)
   })
 })
+
+describe('isSafeCommand blocks the write and exec forms of allowlisted tools', () => {
+  // fd(1): -x/--exec runs a command per result, -X/--exec-batch once with all of them.
+  it.each(['fd -e tmp -x rm {}', 'fd -X wc -l', 'fd --exec echo {}', 'fd --exec-batch ls', 'fd -Hx rm'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // npm-audit(1): `npm audit fix` installs packages.
+  it.each(['npm audit fix', 'npm audit fix --force'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // bat(1): --pager names the program bat runs when it pages.
+  it.each(['bat --paging=always --pager "touch y" f', 'bat --pager=less f'])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  // bash(1) REDIRECTION: [n]<>word opens word for reading and writing, creating it.
+  it.each(['cat <>newfile', 'echo hi 1<>existing'])('blocks the read-write redirect in %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+})
+
+describe('isSafeCommand still allows the read-only forms of those tools', () => {
+  it.each(['fd -e ts', 'fd --extension x src', 'fd -H pattern', 'fd --exclude node_modules x', 'npm audit', 'npm audit --json', 'bat --paging=never f', 'bat -n f', 'cat < input.txt'])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+})
