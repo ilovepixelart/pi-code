@@ -477,8 +477,10 @@ export default async function mcpExtension(pi: ExtensionAPI) {
         continue
       }
       // pi replaces a name this extension registers again, so the first scope to register
-      // a name keeps it, as connectServers keeps the first client (local over project).
-      if (nativeRegistered.has(translated.native.name)) {
+      // a name keeps it, as connectServers keeps the first client (local over project). A
+      // name pi-code's own client holds keeps it too: a server pi rejects (sse, a
+      // headersHelper) stays here, and a later scope must not reach pi under it.
+      if (nativeRegistered.has(translated.native.name) || clients.has(name)) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }

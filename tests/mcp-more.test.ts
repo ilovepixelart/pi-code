@@ -3333,6 +3333,16 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     expect(Date.now() - pushed).toBeLessThan(1000)
   })
 
+  // Claude: the first scope to name a server keeps it. A user-scope sse server stays on
+  // pi-code's own client, so pi must not also get the project's server of that name.
+  it("does not hand pi a project server whose name pi-code's own client already holds", async () => {
+    const harness = await setup({ user: { shared: { type: 'sse', url: 'https://example.com/sse' } }, project: { shared: { command: 'from-project' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true, true)
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['sse'])
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual([])
+    expect(harness.warnings.some((warning) => warning.includes('duplicate server name shared'))).toBe(true)
+  })
+
   it('stops holding a headless run after MCP_TIMEOUT', async () => {
     setEnv('MCP_TIMEOUT', '200')
     const harness = await setup({ user: { srv: { command: 'node' } }, native: { builtinMcp: true, tools: [] } })
