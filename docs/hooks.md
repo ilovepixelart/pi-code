@@ -30,7 +30,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 ## Payloads and decisions
 
 - Payloads use Claude's vocabulary for pi's built-ins. Every pi tool the tools reference has a counterpart for reports its canonical Claude name, so a matcher or `if` rule written as `WebFetch`, `Agent`, `Skill`, `AskUserQuestion`, `ExitPlanMode`, `WebSearch` or `TodoWrite` fires; the pi spelling keeps working too, since both names are matched. `ls` and `memory` have no counterpart and stay untranslated.
-- Input shapes are translated only for `Bash`/`Edit`/`Write`/`Read`/`Grep`/`Glob` (absolute `file_path`, the documented Bash/Write response shapes), because those are the only tools the hooks reference gives a per-tool input table for. For every other tool the payload carries pi's own input fields, since there is no documented Claude shape to conform to. `updatedInput` is translated back to pi's shape for the six (an incomplete rewrite keeps the original input).
+- Input shapes are translated only for `Bash`/`Edit`/`Write`/`Read`/`Grep`/`Glob` (absolute `file_path`, resolved as pi's tools resolve it: a leading `@` stripped, `~` expanded, a `file://` URL decoded; the documented Bash/Write response shapes), because those are the only tools the hooks reference gives a per-tool input table for. For every other tool the payload carries pi's own input fields, since there is no documented Claude shape to conform to. `updatedInput` is translated back to pi's shape for the six (an incomplete rewrite keeps the original input).
 - `if` rules take each tool's own permission specifier: `Bash(git *)`, a path rule for the file tools, `WebFetch(domain:host)`, `Agent(AgentName)` checked against every agent a call names, and `Skill(name)` / `Skill(name *)`. A tool with no specifier syntax matches nothing, as an unparseable rule does.
 - A hook from a plugin runs with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` in its environment alongside `CLAUDE_PROJECT_DIR`, as Claude exports all three to hook processes; the data directory is created when the path is handed over.
 - Every payload carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`; tool events add `tool_use_id` and PostToolUse/PostToolUseFailure add `duration_ms` (excluding PreToolUse hook and confirm time). PreCompact carries `custom_instructions`, PostCompact `compact_summary`.
@@ -41,7 +41,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 - The `if` permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`) runs on tool events only; a hook carrying it never runs elsewhere.
 - `permissionDecision: "ask"` prompts via a confirm dialog (blocks when headless); `"defer"` blocks the call, since pi cannot resume a deferred one.
 - Exit-2 blocking messages prefer the JSON reason over stderr.
-- A user-typed `!`/`!!` bash line runs PreToolUse (there is no PostToolUse for it).
+- A user-typed `!`/`!!` bash line runs PreToolUse (there is no PostToolUse for it). An `updatedInput` rewrite runs the rewritten command in place of the typed one, under the shell pi would use, and a notice names it, since pi's transcript shows the typed command.
 
 ## Background hooks
 

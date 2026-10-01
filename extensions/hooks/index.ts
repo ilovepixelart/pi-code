@@ -95,7 +95,7 @@
  */
 
 import * as os from 'node:os'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
 import { claudeEffortLevel } from '../internal/effort.js'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.js'
 import { readManagedSettings } from '../internal/managed-settings.js'
@@ -192,6 +192,31 @@ function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: bo
   const context = parsed?.hookSpecificOutput?.additionalContext
   if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
   return { block: false, reason: '' }
+}
+
+/**
+ * A PreToolUse `updatedInput` on a direct `!` command. pi runs the event's own command
+ * unless the handler returns operations, so a rewrite that only changed the payload ran the
+ * typed command. The rewrite is honoured by running pi's local executor on the rewritten
+ * command, with the shell pi itself would use (its settings, the project's only when pi
+ * trusts the project) and the command prefix pi prepends kept. pi shows the typed command,
+ * so the user is told what actually runs.
+ */
+function rewrittenUserBash(typed: string, rewritten: unknown, ctx: ExtensionContext): UserBashEventResult | undefined {
+  if (typeof rewritten !== 'string' || rewritten === typed) return undefined
+  ctx.ui.notify(`A PreToolUse hook rewrote this command; running: ${rewritten}`, 'warning')
+  let shellPath: string | undefined
+  try {
+    shellPath = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true }).getShellPath()
+  } catch {
+    shellPath = undefined
+  }
+  const local = createLocalBashOperations({ shellPath })
+  return {
+    operations: {
+      exec: (command, cwd, options) => local.exec(command.endsWith(typed) ? `${command.slice(0, command.length - typed.length)}${rewritten}` : rewritten, cwd, options),
+    },
+  }
 }
 
 export default function hooksExtension(pi: ExtensionAPI) {
@@ -585,16 +610,16 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // no execution result and fires only before the command runs, so there is deliberately
   // no PostToolUse for it.
   pi.on('user_bash', async (event, ctx) => {
-    const decision = await runPreToolUse(config, 'bash', { command: event.command }, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'), { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() })
-    if (!decision.block) return undefined
+    const input: { command?: unknown } = { command: event.command }
+    const decision = await runPreToolUse(config, 'bash', input, boundRunner(ctx), 'Bash', (message) => ctx.ui.notify(message, 'warning'), { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() })
     // Claude's "ask": prompt before running and let the command through on approval; with
     // no UI (headless) the block stands, the same safe default as the tool_call path.
-    if (decision.ask && ctx.hasUI) {
-      const approved = await ctx.ui.confirm('Allow this command?', decision.reason ?? 'A hook asks you to confirm this command.')
-      if (approved) return undefined
+    const approved = decision.block && decision.ask && ctx.hasUI && (await ctx.ui.confirm('Allow this command?', decision.reason ?? 'A hook asks you to confirm this command.'))
+    if (decision.block && !approved) {
+      const reason = decision.reason ?? 'Command blocked by hook'
+      return { result: { output: `Blocked by hook: ${reason}`, exitCode: 1, cancelled: false, truncated: false } }
     }
-    const reason = decision.reason ?? 'Command blocked by hook'
-    return { result: { output: `Blocked by hook: ${reason}`, exitCode: 1, cancelled: false, truncated: false } }
+    return rewrittenUserBash(event.command, input.command, ctx)
   })
 
   pi.on('input', async (event, ctx) => {
