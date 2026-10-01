@@ -33,6 +33,7 @@
   "bugs": "https://github.com/ilovepixelart/pi-code/issues",
   "pi": {
     "extensions": [
+      "./extensions/claude-rules.ts",
       "./extensions"
     ]
   },

@@ -213,3 +213,28 @@ describe('host-provided packages', () => {
     expect(Object.entries(pkg.peerDependencies).filter(([name, range]) => !HOST_PROVIDED.includes(name) || range !== '*')).toEqual([])
   })
 })
+
+// context-imports reads the rule files claude-rules adds to the prompt options in the same
+// before_agent_start, so claude-rules has to load first. pi loads a package directory in
+// readdir order (pi dist/core/package-manager collectAutoExtensionEntries), which APFS
+// sorts and ext4 does not, so the manifest names claude-rules ahead of the directory.
+describe('pi load order', () => {
+  const repo = path.resolve(import.meta.dirname, '..')
+
+  it('names claude-rules ahead of the extensions directory in the package manifest', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf-8')) as { pi: { extensions: string[] } }
+    expect(manifest.pi.extensions.indexOf('./extensions/claude-rules.ts')).toBeGreaterThanOrEqual(0)
+    expect(manifest.pi.extensions.indexOf('./extensions/claude-rules.ts')).toBeLessThan(manifest.pi.extensions.indexOf('./extensions'))
+  })
+
+  it("loads every extension once through pi's own resolver, claude-rules before context-imports", async () => {
+    const { DefaultPackageManager, SettingsManager } = await import('@earendil-works/pi-coding-agent')
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'order-agent-'))
+    const manager = new DefaultPackageManager({ cwd: repo, agentDir, settingsManager: SettingsManager.inMemory() })
+    const resolved = await manager.resolveExtensionSources([repo], { temporary: true })
+    const loaded = resolved.extensions.filter((entry) => entry.enabled).map((entry) => path.relative(repo, entry.path))
+    expect(new Set(loaded).size).toBe(loaded.length)
+    expect(loaded.indexOf(path.join('extensions', 'claude-rules.ts'))).toBeLessThan(loaded.indexOf(path.join('extensions', 'context-imports.ts')))
+    expect(loaded.length).toBe(scannedEntries().length)
+  })
+})
