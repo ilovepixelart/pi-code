@@ -79,8 +79,11 @@ export function timeoutMs(command: HookCommand): number {
 
 /** Claude's SessionEnd budget: hooks share 1.5 seconds so session exit (and /new,
  * /resume) cannot stall on a slow hook; a declared per-hook `timeout` raises the
- * budget to match, up to 60 seconds. */
+ * budget to match, up to 60 seconds. An `async` command hook is the exception Claude
+ * names ("apart from a command hook you run with async: true"): it runs in the
+ * background, holds up nothing, and gets timeoutMs's no-deadline ceiling. */
 export function sessionEndTimeoutMs(command: HookCommand): number {
+  if (isBackgroundHook(command) && command.asyncRewake !== true) return timeoutMs(command)
   const declared = command.timeout
   if (typeof declared === 'number' && declared > 0) return Math.min(declared, 60) * 1000
   return 1500

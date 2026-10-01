@@ -2585,6 +2585,15 @@ describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () 
     expect(sessionEndTimeoutMs({ command: 'x', timeout: 300 })).toBe(60_000)
   })
 
+  it('does not cut off an async SessionEnd hook, which Claude never cancels at a timeout', () => {
+    // Claude: "Apart from a command hook you run with async: true, Claude Code cancels a
+    // command, http, or mcp_tool hook that reaches its timeout."
+    expect(sessionEndTimeoutMs({ command: 'x', async: true })).toBeGreaterThan(60_000)
+    expect(sessionEndTimeoutMs({ command: 'x', async: true, timeout: 5 })).toBeGreaterThan(60_000)
+    // asyncRewake keeps its deadline, so it keeps the SessionEnd budget too.
+    expect(sessionEndTimeoutMs({ command: 'x', asyncRewake: true })).toBe(1500)
+  })
+
   it('appends the input JSON to a prompt hook that has no $ARGUMENTS placeholder', async () => {
     // Claude: "If $ARGUMENTS is not present, input JSON is appended to the prompt."
     let seenPrompt = ''
