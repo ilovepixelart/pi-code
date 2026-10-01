@@ -101,15 +101,16 @@ export interface RunAgentOptions {
  * delivers as last_assistant_message. */
 export type SubagentPhaseSink = (phase: 'start' | 'stop', agentType: string, agentId: string, lastAssistantMessage?: string) => void
 
-/** Append a note to the final assistant message so it rides the run's normal
- * output; stderr when there is none. */
+/** Append a note to the last assistant message that has text, the one getFinalOutput
+ * returns, so the note rides the run's output instead of replacing it: a capped run
+ * usually ends on a turn that only calls a tool. With no text anywhere, the last
+ * assistant message carries it; with no assistant message, stderr. */
 function appendResultNote(result: SingleResult, note: string): void {
-  for (let i = result.messages.length - 1; i >= 0; i--) {
-    const msg = result.messages[i]
-    if (msg.role === 'assistant') {
-      msg.content.push({ type: 'text', text: note })
-      return
-    }
+  const assistants = result.messages.filter((msg): msg is AssistantMessage => msg.role === 'assistant').reverse()
+  const target = assistants.find((msg) => msg.content.some((part) => part.type === 'text')) ?? assistants[0]
+  if (target) {
+    target.content.push({ type: 'text', text: note })
+    return
   }
   result.stderr = result.stderr ? `${result.stderr}\n${note}` : note
 }

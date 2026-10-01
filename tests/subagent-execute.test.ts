@@ -2033,6 +2033,27 @@ describe('subagent run semantics conformance', () => {
     expect((result as { isError?: boolean }).isError).not.toBe(true)
   })
 
+  it("keeps the subagent's last text when the capped turn was a tool call alone", async () => {
+    // A capped run usually stops mid-work, on a turn that only calls a tool. The note
+    // used to land on that text-less message, so the output became the note alone.
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 2 })], projectAgentsDir: null })
+    const toolTurn = messageEnd({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.ts' } }] })
+    script('inspect', { stdout: [say('FINDINGS SO FAR: a.ts leaks a handle'), toolTurn], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('FINDINGS SO FAR: a.ts leaks a handle')
+    expect(text(result)).toContain('[Output is partial: the subagent stopped at its maxTurns limit.]')
+  })
+
+  it('still shows the partial note when no capped turn produced any text', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ maxTurns: 1 })], projectAgentsDir: null })
+    const toolTurn = messageEnd({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.ts' } }] })
+    script('inspect', { stdout: [toolTurn], exitCode: 143 })
+    const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toContain('[Output is partial: the subagent stopped at its maxTurns limit.]')
+  })
+
   it('does not mark an uncapped clean run as partial', async () => {
     script('inspect', { stdout: [say('all done')] })
     const result = await execute('c1', { agent: 'scout', task: 'inspect' }, undefined, undefined, trustedCtx)
