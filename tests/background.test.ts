@@ -92,7 +92,7 @@ const spec = (over: Partial<BackgroundSpawn> = {}): BackgroundSpawn => ({ comman
 const assistantTurn = (text: string) => `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } })}\n`
 
 describe('background run lifecycle', () => {
-  it('records a synchronous spawn failure as failed instead of leaving a phantom running run', () => {
+  it('records a synchronous spawn failure as failed instead of leaving a phantom running run', async () => {
     // On Linux spawn() throws synchronously for E2BIG (posix_spawn detects it before
     // returning). The run was already registered as running, so the throw escaped the
     // tool call and the record held a cap slot forever: no kill, no eviction, and
@@ -106,9 +106,38 @@ describe('background run lifecycle', () => {
     })
 
     expect(id).not.toBeNull()
+    expect(activeBackgroundRuns()).toBe(0)
+    await Promise.resolve()
     expect(done?.state).toBe('failed')
     expect(done?.stderr).toBe('spawn E2BIG')
-    expect(activeBackgroundRuns()).toBe(0)
+  })
+
+  // The caller announces the run (the subagent start event) once the call returns, and
+  // listeners pair start with stop: /goal holds its evaluation while a run it saw start
+  // has not stopped. A completion delivered inside the call arrived first and left a
+  // started run that never stopped.
+  it('delivers a synchronous spawn failure only after the start call has returned', async () => {
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+    const events: string[] = []
+    startBackgroundRun('scout', 'find', spec(), () => events.push('stop'))
+    events.push('start')
+    await Promise.resolve()
+    expect(events).toEqual(['start', 'stop'])
+  })
+
+  it('delivers a synchronous spawn failure on resume only after the resume call has returned', async () => {
+    const id = startBackgroundRun('scout', 'one', spec(), () => {})
+    children.at(-1)!.emit('close', 0)
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' })
+    })
+    const events: string[] = []
+    expect(resumeBackgroundRun(id ?? '', 'two', () => events.push('stop'))).toBe('resumed')
+    events.push('start')
+    await Promise.resolve()
+    expect(events).toEqual(['start', 'stop'])
   })
 
   it('reports the final text of a stdout stream whose chunks split lines', () => {
