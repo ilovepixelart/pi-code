@@ -89,6 +89,7 @@ import { claudeSettingsChain, readSettingsChain } from './internal/settings-chai
 import { statToken } from './internal/stat-token.js'
 import { type Fence, fenceMarker, stepFence, stripBlockComments } from './internal/strip-comments.js'
 import { fileToolTarget } from './internal/tool-target.js'
+import { realpathOr } from './internal/values.js'
 
 /** Claude documents "a maximum depth of four hops" for recursive imports. */
 const MAX_IMPORT_DEPTH = 4
@@ -210,7 +211,10 @@ function readImport(target: string, fromDir: string, home: string, allowedRoots:
     // reported never depends on whether it exists: a notice that named only the
     // existing ones would enumerate the filesystem for any repo-controlled file
     // willing to write one @line per guess.
-    if (!isUnder(resolved, allowedRoots)) refuse(false)
+    // Compared through its nearest existing ancestor's real path, as the roots are: a
+    // session reached through a symlink otherwise reported its own missing files as
+    // outside the project.
+    if (!isUnder(realpathOr(resolved), allowedRoots)) refuse(false)
     return null
   }
   if (seen.has(real)) return null

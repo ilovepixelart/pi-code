@@ -2955,3 +2955,29 @@ describe('claudeMdExcludes through a symlink', () => {
     expect(imported.map((entry) => entry.body)).not.toContain('LINKED BODY')
   })
 })
+
+// A session started through a symlinked directory: the roots are real paths, the importing
+// file's directory is the linked spelling.
+describe('a missing import under a symlinked working directory', () => {
+  const linked = () => {
+    const real = realpathSync(mkdtempSync(join(tmpdir(), 'ci-real-')))
+    const link = join(mkdtempSync(join(tmpdir(), 'ci-link-')), 'project')
+    symlinkSync(real, link)
+    return { real, link }
+  }
+
+  it('is not reported as resolving outside the project', () => {
+    const { real, link } = linked()
+    const budget = createImportBudget()
+    collectImports('@docs/missing.md', link, '/home/u', [real], new Set(), { budget })
+    expect([...budget.refused]).toEqual([])
+  })
+
+  it('still reports a missing import that does point outside', () => {
+    const { real, link } = linked()
+    const budget = createImportBudget()
+    const outside = join(mkdtempSync(join(tmpdir(), 'ci-out-')), 'missing.md')
+    collectImports(`@${outside}`, link, '/home/u', [real], new Set(), { budget })
+    expect([...budget.refused]).toEqual([outside])
+  })
+})
