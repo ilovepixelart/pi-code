@@ -312,10 +312,19 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   try {
     return await connectHttpFamily(name, config, (authProvider) => new StreamableHTTPClientTransport(url, { requestInit: { headers }, authProvider }), `connect ${name}`, configuredAuth, authUi, session)
   } catch (error) {
-    // An explicitly declared streamable transport must not silently degrade to SSE.
-    if (config.type !== undefined || isUnauthorized(error)) throw error
+    // An explicitly declared streamable transport must not silently degrade to SSE. A
+    // typeless one falls back only on a 4xx, as the SDK's backwards-compatible client does:
+    // a legacy SSE server answers the streamable POST with one, while a refused connection,
+    // a timeout or a 5xx is the server's real failure and is reported as such.
+    if (config.type !== undefined || isUnauthorized(error) || !isClientErrorStatus(error)) throw error
     return await connectHttpFamily(name, config, sseTransport, `connect ${name} (sse)`, configuredAuth, authUi, session)
   }
+}
+
+/** Whether the SDK reported an HTTP 4xx: StreamableHTTPError carries the status as `code`. */
+function isClientErrorStatus(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'number' && code >= 400 && code < 500
 }
 
 /** Transport-level failure codes worth another attempt. */

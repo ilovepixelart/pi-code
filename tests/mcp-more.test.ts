@@ -819,8 +819,9 @@ describe('mcp transport selection', () => {
   })
 
   it('falls back to SSE when the streamable transport fails to connect', async () => {
+    // What the SDK throws for an HTTP error status: StreamableHTTPError, the status as code.
     hoisted.control.connect = async (transport) => {
-      if (transport.kind === 'http') throw new Error('404 Not Found')
+      if (transport.kind === 'http') throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Not Found'), { code: 404 })
     }
     withTools([{ name: 'go' }])
     const harness = await setupStarted({ user: { remote: { url: 'https://example.com/mcp', bearerToken: 'tok' } } })
@@ -830,6 +831,37 @@ describe('mcp transport selection', () => {
     expect(sse.url?.href).toBe('https://example.com/mcp')
     expect((sse.options.requestInit as { headers: Record<string, string> }).headers.Authorization).toBe('Bearer tok')
     expect(harness.toolNames()).toEqual(['remote_go'])
+  })
+
+  // The SDK's backwards-compatible client "tries Streamable HTTP first, then falls back to
+  // SSE on 4xx responses". Anything else is the server's real failure, not a transport
+  // mismatch, and retrying over SSE doubled the wait and reported the wrong cause.
+  it('falls back to SSE on another 4xx, 405 Method Not Allowed', async () => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Method Not Allowed'), { code: 405 })
+    }
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { remote: { url: 'https://example.com/mcp' } } })
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['http', 'sse'])
+  })
+
+  it.each([
+    ['a refused connection', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })],
+    ['a server error', Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: Internal Server Error'), { code: 500 })],
+  ])('does not retry over SSE after %s', async (_label, error) => {
+    hoisted.control.connect = async (transport) => {
+      if (transport.kind === 'http') throw error
+    }
+    vi.useFakeTimers()
+    const harness = await setup({ user: { remote: { url: 'https://example.com/mcp' } } })
+    const started = harness.sessionStart()
+    // Both are transient, so the connect is retried three times, 1 s doubling, first.
+    await vi.advanceTimersByTimeAsync(8000)
+    await started
+    expect(hoisted.transports.length).toBeGreaterThan(1)
+    expect(hoisted.transports.every((t) => t.kind === 'http')).toBe(true)
+    const [line] = await statusLinesOf(harness)
+    expect(line).toContain((error as Error).message)
   })
 
   it('connects an explicit type sse server over SSE directly', async () => {
