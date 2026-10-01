@@ -567,11 +567,19 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
     const allowedRoots = rootsForImporter(file.path, run.home, run.cwd, run.externalApproved)
     imported.push(...collectImports(file.content, path.dirname(file.path), run.home, allowedRoots, run.seen, { ...options, importer: file.path }))
   }
+  // An additional dir's refusals are reported but not asked about: the approval is stored
+  // for the project and widens project files only, and --add-dir changes per run, so a
+  // yes here would cover whatever directory a later run adds. They stay in `refused` for
+  // the notice; only the dialog's list drops them.
+  const askable = new Set(run.budget.refusedPresent)
   for (const extra of extras) {
     // The additional dir itself is an allowed root, so its files' relative imports
     // resolve even from .claude/rules two levels down.
     const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, run.home, run.cwd)]
     imported.push(...collectImports(extra.content, path.dirname(extra.path), run.home, allowedRoots, run.seen, { ...options, importer: extra.path }))
+  }
+  for (const file of [...run.budget.refusedPresent]) {
+    if (!askable.has(file)) run.budget.refusedPresent.delete(file)
   }
   return imported
 }

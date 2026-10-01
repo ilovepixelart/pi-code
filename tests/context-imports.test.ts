@@ -1072,6 +1072,39 @@ describe('--add-dir additional directories', () => {
     expect(prompt).toContain(instructionsBlock(join(extra, 'CLAUDE.md'), 'EXTRA DIR RULES'))
   })
 
+  // The external-import approval is stored for the project and widens project files;
+  // --add-dir changes per run, so its files' refusals are reported, not asked about: a
+  // yes given here would cover whatever directory a later run adds.
+  it("reports an additional dir file's external import without asking about it", async () => {
+    process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'
+    const extra = tempDir()
+    const outside = tempDir()
+    writeFileSync(join(outside, 'shared.md'), 'SHARED BODY')
+    writeFileSync(join(extra, 'CLAUDE.md'), `EXTRA DIR RULES\n@${join(outside, 'shared.md')}\n`)
+    const cwd = tempDir()
+    const asked: string[] = []
+    const ctx = {
+      cwd,
+      isProjectTrusted: () => true,
+      hasUI: true,
+      ui: {
+        notify: () => {},
+        confirm: async (title: string) => {
+          asked.push(title)
+          return true
+        },
+      },
+    }
+
+    const wired = wire(extra)
+    await wired.handlers.get('session_start')?.({}, ctx)
+    const result = (await wired.handlers.get('before_agent_start')?.({ systemPrompt: 'BASE', systemPromptOptions: { cwd, contextFiles: [] } }, ctx)) as { systemPrompt?: string } | undefined
+
+    expect(asked).not.toContain(EXTERNAL_IMPORT_PROMPT_TITLE)
+    expect(result?.systemPrompt).not.toContain('SHARED BODY')
+    expect(result?.systemPrompt).toContain('## Imports not loaded (@)')
+  })
+
   it('does not load additional dir context without the env gate', async () => {
     const extra = tempDir()
     writeFileSync(join(extra, 'CLAUDE.md'), 'EXTRA DIR RULES')
