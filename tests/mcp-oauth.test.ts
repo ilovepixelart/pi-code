@@ -3,6 +3,7 @@ import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { auth, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Record spawn so openBrowser's per-platform launch can be asserted without opening a browser.
@@ -633,5 +634,53 @@ describe('the authorization redirect the flow hands the SDK', () => {
     expect(spawnMock.calls).toHaveLength(1)
     expect(spawnMock.calls[0].args).toContain(authUrl)
     expect(notices.some((message) => message.includes(authUrl) && message.includes('srv'))).toBe(true)
+  })
+})
+
+// The real SDK auth() against a faked authorization server: a stored client the server
+// has forgotten answers the refresh with invalid_client, and the SDK then registers a
+// new client through whichever provider it was given.
+describe('dynamic registration after a forgotten client', () => {
+  const url = 'https://mcp.example.com/mcp'
+  const registrations: Array<{ redirect_uris: string[] }> = []
+  const fetchFn = async (input: unknown, init?: { body?: string }): Promise<Response> => {
+    const target = String(input)
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+    if (target.includes('oauth-protected-resource')) return json({ resource: url, authorization_servers: ['https://mcp.example.com'] })
+    if (target.includes('oauth-authorization-server') || target.includes('openid-configuration')) {
+      return json({ issuer: 'https://mcp.example.com', authorization_endpoint: 'https://mcp.example.com/authorize', token_endpoint: 'https://mcp.example.com/token', registration_endpoint: 'https://mcp.example.com/register', response_types_supported: ['code'], code_challenge_methods_supported: ['S256'] })
+    }
+    if (target.endsWith('/token')) return json({ error: 'invalid_client' }, 401)
+    if (target.endsWith('/register')) {
+      const body = JSON.parse(init?.body ?? '{}')
+      registrations.push(body)
+      return json({ ...body, client_id: 'new' }, 201)
+    }
+    return new Response('not found', { status: 404 })
+  }
+  const seeded = (server: string): void => {
+    const seed = new FileOAuthProvider(server, () => {}, undefined, url)
+    seed.bindRedirectPort(5555)
+    seed.saveClientInformation({ client_id: 'old', redirect_uris: ['http://localhost:5555/callback'] })
+    seed.saveTokens({ access_token: 'a', token_type: 'bearer', refresh_token: 'r' })
+  }
+
+  it('lets the silent provider clear the credentials but not register, so the connect asks for a login', async () => {
+    registrations.length = 0
+    seeded('forgot-silent')
+    // As connectHttpFamily builds it for the silent connect.
+    const silent = new FileOAuthProvider('forgot-silent', () => {}, undefined, url, { refreshOnly: true })
+    await expect(auth(silent, { serverUrl: url, fetchFn: fetchFn as never })).rejects.toBeInstanceOf(UnauthorizedError)
+    expect(registrations).toEqual([])
+    const reread = new FileOAuthProvider('forgot-silent', () => {}, undefined, url)
+    expect([reread.clientInformation(), reread.tokens(), reread.savedRedirectPort()]).toEqual([undefined, undefined, 5555])
+  })
+
+  it('still registers through the interactive provider, with the port it bound', async () => {
+    registrations.length = 0
+    const interactive = new FileOAuthProvider('forgot-interactive', () => {}, undefined, url)
+    interactive.bindRedirectPort(5555)
+    await expect(auth(interactive, { serverUrl: url, fetchFn: fetchFn as never })).resolves.toBe('REDIRECT')
+    expect(registrations.map((body) => body.redirect_uris)).toEqual([['http://localhost:5555/callback']])
   })
 })

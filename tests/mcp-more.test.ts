@@ -887,6 +887,29 @@ describe('mcp transport selection', () => {
   })
 })
 
+describe('silent OAuth connect', () => {
+  it('hands the transport a provider that asks for a login rather than registering a client', async () => {
+    // The silent connect refreshes stored tokens. When the server has forgotten the
+    // client, the SDK clears the credentials and asks this provider for client
+    // information before registering one; a provider with no callback port would
+    // register http://localhost:0/callback.
+    const { FileOAuthProvider } = await import('../extensions/internal/mcp-oauth.ts')
+    const { UnauthorizedError } = await import('@modelcontextprotocol/sdk/client/auth.js')
+    const url = 'https://silent.example.com/mcp'
+    const seed = new FileOAuthProvider('remote', () => {}, undefined, url)
+    seed.bindRedirectPort(5555)
+    seed.saveClientInformation({ client_id: 'old', redirect_uris: ['http://localhost:5555/callback'] })
+    seed.saveTokens({ access_token: 'a', token_type: 'bearer', refresh_token: 'r' })
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { remote: { type: 'http', url } } })
+
+    const provider = (hoisted.transports[0].options as { authProvider?: InstanceType<typeof FileOAuthProvider> }).authProvider
+    expect(provider).toBeDefined()
+    provider?.invalidateCredentials('all')
+    expect(() => provider?.clientInformation()).toThrow(UnauthorizedError)
+  })
+})
+
 describe('auth reconnect ordering', () => {
   it('does not pop a second login dialog from the backoff path after a declined re-login', async () => {
     // reconnectForAuth deletes the client from the map before closing it, so the
