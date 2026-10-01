@@ -17,6 +17,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
+import { PACKAGE_VERSION } from '../internal/package-version.js'
 import { resolveShell } from '../internal/shell-resolve.js'
 import { parseNumericEnv } from '../internal/values.js'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
@@ -160,8 +161,9 @@ export interface SessionDirs {
  * with the session's launch directory. pi's directory set is static, so no
  * roots/list_changed notification is ever sent. */
 function makeClient(session?: SessionDirs): Client {
-  if (!session) return new Client({ name: 'pi-code-mcp', version: '0.1.0' })
-  const client = new Client({ name: 'pi-code-mcp', version: '0.1.0' }, { capabilities: { roots: {} } })
+  const info = { name: 'pi-code-mcp', version: PACKAGE_VERSION }
+  if (!session) return new Client(info)
+  const client = new Client(info, { capabilities: { roots: {} } })
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(session.launchDir).href }] }))
   return client
 }

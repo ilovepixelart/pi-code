@@ -35,6 +35,7 @@ import { hookFiles, readSettingsDisableAllHooks, runHookCommand } from './hooks/
 import { addDirFlagValue } from './internal/add-dir-flag.js'
 import { claudeEffortLevel } from './internal/effort.js'
 import { readManagedSettings } from './internal/managed-settings.js'
+import { PACKAGE_VERSION } from './internal/package-version.js'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.js'
 import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
 import { checkoutRoot, gitRoot } from './internal/project-root.js'
@@ -62,15 +63,6 @@ function gitWorktreeName(cwd: string): string | undefined {
     return undefined
   }
 }
-
-/** Claude sends its CLI version; pi-code's own version is the honest analogue. */
-const PACKAGE_VERSION = (() => {
-  try {
-    return String(JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf-8')).version ?? '')
-  } catch {
-    return ''
-  }
-})()
 
 interface UsageEntry {
   type: string
@@ -291,6 +283,7 @@ export default function statusLine(pi: ExtensionAPI) {
       hook_event_name: 'Status',
       session_id: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
+      // Claude sends its CLI version; pi-code's own version is the honest analogue.
       version: PACKAGE_VERSION,
       // project_dir is the repository, not the directory the session started in: a
       // script labelling the project showed whichever subdirectory it was launched

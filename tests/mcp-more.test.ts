@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -916,6 +916,16 @@ describe('mcp transport selection', () => {
     const [line] = await statusLinesOf(harness)
     expect(line.startsWith('remote: failed: ')).toBe(true)
     expect(line.endsWith(' (0 tools)')).toBe(true)
+  })
+})
+
+describe('MCP client identity', () => {
+  it("reports pi-code's own version to the server", async () => {
+    // The version in package.json is the one packaging publishes.
+    const manifest = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf-8')) as { version: string }
+    withTools([{ name: 'go' }])
+    await setupStarted({ user: { srv: { command: 'node' } } })
+    expect(hoisted.clients[0].info).toEqual({ name: 'pi-code-mcp', version: manifest.version })
   })
 })
 
