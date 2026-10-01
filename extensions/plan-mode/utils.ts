@@ -117,7 +117,7 @@ const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
 
 /** `segment` with its quoted spans removed, so a `>` or a flag inside a pattern reads as
  * text. Follows splitSegments: a backslash outside quotes escapes the next character,
- * and inside quotes only the closing quote matters. */
+ * and inside "..." and $'...' too, while '...' has no escapes. */
 function withoutQuoted(segment: string): string {
   let bare = ''
   let quote: Quote | undefined
