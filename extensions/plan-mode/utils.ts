@@ -3,7 +3,7 @@
  * Extracted for testability.
  */
 
-import { hasSubstitution, splitSegments } from '../internal/shell-split.js'
+import { hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, splitSegments } from '../internal/shell-split.js'
 
 // Destructive commands blocked in plan mode. Tested against the segment's command word,
 // the one word that runs: an allowlisted head never executes its arguments, so `code`
@@ -120,13 +120,16 @@ const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
  * and inside quotes only the closing quote matters. */
 function withoutQuoted(segment: string): string {
   let bare = ''
-  let quote: string | undefined
+  let quote: Quote | undefined
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]
+    const opened = quote === undefined ? quoteOpensAt(segment, i) : undefined
     if (quote !== undefined) {
-      if (ch === quote) quote = undefined
-    } else if (ch === "'" || ch === '"') {
-      quote = ch
+      if (ch === '\\' && quoteEscapes(quote)) i++
+      else if (ch === quoteCloser(quote)) quote = undefined
+    } else if (opened !== undefined) {
+      quote = opened.quote
+      i += opened.length - 1
     } else if (ch === '\\') {
       i++
     } else {

@@ -196,3 +196,21 @@ describe('isSafeCommand respects quoting', () => {
     expect(isSafeCommand('grep "unterminated')).toBe(false)
   })
 })
+
+describe('isSafeCommand follows bash escapes inside quotes', () => {
+  it('blocks a command hidden after an escaped double quote', () => {
+    expect(isSafeCommand('echo "\\"" ; touch PWN ; echo \\"')).toBe(false)
+  })
+
+  it('blocks a command hidden after an escaped quote in an ANSI-C string', () => {
+    expect(isSafeCommand("echo $'\\'' ; touch PWN ; echo \\'")).toBe(false)
+  })
+
+  it('sees a redirect that follows a string ending in an escaped quote', () => {
+    expect(isSafeCommand('echo "\\"" > out')).toBe(false)
+  })
+
+  it('still allows a read whose quoted argument contains an escaped quote', () => {
+    expect(isSafeCommand('grep "a\\"b" file')).toBe(true)
+  })
+})

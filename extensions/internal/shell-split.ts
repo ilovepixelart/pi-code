@@ -22,6 +22,24 @@ function separatorAt(command: string, i: number): number {
   return ch === ';' || ch === '|' || ch === '&' || ch === '\n' ? 1 : 0
 }
 
+/** The quoting bash applies: '...' with no escapes, "..." where a backslash escapes the
+ * next character, and ANSI-C $'...' where a backslash escapes anything, `\'` included. */
+export type Quote = "'" | '"' | "$'"
+
+/** The quote that opens at `i`, if any, and how many characters open it. */
+export function quoteOpensAt(command: string, i: number): { quote: Quote; length: number } | undefined {
+  const ch = command[i]
+  if (ch === "'" || ch === '"') return { quote: ch, length: 1 }
+  if (ch === '$' && command[i + 1] === "'") return { quote: "$'", length: 2 }
+  return undefined
+}
+
+/** Whether a backslash inside this quote escapes the character after it. */
+export const quoteEscapes = (quote: Quote): boolean => quote !== "'"
+
+/** The character that closes this quote. */
+export const quoteCloser = (quote: Quote): string => (quote === '"' ? '"' : "'")
+
 /**
  * Split on the shell separators Claude Code documents (`&&`, `||`, `;`, `|`, `|&`, `&`,
  * newline) so every subcommand is checked on its own, ignoring separators inside quotes:
@@ -33,18 +51,24 @@ function separatorAt(command: string, i: number): number {
 export function splitSegments(command: string): string[] {
   const segments: string[] = []
   let current = ''
-  let quote: "'" | '"' | undefined
+  let quote: Quote | undefined
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (quote !== undefined) {
+      if (ch === '\\' && quoteEscapes(quote) && i + 1 < command.length) {
+        current += ch + command[++i]
+        continue
+      }
       current += ch
-      if (ch === quote) quote = undefined
+      if (ch === quoteCloser(quote)) quote = undefined
       continue
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      current += ch
+    const opened = quoteOpensAt(command, i)
+    if (opened !== undefined) {
+      quote = opened.quote
+      current += command.slice(i, i + opened.length)
+      i += opened.length - 1
       continue
     }
     if (ch === '\\' && i + 1 < command.length) {

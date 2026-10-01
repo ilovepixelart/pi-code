@@ -86,3 +86,13 @@ describe('matchesBashRules', () => {
     expect(matchesBashRules('git status', [''])).toBe(false)
   })
 })
+
+describe('matchesBashRules follows bash escapes inside quotes', () => {
+  it('refuses a command hidden after an escaped double quote', () => {
+    expect(matchesBashRules('echo "\\"" ; touch X ; echo \\"', ['echo:*'])).toBe(false)
+  })
+
+  it('still matches a single command whose quoted argument contains an escaped quote', () => {
+    expect(matchesBashRules('echo "a\\"b"', ['echo:*'])).toBe(true)
+  })
+})

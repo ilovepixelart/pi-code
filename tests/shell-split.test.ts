@@ -55,3 +55,31 @@ describe('hasSubstitution', () => {
     expect(hasSubstitution('git status')).toBe(false)
   })
 })
+
+// Worked from bash's quoting rules: inside "..." a backslash escapes the next character,
+// '...' has no escapes at all, and $'...' (ANSI-C quoting) escapes everything.
+describe('splitSegments follows bash escapes inside quotes', () => {
+  it('keeps an escaped double quote inside the string, so a separator after the string still splits', () => {
+    expect(splitSegments('echo "\\"" ; touch X ; echo \\"')).toEqual(['echo "\\""', 'touch X', 'echo \\"'])
+  })
+
+  it('keeps an escaped single quote inside an ANSI-C string', () => {
+    expect(splitSegments("echo $'\\'' ; touch X ; echo \\'")).toEqual(["echo $'\\''", 'touch X', "echo \\'"])
+  })
+
+  it('ends an ANSI-C string after an escaped backslash', () => {
+    expect(splitSegments("echo $'a\\\\' ; touch X")).toEqual(["echo $'a\\\\'", 'touch X'])
+  })
+
+  it('treats a backslash inside single quotes as literal, so the next quote closes the string', () => {
+    expect(splitSegments("echo 'a\\' ; touch X")).toEqual(["echo 'a\\'", 'touch X'])
+  })
+
+  it('keeps a separator after a non-special escape inside double quotes', () => {
+    expect(splitSegments('grep "a\\|b;c" f')).toEqual(['grep "a\\|b;c" f'])
+  })
+
+  it('reads an escaped dollar before a quote as a plain single-quoted string', () => {
+    expect(splitSegments("echo \\$'a ; b'")).toEqual(["echo \\$'a ; b'"])
+  })
+})
