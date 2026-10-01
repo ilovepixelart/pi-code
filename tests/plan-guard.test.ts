@@ -254,3 +254,17 @@ describe('isSafeCommand reads a quoted flag as the flag the command receives', (
     expect(isSafeCommand(command)).toBe(true)
   })
 })
+
+// Read-only commands the stricter flag and escape checks must not catch. `$'` is ANSI-C
+// quoting only where it is unquoted; fd's -t and -e and sort's -t take a value, so a cluster
+// ending in that value is not -x or -o; a flag is the start of a word, never text inside a
+// quoted value.
+describe('isSafeCommand keeps allowing read-only commands near the blocked forms', () => {
+  it.each([`grep -rn "\\$'\\033" .`, `grep -rn "PS1=\\$'\\x1b" .`, `echo \\$'\\x41'`, `echo "$'\\x41'"`, 'fd -tx', 'fd -etsx', `git log --format="%h --output x"`, `sort -t'o' f`])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+
+  it.each([`sort $'\\x2do' out in`, 'fd -Hx rm', 'fd -x rm', 'sort -o out in', 'sort -ro out in', 'git log --output=x'])('still blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+})

@@ -111,12 +111,14 @@ const FIND_ACTIONS = /\s-(exec|execdir|ok|okdir|delete|fls|fprint|fprint0|fprint
 // Flags that turn an allowlisted read into a write or an execution, per command.
 const UNSAFE_FLAGS: ReadonlyArray<readonly [head: RegExp, flag: RegExp]> = [
   [/^\s*find\b/, FIND_ACTIONS],
-  [/^\s*sort\b/, /\s(-[a-zA-Z]*o|--output\b|--compress-program\b)/],
+  // -o ends a cluster of value-less flags (-ro); in -to, o is -t's separator.
+  [/^\s*sort\b/, /\s(-[bdfghiMnRrsVcCmuz]*o|--output\b|--compress-program\b)/],
   [/^\s*tree\b/, /\s-[a-zA-Z]*o/],
   [/^\s*rg\b/, /\s--(pre|hostname-bin)\b/],
   [/^\s*git\s/, /\s--output(=|\s|$)/],
-  // -x/--exec runs a command per result, -X/--exec-batch once for all; a short flag may end a cluster.
-  [/^\s*fd\b/, /\s(-[a-zA-Z]*[xX](?=\s|$)|--exec(-batch)?(?==|\s|$))/],
+  // -x/--exec runs a command per result, -X/--exec-batch once for all; it may end a cluster
+  // of value-less flags (-Hx), while in -tx or -etsx the x is the value of -t or -e.
+  [/^\s*fd\b/, /\s(-[HIusigFaLlpq0]*[xX](?=\s|$)|--exec(-batch)?(?==|\s|$))/],
   // --pager names the program bat runs when it pages.
   [/^\s*bat\b/, /\s--pager(?==|\s|$)/],
 ]
@@ -189,7 +191,8 @@ function writesThroughOperands(segment: string): boolean {
   // quoted '-delete' is the flag itself, while a flag-like run inside a quoted argument
   // ("x -delete") is not a word of its own.
   const words = shellWords(segment)
-  const flagged = (flag: RegExp): boolean => words.some((word) => word.startsWith('-') && flag.test(` ${word}`))
+  // A flag is the start of a word: text inside a quoted value ("%h --output x") is not.
+  const flagged = (flag: RegExp): boolean => words.some((word) => word.startsWith('-') && flag.exec(` ${word}`)?.index === 0)
   if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flagged(flag))) return true
   const [command = '', subcommand = '', ...rest] = words
   if (command === 'uniq') return uniqWrites([subcommand, ...rest].filter(Boolean))

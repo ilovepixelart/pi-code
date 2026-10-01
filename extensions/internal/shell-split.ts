@@ -134,5 +134,21 @@ export function shellWords(segment: string): string[] {
 }
 
 /** Whether an ANSI-C $'...' string uses a numeric or control escape (`\x2d`, `\055`,
- * `\u002d`, `\cA`), which can spell any character, a flag's dash included. */
-export const hasAnsiCNumericEscape = (command: string): boolean => /\$'(?:[^'\\]|\\.)*?\\[xuU0-7c]/.test(command)
+ * `\u002d`, `\cA`), which can spell any character, a flag's dash included. Only a `$'`
+ * bash reads as ANSI-C counts: one inside "..." or after `\$` is plain text. */
+export function hasAnsiCNumericEscape(command: string): boolean {
+  let quote: Quote | undefined
+  for (let i = 0; i < command.length; ) {
+    if (quote === undefined) {
+      const opened = quoteOpensAt(command, i)
+      quote = opened?.quote
+      i += opened?.length ?? unquotedStep(command, i)
+      continue
+    }
+    if (quote === "$'" && command[i] === '\\' && /[xuU0-7c]/.test(command[i + 1] ?? '')) return true
+    const step = stepInQuote(command, i, quote)
+    if (step.closes) quote = undefined
+    i += step.taken
+  }
+  return false
+}
