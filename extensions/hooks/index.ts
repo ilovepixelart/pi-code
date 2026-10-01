@@ -252,7 +252,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
    * the config and re-merges the skill hooks from their declarations, so the spent mark on
    * the parsed hook does not survive it; this does. */
   const spentOnce = new Set<string>()
-  const onceKey = (hook: HookCommand): string => `${hook.origin ?? ''}\0${hook.command ?? ''}`
+  const onceKey = (hook: HookCommand): string => hook.declarationKey ?? `${hook.origin ?? ''}\0${hook.command ?? ''}`
   /** Whether this process is a subagent's child. Claude runs settings hooks inside a
    * subagent for tool events, but Stop is the main agent's, a subagent completes with
    * SubagentStop, and a subagent run is neither a session (SessionStart, SessionEnd) nor

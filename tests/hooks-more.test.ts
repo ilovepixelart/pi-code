@@ -2786,6 +2786,34 @@ describe('hooks from skill frontmatter', () => {
     await ext.shutdown('quit')
   })
 
+  it('keeps two once hooks with the same command apart across a reload', async () => {
+    // A spent mark must name the hook, not just its command: the Read hook below never
+    // ran, so a reload must not count it as spent.
+    vi.stubEnv('PI_CODE_SETTINGS_WATCH_INTERVAL_MS', '20')
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, {
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [{ command: 'shared-once', once: true }] },
+        { matcher: 'Read', hooks: [{ command: 'shared-once', once: true }] },
+      ],
+    })
+    await ext.toolCall('bash', {})
+
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Grep', hooks: [{ command: 'reloaded' }] }] })
+    await vi.waitFor(
+      async () => {
+        await ext.toolCall('grep', {})
+        expect(commandsRun()).toContain('reloaded')
+      },
+      { timeout: 5000, interval: 25 },
+    )
+    await ext.toolCall('read', {})
+
+    expect(commandsRun().filter((command) => command === 'shared-once')).toEqual(['shared-once', 'shared-once'])
+    await ext.shutdown('quit')
+  })
+
   it('runs a once hook again in a new session, even after a reload there', async () => {
     vi.stubEnv('PI_CODE_SETTINGS_WATCH_INTERVAL_MS', '20')
     const ext = setupExtension()
