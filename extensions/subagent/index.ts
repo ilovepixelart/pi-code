@@ -73,6 +73,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // hook must respect project trust the way the tool path does, or an unapproved repo's
   // .claude/agents entry (which wins a name clash) would run on its own say-so.
   let hookAgentScope: AgentScope = 'user'
+  // The same session values the tool path computes per call: a named agent's skills: list
+  // resolves against these roots, and its project or local memory needs the approval.
+  let hookApproved = false
+  let hookSkillRoots: string[] = []
 
   // Discovery walks the plugin cache, the builtin dir, and every agent dir, parsing
   // each file: dozens of fs ops per call. The roster injection below runs every turn
@@ -84,7 +88,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     rosterCache = null
     hookCwd = ctx.cwd
-    hookAgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
+    hookApproved = isProjectApprovedSilently(ctx)
+    hookAgentScope = hookApproved ? 'both' : 'user'
+    hookSkillRoots = skillDirs(ctx.cwd, os.homedir(), hookApproved)
     try {
       hookModels = ctx.modelRegistry?.getAvailable?.() ?? []
     } catch {
@@ -106,6 +112,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
         signal: request.signal,
         makeDetails: (results): SubagentDetails => ({ mode: 'single', agentScope: 'user', projectAgentsDir: null, results }),
         availableModels: hookModels,
+        skillRoots: hookSkillRoots,
+        projectApproved: hookApproved,
       })
       return getFinalOutput(result.messages)
     })

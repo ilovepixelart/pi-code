@@ -324,6 +324,26 @@ describe('agent hook runner', () => {
     expect(discoverAgentsMock).toHaveBeenCalledWith('/repo', 'both')
   })
 
+  it("preloads a named agent's skills when a fork skill runs it, as the tool path does", async () => {
+    // A context: fork skill naming an agent goes through this seam; the agent's skills:
+    // list must resolve against the same skill roots the subagent tool uses.
+    osHoisted.home = fs.mkdtempSync(join(tmpdir(), 'seam-home-'))
+    fs.mkdirSync(join(osHoisted.home, '.claude', 'skills', 'house-style'), { recursive: true })
+    fs.writeFileSync(join(osHoisted.home, '.claude', 'skills', 'house-style', 'SKILL.md'), '---\nname: house-style\ndescription: style\n---\nUSE TABS')
+    discoverAgentsMock.mockReturnValue({ agents: [{ ...agentConfig({ name: 'reviewer', systemPrompt: 'Review.' }), skills: ['house-style'] }], projectAgentsDir: null })
+    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    script('look', { stdout: [say('done')], exitCode: 0 })
+
+    try {
+      await runAgent({ prompt: 'look', agent: 'reviewer' })
+    } finally {
+      osHoisted.home = ''
+    }
+
+    expect(spawnCalls[0].promptFile?.content).toContain('USE TABS')
+    expect(spawnCalls[0].promptFile?.content).not.toContain('(skill not found)')
+  })
+
   it('refuses to run inside a subagent session', async () => {
     await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
     const saved = process.env.PI_CODE_SUBAGENT
@@ -1801,6 +1821,19 @@ describe('agent memory', () => {
     const content = spawnCalls[0].promptFile?.content as string
     expect(content).toContain('- session store')
     expect(content).not.toContain('DECOY')
+  })
+
+  it('gives a named agent run by a fork skill its project memory once the project is approved', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'scout', systemPrompt: 'Be terse.', memory: 'project' })], projectAgentsDir: null })
+    const repo = fs.mkdtempSync(join(tmpdir(), 'sa-seam-'))
+    fs.mkdirSync(join(repo, '.git'))
+    writeStore(agentMemoryDir('project', 'scout', repo, home), '- seam store\n')
+    await eventHandlers.get('session_start')?.({}, { cwd: repo, isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    script('inspect', { stdout: [say('ok')] })
+
+    await runAgent({ prompt: 'inspect', agent: 'scout' })
+
+    expect(spawnCalls[0].promptFile?.content).toContain('- seam store')
   })
 
   it('keeps a user-scoped store even when the project is not approved', async () => {
