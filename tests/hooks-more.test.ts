@@ -2763,6 +2763,52 @@ describe('hooks from skill frontmatter', () => {
     expect(commandsRun()).toEqual(['skill-once'])
   })
 
+  it('keeps a spent once hook removed when the settings reload', async () => {
+    // A reload rebuilds the hook config, re-merging the session's skill hooks from their
+    // declarations; the spent mark must survive it.
+    vi.stubEnv('PI_CODE_SETTINGS_WATCH_INTERVAL_MS', '20')
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-once', once: true }] }] })
+    await ext.toolCall('bash', {})
+
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Read', hooks: [{ command: 'reloaded' }] }] })
+    await vi.waitFor(
+      async () => {
+        await ext.toolCall('read', {})
+        expect(commandsRun()).toContain('reloaded')
+      },
+      { timeout: 5000, interval: 25 },
+    )
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun().filter((command) => command === 'skill-once')).toEqual(['skill-once'])
+    await ext.shutdown('quit')
+  })
+
+  it('runs a once hook again in a new session, even after a reload there', async () => {
+    vi.stubEnv('PI_CODE_SETTINGS_WATCH_INTERVAL_MS', '20')
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-once', once: true }] }] })
+    await ext.toolCall('bash', {})
+
+    await ext.sessionStart('new', { cwd: tempDir('hooks-proj-') })
+    invokeSkill(ext, { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'skill-once', once: true }] }] })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Read', hooks: [{ command: 'reloaded' }] }] })
+    await vi.waitFor(
+      async () => {
+        await ext.toolCall('read', {})
+        expect(commandsRun()).toContain('reloaded')
+      },
+      { timeout: 5000, interval: 25 },
+    )
+    await ext.toolCall('bash', {})
+
+    expect(commandsRun().filter((command) => command === 'skill-once')).toEqual(['skill-once', 'skill-once'])
+    await ext.shutdown('quit')
+  })
+
   it('keeps a once hook in place after a failing run', async () => {
     // Claude: a run that fails, blocks with exit code 2, or times out leaves the
     // hook in place, so it runs again on the next matching event.
