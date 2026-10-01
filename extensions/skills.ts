@@ -213,6 +213,22 @@ async function runForkedSkill(name: string, filePath: string, expanded: string, 
  * pass the input through to pi untouched. The expanded body is wrapped in pi's
  * skill-block format so downstream behavior (the baseDir note for relative
  * references) matches an untouched invocation. */
+/** Whether pi resolved this skill name to another file: pi loads its own skill directories
+ * ahead of the ones this extension adds and the first name wins, so its listing then
+ * shows that skill, and the invocation is left to pi's own expansion of it. */
+function shadowedByPi(pi: ExtensionAPI, name: string, filePath: string): boolean {
+  const loaded = pi.getCommands?.().find((command) => command.source === 'skill' && command.name === `skill:${name}`)
+  if (loaded === undefined) return false
+  const real = (target: string): string => {
+    try {
+      return fs.realpathSync(target)
+    } catch {
+      return path.resolve(target)
+    }
+  }
+  return real(loaded.sourceInfo.path) !== real(filePath)
+}
+
 async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
   const text = rawText.trimStart()
   if (!text.startsWith('/skill:')) return
@@ -222,7 +238,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   if (!name) return
   const trusted = isProjectApprovedSilently(ctx)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
-  if (!found) return
+  if (!found || shadowedByPi(pi, name, found.filePath)) return
   const refused = refusedByOverride(name, ctx, trusted)
   if (refused) return refused
   let parsed: ReturnType<typeof parseCommandFile>
