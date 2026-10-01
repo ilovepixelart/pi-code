@@ -59,32 +59,36 @@ const unquotedStep = (text: string, i: number): number => (text[i] === '\\' && i
  * A shell AST would be exact; this is the honest approximation for a quoting-only concern.
  */
 export function splitSegments(command: string): string[] {
-  const segments: string[] = []
-  let current = ''
-  let quote: Quote | undefined
+  const state: SplitState = { segments: [], current: '', quote: undefined }
+  for (let i = 0; i < command.length; ) i += splitStep(command, i, state)
+  if (state.quote !== undefined) return []
+  state.segments.push(state.current)
+  return state.segments.map((segment) => segment.trim()).filter(Boolean)
+}
 
-  for (let i = 0; i < command.length; ) {
-    if (quote !== undefined) {
-      const step = stepInQuote(command, i, quote)
-      current += command.slice(i, i + step.taken)
-      if (step.closes) quote = undefined
-      i += step.taken
-      continue
-    }
-    const opened = quoteOpensAt(command, i)
-    const separator = opened === undefined ? separatorAt(command, i) : 0
-    const taken = opened?.length ?? (separator > 0 ? separator : unquotedStep(command, i))
-    if (separator > 0) {
-      segments.push(current)
-      current = ''
-    } else current += command.slice(i, i + taken)
-    if (opened !== undefined) quote = opened.quote
-    i += taken
+interface SplitState {
+  segments: string[]
+  current: string
+  quote: Quote | undefined
+}
+
+/** One step of splitSegments at `i`, returning how many characters it took. */
+function splitStep(command: string, i: number, state: SplitState): number {
+  if (state.quote !== undefined) {
+    const step = stepInQuote(command, i, state.quote)
+    state.current += command.slice(i, i + step.taken)
+    if (step.closes) state.quote = undefined
+    return step.taken
   }
-
-  if (quote !== undefined) return []
-  segments.push(current)
-  return segments.map((segment) => segment.trim()).filter(Boolean)
+  const opened = quoteOpensAt(command, i)
+  const separator = opened === undefined ? separatorAt(command, i) : 0
+  const taken = opened?.length ?? (separator > 0 ? separator : unquotedStep(command, i))
+  if (separator > 0) {
+    state.segments.push(state.current)
+    state.current = ''
+  } else state.current += command.slice(i, i + taken)
+  if (opened !== undefined) state.quote = opened.quote
+  return taken
 }
 
 // Characters a backslash escapes inside "...": everything else keeps its backslash.
@@ -107,30 +111,41 @@ const wordChars = (text: string, i: number): string => (unquotedStep(text, i) ==
  * hide behind quoting. An empty quoted argument is still a word.
  */
 export function shellWords(segment: string): string[] {
-  const words: string[] = []
-  // undefined between words; a quoted empty argument is the word ''.
-  let word: string | undefined
-  let quote: Quote | undefined
-  for (let i = 0; i < segment.length; ) {
-    if (quote !== undefined) {
-      const step = stepInQuote(segment, i, quote)
-      if (step.taken === 2) word = `${word ?? ''}${escaped(quote, segment[i + 1])}`
-      else if (!step.closes) word = `${word ?? ''}${segment[i]}`
-      if (step.closes) quote = undefined
-      i += step.taken
-      continue
-    }
-    const opened = quoteOpensAt(segment, i)
-    if (opened !== undefined) quote = opened.quote
-    if (opened !== undefined || !/\s/.test(segment[i])) word = `${word ?? ''}${opened ? '' : wordChars(segment, i)}`
-    else if (word !== undefined) {
-      words.push(word)
-      word = undefined
-    }
-    i += opened?.length ?? unquotedStep(segment, i)
+  // `word` is undefined between words; a quoted empty argument is the word ''.
+  const state: WordState = { words: [], word: undefined, quote: undefined }
+  for (let i = 0; i < segment.length; ) i += wordStep(segment, i, state)
+  if (state.word !== undefined) state.words.push(state.word)
+  return state.words
+}
+
+interface WordState {
+  words: string[]
+  word: string | undefined
+  quote: Quote | undefined
+}
+
+/** One step of shellWords at `i`, returning how many characters it took. */
+function wordStep(segment: string, i: number, state: WordState): number {
+  if (state.quote !== undefined) {
+    const step = stepInQuote(segment, i, state.quote)
+    if (step.taken === 2) state.word = `${state.word ?? ''}${escaped(state.quote, segment[i + 1])}`
+    else if (!step.closes) state.word = `${state.word ?? ''}${segment[i]}`
+    if (step.closes) state.quote = undefined
+    return step.taken
   }
-  if (word !== undefined) words.push(word)
-  return words
+  const opened = quoteOpensAt(segment, i)
+  if (opened !== undefined) {
+    state.quote = opened.quote
+    state.word = state.word ?? ''
+    return opened.length
+  }
+  if (/\s/.test(segment[i])) {
+    if (state.word !== undefined) state.words.push(state.word)
+    state.word = undefined
+    return 1
+  }
+  state.word = `${state.word ?? ''}${wordChars(segment, i)}`
+  return unquotedStep(segment, i)
 }
 
 /** Whether an ANSI-C $'...' string uses a numeric or control escape (`\x2d`, `\055`,
