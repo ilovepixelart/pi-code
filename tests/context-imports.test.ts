@@ -2142,6 +2142,21 @@ describe('subdirectory context files load on demand', () => {
     expect(texts(second).join('\n')).not.toContain('SRC RULES')
   })
 
+  // Claude: CLAUDE_CODE_DISABLE_CLAUDE_MDS prevents "loading any CLAUDE.md memory files
+  // into context, including user, project, and auto memory files".
+  it('attaches no subdirectory CLAUDE.md when CLAUDE.md memory is disabled', async () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_CLAUDE_MDS', '1')
+    const cwd = tempDir()
+    writeAt(join(cwd, 'src'), 'CLAUDE.md', 'SRC RULES')
+
+    const wired = wireTools()
+    await wired.handlers.get('session_start')?.({}, approvingCtx(cwd))
+    const result = await wired.handlers.get('tool_result')?.(readResult(join('src', 'a.ts')), { cwd })
+
+    expect(texts(result).join('\n')).not.toContain('SRC RULES')
+    expect(wired.instructionEvents()).toEqual([])
+  })
+
   // Claude: after /compact "nested CLAUDE.md files in subdirectories and rules with paths:
   // frontmatter reload as Claude reads files they apply to". Compaction folds the tool result
   // that carried the memory into a summary, and /tree moves to a branch that never had it, so
