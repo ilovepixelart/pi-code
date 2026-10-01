@@ -505,6 +505,12 @@ describe('managedForceEnabled', () => {
     expect(await forced({ 'fmt-dir': true }, (h) => install(h, 'community', 'fmt-dir', '1.0.0', { name: 'Formatter' }))).toEqual(['Formatter'])
   })
 
+  it('does not exempt a plugin whose managed entry is not true', async () => {
+    // A non-boolean entry is ignored by enablement, so the plugin still loads; it must not
+    // count as a force-enable either.
+    expect(await forced({ 'foo@community': 'yes' as unknown as boolean }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual([])
+  })
+
   it('does not exempt a plugin whose managed entry is false', async () => {
     expect(await forced({ 'foo@community': false }, (h) => install(h, 'community', 'foo', '1.0.0'))).toEqual([])
   })
