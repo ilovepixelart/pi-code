@@ -1,5 +1,6 @@
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolInput, piToolOutput } from '../extensions/hooks/claude-tools.ts'
@@ -135,7 +136,10 @@ describe('todo tool aliases', () => {
 // a different file than the one pi touches.
 describe('hook file paths name the file pi opens', () => {
   const cwd = '/proj'
-  const spellings = ['@~/.ssh/id_rsa', '@/etc/hosts', 'file:///etc/hosts', 'notes draft.md', '~/x', 'src/a.ts', '/abs/b.ts']
+  // A file URL must name an absolute path of the platform: file:///etc/hosts has no drive
+  // letter on Windows, and pi's own resolver rejects it there.
+  const fileUrl = pathToFileURL(path.resolve('/etc/hosts')).href
+  const spellings = ['@~/.ssh/id_rsa', '@/etc/hosts', fileUrl, 'notes draft.md', '~/x', 'src/a.ts', '/abs/b.ts']
 
   it.each(spellings)('read %s', async (spelling) => {
     const { resolveToCwd } = await import('../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js')
@@ -150,6 +154,6 @@ describe('hook file paths name the file pi opens', () => {
 
   it('reports the written file the same way in the response', async () => {
     const { resolveToCwd } = await import('../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js')
-    expect(claudeToolResponse('write', { path: 'file:///etc/hosts' }, '', false, cwd)?.filePath).toBe(resolveToCwd('file:///etc/hosts', cwd))
+    expect(claudeToolResponse('write', { path: fileUrl }, '', false, cwd)?.filePath).toBe(resolveToCwd(fileUrl, cwd))
   })
 })
