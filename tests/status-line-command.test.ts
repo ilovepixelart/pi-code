@@ -178,6 +178,22 @@ describe('statusLine command contract', () => {
     expect(hoisted.runs.length).toBeGreaterThan(afterReload)
   })
 
+  it('leaves the built-in segment alone when settings change and no statusLine is configured', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', {})
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    const before = status.at(-1)
+
+    writeSettings(hoisted.home, 'settings.json', { outputStyle: 'Explanatory' })
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toBe(before)
+  })
+
   it('drops the custom segment when the statusLine setting is removed mid-session', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })

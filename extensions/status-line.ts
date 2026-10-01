@@ -533,7 +533,10 @@ export default function statusLine(pi: ExtensionAPI) {
       config = activeStatusLine(liveFiles)
       armRefresh()
       // With the setting gone nothing runs again, so the last script output would stay.
+      // Only a removal resets the segment: with no statusLine before either, the built-in
+      // segment is already showing and keeps its state.
       if (!config) {
+        if (previousCommand === undefined) return
         commandLine = undefined
         show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
         return
