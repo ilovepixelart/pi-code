@@ -149,6 +149,22 @@ describe('statusLine command contract', () => {
     expect(hoisted.runs.length).toBeGreaterThan(afterReload)
   })
 
+  it('drops the custom segment when the statusLine setting is removed mid-session', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'CUSTOM SEGMENT\n', stderr: '', timedOut: false }
+    const { handlers, status, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).toContain('CUSTOM SEGMENT')
+
+    writeSettings(hoisted.home, 'settings.json', {})
+    hoisted.settingsChanged?.()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(status.at(-1)).not.toContain('CUSTOM SEGMENT')
+  })
+
   it('runs the configured command with the session payload and shows every line it printed, padded', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh', padding: 1 } })

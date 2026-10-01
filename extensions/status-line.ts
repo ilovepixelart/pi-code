@@ -520,6 +520,12 @@ export default function statusLine(pi: ExtensionAPI) {
       const liveFiles = hookFiles(watchCwd, os.homedir(), trusted && stillApproved())
       config = readDisableAllHooks(liveFiles) ? undefined : readStatusLineConfig(liveFiles)
       armRefresh()
+      // With the setting gone nothing runs again, so the last script output would stay.
+      if (!config) {
+        commandLine = undefined
+        show(ctx, segmentText(ctx, ctx.ui.theme.fg('dim', '○')))
+        return
+      }
       // The debounce batches rapid triggers, but a command the user just edited has
       // nothing to batch with: run it now so the result of the edit is immediate.
       if (config?.command !== previousCommand) void runCommand(ctx)
