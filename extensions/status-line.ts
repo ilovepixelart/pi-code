@@ -21,8 +21,8 @@
  * session start, accumulated per message_end, and reseeded when compaction or
  * /tree navigation reshapes the branch, so it stays correct across navigation
  * and forks without re-walking the branch on every render. The built-in segment is also
- * the fallback while a configured command produces no output. Multi-line output
- * is truncated to its first line: the segment is one footer row in pi.
+ * the fallback while a configured command produces no output. Multi-line output is
+ * joined into the one footer row pi gives the segment.
  *
  * Docs: https://code.claude.com/docs/en/statusline.md
  */

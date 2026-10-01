@@ -27,7 +27,7 @@ export interface HookCommand {
    * the background but keeps its timeout, and wakes the model when the hook exits 2
    * (stderr, or stdout when stderr is empty, feeds back as a new turn). Background hooks
    * render no decision; their JSON `systemMessage`/`additionalContext` reach the model on
-   * the next turn, and any still running are killed at session end. */
+   * the next turn, and any still running when a headless run ends are killed. */
   async?: boolean
   asyncRewake?: boolean
   /** Claude's permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`): evaluated only
@@ -73,9 +73,9 @@ export function isBackgroundHook(hook: HookCommand): boolean {
 }
 export type HooksConfig = Record<string, HookMatcher[]>
 
-/** Settings files to read, newest-winning. Project files load only when trusted, each
- * the nearest of its name at or above cwd (bounded at the repository root, matching
- * the approval walk), so a subdirectory session reads the settings that gated it. */
+/** Settings files to read, newest-winning, through the shared settings chain: project
+ * files load only when trusted, the shared settings.json from cwd and settings.local.json
+ * from the repository root, as Claude places them. */
 export function hookFiles(cwd: string, home: string, trusted: boolean): string[] {
   return claudeSettingsChain(cwd, home, trusted)
 }

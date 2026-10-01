@@ -10,7 +10,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 - **PostToolUse**: feedback and `additionalContext` land next to the tool result; `updatedToolOutput`/`updatedMCPToolOutput` replace what the model sees (schema-checked for built-ins, unvalidated for MCP).
 - **PostToolUseFailure**: notify-only (the tool already failed); the hook's stderr is shown to the model.
 - **SessionStart**: context injection before the first prompt.
-- **UserPromptSubmit**: blocks the prompt or injects context ahead of it.
+- **UserPromptSubmit**: blocks the prompt or adds context to it.
 - **Stop**: a block (or `additionalContext`) feeds back as a new turn, with `stop_hook_active` as the loop guard and a consecutive-block cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`; `0` disables the cap). Does not run when the turn ended on a user interrupt, as Claude documents.
 - **SubagentStart / SubagentStop**: SubagentStart runs pre-spawn so its `additionalContext` reaches the child before its first prompt (it cannot block the spawn); SubagentStop is notify-only (the child has already exited) and carries `last_assistant_message`.
 - **PreCompact**: exit 2 or a `decision: block` JSON reply cancels the compaction, with the reason shown; other output is notify-only.
@@ -35,7 +35,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 - A hook from a plugin runs with `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` in its environment alongside `CLAUDE_PROJECT_DIR`, as Claude exports all three to hook processes; the data directory is created when the path is handed over.
 - Every payload carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `effort`; tool events add `tool_use_id` and PostToolUse/PostToolUseFailure add `duration_ms` (excluding PreToolUse hook and confirm time). PreCompact carries `custom_instructions`, PostCompact `compact_summary`.
 - Stdout follows Claude's shape rule: only output that starts with `{` and ends with `}` is read as JSON; arrays, quoted strings, and numbers are plain text, multi-line independent JSON objects with no output field are plain text, and malformed `{..}`-shaped output surfaces a `hook error` notice instead of becoming context.
-- UserPromptSubmit injects `additionalContext` ahead of the prompt and never replaces it. `suppressOriginalPrompt` is accepted and needs no handling: it omits the prompt from a block message, and a blocked prompt here is reported by reason alone.
+- UserPromptSubmit adds `additionalContext` to the same turn, right after the prompt, and never replaces it. `suppressOriginalPrompt` is accepted and needs no handling: it omits the prompt from a block message, and a blocked prompt here is reported by reason alone.
 - Claude matcher semantics, including `mcp__server__tool` names; Stop and UserPromptSubmit ignore a stray matcher.
 - Identical handlers collapse across settings files only; a plugin's copy of the same handler stays separate, and http handlers differing only in headers are distinct.
 - The `if` permission-rule filter (`"Bash(git *)"`, `"Edit(*.ts)"`) runs on tool events only; a hook carrying it never runs elsewhere.
@@ -45,7 +45,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 
 ## Background hooks
 
-`async`/`asyncRewake` command hooks run in the background on every event: never blocking, no decision, no timeout enforced on `async` while `asyncRewake` keeps its own. An asyncRewake exit 2 wakes the model with the hook's stderr as a new turn; other completions deliver `systemMessage`/`additionalContext` to the model on the next turn; hooks still running at session end are killed.
+`async`/`asyncRewake` command hooks run in the background on every event: never blocking, no decision, no timeout enforced on `async` while `asyncRewake` keeps its own. An asyncRewake exit 2 wakes the model with the hook's stderr as a new turn; other completions deliver `systemMessage`/`additionalContext` to the model on the next turn; hooks still running when a headless (`-p`) run ends are killed, as Claude does; an interactive session leaves them to finish.
 
 ## Unbridged events and fields
 

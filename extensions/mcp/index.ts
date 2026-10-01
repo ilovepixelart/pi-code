@@ -619,8 +619,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   }
 
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
-    // Plugin servers merge under the user scope (plugins are user-installed);
-    // the user's own entry wins a name clash with a plugin's. A server toggled off
+    // Plugin servers merge under the user scope (plugins are user-installed). Their keys
+    // are plugin:<plugin>:<server>, so a plugin server never shares a name with the user's. A server toggled off
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)

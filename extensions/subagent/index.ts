@@ -124,8 +124,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
     // spending tokens) with its completion swallowed: SIGTERM every live run, killing the
     // process group the way a cancel does. On a same-process session switch
     // (new/resume/fork) the children keep running under the new session, so leave them be
-    // and warn once that they are still spending; /tasks inspects them. reload re-imports
-    // this module (losing the registry), so it neither kills nor warns.
+    // and warn once that they are still spending; /tasks inspects them. reload keeps the
+    // registry (held on globalThis, see background.ts), so its runs stay listed and
+    // cancellable and it neither kills nor warns.
     if (event.reason === 'quit') {
       cancelAllBackgroundRuns()
       return

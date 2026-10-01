@@ -412,8 +412,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
     if (event.toolName === 'slash_command') return scopeVerdict(pendingSkillRules, 'slash_command', 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
-    // pi's read/edit/write accept `file_path` as an alias for `path`; the shared reader
-    // handles both and normalises the value as pi resolves it. The paired guard in
+    // The shared reader takes pi's `path` (or Claude's `file_path`) and normalises the
+    // value as pi resolves it. The paired guard in
     // hooks/matcher.ts judges the same paths against the same rules, so it normalises
     // through the same helper rather than only aliasing the two keys.
     const filePath = fileToolTarget(event) ?? ''

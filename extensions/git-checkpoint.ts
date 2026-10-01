@@ -546,7 +546,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // Snapshot code state before the LLM acts, once per run. The user message that
   // started the turn is not persisted yet at turn_start (it lands on message_end), so
   // the checkpoint is only keyed and saved at turn_end. The snapshot is awaited here so
-  // `git add -A` captures the tree before the model's first edit; turn_end reads the
+  // it captures the touched files before the model's first edit; turn_end reads the
   // resolved value.
   // Only a prompt fires before_agent_start. A provider retry, an overflow recovery and a
   // queued follow-up all re-enter through agent.continue(), with agent_start alone.

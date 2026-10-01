@@ -1,9 +1,8 @@
 /**
  * The shared Claude settings chain: the ordered settings.json files a home-and-project
- * setting is read from, newest winning. User settings lead; the project's
- * settings.json and settings.local.json (each the nearest of its name at or above cwd,
- * falling back to cwd's own `.claude/`) follow only when the project is included, the
- * trust gate every caller applies; the `--settings` flag's snapshot comes last, above
+ * setting is read from, newest winning. User settings lead; the project's settings.json
+ * (from cwd) and settings.local.json (at the repository root, see localSettingsDir)
+ * follow only when the project is included, the trust gate every caller applies; the `--settings` flag's snapshot comes last, above
  * them all, and `--setting-sources` drops the file sources it does not name (see
  * internal/cli-settings). Hooks, output styles, memory, the CLAUDE.md excludes, and
  * the skill-shell policy all resolve their files through this one chain.

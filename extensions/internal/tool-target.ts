@@ -1,10 +1,10 @@
 /**
  * Which file a tool call touched.
  *
- * pi's read, edit and write tools accept `file_path` as an alias for `path`, so every
- * reader of a file tool's target must accept both, and a handler reading only `path`
- * does nothing for a model that used the alias. This is the one reader (claude-rules,
- * context-imports and the command path-scope guard all go through it).
+ * pi's read, edit and write tools take `path`; `file_path`, Claude's name for it, is
+ * read too when `path` is absent. This is the one reader (claude-rules, context-imports
+ * and the command path-scope guard all go through it), and it resolves the value the way
+ * pi's tools do before opening the file.
  */
 
 import * as os from 'node:os'

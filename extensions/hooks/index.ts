@@ -61,8 +61,8 @@
  * stderr (stdout when stderr is empty) as a new turn; any other background
  * completion delivers the JSON response's systemMessage/additionalContext to the
  * model on the next turn, shown to nobody else. No timeout is enforced on `async`
- * (asyncRewake keeps its own), and hooks still running at session end are killed,
- * as Claude does at teardown.
+ * (asyncRewake keeps its own), and hooks still running when a headless run ends are
+ * killed, as Claude does with -p; an interactive session leaves them to finish.
  *
  * SubagentStart runs through the pre-spawn seam (internal/subagent-hooks) so its
  * additionalContext reaches the child before its first prompt; it cannot block a
