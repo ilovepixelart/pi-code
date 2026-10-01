@@ -810,6 +810,16 @@ describe('/rewind to a checkpoint before a later first edit', () => {
     expect([read(t, 'a.txt'), read(t, 'b.txt')]).toEqual(['a0\n', 'b0\n'])
   })
 
+  it('restores a later first edit to a file whose name git would quote', async () => {
+    // git C-quotes such a name in plain --name-only and ls-tree output ("caf\303\251.md").
+    const t = setup()
+    writeFileSync(join(t.repo, 'a.txt'), 'a0\n')
+    writeFileSync(join(t.repo, 'café.md'), 'c0\n')
+    const branch = await runs(t, [{ 'a.txt': 'a1\n' }, { 'café.md': 'c1\n' }])
+    await rewindCodeTo(t, 'prompt 1', branch)
+    expect(read(t, 'café.md')).toBe('c0\n')
+  })
+
   it('leaves a file created after the checkpoint as it is, later edits included', async () => {
     const t = setup()
     writeFileSync(join(t.repo, 'a.txt'), 'a0\n')

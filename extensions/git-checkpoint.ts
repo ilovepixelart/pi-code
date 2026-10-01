@@ -54,18 +54,27 @@ export const CHECKPOINT_RETENTION_DAYS = 30
 /** The message of a commit that records a file's content before its first edit. */
 const BASELINE_MESSAGE = 'baseline'
 
-/** For each file a `git log --diff-filter=A --name-only --format=%x00%H %s` lists, oldest
- * first, the first commit that added it, skipping files the checkpoint already holds. */
+/** Marks a commit header in ADDED_FILES_LOG output, which no file name can contain. */
+const COMMIT_MARK = '\x01'
+
+/** `git log` arguments listing, oldest first, the files each commit added: with -z the
+ * names arrive raw and NUL-terminated rather than C-quoted ("caf\303\251.md"), which no
+ * checkout could name. */
+const ADDED_FILES_LOG = ['log', '-z', '--reverse', '--diff-filter=A', '--name-only', `--format=${COMMIT_MARK}%H %s`]
+
+/** For each file ADDED_FILES_LOG lists, the first commit that added it, skipping files the
+ * checkpoint already holds. */
 function firstAdditions(log: string, skip: ReadonlySet<string>): Map<string, { sha: string; baseline: boolean }> {
   const first = new Map<string, { sha: string; baseline: boolean }>()
-  for (const block of log.split('\0')) {
-    const [header = '', ...files] = block.split('\n')
-    const space = header.indexOf(' ')
-    if (space === -1) continue
-    const commit = { sha: header.slice(0, space), baseline: header.slice(space + 1) === BASELINE_MESSAGE }
-    for (const file of files) {
-      if (file !== '' && !skip.has(file) && !first.has(file)) first.set(file, commit)
-    }
+  let commit: { sha: string; baseline: boolean } | undefined
+  for (const raw of log.split('\0')) {
+    // git separates a commit's header from its names with a newline.
+    const token = raw.startsWith('\n') ? raw.slice(1) : raw
+    if (token.startsWith(COMMIT_MARK)) {
+      const header = token.slice(1)
+      const space = header.indexOf(' ')
+      commit = space === -1 ? undefined : { sha: header.slice(0, space), baseline: header.slice(space + 1) === BASELINE_MESSAGE }
+    } else if (commit !== undefined && token !== '' && !skip.has(token) && !first.has(token)) first.set(token, commit)
   }
   return first
 }
@@ -459,10 +468,10 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
    * content. A file created after the checkpoint first appears in a snapshot commit instead
    * and is left in place, as documented. */
   async function restoreLaterBaselines(ref: string): Promise<void> {
-    const inRef = await gitShadow(['ls-tree', '-r', '--name-only', ref])
-    const added = await gitShadow(['log', '--reverse', '--diff-filter=A', '--name-only', '--format=%x00%H %s', `${ref}..HEAD`])
+    const inRef = await gitShadow(['ls-tree', '-r', '-z', '--name-only', ref])
+    const added = await gitShadow([...ADDED_FILES_LOG, `${ref}..HEAD`])
     if (inRef.code !== 0 || added.code !== 0) return
-    const atCheckpoint = new Set(inRef.stdout.split('\n').filter(Boolean))
+    const atCheckpoint = new Set(inRef.stdout.split('\0').filter(Boolean))
     const bySha = new Map<string, string[]>()
     for (const [file, commit] of firstAdditions(added.stdout, atCheckpoint)) {
       if (commit.baseline) bySha.set(commit.sha, [...(bySha.get(commit.sha) ?? []), file])
