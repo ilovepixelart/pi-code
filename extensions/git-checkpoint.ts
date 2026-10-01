@@ -13,7 +13,8 @@
  * checkpoint persisted as {entryId, ref, prompt, createdAt} in the session
  * file, so /rewind works across restarts, resumes, and forks. Code restore
  * checks the snapshot out over the working tree, resetting file contents to
- * the checkpoint (files created after the checkpoint are left in place).
+ * the checkpoint; a file first edited after the checkpoint is put back from the
+ * baseline recorded before that edit, and files created after it are left in place.
  */
 
 import { createHash } from 'node:crypto'
@@ -49,6 +50,25 @@ interface Checkpoint {
  * snapshot per edited file, so unbounded retention grows under $HOME for the life of
  * the machine. */
 export const CHECKPOINT_RETENTION_DAYS = 30
+
+/** The message of a commit that records a file's content before its first edit. */
+const BASELINE_MESSAGE = 'baseline'
+
+/** For each file a `git log --diff-filter=A --name-only --format=%x00%H %s` lists, oldest
+ * first, the first commit that added it, skipping files the checkpoint already holds. */
+function firstAdditions(log: string, skip: ReadonlySet<string>): Map<string, { sha: string; baseline: boolean }> {
+  const first = new Map<string, { sha: string; baseline: boolean }>()
+  for (const block of log.split('\0')) {
+    const [header = '', ...files] = block.split('\n')
+    const space = header.indexOf(' ')
+    if (space === -1) continue
+    const commit = { sha: header.slice(0, space), baseline: header.slice(space + 1) === BASELINE_MESSAGE }
+    for (const file of files) {
+      if (file !== '' && !skip.has(file) && !first.has(file)) first.set(file, commit)
+    }
+  }
+  return first
+}
 
 /** The retention period in effect: Claude keeps checkpoints for 30 days and says to
  * "change the period with cleanupPeriodDays". Read from the user-level files (the user
@@ -349,8 +369,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if ((await withoutIgnored([rel])).length === 0) return
     if (!(await addPaths([rel]))) return
     // A commit, never an amend: the run's checkpoint can be a commit an earlier
-    // checkpoint also points at, and rewriting it would strand that one.
-    const commit = await commitShadow([])
+    // checkpoint also points at, and rewriting it would strand that one. Its own message
+    // lets a rewind to an earlier checkpoint find the file's content there.
+    const commit = await commitShadow([], BASELINE_MESSAGE)
     if (commit.code !== 0) return
     const sha = await gitShadow(['rev-parse', 'HEAD'])
     if (sha.code === 0) await gitShadow(['update-ref', runRef, sha.stdout.trim()])
@@ -428,8 +449,23 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   }
 
   /** Commit in the shadow repo, isolated from the user's global signing and hook config. */
-  function commitShadow(extra: string[]): ReturnType<ExtensionAPI['exec']> {
-    return gitShadow(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', ...extra, '-m', 'checkpoint'])
+  function commitShadow(extra: string[], message = 'checkpoint'): ReturnType<ExtensionAPI['exec']> {
+    return gitShadow(['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', ...extra, '-m', message])
+  }
+
+  /** A file the session first edited after this checkpoint was on disk, untouched, when it
+   * was taken, but the checkpoint's tree does not hold it: only files touched so far are
+   * snapshotted. The baseline commit that first recorded it after the checkpoint holds that
+   * content. A file created after the checkpoint first appears in a snapshot commit instead
+   * and is left in place, as documented. */
+  async function restoreLaterBaselines(ref: string): Promise<void> {
+    const inRef = await gitShadow(['ls-tree', '-r', '--name-only', ref])
+    const added = await gitShadow(['log', '--reverse', '--diff-filter=A', '--name-only', '--format=%x00%H %s', `${ref}..HEAD`])
+    if (inRef.code !== 0 || added.code !== 0) return
+    const atCheckpoint = new Set(inRef.stdout.split('\n').filter(Boolean))
+    for (const [file, commit] of firstAdditions(added.stdout, atCheckpoint)) {
+      if (commit.baseline) await gitShadow(['checkout', '-f', commit.sha, '--', file])
+    }
   }
 
   async function restoreCode(ctx: ExtensionCommandContext, checkpoint: Checkpoint): Promise<boolean> {
@@ -446,6 +482,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Code restore failed: ${result.stderr.trim()}`, 'warning')
       return false
     }
+    await restoreLaterBaselines(checkpoint.ref)
     return true
   }
 

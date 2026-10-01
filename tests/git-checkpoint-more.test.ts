@@ -750,3 +750,93 @@ describe('shadow repo init failure', () => {
     expect(t.notifications.some((n) => n.startsWith('[warning] Checkpoints disabled:'))).toBe(true)
   })
 })
+
+// Claude's rewind restores code to the state at the checkpoint. A file the session first
+// edits in a later run was already on disk, untouched, at the earlier checkpoint, so a
+// rewind to that checkpoint has to put it back too; a file created after it stays.
+describe('/rewind to a checkpoint before a later first edit', () => {
+  /** One run's edits (a string writes that content, null deletes the file), or a session
+   * resume, which reseeds the touched set from the shadow repo as pi's /resume does. */
+  type Run = Record<string, string | null> | 'resume'
+
+  /** Drive one run per entry, each its own prompt ("prompt 1", "prompt 2", ...): every file
+   * is announced to the edit tools before it changes, as pi does. */
+  async function runs(t: Harness, plan: Run[]): Promise<unknown[]> {
+    await t.handlers.get('session_start')?.({ reason: 'startup' }, t.makeCtx())
+    return continueRuns(t, [], plan)
+  }
+
+  async function continueRuns(t: Harness, earlier: unknown[], plan: Run[]): Promise<unknown[]> {
+    const branch = [...earlier]
+    for (const edits of plan) {
+      const index = branch.length
+      if (edits === 'resume') {
+        await t.handlers.get('session_start')?.({ reason: 'resume' }, t.makeCtx({ branch: [...branch], entries: saved(t) }))
+        continue
+      }
+      const before = [...branch]
+      branch.push({ type: 'message', id: `user-${index + 1}`, message: { role: 'user', content: `prompt ${index + 1}` } })
+      await t.handlers.get('before_agent_start')?.({}, t.makeCtx({ branch: before }))
+      await t.handlers.get('agent_start')?.({}, t.makeCtx({ branch: before }))
+      await t.handlers.get('turn_start')?.({ turnIndex: 0 }, t.makeCtx({ branch: [...branch] }))
+      for (const [file, content] of Object.entries(edits)) {
+        await announceEdit(t, file)
+        if (content === null) rmSync(join(t.repo, file))
+        else writeFileSync(join(t.repo, file), content)
+      }
+      await t.handlers.get('turn_end')?.({ turnIndex: 0 }, t.makeCtx({ branch: [...branch] }))
+    }
+    return branch
+  }
+
+  /** The checkpoints the extension appended, as the session file holds them. */
+  const saved = (t: Harness): unknown[] => t.appended.map((entry) => ({ type: 'custom', ...entry }))
+
+  async function rewindCodeTo(t: Harness, prompt: string, branch: unknown[]): Promise<void> {
+    await rewind(t, { branch, entries: saved(t), answers: [undefined] })
+    const index = t.selects.at(-1)?.options.findIndex((option) => option.endsWith(prompt)) ?? -1
+    expect(index).toBeGreaterThanOrEqual(0)
+    await rewind(t, { branch, entries: saved(t), answers: [index, 'Code only'] })
+  }
+
+  const read = (t: Harness, file: string): string => readFileSync(join(t.repo, file), 'utf8')
+
+  it('restores a file first edited in a later run to its content at the checkpoint', async () => {
+    const t = setup()
+    writeFileSync(join(t.repo, 'a.txt'), 'a0\n')
+    writeFileSync(join(t.repo, 'b.txt'), 'b0\n')
+    const branch = await runs(t, [{ 'a.txt': 'a1\n' }, { 'b.txt': 'b1\n' }])
+    await rewindCodeTo(t, 'prompt 1', branch)
+    expect([read(t, 'a.txt'), read(t, 'b.txt')]).toEqual(['a0\n', 'b0\n'])
+  })
+
+  it('leaves a file created after the checkpoint as it is, later edits included', async () => {
+    const t = setup()
+    writeFileSync(join(t.repo, 'a.txt'), 'a0\n')
+    const branch = await runs(t, [{ 'a.txt': 'a1\n' }, { 'c.txt': 'c1\n' }, { 'c.txt': 'c2\n' }])
+    await rewindCodeTo(t, 'prompt 1', branch)
+    expect(read(t, 'c.txt')).toBe('c2\n')
+  })
+
+  it("keeps the checkpoint's own content for a file baselined again after a resume", async () => {
+    // A resume reseeds the touched set from the shadow repo's current tree; a file deleted
+    // since the checkpoint is not in it, so editing it again records a new baseline.
+    const t = setup()
+    writeFileSync(join(t.repo, 'a.txt'), 'a0\n')
+    const firstRuns = await runs(t, [{ 'a.txt': 'a1\n' }, { 'a.txt': null }, {}])
+    writeFileSync(join(t.repo, 'a.txt'), 'made outside pi\n')
+    const rest: Run[] = ['resume', { 'a.txt': 'a4\n' }, {}]
+    const branch = await continueRuns(t, firstRuns, rest)
+    await rewindCodeTo(t, 'prompt 1', branch)
+    expect(read(t, 'a.txt')).toBe('a0\n')
+  })
+
+  it("takes a file's first recorded content when it was later deleted and created again", async () => {
+    const t = setup()
+    writeFileSync(join(t.repo, 'a.txt'), 'a0\n')
+    writeFileSync(join(t.repo, 'b.txt'), 'b0\n')
+    const branch = await runs(t, [{ 'a.txt': 'a1\n' }, { 'b.txt': 'b1\n' }, { 'b.txt': null }, { 'b.txt': 'b4\n' }, {}])
+    await rewindCodeTo(t, 'prompt 1', branch)
+    expect(read(t, 'b.txt')).toBe('b0\n')
+  })
+})
