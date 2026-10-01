@@ -57,8 +57,11 @@ function gitWorktreeName(cwd: string): string | undefined {
   const root = gitRoot(cwd)
   if (root === undefined) return undefined
   try {
-    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(path.join(root, '.git'), 'utf-8'))
-    return pointer ? path.basename(pointer[1]) : undefined
+    const line = fs
+      .readFileSync(path.join(root, '.git'), 'utf-8')
+      .split('\n')
+      .find((entry) => entry.startsWith('gitdir:'))
+    return line === undefined ? undefined : path.basename(line.slice('gitdir:'.length).trim())
   } catch {
     return undefined
   }
@@ -207,6 +210,17 @@ export function activeStatusLine(files: string[], managed: Record<string, unknow
   return readStatusLineConfig(files, managed)
 }
 
+/** The --add-dir directories, the flag context-imports registers for Claude's additional
+ * working directories. Empty when none were given, which is the documented shape. */
+function addedDirs(): string[] {
+  const raw = addDirFlagValue()
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(',')
+    .map((dir) => dir.trim())
+    .filter(Boolean)
+}
+
 export default function statusLine(pi: ExtensionAPI) {
   let turnCount = 0
   let config: StatusLineConfig | undefined
@@ -257,16 +271,6 @@ export default function statusLine(pi: ExtensionAPI) {
 
   function show(ctx: ExtensionContext, builtIn: string): void {
     ctx.ui.setStatus('pi-code-status', commandLine ?? builtIn)
-  }
-
-  /** The --add-dir directories, the flag context-imports registers for Claude's additional
-   * working directories. Empty when none were given, which is the documented shape. */
-  function addedDirs(): string[] {
-    const raw = String(addDirFlagValue() ?? '')
-    return raw
-      .split(',')
-      .map((dir) => dir.trim())
-      .filter(Boolean)
   }
 
   /** The stdin payload per Claude's documented statusline contract. */

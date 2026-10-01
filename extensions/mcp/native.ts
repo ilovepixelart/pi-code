@@ -135,7 +135,7 @@ export function piMcpRunning(commands: ReadonlyArray<{ name: string; sourceInfo?
  * (`mcp__my-srv__x` became `mcp__my_srv__x`, pi CHANGELOG #10239); earlier versions keep
  * the name as registered. Both are accepted, since the pi peer range is open. */
 export function nativeToolPrefixes(server: string): string[] {
-  return [...new Set([`mcp__${server}__`, `mcp__${server.replace(/-/g, '_')}__`])]
+  return [...new Set([`mcp__${server}__`, `mcp__${server.replaceAll('-', '_')}__`])]
 }
 
 /** pi's MCP tools under Claude's `mcp__<server>__<tool>` names, with each server pi-code

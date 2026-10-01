@@ -40,6 +40,16 @@ export const quoteEscapes = (quote: Quote): boolean => quote !== "'"
 /** The character that closes this quote. */
 export const quoteCloser = (quote: Quote): string => (quote === '"' ? '"' : "'")
 
+/** One step inside a quote at `i`: an escape takes the backslash and the character after
+ * it (where this quote has escapes), anything else one character, which may close it. */
+function stepInQuote(text: string, i: number, quote: Quote): { taken: number; closes: boolean } {
+  if (text[i] === '\\' && quoteEscapes(quote) && i + 1 < text.length) return { taken: 2, closes: false }
+  return { taken: 1, closes: text[i] === quoteCloser(quote) }
+}
+
+/** Characters an unquoted step at `i` takes: a backslash and the character it escapes, or one. */
+const unquotedStep = (text: string, i: number): number => (text[i] === '\\' && i + 1 < text.length ? 2 : 1)
+
 /**
  * Split on the shell separators Claude Code documents (`&&`, `||`, `;`, `|`, `|&`, `&`,
  * newline) so every subcommand is checked on its own, ignoring separators inside quotes:
@@ -53,36 +63,23 @@ export function splitSegments(command: string): string[] {
   let current = ''
   let quote: Quote | undefined
 
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
+  for (let i = 0; i < command.length; ) {
     if (quote !== undefined) {
-      if (ch === '\\' && quoteEscapes(quote) && i + 1 < command.length) {
-        current += ch + command[++i]
-        continue
-      }
-      current += ch
-      if (ch === quoteCloser(quote)) quote = undefined
+      const step = stepInQuote(command, i, quote)
+      current += command.slice(i, i + step.taken)
+      if (step.closes) quote = undefined
+      i += step.taken
       continue
     }
     const opened = quoteOpensAt(command, i)
-    if (opened !== undefined) {
-      quote = opened.quote
-      current += command.slice(i, i + opened.length)
-      i += opened.length - 1
-      continue
-    }
-    if (ch === '\\' && i + 1 < command.length) {
-      current += ch + command[++i]
-      continue
-    }
-    const separator = separatorAt(command, i)
+    const separator = opened === undefined ? separatorAt(command, i) : 0
+    const taken = opened?.length ?? (separator > 0 ? separator : unquotedStep(command, i))
     if (separator > 0) {
       segments.push(current)
       current = ''
-      i += separator - 1
-      continue
-    }
-    current += ch
+    } else current += command.slice(i, i + taken)
+    if (opened !== undefined) quote = opened.quote
+    i += taken
   }
 
   if (quote !== undefined) return []
@@ -101,6 +98,9 @@ function escaped(quote: Quote | undefined, next: string): string {
   return quote === '"' && !DOUBLE_QUOTE_ESCAPABLE.has(next) ? `\\${next}` : next
 }
 
+/** The characters an unquoted step at `i` adds to a word: an escaped character alone. */
+const wordChars = (text: string, i: number): string => (unquotedStep(text, i) === 2 ? escaped(undefined, text[i + 1]) : text[i])
+
 /**
  * The words of one segment as the command receives them, after bash's quote removal:
  * `'-delete'`, `-de'lete'` and `$'-o'` are the words `-delete` and `-o`, so a flag cannot
@@ -108,32 +108,28 @@ function escaped(quote: Quote | undefined, next: string): string {
  */
 export function shellWords(segment: string): string[] {
   const words: string[] = []
-  let word = ''
-  let inWord = false
+  // undefined between words; a quoted empty argument is the word ''.
+  let word: string | undefined
   let quote: Quote | undefined
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]
-    const opened = quote === undefined ? quoteOpensAt(segment, i) : undefined
-    if (ch === '\\' && i + 1 < segment.length && (quote === undefined || quoteEscapes(quote))) {
-      word += escaped(quote, segment[++i])
-      inWord = true
-    } else if (quote !== undefined) {
-      if (ch === quoteCloser(quote)) quote = undefined
-      else word += ch
-    } else if (opened !== undefined) {
-      quote = opened.quote
-      inWord = true
-      i += opened.length - 1
-    } else if (/\s/.test(ch)) {
-      if (inWord) words.push(word)
-      word = ''
-      inWord = false
-    } else {
-      word += ch
-      inWord = true
+  for (let i = 0; i < segment.length; ) {
+    if (quote !== undefined) {
+      const step = stepInQuote(segment, i, quote)
+      if (step.taken === 2) word = `${word ?? ''}${escaped(quote, segment[i + 1])}`
+      else if (!step.closes) word = `${word ?? ''}${segment[i]}`
+      if (step.closes) quote = undefined
+      i += step.taken
+      continue
     }
+    const opened = quoteOpensAt(segment, i)
+    if (opened !== undefined) quote = opened.quote
+    if (opened !== undefined || !/\s/.test(segment[i])) word = `${word ?? ''}${opened ? '' : wordChars(segment, i)}`
+    else if (word !== undefined) {
+      words.push(word)
+      word = undefined
+    }
+    i += opened?.length ?? unquotedStep(segment, i)
   }
-  if (inWord) words.push(word)
+  if (word !== undefined) words.push(word)
   return words
 }
 

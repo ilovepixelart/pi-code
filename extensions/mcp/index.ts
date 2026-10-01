@@ -776,9 +776,15 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     nativeRegistered.clear()
   })
 
+  /** Whether pi has registered a tool for this server, in either spelling pi uses. */
+  function hasNativeTools(name: string): boolean {
+    const prefixes = nativeToolPrefixes(name)
+    return pi.getAllTools().some((tool) => prefixes.some((prefix) => tool.name.startsWith(prefix)))
+  }
+
   /** Resolves once every server handed to pi has a tool registered, or at the deadline. */
   function waitForNativeTools(deadline: number): Promise<void> {
-    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every((name) => nativeToolPrefixes(name).some((prefix) => pi.getAllTools().some((tool) => tool.name.startsWith(prefix))))
+    const settled = (): boolean => Date.now() >= deadline || [...nativeRegistered].every(hasNativeTools)
     return new Promise((resolve) => {
       if (settled()) {
         resolve()

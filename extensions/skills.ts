@@ -229,13 +229,20 @@ function shadowedByPi(pi: ExtensionAPI, name: string, filePath: string): boolean
   return real(loaded.sourceInfo.path) !== real(filePath)
 }
 
-async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
+/** The skill name and arguments of a `/skill:<name> <args>` input, or undefined. */
+function parseSkillInvocation(rawText: string): { name: string; args: string } | undefined {
   const text = rawText.trimStart()
-  if (!text.startsWith('/skill:')) return
+  if (!text.startsWith('/skill:')) return undefined
   const space = text.indexOf(' ')
   const name = (space === -1 ? text.slice(7) : text.slice(7, space)).trim()
-  const args = space === -1 ? '' : text.slice(space + 1).trim()
-  if (!name) return
+  if (!name) return undefined
+  return { name, args: space === -1 ? '' : text.slice(space + 1).trim() }
+}
+
+async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
+  const invocation = parseSkillInvocation(rawText)
+  if (!invocation) return
+  const { name, args } = invocation
   const trusted = isProjectApprovedSilently(ctx)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
   if (!found || shadowedByPi(pi, name, found.filePath)) return

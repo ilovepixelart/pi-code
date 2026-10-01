@@ -597,7 +597,7 @@ function expandImports(contextFiles: Array<{ path: string; content: string }>, e
     const allowedRoots = [...realRoots([extra.dir]), ...rootsForImporter(extra.path, run.home, run.cwd)]
     imported.push(...collectImports(extra.content, path.dirname(extra.path), run.home, allowedRoots, run.seen, { ...options, importer: extra.path }))
   }
-  for (const file of [...run.budget.refusedPresent]) {
+  for (const file of run.budget.refusedPresent) {
     if (!askable.has(file)) run.budget.refusedPresent.delete(file)
   }
   return imported

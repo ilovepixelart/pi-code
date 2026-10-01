@@ -463,8 +463,13 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     const added = await gitShadow(['log', '--reverse', '--diff-filter=A', '--name-only', '--format=%x00%H %s', `${ref}..HEAD`])
     if (inRef.code !== 0 || added.code !== 0) return
     const atCheckpoint = new Set(inRef.stdout.split('\n').filter(Boolean))
+    const bySha = new Map<string, string[]>()
     for (const [file, commit] of firstAdditions(added.stdout, atCheckpoint)) {
-      if (commit.baseline) await gitShadow(['checkout', '-f', commit.sha, '--', file])
+      if (commit.baseline) bySha.set(commit.sha, [...(bySha.get(commit.sha) ?? []), file])
+    }
+    for (const [sha, files] of bySha) {
+      // Sequential on purpose: each checkout takes the shadow repo's index lock.
+      await gitShadow(['checkout', '-f', sha, '--', ...files]) // NOSONAR typescript:S9382 - git's index lock forbids parallel checkouts
     }
   }
 
