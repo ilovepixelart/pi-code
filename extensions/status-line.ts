@@ -46,15 +46,19 @@ const DEBOUNCE_MS = 300
 
 /** Whether cwd sits in a git worktree: `.git` is a file pointing at the main
  * checkout there, and a directory in an ordinary clone. */
-function isGitWorktree(cwd: string): boolean {
+/** git's name for the linked worktree cwd is in: the directory under .git/worktrees that
+ * the worktree's `.git` file points at. Undefined in a main checkout (whose `.git` is a
+ * directory) and outside a repository. */
+function gitWorktreeName(cwd: string): string | undefined {
   // gitRoot, not repoRoot: repoRoot resolves a worktree to its main checkout, which is
   // exactly the thing this needs to see before it is resolved away.
   const root = gitRoot(cwd)
-  if (root === undefined) return false
+  if (root === undefined) return undefined
   try {
-    return fs.statSync(path.join(root, '.git')).isFile()
+    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(path.join(root, '.git'), 'utf-8'))
+    return pointer ? path.basename(pointer[1]) : undefined
   } catch {
-    return false
+    return undefined
   }
 }
 
@@ -281,6 +285,7 @@ export default function statusLine(pi: ExtensionAPI) {
       styleName = readActiveStyleName(styleFiles)
       styleDirty = false
     }
+    const worktreeName = gitWorktreeName(ctx.cwd)
     const payload: Record<string, unknown> = {
       hook_event_name: 'Status',
       session_id: ctx.sessionManager.getSessionId(),
@@ -288,12 +293,12 @@ export default function statusLine(pi: ExtensionAPI) {
       version: PACKAGE_VERSION,
       // project_dir is the repository, not the directory the session started in: a
       // script labelling the project showed whichever subdirectory it was launched
-      // from. git_worktree reports the .git file a worktree carries in place of a
-      // directory. added_dirs comes from the --add-dir flag pi-code registers.
+      // from. git_worktree names a linked worktree and is absent in a main checkout, as
+      // Claude sends it. added_dirs comes from the --add-dir flag pi-code registers.
       workspace: {
         current_dir: ctx.cwd,
         project_dir: checkoutRoot(ctx.cwd),
-        git_worktree: isGitWorktree(ctx.cwd),
+        ...(worktreeName === undefined ? {} : { git_worktree: worktreeName }),
         added_dirs: addedDirs(),
       },
       // Both fields, per Claude's documented contract: published statusline scripts

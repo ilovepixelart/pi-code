@@ -386,17 +386,29 @@ describe('statusLine command contract', () => {
     expect(workspace.project_dir).toBe(repo)
   })
 
-  it('reports whether the session is in a git worktree', async () => {
-    const repo = tempDir()
-    // A worktree carries a .git file pointing at the main checkout, not a directory.
-    writeFileSync(join(repo, '.git'), 'gitdir: /elsewhere/.git/worktrees/feature\n')
+  // Claude: workspace.git_worktree is the "Git worktree name when the current directory is
+  // inside a linked worktree created with git worktree add. Absent in the main working tree."
+  const workspaceAt = async (cwd: string): Promise<Record<string, unknown>> => {
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
-    const { handlers, ctx } = setup(repo)
+    const { handlers, ctx } = setup(cwd)
     vi.useFakeTimers()
     await handlers.get('session_start')?.({}, ctx)
     await vi.advanceTimersByTimeAsync(400)
+    return (hoisted.runs[0].payload as { workspace: Record<string, unknown> }).workspace
+  }
 
-    expect((hoisted.runs[0].payload as { workspace: { git_worktree: boolean } }).workspace.git_worktree).toBe(true)
+  it("names the linked worktree the session is in, by git's name for it", async () => {
+    // git names a worktree by its directory under .git/worktrees, which the worktree's
+    // .git file points at; it need not match the folder the worktree was checked out to.
+    const tree = tempDir()
+    writeFileSync(join(tree, '.git'), 'gitdir: /elsewhere/main/.git/worktrees/feature-xyz\n')
+    expect((await workspaceAt(tree)).git_worktree).toBe('feature-xyz')
+  })
+
+  it('leaves git_worktree out in the main working tree', async () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    expect('git_worktree' in (await workspaceAt(repo))).toBe(false)
   })
 
   it('reports the context window as zero-output and no usage before the first response', async () => {
