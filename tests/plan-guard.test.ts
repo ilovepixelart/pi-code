@@ -242,3 +242,15 @@ describe('isSafeCommand still allows the read-only forms of those tools', () => 
     expect(isSafeCommand(command)).toBe(true)
   })
 })
+
+// bash removes quotes before the command sees its arguments: '-delete', "-o", -de'lete'
+// and $'-o' are the flags themselves, and $'\x2do' is -o spelled in hex.
+describe('isSafeCommand reads a quoted flag as the flag the command receives', () => {
+  it.each([`find . '-delete'`, `find . -de'lete'`, `find . "-exec" rm {} \\;`, `sort "-o" out in`, `sort $'-o' out in`, `sort $'\\x2do' out in`, `rg '--pre' cat x`, `fd "-x" rm {}`, `bat "--pager" x f`, `git log "--output=x"`, `git branch "-D" main`])('blocks %s', (command) => {
+    expect(isSafeCommand(command)).toBe(false)
+  })
+
+  it.each([`find . -name "*-delete*"`, `find . -name "x -delete"`, `sort -k2 "file -o"`, `git branch "--list"`, `git log --grep="-o"`])('allows %s', (command) => {
+    expect(isSafeCommand(command)).toBe(true)
+  })
+})

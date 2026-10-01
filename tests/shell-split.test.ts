@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { hasSubstitution, splitSegments } from '../extensions/internal/shell-split.ts'
+import { hasSubstitution, shellWords, splitSegments } from '../extensions/internal/shell-split.ts'
 
 describe('splitSegments', () => {
   it('splits on each documented separator', () => {
@@ -81,5 +81,15 @@ describe('splitSegments follows bash escapes inside quotes', () => {
 
   it('reads an escaped dollar before a quote as a plain single-quoted string', () => {
     expect(splitSegments("echo \\$'a ; b'")).toEqual(["echo \\$'a ; b'"])
+  })
+})
+
+describe('shellWords', () => {
+  it('removes quotes and applies escapes the way bash builds arguments', () => {
+    expect(shellWords(`find . '-delete' -de'lete' "a b" \\-x "\\"q\\"" "\\-y" $'it\\'s'`)).toEqual(['find', '.', '-delete', '-delete', 'a b', '-x', '"q"', '\\-y', "it's"])
+  })
+
+  it('keeps an empty quoted argument as a word', () => {
+    expect(shellWords(`printf '' x`)).toEqual(['printf', '', 'x'])
   })
 })

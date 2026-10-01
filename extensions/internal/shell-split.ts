@@ -89,3 +89,54 @@ export function splitSegments(command: string): string[] {
   segments.push(current)
   return segments.map((segment) => segment.trim()).filter(Boolean)
 }
+
+// Characters a backslash escapes inside "...": everything else keeps its backslash.
+const DOUBLE_QUOTE_ESCAPABLE = new Set(['$', '`', '"', '\\', '\n'])
+
+/** One escaped character as bash reads it: inside "..." the backslash stays unless it
+ * escapes one of DOUBLE_QUOTE_ESCAPABLE; elsewhere only the character is kept. ANSI-C
+ * escapes beyond `\'` and `\\` (`\n`, `\x2d`) keep the bare character, which is enough
+ * to read flags; callers that must not guess refuse those with hasAnsiCNumericEscape. */
+function escaped(quote: Quote | undefined, next: string): string {
+  return quote === '"' && !DOUBLE_QUOTE_ESCAPABLE.has(next) ? `\\${next}` : next
+}
+
+/**
+ * The words of one segment as the command receives them, after bash's quote removal:
+ * `'-delete'`, `-de'lete'` and `$'-o'` are the words `-delete` and `-o`, so a flag cannot
+ * hide behind quoting. An empty quoted argument is still a word.
+ */
+export function shellWords(segment: string): string[] {
+  const words: string[] = []
+  let word = ''
+  let inWord = false
+  let quote: Quote | undefined
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    const opened = quote === undefined ? quoteOpensAt(segment, i) : undefined
+    if (ch === '\\' && i + 1 < segment.length && (quote === undefined || quoteEscapes(quote))) {
+      word += escaped(quote, segment[++i])
+      inWord = true
+    } else if (quote !== undefined) {
+      if (ch === quoteCloser(quote)) quote = undefined
+      else word += ch
+    } else if (opened !== undefined) {
+      quote = opened.quote
+      inWord = true
+      i += opened.length - 1
+    } else if (/\s/.test(ch)) {
+      if (inWord) words.push(word)
+      word = ''
+      inWord = false
+    } else {
+      word += ch
+      inWord = true
+    }
+  }
+  if (inWord) words.push(word)
+  return words
+}
+
+/** Whether an ANSI-C $'...' string uses a numeric or control escape (`\x2d`, `\055`,
+ * `\u002d`, `\cA`), which can spell any character, a flag's dash included. */
+export const hasAnsiCNumericEscape = (command: string): boolean => /\$'(?:[^'\\]|\\.)*?\\[xuU0-7c]/.test(command)

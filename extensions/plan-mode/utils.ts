@@ -3,7 +3,7 @@
  * Extracted for testability.
  */
 
-import { hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, splitSegments } from '../internal/shell-split.js'
+import { hasAnsiCNumericEscape, hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, shellWords, splitSegments } from '../internal/shell-split.js'
 
 // Destructive commands blocked in plan mode. Tested against the segment's command word,
 // the one word that runs: an allowlisted head never executes its arguments, so `code`
@@ -185,9 +185,13 @@ function gitRemoteWrites(args: string[]): boolean {
 
 /** Whether an allowlisted command carries a flag or operand that makes it write. */
 function writesThroughOperands(segment: string): boolean {
-  const bare = withoutQuoted(segment)
-  if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flag.test(bare))) return true
-  const [command = '', subcommand = '', ...rest] = segment.trim().split(/\s+/)
+  // Flags are read from the words the command receives: bash removes quotes first, so a
+  // quoted '-delete' is the flag itself, while a flag-like run inside a quoted argument
+  // ("x -delete") is not a word of its own.
+  const words = shellWords(segment)
+  const flagged = (flag: RegExp): boolean => words.some((word) => word.startsWith('-') && flag.test(` ${word}`))
+  if (UNSAFE_FLAGS.some(([head, flag]) => head.test(segment) && flagged(flag))) return true
+  const [command = '', subcommand = '', ...rest] = words
   if (command === 'uniq') return uniqWrites([subcommand, ...rest].filter(Boolean))
   if (command !== 'git') return false
   if (subcommand === 'branch') return gitBranchWrites(rest)
@@ -209,7 +213,7 @@ function isSafeSegment(segment: string): boolean {
  * containing a determined one. Only OS-level isolation would be a boundary.
  */
 export function isSafeCommand(command: string): boolean {
-  if (hasSubstitution(command)) return false
+  if (hasSubstitution(command) || hasAnsiCNumericEscape(command)) return false
   const segments = splitSegments(command)
   return segments.length > 0 && segments.every(isSafeSegment)
 }
