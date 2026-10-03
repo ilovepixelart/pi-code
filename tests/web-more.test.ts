@@ -230,11 +230,20 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe(`${'x'.repeat(30_000)}\n[truncated 10000 chars]`)
   })
 
-  it('caps the raw download at 200000 chars before the 30000 char output cap', async () => {
-    fetchMock.mockResolvedValue(respond('a'.repeat(250_000)))
+  it('caps the raw download at 2000000 chars before the 30000 char output cap', async () => {
+    fetchMock.mockResolvedValue(respond('a'.repeat(2_500_000)))
     const result = await setup().fetchUrl('https://example.com/huge')
-    // 250k downloaded -> 200k kept by readCapped -> 30k emitted, 170k reported as dropped.
-    expect(result.content[0].text).toBe(`${'a'.repeat(30_000)}\n[truncated 170000 chars]`)
+    // 2.5M downloaded -> 2M kept by readCapped -> 30k emitted, 1.97M reported as dropped.
+    expect(result.content[0].text).toBe(`${'a'.repeat(30_000)}\n[truncated 1970000 chars]`)
+  })
+
+  it('reaches content that follows a large inline script block, as on GitHub pull request pages', async () => {
+    // GitHub inlines ~250k chars of embedded data ahead of the conversation, so a 200k raw cap
+    // returned only the navigation. The converter drops the script, leaving the content.
+    const page = `<html><head><script>${'x'.repeat(250_000)}</script></head><body><main><p>PR body marker</p></main></body></html>`
+    fetchMock.mockResolvedValue(respond(page))
+    const result = await setup().fetchUrl('https://example.com/pull/1')
+    expect(result.content[0].text).toBe('PR body marker')
   })
 
   it('reassembles multi-byte characters split across stream chunks', async () => {

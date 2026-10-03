@@ -24,8 +24,11 @@ const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/
 const MAX_FETCH_CHARS = 30_000
 // Hard cap on raw bytes read before any parsing, so a huge or hostile page can't
 // exhaust memory or feed megabytes into the HTML regexes. Output is capped again
-// at MAX_FETCH_CHARS, so real pages rarely lose text.
-const MAX_RAW_CHARS = 200_000
+// at MAX_FETCH_CHARS. The raw cap must sit well above that: GitHub pull request pages
+// carry ~250k chars of navigation and embedded data ahead of the conversation, and a
+// 200k cap returned only the navigation. The converter is linear (2M chars of
+// pathological markup converts in under 200ms), so 2M bounds the cost.
+const MAX_RAW_CHARS = 2_000_000
 const FETCH_TIMEOUT_MS = 20_000
 
 export interface SearchResult {
