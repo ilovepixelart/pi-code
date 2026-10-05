@@ -189,7 +189,7 @@ describe('Claude skill invocation expansion', () => {
     const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
     skillsExt({ on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn), exec: async () => ({ stdout: '', stderr: 'fatal: bad revision', code: 128 }) } as never)
     const notes: Array<{ message: string; level?: string }> = []
-    const result = await handlers.get('input')?.({ text: '/skill:greet world', source: 'interactive' }, { cwd, ui: { notify: (message: string, level?: string) => notes.push({ message, level }) } })
+    const result = await handlers.get('input')?.({ text: '/skill:greet world', source: 'interactive' }, { cwd, isProjectTrusted: () => true, ui: { notify: (message: string, level?: string) => notes.push({ message, level }) } })
 
     expect(result).toEqual({ action: 'handled' })
     expect(notes).toHaveLength(1)
