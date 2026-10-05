@@ -41,12 +41,11 @@ describe('htmlToMarkdown on well-formed pages', () => {
 // A page that repeats one unclosed tag (a broken template, a truncated fetch) used to cost
 // one full rescan to the end of the string per occurrence: a lazy `[\s\S]*?<\/tag>` body
 // capture that never finds its close scans the whole remainder every time it is tried, so a
-// tag repeated n times over a document of length n costs O(n^2). web_fetch caps raw HTML at
-// 200,000 characters, so this was a bounded but real multi-second stall per fetch.
+// tag repeated n times over a document of length n costs O(n^2), a multi-second stall per
+// fetch already at 200,000 characters.
 describe('htmlToMarkdown on pages that repeat an unclosed tag', () => {
-  // Bigger than web_fetch's 200,000-character raw-HTML cap, so a fix that is merely
-  // faster (not linear) still fails this at some size; the quadratic pre-fix cost was
-  // already several seconds at 200,000.
+  // Big enough that a fix that is merely faster (not linear) still fails this at some
+  // size; the quadratic pre-fix cost was already several seconds at 200,000.
   const CAP = 300_000
 
   it.each([
