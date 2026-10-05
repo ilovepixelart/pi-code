@@ -22,13 +22,16 @@ import { httpFetch } from './internal/web-transport.js'
 const SEARCH_ENDPOINT = 'https://html.duckduckgo.com/html/?q='
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) pi-code-web/0.1'
 const MAX_FETCH_CHARS = 30_000
-// Hard cap on raw bytes read before any parsing, so a huge or hostile page can't
-// exhaust memory or feed megabytes into the HTML regexes. Output is capped again
-// at MAX_FETCH_CHARS. The raw cap must sit well above that: GitHub pull request pages
-// carry ~250k chars of navigation and embedded data ahead of the conversation, and a
-// 200k cap returned only the navigation. The converter is linear (2M chars of
-// pathological markup converts in under 200ms), so 2M bounds the cost.
-const MAX_RAW_CHARS = 2_000_000
+/** How much of a body is read, and what happens past that. */
+type BodyLimit = { maxBytes: number; overflow: 'cut' | 'refuse' }
+// A page is converted whole, then capped at MAX_FETCH_CHARS. Real pages put hundreds
+// of KB of markup ahead of their content (a GitHub pull request's conversation starts
+// past 250k chars), so the raw ceiling bounds memory only; the converter is linear
+// (10 MiB converts in ~120ms). Over it the fetch is refused, never cut: a cut can land
+// inside a <script> or <style> and leak its contents as text.
+const FETCH_LIMIT: BodyLimit = { maxBytes: 10 * 1024 * 1024, overflow: 'refuse' }
+// The results page is ~35k; a small cut bounds the result regexes' worst case.
+const SEARCH_LIMIT: BodyLimit = { maxBytes: 200_000, overflow: 'cut' }
 const FETCH_TIMEOUT_MS = 20_000
 
 export interface SearchResult {
@@ -197,23 +200,42 @@ function decoderFor(contentType: string): TextDecoder {
   }
 }
 
-/** Read a response body up to MAX_RAW_CHARS, decoded as the content-type header's charset
- * (UTF-8 when it names none), then stop the download. Bounds memory and parsing cost. */
-async function readCapped(response: Response): Promise<string> {
+/** Read a response body up to `limit.maxBytes`, decoded as the content-type header's charset
+ * (UTF-8 when it names none), then stop the download. Past the limit the body is cut or
+ * the read throws, per `limit.overflow`; a declared content-length over a refusing limit
+ * throws before any byte is read. */
+async function readCapped(response: Response, url: URL, limit: BodyLimit): Promise<string> {
+  const tooLarge = () => new Error(`response from ${url.hostname} exceeds the ${limit.maxBytes / 1024 / 1024} MiB limit`)
+  if (limit.overflow === 'refuse' && Number(response.headers.get('content-length')) > limit.maxBytes) {
+    void response.body?.cancel().catch(() => {})
+    throw tooLarge()
+  }
   const decoder = decoderFor(response.headers.get('content-type') ?? '')
   const reader = response.body?.getReader()
-  if (!reader) return decoder.decode(await response.arrayBuffer()).slice(0, MAX_RAW_CHARS)
+  if (!reader) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > limit.maxBytes && limit.overflow === 'refuse') throw tooLarge()
+    return decoder.decode(bytes.subarray(0, limit.maxBytes))
+  }
   let text = ''
-  while (text.length < MAX_RAW_CHARS) {
+  let read = 0
+  // A refusing read keeps going at exactly the limit: only the next chunk shows whether it is over.
+  while (limit.overflow === 'refuse' || read < limit.maxBytes) {
     const { done, value } = await reader.read()
     if (done) break
-    if (value) text += decoder.decode(value, { stream: true })
+    if (!value) continue
+    if (read + value.byteLength > limit.maxBytes && limit.overflow === 'refuse') {
+      await reader.cancel().catch(() => {})
+      throw tooLarge()
+    }
+    text += decoder.decode(value.subarray(0, limit.maxBytes - read), { stream: true })
+    read += value.byteLength
   }
   // Flush: bytes of a character cut off by the end of the stream become U+FFFD
   // instead of vanishing silently.
   text += decoder.decode()
   await reader.cancel().catch(() => {})
-  return text.slice(0, MAX_RAW_CHARS)
+  return text
 }
 
 /** Either the page, or the cross-host redirect Claude reports instead of following. */
@@ -262,7 +284,7 @@ function hopSignal(signal: AbortSignal | undefined): AbortSignal {
   return signal ? AbortSignal.any([signal, timeout]) : timeout
 }
 
-async function fetchText(rawUrl: string, crossHost: CrossHost, signal?: AbortSignal, transport = httpFetch): Promise<FetchOutcome> {
+async function fetchText(rawUrl: string, crossHost: CrossHost, limit: BodyLimit, signal?: AbortSignal, transport = httpFetch): Promise<FetchOutcome> {
   let url = new URL(rawUrl)
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     // Cancelled between hops (a redirect chain), not just mid-request.
@@ -284,7 +306,7 @@ async function fetchText(rawUrl: string, crossHost: CrossHost, signal?: AbortSig
       void response.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${response.status} for ${url}`)
     }
-    return { kind: 'body', text: await readCapped(response), contentType: response.headers.get('content-type') ?? '' }
+    return { kind: 'body', text: await readCapped(response, url, limit), contentType: response.headers.get('content-type') ?? '' }
   }
   throw new Error(`too many redirects for ${rawUrl}`)
 }
@@ -349,7 +371,7 @@ export default function webExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params, signal) {
       // Claude documents allowed/blocked domains as mutually exclusive; allowed wins.
-      const outcome = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query), 'follow', signal)
+      const outcome = await fetchText(SEARCH_ENDPOINT + encodeURIComponent(params.query), 'follow', SEARCH_LIMIT, signal)
       const text = outcome.kind === 'body' ? outcome.text : ''
       const limit = Math.min(params.count ?? 5, 10)
       const results = filterByDomain(parseSearchResults(text, 10), params.allowed_domains, params.blocked_domains).slice(0, limit)
@@ -386,7 +408,7 @@ export default function webExtension(pi: ExtensionAPI) {
       if (cached && cached.expires > now) {
         body = cached.body
       } else {
-        const outcome = await fetchText(target, 'report', signal)
+        const outcome = await fetchText(target, 'report', FETCH_LIMIT, signal)
         // A cross-host redirect has no body to cache or summarize: the naming result is
         // the answer, and Claude fetches the target with a second call if it wants it.
         if (outcome.kind === 'redirect') {

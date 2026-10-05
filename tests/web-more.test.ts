@@ -230,11 +230,46 @@ describe('web_fetch responses', () => {
     expect(result.content[0].text).toBe(`${'x'.repeat(30_000)}\n[truncated 10000 chars]`)
   })
 
-  it('caps the raw download at 2000000 chars before the 30000 char output cap', async () => {
-    fetchMock.mockResolvedValue(respond('a'.repeat(2_500_000)))
+  it('converts a body of exactly 10 MiB in full before the 30000 char output cap', async () => {
+    fetchMock.mockResolvedValue(respond('a'.repeat(10_485_760)))
     const result = await setup().fetchUrl('https://example.com/huge')
-    // 2.5M downloaded -> 2M kept by readCapped -> 30k emitted, 1.97M reported as dropped.
-    expect(result.content[0].text).toBe(`${'a'.repeat(30_000)}\n[truncated 1970000 chars]`)
+    // 10,485,760 kept -> 30,000 emitted, 10,455,760 reported as dropped.
+    expect(result.content[0].text).toBe(`${'a'.repeat(30_000)}\n[truncated 10455760 chars]`)
+  })
+
+  it('refuses a streamed body one byte over 10 MiB instead of cutting it', async () => {
+    fetchMock.mockResolvedValue(respond('a'.repeat(10_485_761)))
+    await expect(setup().fetchUrl('https://example.com/huge')).rejects.toThrow('response from example.com exceeds the 10 MiB limit')
+  })
+
+  it('refuses a body that fills 10 MiB exactly and then sends one more chunk', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(10_485_760).fill(0x61))
+        controller.enqueue(new Uint8Array([0x61]))
+        controller.close()
+      },
+    })
+    fetchMock.mockResolvedValue(respond(stream))
+    await expect(setup().fetchUrl('https://example.com/huge')).rejects.toThrow('response from example.com exceeds the 10 MiB limit')
+  })
+
+  it('refuses a body whose content-length declares more than 10 MiB without reading it', async () => {
+    const response = respond('small')
+    response.headers.set('content-length', '10485761')
+    fetchMock.mockResolvedValue(response)
+    await expect(setup().fetchUrl('https://example.com/huge')).rejects.toThrow('response from example.com exceeds the 10 MiB limit')
+  })
+
+  it('refuses an over-limit body on the arrayBuffer fallback too', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: null,
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      arrayBuffer: async () => new Uint8Array(10_485_761).buffer,
+    } as unknown as Response)
+    await expect(setup().fetchUrl('https://example.com/huge')).rejects.toThrow('response from example.com exceeds the 10 MiB limit')
   })
 
   it('reaches content that follows a large inline script block, as on GitHub pull request pages', async () => {
@@ -566,6 +601,14 @@ describe('web_search', () => {
     fetchMock.mockResolvedValue(respond('<a class="result__a" href="//duckduckgo.com/l/?uddg=%E0%A4%A">Broken</a><a class="result__snippet">S</a>'))
     const result = await setup().search({ query: 'pi' })
     expect(result.content[0].text).toBe('1. Broken\n   //duckduckgo.com/l/?uddg=%E0%A4%A\n   S')
+  })
+
+  it('parses only the first 200000 bytes of a search page, cutting rather than refusing', async () => {
+    // The results page is ~35k; the small cap bounds the result regexes' worst case.
+    const late = '<a class="result__a" href="https://late.test/">Late</a><a class="result__snippet">L</a>'
+    fetchMock.mockResolvedValue(respond(`${resultHtml(1)}${' '.repeat(200_000)}${late}`))
+    const result = await setup().search({ query: 'pi' })
+    expect(result.content[0].text).toBe('1. Title 0\n   https://site0.test/\n   Snippet 0')
   })
 
   it('surfaces an upstream http failure from the search endpoint', async () => {

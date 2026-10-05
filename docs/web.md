@@ -4,6 +4,7 @@ Key-free web tools. Source: [`extensions/web.ts`](../extensions/web.ts).
 
 - WebSearch: DuckDuckGo search with `allowed_domains`/`blocked_domains`, no API key.
 - WebFetch: SSRF-guarded fetch that prefers markdown via `Accept` and converts HTML otherwise.
+- WebFetch reads up to 10 MiB and converts the whole page before capping the output at 30,000 characters, so content that sits behind hundreds of KB of markup (a GitHub pull request's conversation) is reached. A larger response is refused with an error rather than cut, since a cut inside a `<script>` or `<style>` leaks its contents as text.
 - An optional `prompt` runs the page through the model in-process and returns the answer, falling back to markdown when headless or on error.
 
 ## Aligned with Claude
