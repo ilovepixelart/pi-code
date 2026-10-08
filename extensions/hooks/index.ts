@@ -316,7 +316,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
       const dispatch = (onChild?: (kill: () => void) => void): Promise<HookRunResult> => {
         if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
-        if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms)
+        if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms, ctx.modelRegistry)
         if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
         if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
         return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined, sessionId: merged.session_id as string | undefined })

@@ -317,7 +317,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline
     // Claude runs its evaluator with thinking disabled: the verdict is mechanical.
     // completeText requests no thinking level, which is the same for pi.
-    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: EVALUATOR_MAX_TOKENS, signal })
+    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: EVALUATOR_MAX_TOKENS, signal, registry: ctx.modelRegistry })
     active.evaluatorTokens += usageTokens(usage as TokenUsage | undefined)
     const verdict = parseVerdict(text)
     if (!verdict) throw new Error(`unreadable verdict: ${text.slice(0, 200)}`)

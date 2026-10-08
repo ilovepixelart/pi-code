@@ -341,6 +341,21 @@ describe('goal evaluation', () => {
     expect(t.lastNote().msg).toContain('Last check: biome reports 3 errors')
   })
 
+  it('evaluates through the session model registry, where extension-registered providers live', async () => {
+    const t = setup()
+    const models: unknown[] = []
+    Object.assign(t.ctx.modelRegistry, {
+      streamSimple: (model: unknown) => {
+        models.push(model)
+        return { result: async () => ({ role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ ok: true, reason: 'checked via registry' }) }], usage: {}, stopReason: 'stop' }) as never }
+      },
+    })
+    await t.goal('lint is clean')
+    await t.agentEnd()
+    expect(models).toEqual([t.ctx.model])
+    expect(t.sent[t.sent.length - 1].message.content).toMatch(/\nEvaluator: checked via registry$/)
+  })
+
   it('clears an achieved goal, records the verdict for the model, and keeps it for the status view', async () => {
     const t = setup()
     await t.goal('lint is clean')

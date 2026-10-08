@@ -9,7 +9,7 @@ import * as fs from 'node:fs'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { runAgent } from '../internal/agent-run.js'
 import { callMcpTool } from '../internal/mcp-call.js'
-import { completeText } from '../internal/model-complete.js'
+import { type CompletionRegistry, completeText } from '../internal/model-complete.js'
 import { killProcessTree } from '../internal/process-tree.js'
 import { resolveShell } from '../internal/shell-resolve.js'
 import { errorMessage } from '../internal/values.js'
@@ -300,7 +300,7 @@ function abortAwareFailure(signal: AbortSignal, error: unknown): HookRunResult {
   return { code: aborted ? TIMEOUT_EXIT_CODE : 1, stdout: '', stderr: errorMessage(error), timedOut: aborted }
 }
 
-export async function runPromptHook(hook: HookCommand, payload: unknown, model: Model<Api> | undefined, timeoutMs: number): Promise<HookRunResult> {
+export async function runPromptHook(hook: HookCommand, payload: unknown, model: Model<Api> | undefined, timeoutMs: number, registry?: CompletionRegistry): Promise<HookRunResult> {
   if (!model) return { code: 1, stdout: '', stderr: 'no model available for prompt hook', timedOut: false }
   // A replacer function, so `$$`/`$&`/`` $` ``/`$'` inside the payload JSON are inserted
   // verbatim rather than read as replacement patterns (a Bash `echo $$` is a common trigger).
@@ -311,7 +311,7 @@ export async function runPromptHook(hook: HookCommand, payload: unknown, model: 
   const prompt = substituteArguments(withInput, payload)
   const signal = AbortSignal.timeout(timeoutMs)
   try {
-    const { text: answer } = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal })
+    const { text: answer } = await completeText(model, prompt, { system: PROMPT_HOOK_SYSTEM, maxTokens: 512, signal, registry })
     return { code: 0, stdout: answer, stderr: '', timedOut: false }
   } catch (error) {
     return abortAwareFailure(signal, error)

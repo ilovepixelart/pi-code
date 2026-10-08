@@ -77,6 +77,21 @@ describe('web_fetch prompt (in-process summarization)', () => {
     expect(seenPrompt).toContain('What does the plan cost?')
   })
 
+  it('answers through the session model registry, where extension-registered providers live', async () => {
+    fetchMock.mockResolvedValue(respond('<p>page body</p>'))
+    const model = { id: 'bridge-model' }
+    const models: unknown[] = []
+    const modelRegistry = {
+      streamSimple: (m: unknown) => {
+        models.push(m)
+        return { result: async () => ({ role: 'assistant', content: [{ type: 'text', text: 'registry answer' }], usage: {}, stopReason: 'stop' }) }
+      },
+    }
+    const r = await setup().fetchWith({ url: 'https://example.com/registry', prompt: 'what is it?' }, { model, modelRegistry })
+    expect(models).toEqual([model])
+    expect(r.content[0].text).toBe('registry answer')
+  })
+
   it('carries the nested completion usage on the tool result for session accounting', async () => {
     fetchMock.mockResolvedValue(respond('<p>page body</p>'))
     const usage = { input: 200, output: 12, cacheRead: 0, cacheWrite: 0, totalTokens: 212, cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 } }

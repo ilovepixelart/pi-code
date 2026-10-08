@@ -3360,6 +3360,23 @@ describe('prompt hook model override', () => {
     expect(await runWith('haiku', [{ id: 'big-1' }, { id: 'small-haiku-2', name: 'Small Haiku' }])).toEqual(['small-haiku-2'])
   })
 
+  it('completes through the session model registry, where extension-registered providers live', async () => {
+    const seen: string[] = []
+    const modelRegistry = {
+      getAvailable: () => [],
+      streamSimple: (model: { id: string }) => {
+        seen.push(model.id)
+        return { result: async () => ({ ...answer, content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"registry says no"}}' }] }) }
+      },
+    }
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'ok? $ARGUMENTS' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    const decision = await ext.toolCall('bash', { command: 'ls' }, 't1', { model: { id: 'bridge-model' }, modelRegistry })
+    expect(seen).toEqual(['bridge-model'])
+    expect(decision).toEqual({ block: true, reason: 'registry says no', terminate: true })
+  })
+
   it('uses the session model when the override matches nothing or is absent', async () => {
     expect(await runWith('nope', [{ id: 'big-1' }])).toEqual(['session-model'])
     expect(await runWith(undefined, [{ id: 'big-1' }])).toEqual(['session-model'])
