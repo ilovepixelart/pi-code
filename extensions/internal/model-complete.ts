@@ -57,7 +57,7 @@ export interface CompleteOptions {
   system?: string
   /** The session's registry. Only the session's runtime holds extension-registered
    * providers, virtual models and a `--api-key` key; a fresh ModelRuntime.create()
-   * throws `Unknown provider` for the first and lacks the others. Without it, a
+   * fails with `Unknown provider` for the first and lacks the others. Without it, a
    * standalone runtime is the fallback. */
   registry?: CompletionRegistry
   /** Output cap; a summary/decision does not need the model's full budget. */
