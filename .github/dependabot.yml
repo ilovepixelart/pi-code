@@ -4,13 +4,27 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    # Version updates only; security updates are never delayed.
+    cooldown:
+      semver-major-days: 7
     groups:
+      # A dependency joins the first group it matches, so the groups run from most to
+      # least specific. The pi packages pin each other with caret ranges: a lone bump
+      # installs two copies with incompatible types, so every pi update, majors included,
+      # moves as one set.
+      pi:
+        patterns: ["@earendil-works/*"]
       minor-and-patch:
         update-types: ["minor", "patch"]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
     groups:
-      codeql-action:
-        patterns: ["github/codeql-action*"]
+      actions:
+        patterns: ["*"]
