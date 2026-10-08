@@ -121,6 +121,7 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
       const { text } = await completeText(model, `First user message of a new coding session:\n\n${prompt.slice(0, MAX_PROMPT_CHARS)}`, {
         system: TITLE_SYSTEM,
         maxTokens: TITLE_MAX_TOKENS,
+        registry: ctx.modelRegistry,
       })
       title = cleanTitle(text)
     } catch {

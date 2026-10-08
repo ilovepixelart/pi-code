@@ -14,7 +14,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
 import { htmlToMarkdown, removeTags } from './internal/html-markdown.js'
-import { completeText } from './internal/model-complete.js'
+import { type CompletionRegistry, completeText } from './internal/model-complete.js'
 import { capForContext } from './internal/output-guard.js'
 import { parseNumericEnv } from './internal/values.js'
 import { httpFetch } from './internal/web-transport.js'
@@ -345,12 +345,13 @@ function rememberFetch(cache: FetchCache, url: string, body: string, now: number
  * that answer, not the raw page, along with the nested call's usage so the tool
  * result can account for it. Best-effort: any failure (no model, provider error)
  * yields null so the caller falls back to the markdown. */
-async function answerFromPage(model: Parameters<typeof completeText>[0], prompt: string, url: string, body: string, signal?: AbortSignal): Promise<{ text: string; usage: Usage } | null> {
+async function answerFromPage(model: Parameters<typeof completeText>[0], prompt: string, url: string, body: string, signal?: AbortSignal, registry?: CompletionRegistry): Promise<{ text: string; usage: Usage } | null> {
   try {
     return await completeText(model, `${prompt}\n\nAnswer using only the page content below, fetched from ${url}:\n\n${body}`, {
       system: 'You extract and answer questions from a web page. Answer only from the provided content, concisely. If the content does not contain the answer, say so.',
       maxTokens: 1024,
       signal,
+      registry,
     })
   } catch {
     return null
@@ -423,7 +424,7 @@ export default function webExtension(pi: ExtensionAPI) {
       // usage rides on the result either way, so pi counts it in session totals.
       let usage: Usage | undefined
       if (params.prompt && ctx?.model) {
-        const answer = await answerFromPage(ctx.model, params.prompt, target, body, signal)
+        const answer = await answerFromPage(ctx.model, params.prompt, target, body, signal, ctx.modelRegistry)
         if (answer?.text) return { content: [{ type: 'text' as const, text: answer.text }], details: {}, usage: answer.usage }
         // An empty answer still cost the completion; the fallback carries its usage.
         usage = answer?.usage

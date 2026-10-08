@@ -35,8 +35,9 @@ function setup(initialName?: string, opts: { throwOnSetName?: boolean; staleAfte
     },
   } as any)
 
-  const makeCtx = (branch: any[], ctxOpts: { model?: unknown } = {}) => ({
+  const makeCtx = (branch: any[], ctxOpts: { model?: unknown; modelRegistry?: unknown } = {}) => ({
     model: 'model' in ctxOpts ? ctxOpts.model : {},
+    modelRegistry: ctxOpts.modelRegistry,
     hasUI: true,
     mode: 'tui' as const,
     sessionManager: { getBranch: () => branch },
@@ -44,7 +45,7 @@ function setup(initialName?: string, opts: { throwOnSetName?: boolean; staleAfte
   })
 
   return {
-    settle: (branch: any[], ctxOpts?: { model?: unknown }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, ctxOpts)),
+    settle: (branch: any[], ctxOpts?: { model?: unknown; modelRegistry?: unknown }) => handlers.get('agent_settled')?.({ type: 'agent_settled' }, makeCtx(branch, ctxOpts)),
     start: (reason = 'new') => handlers.get('session_start')?.({ type: 'session_start', reason }, makeCtx([])),
     namesSet,
     getName: () => name,
@@ -58,6 +59,21 @@ describe('session auto-titling', () => {
     await t.settle([userEntry('refactor the config loader so it validates the schema up front')])
     expect(t.namesSet).toEqual(['Refactor Config Loader'])
     expect(t.getName()).toBe('Refactor Config Loader')
+  })
+
+  it('titles through the session model registry, where extension-registered providers live', async () => {
+    const t = setup()
+    const model = { id: 'bridge-model' }
+    const models: unknown[] = []
+    const modelRegistry = {
+      streamSimple: (m: unknown) => {
+        models.push(m)
+        return { result: async () => assistantMsg('Registry Title') }
+      },
+    }
+    await t.settle([userEntry('fix the parser')], { model, modelRegistry })
+    expect(models).toEqual([model])
+    expect(t.namesSet).toEqual(['Registry Title'])
   })
 
   it('does not re-title on a later settle once the session is named', async () => {
