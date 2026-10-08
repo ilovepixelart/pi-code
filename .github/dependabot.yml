@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # The pi packages pin each other with caret ranges, so a lone bump installs two
+      # copies with incompatible types. Listed first: a dependency joins the first group
+      # it matches, and this one has no update-types, so majors are grouped too.
+      pi:
+        patterns: ["@earendil-works/*"]
       minor-and-patch:
         update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
