@@ -104,6 +104,17 @@ describe('cross-extension seams meet across module graphs', () => {
       registrar.setSubagentStartHookRunner(undefined)
     }
   })
+
+  it('the idle_prompt gate reads the background run count the subagent extension registered', async () => {
+    type Seam = typeof import('../extensions/internal/background-agents.ts')
+    const [registrar, consumer] = await twoGraphs<Seam>('../extensions/internal/background-agents.ts')
+    registrar.setBackgroundAgentCounter(() => 3)
+    try {
+      expect(consumer.runningBackgroundAgents()).toBe(3)
+    } finally {
+      registrar.setBackgroundAgentCounter(undefined)
+    }
+  })
 })
 
 // The settings watchers in hooks, status-line and env-settings outlive the handler that

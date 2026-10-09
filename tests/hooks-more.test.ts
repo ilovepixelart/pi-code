@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import contextImports from '../extensions/context-imports.ts'
 import { loadPluginHooks } from '../extensions/hooks/config.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
+import { setBackgroundAgentCounter } from '../extensions/internal/background-agents.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
@@ -1484,6 +1485,43 @@ describe('hooks extension notify-style events', () => {
     await vi.advanceTimersByTimeAsync(120_000)
 
     expect(commandsRun()).toEqual([])
+  })
+
+  it.each(['new', 'resume', 'fork', 'quit'])('drops the pending idle_prompt when the session shuts down for %s', async (reason) => {
+    // /new, /resume and /fork send no input event, so only the shutdown can cancel the
+    // timer armed by the ending session; left armed it fires against a disposed context.
+    vi.useFakeTimers()
+    const ext = await withHooks({ Notification: [{ matcher: 'idle_prompt', hooks: [{ command: 'notify-idle' }] }] })
+    await ext.agentEnd()
+    await ext.shutdown(reason)
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(commandsRun()).toEqual([])
+  })
+
+  it('holds idle_prompt while a background subagent runs, then fires 60s after the turn its completion triggers', async () => {
+    // Claude: "Expect idle_prompt about 60 seconds after Claude finishes responding, and
+    // only if you haven't typed since and no background agent ... is still running." A
+    // finished background run wakes the parent with a new turn, whose end re-arms it.
+    vi.useFakeTimers()
+    let running = 1
+    setBackgroundAgentCounter(() => running)
+    try {
+      const ext = await withHooks({ Notification: [{ matcher: 'idle_prompt', hooks: [{ command: 'notify-idle' }] }] })
+      await ext.agentEnd()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(commandsRun()).toEqual([])
+
+      running = 0
+      await ext.beforeAgentStart()
+      await ext.agentEnd()
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(commandsRun()).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(commandsRun()).toEqual(['notify-idle'])
+    } finally {
+      setBackgroundAgentCounter(undefined)
+    }
   })
 
   it('runs Stop hooks on agent end with stop_hook_active false', async () => {
