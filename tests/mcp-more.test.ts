@@ -3572,3 +3572,115 @@ describe('--setting-sources and project MCP config', () => {
     expect(harness.toolNames().sort()).toEqual(['mine_a', 'repo_a'])
   })
 })
+
+describe('mcp under --mcp-config and --strict-mcp-config', () => {
+  // Captured from Claude Code 2.1.295 with `claude -p "Reply with exactly: OK"
+  // --output-format stream-json --verbose ...` and marker stdio servers.
+  const withFlags = (servers: Record<string, unknown>, strict = false): void => setCliSettingsReader(() => ({ settingsFile: undefined, sources: new Set(['user', 'project', 'local'] as const), forwardArgs: [], errors: [], mcp: { servers, strict } }))
+  const commands = (): unknown[] => hoisted.transports.map((t) => t.options.command)
+  const withPlugin = (home: string): void => {
+    const root = join(home, '.claude', 'plugins', 'cache', 'market', 'toolbox', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'toolbox' }))
+    writeFileSync(join(root, '.mcp.json'), JSON.stringify({ mcpServers: { db: { command: 'from-plugin' } } }))
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolbox: true } }))
+  }
+  afterEach(() => {
+    setCliSettingsReader(undefined)
+    setManagedSettingsPath(undefined)
+  })
+
+  it('connects the flag servers beside the user and project scopes', async () => {
+    // Measured: `--mcp-config a.json b.json` lists a and b next to the user, project and
+    // plugin servers.
+    withFlags({ f: { command: 'from-flag' } })
+    const harness = await setup({ user: { u: { command: 'from-user' } }, project: { p: { command: 'from-project' } } })
+    await harness.sessionStart(true)
+    expect(new Set(commands())).toEqual(new Set(['from-user', 'from-project', 'from-flag']))
+  })
+
+  it('lets a flag server win a name the project scope also defines', async () => {
+    // Measured: with .mcp.json and --mcp-config both naming "proj", only the flag's command ran.
+    withFlags({ proj: { command: 'from-flag' } })
+    const harness = await setup({ project: { proj: { command: 'from-project' } } })
+    await harness.sessionStart(true)
+    expect(commands()).toEqual(['from-flag'])
+  })
+
+  it('does not ask to approve a project whose only server a flag server replaces', async () => {
+    const confirm = vi.fn(async () => true)
+    withFlags({ proj: { command: 'from-flag' } })
+    const harness = await setup({ project: { proj: { command: 'from-project' } }, confirm })
+    await harness.sessionStart(true)
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it('lets a flag server win a name the user scope also defines', async () => {
+    withFlags({ x: { command: 'from-flag' } })
+    const harness = await setup({ user: { x: { command: 'from-user' } } })
+    await harness.sessionStart(true)
+    expect(commands()).toEqual(['from-flag'])
+  })
+
+  it('hands pi the flag server for a name the user scope also defines, as a precedence rather than a clash', async () => {
+    withFlags({ x: { command: 'from-flag' } })
+    const harness = await setup({ user: { x: { command: 'from-user' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true)
+    expect(harness.nativeRegistered.map((entry) => [entry.name, entry.config.command])).toEqual([['x', 'from-flag']])
+    expect(harness.warnings.filter((w) => w.includes('duplicate'))).toEqual([])
+  })
+
+  it('connects only the flag servers under --strict-mcp-config: no user, project or plugin server', async () => {
+    // Measured: `--strict-mcp-config --mcp-config a.json b.json` lists exactly a and b, and
+    // the project's marker server never spawned.
+    withFlags({ f: { command: 'from-flag' } }, true)
+    const harness = await setup({ user: { u: { command: 'from-user' } }, project: { p: { command: 'from-project' } } })
+    withPlugin(harness.home)
+    await harness.sessionStart(true)
+    expect(commands()).toEqual(['from-flag'])
+  })
+
+  it('connects nothing under --strict-mcp-config alone', async () => {
+    // Measured: `claude -p ... --strict-mcp-config` lists no MCP server.
+    withFlags({}, true)
+    const harness = await setup({ user: { u: { command: 'from-user' } }, project: { p: { command: 'from-project' } } })
+    withPlugin(harness.home)
+    await harness.sessionStart(true)
+    expect(commands()).toEqual([])
+  })
+
+  it("skips a flag entry with a url and no type, with Claude's message, and loads the rest", async () => {
+    // Measured: Claude lists "bad" in mcp_server_errors as url_missing_type and still loads
+    // "good". The warning is Claude's message, with a colon where Claude prints a dash.
+    withFlags({ bad: { url: 'https://example.invalid/mcp' }, good: { command: 'from-flag' } })
+    const harness = await setup()
+    await harness.sessionStart(true)
+    expect(hoisted.transports.map((t) => t.kind)).toEqual(['stdio'])
+    expect(harness.warnings).toContain('pi-code-mcp: Skipped: MCP server "bad" has a "url" but no "type"; add "type": "http" (or "sse" / "ws") to this entry')
+  })
+
+  it('filters flag servers through the deny list', async () => {
+    // Claude's managed-mcp doc: "Both lists also filter servers a user passes with the
+    // --mcp-config CLI flag".
+    withFlags({ blocked: { command: 'from-flag' } })
+    const harness = await setup()
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ deniedMcpServers: [{ serverName: 'blocked' }] }))
+    await harness.sessionStart(true)
+    expect(commands()).toEqual([])
+  })
+
+  it('connects only the managed set while a managed-mcp.json is deployed, until the refusal ends the session', async () => {
+    // Claude exits at startup in this case; here the session ends once settings-flags
+    // reports the refusal, and the flag servers must not connect in that window.
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-managed-'))
+    tempDirs.push(dir)
+    writeFileSync(join(dir, 'managed-settings.json'), '{}')
+    writeFileSync(join(dir, 'managed-mcp.json'), JSON.stringify({ mcpServers: { m: { command: 'from-managed' } } }))
+    setManagedSettingsPath(join(dir, 'managed-settings.json'))
+    withFlags({ f: { command: 'from-flag' } }, true)
+    const harness = await setup()
+    await harness.sessionStart(true)
+    expect(commands()).toEqual(['from-managed'])
+  })
+})

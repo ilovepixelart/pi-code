@@ -47,14 +47,14 @@ import { isProjectApproved, isProjectApprovedSilently } from '../internal/projec
 import { checkoutRoot } from '../internal/project-root.ts'
 import { claudeSettingsChain } from '../internal/settings-chain.ts'
 import { errorMessage } from '../internal/values.ts'
-import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.ts'
+import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, flagScopeServers, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.ts'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.ts'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.ts'
 import { nativeMode, nativeToolAliases, nativeToolPrefixes, piMcpRunning, toNativeServer } from './native.ts'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.ts'
 import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isConnectionLost, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.ts'
 
-export { managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.ts'
+export { managedMcpPath, managedSettingsPath, setManagedSettingsPath } from '../internal/managed-settings.ts'
 // Re-exports for consumers: the module split keeps the extension's public surface
 // (imported by the test suite) reachable from this entry point unchanged.
 export type { HttpServerConfig, ServerConfig, StdioServerConfig } from './config.ts'
@@ -63,7 +63,7 @@ export type { McpToolInfo } from './listing.ts'
 export type { McpPromptArgumentInfo, McpPromptInfo, ToolContent } from './mapping.ts'
 export { capTotal, formatPromptCommandName, formatToolName, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.ts'
 export type { ProjectServerPolicy } from './policy.ts'
-export { applyServerPolicy, loadManagedMcpServers, type McpPolicy, type McpPolicyEntry, managedMcpPath, mcpAllowDeny, projectServerPolicy, splitByPolicy, urlPatternMatches } from './policy.ts'
+export { applyServerPolicy, loadManagedMcpServers, type McpPolicy, type McpPolicyEntry, mcpAllowDeny, projectServerPolicy, splitByPolicy, urlPatternMatches } from './policy.ts'
 export type { AuthUi } from './transport.ts'
 export { parseHelperHeaders, resolveBearerToken } from './transport.ts'
 
@@ -622,12 +622,24 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   }
 
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
+    // The --mcp-config servers outrank every other scope on a shared name (measured: a
+    // flag server named like a .mcp.json one replaced it), and --strict-mcp-config leaves
+    // them as the only scope. They are the user's own input: no approval, but the
+    // allow/deny lists apply, as Claude's managed-mcp page documents.
+    const flags = cliSettings().mcp
+    const validFlagServers = flagScopeServers(flags?.servers ?? {})
+    const flagServers = Object.fromEntries(Object.entries(applyServerPolicy(validFlagServers, policy)).filter(([name]) => !clients.has(name)))
+    if (flags?.strict) {
+      await connectServers(flagServers, authUi)
+      return
+    }
+    const flagNames = new Set(Object.keys(validFlagServers))
     // Plugin servers merge under the user scope (plugins are user-installed). Their keys
     // are plugin:<plugin>:<server>, so a plugin server never shares a name with the user's. A server toggled off
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
     const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)
-    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name)))
+    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name) && !flagNames.has(name)))
     const scoped = applyServerPolicy(merged, policy)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
@@ -645,7 +657,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // the same kind of repository-supplied config.
     const projectConfigFiles = nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)
     const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(projectConfigFiles) : {}
-    const projectServers = Object.fromEntries(Object.entries(projectConfig).map(([name, config]) => [name, { ...config, projectScope: true }]))
+    const projectServers = Object.fromEntries(
+      Object.entries(projectConfig)
+        .filter(([name]) => !flagNames.has(name))
+        .map(([name, config]) => [name, { ...config, projectScope: true }]),
+    )
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
@@ -669,6 +685,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // than the sum of both. Reconnect attempts after a refused confirm are safe:
     // connectServers skips names that already connected.
     const connects: Promise<void>[] = []
+    if (Object.keys(flagServers).length > 0) connects.push(connectServers(flagServers, authUi))
     if (Object.keys(userServers).length > 0) connects.push(connectServers(userServers, authUi))
     if (!projectConnected && Object.keys(consented).length > 0) connects.push(connectServers(consented, authUi))
     await Promise.all(connects)

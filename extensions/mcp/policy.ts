@@ -5,8 +5,7 @@
  */
 
 import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { managedSettingsFile } from '../internal/managed-settings.ts'
+import { managedMcpPath, managedSettingsFile } from '../internal/managed-settings.ts'
 import { claudeSettingsSources } from '../internal/settings-chain.ts'
 import { errorMessage, escapeRegExp, isRecord } from '../internal/values.ts'
 import { interpolateEnv, type ServerConfig } from './config.ts'
@@ -216,12 +215,6 @@ function serverAllowed(name: string, config: ServerConfig, allowed: McpPolicyEnt
   if (typed.some((entry) => entryMatches(entry, name, config, false))) return true
   if (typed.length > 0) return false
   return allowed.some((entry) => entry.serverName === name)
-}
-
-/** The managed-mcp.json path: a sibling of managed-settings.json (same directory). Derived
- * through the same test seam so a test can write both into one temp dir. */
-export function managedMcpPath(managedFile: string = managedSettingsFile()): string {
-  return path.join(path.dirname(managedFile), 'managed-mcp.json')
 }
 
 /** Claude's managed-mcp.json: when it exists beside managed-settings.json it takes
