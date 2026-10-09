@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import contextImports from '../extensions/context-imports.ts'
 import { loadPluginHooks } from '../extensions/hooks/config.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
+import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../extensions/internal/background-agents.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
@@ -1006,6 +1007,25 @@ describe('hooks extension tool_call', () => {
     expect(decision).toEqual({ block: true, reason: 'looks risky', terminate: true })
   })
 
+  it('runs a PreToolUse agent hook on the session model and blocks on its deny decision', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'agent', prompt: 'Inspect $ARGUMENTS' }] }] })
+    let seenModel: unknown
+    setAgentRunner(async (req) => {
+      seenModel = req.model
+      return '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"agent says no"}}'
+    })
+    try {
+      const ext = setupExtension()
+      await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+      const decision = await ext.toolCall('bash', { command: 'rm -rf /' }, 't1', { model: { id: 'session-model' } })
+      expect(decision).toEqual({ block: true, reason: 'agent says no', terminate: true })
+      expect(seenModel).toBe('session-model')
+      expect(commandsRun()).toEqual([])
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
   it('lets the tool through when a prompt hook allows and there is no command hook to run', async () => {
     writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'ok? $ARGUMENTS' }] }] })
     setCompleteBackend(async () => ({ role: 'assistant', content: [{ type: 'text', text: '{"hookSpecificOutput":{"permissionDecision":"allow"}}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }) as never)
@@ -1198,6 +1218,24 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     await ext.toolResult('bash', { input: { command: 'ls' }, content: okText }, { abort })
     expect(abort).toHaveBeenCalledTimes(1)
     expect(ext.notes).toContainEqual({ msg: 'tests red', level: 'warning' })
+  })
+
+  it('stops the run with a neutral message when a PostToolUse continue false has no stopReason', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    script('post', { stdout: [JSON.stringify({ continue: false })], code: 0 })
+    const abort = vi.fn()
+    await ext.toolResult('bash', { input: { command: 'ls' }, content: okText }, { abort })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toContainEqual({ msg: 'Stopped by hook', level: 'warning' })
+  })
+
+  it('reports a tool with no Claude name under its pi name, input and result untranslated', async () => {
+    writeSettings(hoisted.home, 'settings.json', { PostToolUse: [{ matcher: 'custom_tool', hooks: [{ command: 'post' }] }] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('custom_tool', { input: { query: 'x' }, content: okText, details: { n: 1 } })
+    expect(commandsRun()).toEqual(['post'])
+    expect(JSON.parse(recordFor('post').stdin)).toEqual({ ...COMMON, hook_event_name: 'PostToolUse', tool_name: 'custom_tool', tool_input: { query: 'x' }, tool_use_id: 't1', tool_response: { content: okText, details: { n: 1 }, isError: false } })
   })
 
   it('runs PostToolUse hooks with the tool name, input and response in the payload', async () => {
