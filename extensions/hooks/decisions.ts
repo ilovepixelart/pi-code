@@ -18,6 +18,8 @@ export interface HookDecision {
   /** Claude's `permissionDecision: "ask"`: the caller should prompt the user and
    * block only on decline. `block` stays true as the no-UI fallback. */
   ask?: boolean
+  /** Claude's `continue: false`: stop the whole agent run, not just this call. */
+  stop?: boolean
 }
 
 /** Claude's stdout shape rule: only output that starts with `{` and ends with `}`
@@ -115,6 +117,9 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   // Claude: on exit 2 the blocking message is the JSON blocking decision's reason
   // when it makes one, and the stderr text otherwise.
   if (code === 2) return { block: true, reason: jsonBlockingReason(parsed) ?? (stderr.trim() || 'Blocked by hook') }
+  // Claude: continue false "Takes precedence over any event-specific decision fields".
+  // Claude documents no default stopReason, so a neutral message stands in.
+  if (parsed?.continue === false) return { block: true, stop: true, reason: parsed.stopReason ?? 'Stopped by hook' }
   const specific = parsed?.hookSpecificOutput
   // Claude's "ask" prompts the user; the tool_call handler turns this into a
   // ctx.ui.confirm and blocks only on decline. block:true is the fallback for a
@@ -127,7 +132,6 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   // documented).
   if (specific?.permissionDecision === 'defer') return { block: true, reason: 'Tool call deferred by hook; pi cannot resume a deferred call, so it was not run.' }
   if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Blocked by hook' }
-  if (parsed?.continue === false) return { block: true, reason: parsed.stopReason ?? 'Blocked by hook' }
   return { block: false }
 }
 
@@ -238,11 +242,13 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   if (failClosed) return failClosed
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const context = preToolContexts(results)
+  const decisions = results.map((result) => interpretHookResult(result.code, result.stdout, result.stderr))
+  const stop = decisions.find((decision) => decision.stop)
+  if (stop) return stop
   // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
   // scan for any deny first, and only fall back to the first ask.
   let ask: HookDecision | undefined
-  for (const result of results) {
-    const decision = interpretHookResult(result.code, result.stdout, result.stderr)
+  for (const decision of decisions) {
     if (decision.block && !decision.ask) return decision
     if (decision.ask && ask === undefined) ask = decision
   }

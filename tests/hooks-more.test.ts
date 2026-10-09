@@ -1041,6 +1041,35 @@ describe('hooks extension tool_call', () => {
     expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this', terminate: true })
   })
 
+  // Claude: continue:false means "Claude stops processing entirely after the hook runs",
+  // and stopReason is the "Message shown to the user when continue is false".
+  it('stops the whole run on continue false over an ask, showing stopReason instead of prompting', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed', hookSpecificOutput: { permissionDecision: 'ask' } })], code: 0 })
+    const abort = vi.fn()
+    const confirm = vi.fn(async () => true)
+    const notes: Array<{ msg: string; level: string }> = []
+    const ui = { notify: (msg: string, level: string) => notes.push({ msg, level }), confirm }
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui, abort })).toEqual({ block: true, reason: 'build failed', terminate: true })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(notes).toEqual([{ msg: 'build failed', level: 'warning' }])
+  })
+
+  it('stops the run with a neutral message when continue false has no stopReason (Claude documents no default)', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false })], code: 0 })
+    const abort = vi.fn()
+    expect(await ext.toolCall('bash', { command: 'ls' }, 't1', { abort })).toEqual({ block: true, reason: 'Stopped by hook', terminate: true })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toEqual([{ msg: 'Stopped by hook', level: 'warning' }])
+  })
+
+  it('does not stop the run on a plain deny', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'secrets file' } })], code: 0 })
+    const abort = vi.fn()
+    await ext.toolCall('bash', { command: 'cat .env' }, 't1', { abort })
+    expect(abort).not.toHaveBeenCalled()
+  })
+
   it('forwards the tool name and input to the hook payload', async () => {
     const ext = await withPreHook({ code: 0 })
     await ext.toolCall('bash', { command: 'ls -la' })

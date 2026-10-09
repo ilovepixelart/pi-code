@@ -578,8 +578,23 @@ describe('interpretHookResult', () => {
     expect(interpretHookResult(0, out, '')).toEqual({ block: true, ask: true, reason: 'confirm first' })
   })
 
-  it('blocks on a top-level continue false', () => {
-    expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, reason: 'halt' })
+  it('stops on a top-level continue false, carrying stopReason', () => {
+    expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, stop: true, reason: 'halt' })
+  })
+
+  // Claude: continue "Takes precedence over any event-specific decision fields".
+  it.each([
+    ['permissionDecision ask', { hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }],
+    ['permissionDecision deny', { hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'denied' } }],
+    ['permissionDecision allow', { hookSpecificOutput: { permissionDecision: 'allow' } }],
+    ['permissionDecision defer', { hookSpecificOutput: { permissionDecision: 'defer' } }],
+    ['decision block', { decision: 'block', reason: 'blocked' }],
+  ])('lets continue false take precedence over %s', (_name, fields) => {
+    expect(interpretHookResult(0, JSON.stringify({ ...fields, continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, stop: true, reason: 'halt' })
+  })
+
+  it('uses a neutral stop message when continue false has no stopReason (Claude documents no default)', () => {
+    expect(interpretHookResult(0, JSON.stringify({ continue: false, decision: 'block', reason: 'blocked' }), '')).toEqual({ block: true, stop: true, reason: 'Stopped by hook' })
   })
 
   it('allows on a clean exit', () => {
@@ -622,6 +637,13 @@ describe('runPreToolUse', () => {
   it('surfaces an ask decision so the caller can prompt', async () => {
     const runner: HookRunner = async () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }), stderr: '', timedOut: false })
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, ask: true, reason: 'confirm' })
+  })
+
+  it('lets one hook continue false stop the run even when an earlier hook denies', async () => {
+    const two = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'a.sh' }, { command: 'b.sh' }] }] }
+    const runner: HookRunner = async (hook) =>
+      hook.command === 'a.sh' ? { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no' } }), stderr: '', timedOut: false } : { code: 0, stdout: JSON.stringify({ continue: false, stopReason: 'halt' }), stderr: '', timedOut: false }
+    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, stop: true, reason: 'halt' })
   })
 
   it('prefers a hard deny over an ask, matching Claude deny > ask precedence', async () => {
