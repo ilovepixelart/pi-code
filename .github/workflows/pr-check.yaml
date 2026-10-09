@@ -79,7 +79,11 @@ jobs:
 
   smoke:
     name: Headless e2e smoke
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     permissions:
       contents: read
     steps:
@@ -100,4 +104,5 @@ jobs:
       - name: Run the deterministic smoke
         # Boots the pi devDependency headless against a dead-port model and
         # asserts the exact provider payload; no real model or network needed.
+        shell: bash
         run: bash scripts/e2e-smoke.sh

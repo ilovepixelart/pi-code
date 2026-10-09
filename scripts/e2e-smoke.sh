@@ -16,6 +16,11 @@ FAIL=0
 ok() { PASS=$((PASS + 1)); printf 'PASS %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 
+# Under Git Bash on Windows, node reads C:/... paths and takes its home from USERPROFILE,
+# not HOME: every path handed to pi or node as data goes through native(). bash's own
+# file operations keep the POSIX form.
+native() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+
 SMOKE=$(mktemp -d)
 cleanup() { rm -rf "$SMOKE"; }
 trap cleanup EXIT
@@ -41,29 +46,34 @@ printf -- '---\nname: greet\ndescription: Greets people for the smoke\n---\nRepl
 HOMEDIR="$SMOKE/home"
 mkdir -p "$HOMEDIR/.pi/agent"
 WIRE="$HOMEDIR/wire.jsonl"
-python3 - "$HOMEDIR" "$REPO" "$FX" <<'PY'
-import json, sys
-home, repo, fx = sys.argv[1:4]
-agent = f"{home}/.pi/agent"
-json.dump({"providers": {"dead": {"api": "openai-completions", "apiKey": "dead-key", "baseUrl": "http://127.0.0.1:1/v1", "models": [{"contextWindow": 131072, "id": "dead-model", "input": ["text"]}]}}}, open(f"{agent}/models.json", "w"))
-json.dump({"packages": [repo], "defaultModel": "dead-model", "defaultProvider": "dead", "defaultThinkingLevel": "off", "extensions": [f"{repo}/scripts/lib/wire-probe.ts"]}, open(f"{agent}/settings.json", "w"))
-# Pre-seeded trust: headless -p has no dialog, and untrusted projects load no
-# project-scoped config at all, which is most of what this smoke asserts.
-json.dump({fx: True}, open(f"{agent}/trust.json", "w"))
-PY
-
-# A user-scope stdio MCP server. On a pi with native MCP (pi.registerMcpServer, pi 0.99
-# and later) pi-code hands it to pi, which declares it as mcp__smoke__echo; older pi gets
-# pi-code's own smoke_echo.
-printf '{"mcpServers":{"smoke":{"type":"stdio","command":"node","args":["%s/scripts/lib/mcp-echo-server.mjs"]}}}' "$REPO" > "$HOMEDIR/.claude.json"
+# Trust goes through pi's own store, run from the fixture, so its key is the one pi
+# resolves for that cwd on every platform. Pre-seeded because headless -p has no dialog,
+# and untrusted projects load no project-scoped config, which is most of what this asserts.
+# The MCP server is user-scope stdio: on a pi with native MCP (pi.registerMcpServer, pi
+# 0.99 and later) pi-code hands it to pi, which declares it as mcp__smoke__echo; older pi
+# gets pi-code's own smoke_echo.
+(cd "$FX" && node --input-type=module - "$(native "$HOMEDIR")" "$(native "$REPO")" <<'JS'
+import * as fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [home, repo] = process.argv.slice(2)
+const agent = `${home}/.pi/agent`
+const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value))
+write(`${agent}/models.json`, { providers: { dead: { api: 'openai-completions', apiKey: 'dead-key', baseUrl: 'http://127.0.0.1:1/v1', models: [{ contextWindow: 131072, id: 'dead-model', input: ['text'] }] } } })
+write(`${agent}/settings.json`, { packages: [repo], defaultModel: 'dead-model', defaultProvider: 'dead', defaultThinkingLevel: 'off', extensions: [`${repo}/scripts/lib/wire-probe.ts`] })
+write(`${home}/.claude.json`, { mcpServers: { smoke: { type: 'stdio', command: 'node', args: [`${repo}/scripts/lib/mcp-echo-server.mjs`] } } })
+const { ProjectTrustStore } = await import(pathToFileURL(`${repo}/node_modules/@earendil-works/pi-coding-agent/dist/index.js`).href)
+new ProjectTrustStore(agent).set(process.cwd(), true)
+JS
+)
 if grep -q 'registerMcpServer' "$REPO/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts" 2>/dev/null; then MCP_TOOL=mcp__smoke__echo; else MCP_TOOL=smoke_echo; fi
 
 run_pi() {
-  (cd "$FX" && env -u PI_CODING_AGENT_DIR -u CLAUDE_CONFIG_DIR HOME="$HOMEDIR" PI_E2E_WIRE="$WIRE" PI_SKIP_VERSION_CHECK=1 perl -e 'alarm 150; exec @ARGV' "$@" < /dev/null)
+  (cd "$FX" && env -u PI_CODING_AGENT_DIR -u CLAUDE_CONFIG_DIR HOME="$(native "$HOMEDIR")" USERPROFILE="$(native "$HOMEDIR")" PI_E2E_WIRE="$(native "$WIRE")" PI_SKIP_VERSION_CHECK=1 perl -e 'alarm 150; exec @ARGV' "$@" < /dev/null)
 }
 
 # --- Discovery: pi under the isolated home loads THIS checkout ---
-if run_pi "$PI_BIN" list 2>/dev/null | grep -qF "$REPO"; then ok "smoke: pi list discovers this checkout"; else bad "smoke: pi list does not load $REPO"; fi
+# pi prints the native path, with backslashes on Windows.
+if run_pi "$PI_BIN" list 2>/dev/null | tr '\\' '/' | grep -qiF "$(native "$REPO")"; then ok "smoke: pi list discovers this checkout"; else bad "smoke: pi list does not load $REPO"; fi
 
 # --- One headless turn; the connection error afterwards is expected ---
 run_pi "$PI_BIN" -p "hi" > "$SMOKE/pi-out.log" 2>&1
@@ -85,7 +95,7 @@ mkdir -p "$UNTRUSTED/.claude/rules" "$UNTRUSTED/notes"
 UNTRUSTED=$(cd "$UNTRUSTED" && pwd -P)
 git -C "$UNTRUSTED" init -qb main 2>/dev/null
 printf 'OUTSIDE THE PROJECT MARKER\n' > "$HOMEDIR/outside.md"
-printf 'Untrusted project context.\n\n@notes/inside.md\n@%s/outside.md\n' "$HOMEDIR" > "$UNTRUSTED/CLAUDE.md"
+printf 'Untrusted project context.\n\n@notes/inside.md\n@%s/outside.md\n' "$(native "$HOMEDIR")" > "$UNTRUSTED/CLAUDE.md"
 printf 'INSIDE THE PROJECT MARKER\n' > "$UNTRUSTED/notes/inside.md"
 printf 'UNTRUSTED LOCAL MARKER\n' > "$UNTRUSTED/CLAUDE.local.md"
 printf -- '- UNTRUSTED RULE MARKER\n' > "$UNTRUSTED/.claude/rules/rule.md"
