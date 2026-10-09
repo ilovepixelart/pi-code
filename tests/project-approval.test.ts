@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { hookFiles } from '../extensions/hooks/index.ts'
 import { approvalRecheck, hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp/index.ts'
@@ -359,5 +359,58 @@ describe('hasClaudeShapedConfig walks to the repository root', () => {
 
     expect(hasClaudeShapedConfig(inner)).toBe(false)
     rmSync(outer, { recursive: true, force: true })
+  })
+})
+
+describe('hasClaudeShapedConfig exempts the configuration home', () => {
+  // Claude applies the configuration home's .claude/settings.local.json without the
+  // trust step. That home is the home directory, or the directory whose `.claude`
+  // subdirectory is CLAUDE_CONFIG_DIR, unless that directory sits in a repository whose
+  // root takes the local settings instead.
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('does not gate the home directory own settings.local.json', () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', '')
+    const home = tempDir()
+    write(home, join('.claude', 'settings.local.json'))
+
+    expect(hasClaudeShapedConfig(home, home)).toBe(false)
+  })
+
+  it('does not gate the settings.local.json beside a CLAUDE_CONFIG_DIR named .claude', () => {
+    const configHome = tempDir()
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(configHome, '.claude'))
+    write(configHome, join('.claude', 'settings.local.json'))
+
+    expect(hasClaudeShapedConfig(configHome, join(configHome, 'nowhere'))).toBe(false)
+  })
+
+  it('gates it when CLAUDE_CONFIG_DIR is not the folder .claude subdirectory', () => {
+    const folder = tempDir()
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(folder, 'cfg'))
+    write(folder, join('.claude', 'settings.local.json'))
+
+    expect(hasClaudeShapedConfig(folder, join(folder, 'nowhere'))).toBe(true)
+  })
+
+  it.skipIf(process.platform === 'win32')('gates it when the configuration home sits in a repository whose root takes the local settings', () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const configHome = join(repo, 'dotfiles')
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(configHome, '.claude'))
+    write(configHome, join('.claude', 'settings.local.json'))
+
+    expect(hasClaudeShapedConfig(configHome, join(repo, 'nowhere'))).toBe(true)
+  })
+
+  it('still gates an unrelated folder settings.local.json', () => {
+    const configHome = tempDir()
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(configHome, '.claude'))
+    const project = tempDir()
+    write(project, join('.claude', 'settings.local.json'))
+
+    expect(hasClaudeShapedConfig(project, join(project, 'nowhere'))).toBe(true)
   })
 })

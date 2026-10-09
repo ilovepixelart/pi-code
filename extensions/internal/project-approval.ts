@@ -22,6 +22,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
+import { claudeConfigDir } from './config-dir.ts'
 import { ROOT_MARKERS } from './project-root.ts'
 import { localSettingsFile } from './settings-chain.ts'
 
@@ -43,26 +44,39 @@ const CLAUDE_SHAPED = [
   path.join('.pi', 'agents'),
 ]
 
+/** The folders whose `.claude` is the user's own configuration: the home directory, and
+ * the directory whose `.claude` subdirectory is CLAUDE_CONFIG_DIR. The latter only while
+ * its settings.local.json stays beside that config: inside a repository whose root takes
+ * the local settings instead, Claude holds it like any other folder. One comparison
+ * covers both: a CLAUDE_CONFIG_DIR not named `.claude` never holds the file either. */
+function configurationHomes(home: string): string[] {
+  const configDir = claudeConfigDir(home)
+  const configHome = path.dirname(configDir)
+  if (localSettingsFile(configHome, home) !== path.join(configDir, 'settings.local.json')) return [home]
+  return [home, configHome]
+}
+
 /** Claude-shaped config anywhere between `cwd` and the repository root.
  *
  * The walk matters: agent discovery already searches upward, so starting pi in a
  * subdirectory of a repository whose `.claude/agents` sits at the root found those
  * agents while a cwd-only check reported nothing to gate, and the short-circuit
- * approved the project without ever asking. The bound is the repository root and the home
- * directory, because `~/.claude` is the user's own configuration: a directory under
+ * approved the project without ever asking. The bound is the repository root and the
+ * configuration homes, because `~/.claude` is the user's own configuration: a directory under
  * home that is in no repository would otherwise walk up into it and report the user's
  * own settings as a project waiting to be approved. */
 export function hasClaudeShapedConfig(cwd: string, home: string = os.homedir()): boolean {
   // settings.local.json is read from the main checkout, which a worktree's .git file
   // names and which is a sibling of cwd, never on the walk below. An archive can carry
   // both ends of that pointer, so the file the chain will read is checked where it is.
-  // At home the file is the user's own, as the walk also holds.
+  // At a configuration home the file is the user's own, as the walk also holds.
+  const homes = configurationHomes(home)
   const relocated = localSettingsFile(cwd, home)
-  if (path.dirname(path.dirname(relocated)) !== home && fs.existsSync(relocated)) return true
+  if (!homes.includes(path.dirname(path.dirname(relocated))) && fs.existsSync(relocated)) return true
   let currentDir = cwd
   while (true) {
-    // The home check comes first: at home itself the .claude found is the user's own.
-    if (currentDir === home) return false
+    // The home check comes first: at a configuration home the .claude found is the user's own.
+    if (homes.includes(currentDir)) return false
     if (CLAUDE_SHAPED.some((entry) => fs.existsSync(path.join(currentDir, entry)))) return true
     if (ROOT_MARKERS.some((marker) => fs.existsSync(path.join(currentDir, marker)))) return false
     const parentDir = path.dirname(currentDir)
