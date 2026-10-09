@@ -31,6 +31,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         node-version: [22.x, 24.x]
+        # package.json engines is >=22.19: the floor itself is tested, not only the latest 22.
+        include:
+          - os: ubuntu-latest
+            node-version: 22.19.0
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +79,11 @@ jobs:
 
   smoke:
     name: Headless e2e smoke
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     permissions:
       contents: read
     steps:
@@ -96,4 +104,5 @@ jobs:
       - name: Run the deterministic smoke
         # Boots the pi devDependency headless against a dead-port model and
         # asserts the exact provider payload; no real model or network needed.
+        shell: bash
         run: bash scripts/e2e-smoke.sh
