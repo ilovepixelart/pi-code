@@ -689,7 +689,7 @@ describe('startBackgroundRun', () => {
       {
         command: 'pi',
         args: ['--mode', 'json'],
-        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
+        options: { cwd: '/work/dir', shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true, env: expect.objectContaining({ PI_CODE_SUBAGENT: '1' }) },
       },
     ])
   })
