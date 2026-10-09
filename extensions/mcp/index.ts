@@ -91,6 +91,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   // at load, since registering /mcp here is what drops pi's own, which is before project
   // approval: the project's settings are read here even unapproved. A list there can only
   // keep pi-code's own client, where session_start applies it once the project is approved.
+  // The factory sees no session cwd and pi never chdirs on /resume, so process.cwd() is the
+  // launch directory here; session_start decides again from the session's own project.
   const native = nativeMode(pi, loadManagedMcpServers(), mcpAllowDeny(claudeSettingsChain(process.cwd(), os.homedir(), true)))
   // Whether pi's /mcp is running this session, and the names handed to pi.registerMcpServer.
   let nativeActive = false
@@ -711,7 +713,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // Claude answers roots/list with the session's launch directory and exports the
     // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
     sessionDirs = { projectDir: checkoutRoot(ctx.cwd), launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
-    nativeActive = native && piMcpRunning(pi.getCommands())
+    const managed = loadManagedMcpServers()
+    nativeActive = native && piMcpRunning(pi.getCommands()) && nativeMode(pi, managed, mcpAllowDeny(claudeSettingsChain(ctx.cwd, os.homedir(), true)))
     waitedForNative = false
     const authUi = authUiFor(ctx)
     sessionAuthUi = authUi
@@ -724,7 +727,6 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // project-approval flow below are skipped. An empty map disables MCP entirely. An absent
     // file leaves the normal scopes untouched; a present but corrupt file fails closed to an
     // empty set (see loadManagedMcpServers).
-    const managed = loadManagedMcpServers()
     const connecting = managed !== null ? connectManagedExclusive(managed, policy, authUi) : connectNormalScopes(ctx, policy, authUi)
     // Claude: "MCP startup is non-blocking by default: servers connect in the
     // background and their tools become available as they finish." A slow or

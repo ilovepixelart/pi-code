@@ -3305,6 +3305,52 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     expect(harness.nativeRegistered).toEqual([])
   })
 
+  /** A project directory whose .claude/settings.json sets the given deny list, or none. */
+  const projectDir = (denied?: unknown[]): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-proj-'))
+    tempDirs.push(dir)
+    if (denied) {
+      mkdirSync(join(dir, '.claude'), { recursive: true })
+      writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ deniedMcpServers: denied }))
+    }
+    return dir
+  }
+
+  it("decides the mode from a resumed session's project, not the launch directory, when only the session's project sets a deny list (MCPN-001)", async () => {
+    // pi's /resume builds the runtime on the session's cwd without process.chdir.
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir())
+    const session = projectDir([{ serverName: 'blocked' }])
+    await rememberApproved(session)
+    withTools([{ name: 'go' }])
+    const harness = await setup({ cwd: session, user: { srv: { command: 'node' }, blocked: { command: 'b' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true)
+
+    expect(harness.nativeRegistered).toEqual([])
+    expect(harness.toolNames()).toEqual(['srv_go'])
+  })
+
+  it("applies the resumed session's empty policy, not the launch directory's deny list, when pi's /mcp was dropped at load (MCPN-001, MCPN-009)", async () => {
+    // The launch directory's list made pi-code register /mcp at load, so pi dropped its own.
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir([{ serverName: 'blocked' }]))
+    const session = projectDir()
+    withTools([{ name: 'go' }])
+    const harness = await setup({ cwd: session, user: { blocked: { command: 'b' } }, native: { builtinMcp: false } })
+    await harness.sessionStart(true)
+
+    expect(harness.nativeRegistered).toEqual([])
+    expect(harness.toolNames()).toEqual(['blocked_go'])
+  })
+
+  it('hands the servers to pi when the session runs in the launch directory and no policy is set (MCPN-001)', async () => {
+    const dir = projectDir()
+    vi.spyOn(process, 'cwd').mockReturnValue(dir)
+    const harness = await setup({ cwd: dir, user: { srv: { command: 'node' } }, native: { builtinMcp: true } })
+    await harness.sessionStart(true)
+
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['srv'])
+    expect(harness.commandNames()).not.toContain('mcp')
+  })
+
   it("publishes pi's mcp__ tools on the roster hooks and subagents read, once they connect (MCPN-008)", async () => {
     // pi registers a server's tools when it connects, after session_start.
     const piTools: string[] = []
