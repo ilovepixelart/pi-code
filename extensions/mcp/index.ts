@@ -651,14 +651,16 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // stays with the local (user-side) definition, so the project's entry is dropped
     // here rather than allowed to shadow it.
     const localNames = localScopeServerNames(os.homedir(), ctx.cwd)
+    const consentedNamed = Object.entries(consentedRaw).filter(([name]) => !localNames.has(name))
+    // Claude: in an interactive session it "asks you before connecting" the .mcp.json
+    // servers of a folder whose trust is not settled, the user's own consent included;
+    // only a headless run connects them without asking. Declined, none of them connect.
+    const approved = projectApproved || (ctx.hasUI && !projectConnected && consentedNamed.length > 0 && (await isProjectApproved(ctx)))
+    const interactivelyRefused = ctx.hasUI && !approved
     // Claude: until the folder is trusted, a project server connects with its static
     // headers alone. Consenting to the server is not consenting to run the command it
     // ships, so the helper is dropped (and named once) while the project is unapproved.
-    const consented = Object.fromEntries(
-      Object.entries(consentedRaw)
-        .filter(([name]) => !localNames.has(name))
-        .map(([name, config]) => [name, projectApproved ? config : withoutUntrustedHelper(name, config)]),
-    )
+    const consented = Object.fromEntries(interactivelyRefused ? [] : consentedNamed.map(([name, config]) => [name, approved ? config : withoutUntrustedHelper(name, config)]))
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     // The consented project servers carry no ordering dependency on the user scope:
@@ -672,8 +674,9 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     await Promise.all(connects)
     // A project .mcp.json can run arbitrary commands on connect, so only honor it once
     // the project is trusted. Per-server settings refine that: disabled servers never
-    // connect, servers the user consented to individually connected above without the
-    // whole-project confirm, and the rest stay behind it, sequentially after both
+    // connect, servers the user consented to individually connected above (headless:
+    // without the whole-project confirm; interactive: once it was approved before any
+    // connect), and the rest stay behind it, sequentially after both
     // scopes so the confirm dialog never races a connect.
     if (!projectConnected) projectConnected = await connectGatedProjectServers(ctx, gated, authUi)
   }
