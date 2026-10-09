@@ -595,6 +595,7 @@ export default function statusLine(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     clearInterval(refreshTimer)
     clearTimeout(debounceTimer)
+    clearTimeout(expiryTimer)
     // pi's CLI loads a fresh extension instance for every session replacement, so no later
     // session_start reaches this watcher: left armed, it polls for the life of the process.
     disposeSettingsWatch()
