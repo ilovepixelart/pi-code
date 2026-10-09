@@ -68,7 +68,8 @@ export type ServerConfig = StdioServerConfig | HttpServerConfig
  * shell's `:-`, which substitutes when the variable is unset OR empty. */
 export function interpolateEnv(value: string, env: NodeJS.ProcessEnv = process.env, onMissing?: (name: string) => void): string {
   return value.replace(/\$\{(\w+)(:-([^}]*))?\}/g, (fullMatch, name, hasDefault, fallback) => {
-    const current = env[name]
+    // Own properties only: env[name] would read Object.prototype for ${toString}.
+    const current = Object.hasOwn(env, name) ? env[name] : undefined
     if (hasDefault !== undefined) return current || fallback
     if (current === undefined) {
       // A referenced variable with no value and no default: keep the literal ${VAR} and
