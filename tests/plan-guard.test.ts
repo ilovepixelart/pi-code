@@ -36,9 +36,18 @@ describe('isSafeCommand judges the command, not every word of it', () => {
     ['stderr discarded', 'find . -name "*.ts" 2>/dev/null | head'],
     ['stderr merged into stdout', 'ls x 2>&1'],
     ['both streams discarded', 'ls &>/dev/null'],
+    ['stdout discarded at the end of the command', 'cat notes.txt >/dev/null'],
     ['a directory change before a read', 'cd src && ls'],
   ])('allows %s', (_label, command) => {
     expect(isSafeCommand(command)).toBe(true)
+  })
+
+  // A path that only starts with /dev/null is a file of its own: the redirect writes it.
+  it.each([
+    ['a file named after /dev/null', 'cat notes.txt >/dev/nullx'],
+    ['a numbered sibling of /dev/null', 'echo hi >/dev/null2'],
+  ])('blocks a redirect onto %s', (_label, command) => {
+    expect(isSafeCommand(command)).toBe(false)
   })
 
   it.each([

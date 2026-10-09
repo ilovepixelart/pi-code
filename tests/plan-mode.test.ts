@@ -826,7 +826,10 @@ describe('execution mode stall exit', () => {
     await s.emit('turn_end', { message: assistant('[DONE:2]') })
     await s.emit('agent_end', { messages: [] })
 
-    expect(await s.emit('before_agent_start')).toBeDefined()
+    const context = executionContext(await s.emit('before_agent_start'))
+    expect(context).toContain('3. Third step')
+    expect(context).not.toContain('1. First step')
+    expect(context).not.toContain('2. Second step')
   })
 })
 
