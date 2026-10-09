@@ -5,7 +5,7 @@
  * When enabled, only read-only tools are available.
  *
  * Features:
- * - /plan command or Ctrl+Alt+P to toggle
+ * - /plan [description] to enter (and start a task), Ctrl+Alt+P to toggle
  * - Bash restricted to allowlisted read-only commands
  * - Extracts numbered plan steps from "Plan:" sections
  * - [DONE:n] markers to complete steps during execution
@@ -175,7 +175,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   /** Models regularly drop or renumber a [DONE:n] marker; without a bounded exit the
-   * stale plan would be injected into every later turn until the user finds /plan. */
+   * stale plan would be injected into every later turn until the user turns plan mode off. */
   function endStalledExecution(ctx: ExtensionContext): void {
     const remaining = todoItems
       .filter((t) => !t.completed)
@@ -240,8 +240,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand('plan', {
-    description: 'Toggle plan mode (read-only exploration)',
-    handler: async (_args, ctx) => togglePlanMode(ctx),
+    description: 'Enter plan mode; an optional description starts that task (leave with Ctrl+Alt+P or by executing the plan)',
+    handler: async (args, ctx) => {
+      if (!planModeEnabled) togglePlanMode(ctx)
+      const task = args.trim()
+      // A bare send throws (and is silently swallowed) while the agent is streaming.
+      if (task) pi.sendUserMessage(task, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
+    },
   })
 
   pi.registerTool({
@@ -286,7 +291,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     if (!PLAN_MODE_TOOLS.includes(event.toolName)) {
       return {
         block: true,
-        reason: `Plan mode: tool blocked (read-only mode). Use /plan to disable plan mode first.\nTool: ${event.toolName}`,
+        reason: `Plan mode: tool blocked (read-only mode). Press Ctrl+Alt+P to leave plan mode first.\nTool: ${event.toolName}`,
       }
     }
     if (event.toolName !== 'bash') return
@@ -295,7 +300,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     if (!isSafeCommand(command)) {
       return {
         block: true,
-        reason: `Plan mode: command blocked (not allowlisted). Use /plan to disable plan mode first.\nCommand: ${command}`,
+        reason: `Plan mode: command blocked (not allowlisted). Press Ctrl+Alt+P to leave plan mode first.\nCommand: ${command}`,
       }
     }
   })

@@ -13,13 +13,13 @@ Read-only exploration mode for safe code analysis.
 
 ## Commands
 
-- `/plan` - Toggle plan mode
+- `/plan [description]` - Enter plan mode; a description (`/plan fix the auth bug`) is sent as the first prompt. Running it while plan mode is on keeps it on
 - `/plan-todos` - Show current plan progress
-- `Ctrl+Alt+P` - Toggle plan mode (shortcut)
+- `Ctrl+Alt+P` - Toggle plan mode (shortcut); the way to leave plan mode without executing a plan
 
 ## Usage
 
-1. Enable plan mode with `/plan` or `--plan` flag
+1. Enable plan mode with `/plan`, `/plan <task>`, `Ctrl+Alt+P` or the `--plan` flag
 2. Ask the agent to analyze code and create a plan
 3. The agent calls `plan_mode_complete` with the finished plan. If it writes prose instead, a numbered plan under a `Plan:` header is still picked up:
 

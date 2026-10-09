@@ -250,7 +250,7 @@ sleep 1
 
 send "/plan" Enter
 if wait_for '⏸ plan' 15; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
-send "/plan" Enter
+send C-M-p
 if wait_for_absent '⏸ plan' 20; then ok "plan-mode: badge off"; else bad "plan-mode: badge stuck"; fi
 
 send "/rewind" Enter
@@ -449,7 +449,7 @@ if wait_for 'Plan mode - what next|Plan Steps' 240; then
 else
   bad "plan-mode: review prompt missing"
 fi
-send "/plan" Enter
+send C-M-p
 sleep 2
 
 # --- Second session: persistence checks -----------------------------------------------
