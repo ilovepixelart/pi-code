@@ -2726,6 +2726,19 @@ describe('project CLAUDE.md alternate location (./.claude/CLAUDE.md)', () => {
     expect(prompt).not.toContain('DOT CLAUDE RULES')
   })
 
+  it('skips a ./.claude/CLAUDE.md too large to read, with no block and no event', async () => {
+    // Over the 4 MiB context-file cap, so it is found but never read.
+    const cwd = tempDir()
+    const file = writeDotClaudeMd(cwd, 'x'.repeat(4 * 1024 * 1024 + 1))
+
+    const wired = wireWithBus()
+    await wired.start(approvingCtx(cwd))
+    const prompt = await wired.fire(cwd)
+
+    expect(prompt).toBe('BASE')
+    expect(wired.instructionEvents()).not.toContainEqual(expect.objectContaining({ file_path: file }))
+  })
+
   it('finds ./.claude/CLAUDE.md at the repository root from a subdirectory session, imports included', async () => {
     const repo = tempDir()
     mkdirSync(join(repo, '.git'))

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -132,6 +132,29 @@ describe('memory command', () => {
     expect(readFileSync(settingsFile(), 'utf-8')).toBe(invalid) // unchanged
     expect(notify.mock.calls[0][0]).toMatch(/not valid JSON/i)
     expect(notify.mock.calls[0][1]).toBe('error')
+  })
+
+  it('reports a settings.json that cannot be read instead of writing over it', async () => {
+    // A directory where the file belongs: the read fails with something other than ENOENT.
+    mkdirSync(settingsFile(), { recursive: true })
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-cwd-'))
+
+    const notify = await run('off', cwd)
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toMatch(/^Could not update auto memory: /)
+    expect(notify.mock.calls[0][1]).toBe('error')
+    expect(statSync(settingsFile()).isDirectory()).toBe(true)
+  })
+
+  it('lists the autoMemoryDirectory store from the user settings', async () => {
+    const store = mkdtempSync(join(tmpdir(), 'mem-store-'))
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(settingsFile(), JSON.stringify({ autoMemoryDirectory: store }))
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-cwd-'))
+
+    const text = (await run('', cwd)).mock.calls[0][0] as string
+    expect(text).toContain(`  Store:       ${store}\n`)
+    expect(text).toContain(`  Index:       ${join(store, INDEX_FILE)}\n`)
   })
 
   it('reads and writes settings under CLAUDE_CONFIG_DIR when it is set', async () => {

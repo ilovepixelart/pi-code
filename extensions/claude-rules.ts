@@ -43,6 +43,13 @@ function unquote(value: string): string {
   return value.replace(/^["']|["']$/g, '')
 }
 
+/** The brace nesting depth after `char`; an unmatched closing brace stays at zero. */
+function braceDepth(char: string, depth: number): number {
+  if (char === '{') return depth + 1
+  if (char === '}') return Math.max(0, depth - 1)
+  return depth
+}
+
 /** Split a YAML flow sequence on its top-level commas. A comma inside a brace group
  * (`*.{ts,tsx}`, which Claude expands) or inside quotes belongs to its entry, so
  * splitting on every comma produced patterns that match nothing. */
@@ -62,13 +69,12 @@ function splitInline(value: string): string[] {
       current += char
       continue
     }
-    if (char === '{') depth++
-    else if (char === '}') depth = Math.max(0, depth - 1)
-    else if (char === ',' && depth === 0) {
+    if (char === ',' && depth === 0) {
       entries.push(current)
       current = ''
       continue
     }
+    depth = braceDepth(char, depth)
     current += char
   }
   entries.push(current)
@@ -332,6 +338,23 @@ function rulesDisabled(): boolean {
   return process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1'
 }
 
+/** The project rules directory, or null when the project is not approved. Nearest
+ * at-or-above cwd, so a subdirectory session still reads the rules the approval walk
+ * gated on. Not the user's own rules dir: from $HOME (or under a dotfiles repo rooted
+ * there) the nearest one is ~/.claude/rules, which the global load already read. */
+function projectRulesDirFor(cwd: string, approved: boolean, globalRulesDir: string): string | null {
+  const nearestRulesDir = approved ? findNearestDir(cwd, path.join('.claude', 'rules')) : null
+  return nearestRulesDir !== null && sameLocation(nearestRulesDir, globalRulesDir) ? null : nearestRulesDir
+}
+
+/** The session_start notice, or undefined when no rule loaded at all. */
+function rulesLoadedMessage(globalRules: RuleSet, projectRules: RuleSet): string | undefined {
+  const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
+  const projectCount = projectRules.inline.length + projectRules.scoped.length
+  if (!hasGlobal && projectCount === 0) return undefined
+  return `Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectCount}`
+}
+
 // Module level because the working list lives in each extension instance's closure.
 let pendingScopedRules = 0
 
@@ -363,12 +386,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     const excludeGlobs = readClaudeMdExcludes(claudeMdExcludeFiles(ctx.cwd, os.homedir(), approved), readManagedSettings())
     const isExcluded = (realPath: string): boolean => isExcludedPath(realPath, excludeGlobs, os.homedir())
     const globalRules = readRules(globalRulesDir, isExcluded)
-    // Nearest at-or-above cwd, so a subdirectory session still reads the rules the
-    // approval walk gated on.
-    // Not the user's own rules dir: from $HOME (or under a dotfiles repo rooted there)
-    // the nearest one is ~/.claude/rules, which the global load above already read.
-    const nearestRulesDir = approved ? findNearestDir(ctx.cwd, path.join('.claude', 'rules')) : null
-    const projectRulesDir = nearestRulesDir !== null && sameLocation(nearestRulesDir, globalRulesDir) ? null : nearestRulesDir
+    const projectRulesDir = projectRulesDirFor(ctx.cwd, approved, globalRulesDir)
     const projectRules = projectRulesDir ? readRules(projectRulesDir, isExcluded) : EMPTY_RULES
 
     // Global globs are relative to cwd; project globs to the project root (the dir
@@ -392,11 +410,8 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
       { title: 'Project Rules', rules: projectRules, base: projectRulesBase },
     ])
 
-    const hasGlobal = globalRules.inline.length > 0 || globalRules.scoped.length > 0
-    const projectCount = projectRules.inline.length + projectRules.scoped.length
-    if ((hasGlobal || projectCount > 0) && !rulesDisabled()) {
-      ctx.ui.notify(`Rules loaded: global ${hasGlobal ? 'yes' : 'no'}, project ${projectCount}`, 'info')
-    }
+    const loaded = rulesLoadedMessage(globalRules, projectRules)
+    if (loaded !== undefined && !rulesDisabled()) ctx.ui.notify(loaded, 'info')
   })
 
   pi.on('before_agent_start', (event) => {

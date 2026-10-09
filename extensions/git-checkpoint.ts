@@ -170,6 +170,17 @@ function findLastUserMessage(ctx: ExtensionContext): { entryId: string; prompt: 
   return undefined
 }
 
+/** The checkpoints recorded in the session, in entry order. */
+function storedCheckpoints(ctx: ExtensionContext): Checkpoint[] {
+  const stored: Checkpoint[] = []
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type !== 'custom' || entry.customType !== CUSTOM_TYPE) continue
+    const checkpoint = entry.data as Checkpoint | undefined
+    if (checkpoint?.entryId) stored.push(checkpoint)
+  }
+  return stored
+}
+
 function checkpointLabel(checkpoint: Checkpoint, index: number): string {
   const time = new Date(checkpoint.createdAt).toLocaleTimeString()
   const marker = checkpoint.ref ? '' : ' [no code snapshot]'
@@ -448,12 +459,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if (nothingChanged) {
       const head = await gitShadow(['rev-parse', 'HEAD'])
       if (head.code === 0) return publishRun(head.stdout.trim(), createdAt)
-      const empty = await commitShadow(['--allow-empty'])
-      if (empty.code !== 0) return undefined
-    } else {
-      const commit = await commitShadow([])
-      if (commit.code !== 0) return undefined // real failure: do not record a stale ref
     }
+    const commit = await commitShadow(nothingChanged ? ['--allow-empty'] : [])
+    if (commit.code !== 0) return undefined // real failure: do not record a stale ref
     const sha = await gitShadow(['rev-parse', 'HEAD'])
     return sha.code === 0 ? publishRun(sha.stdout.trim(), createdAt) : undefined
   }
@@ -526,15 +534,9 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     touched.clear()
     for (const rel of await committedPaths()) touched.add(path.resolve(ctx.cwd, rel))
     checkpoints.clear()
-    const stored: Checkpoint[] = []
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type !== 'custom' || entry.customType !== CUSTOM_TYPE) continue
-      const checkpoint = entry.data as Checkpoint | undefined
-      if (checkpoint?.entryId) stored.push(checkpoint)
-    }
     // The same cap the append path enforces: a resumed long session must not
     // rebuild a rewind list beyond the per-session limit.
-    for (const checkpoint of capCheckpoints(stored)) checkpoints.set(checkpoint.entryId, checkpoint)
+    for (const checkpoint of capCheckpoints(storedCheckpoints(ctx))) checkpoints.set(checkpoint.entryId, checkpoint)
   })
 
   // A --no-session run has no session file, so nothing can ever resume it or run
