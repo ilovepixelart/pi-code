@@ -291,7 +291,9 @@ describe('FileOAuthProvider.invalidateCredentials', () => {
 
     await provider.invalidateCredentials('discovery')
 
-    expect(new FileOAuthProvider('linear', () => {}).tokens()).toBeDefined()
+    const reloaded = new FileOAuthProvider('linear', () => {})
+    expect(reloaded.tokens()).toEqual({ access_token: 'at-1', token_type: 'bearer', refresh_token: 'rt-1' })
+    expect(reloaded.clientInformation()).toEqual({ client_id: 'cid-1' })
   })
 })
 
