@@ -3018,6 +3018,34 @@ describe('hooks suppressOriginalPrompt', () => {
     return ext
   }
 
+  // Claude: continue false "stops processing entirely after the hook runs", ahead of any
+  // decision field; one hook asking to stop is not outvoted by another hook's block, the
+  // rule PreToolUse and PostToolUse already follow.
+  it('stops on one Stop hook continue:false even when another Stop hook blocks', async () => {
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'halt' }, { command: 'push-on' }] }] })
+    script('halt', { stdout: ['{"continue":false,"stopReason":"budget spent"}'] })
+    script('push-on', { stdout: ['{"decision":"block","reason":"keep going"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    await ext.agentEnd([{ role: 'assistant', content: 'done' }])
+
+    expect(ext.sent).toEqual([])
+    expect(ext.notes.at(-1)?.msg).toContain('budget spent')
+  })
+
+  it('stops on a Stop hook continue:false with no stopReason, beside another hook blocking', async () => {
+    writeSettings(hoisted.home, 'settings.json', { Stop: [{ hooks: [{ command: 'halt' }, { command: 'push-on' }] }] })
+    script('halt', { stdout: ['{"continue":false}'] })
+    script('push-on', { stdout: ['{"decision":"block","reason":"keep going"}'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+
+    await ext.agentEnd([{ role: 'assistant', content: 'done' }])
+
+    expect(ext.sent).toEqual([])
+  })
+
   it('honors continue:false over a Stop hook decision, showing its stopReason', async () => {
     // Claude: continue "takes precedence over any event-specific decision fields", and
     // stopReason is the "message shown to the user when continue is false". A hook that

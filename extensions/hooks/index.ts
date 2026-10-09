@@ -178,21 +178,21 @@ const MODEL_SELECT_SOURCE: Record<string, string> = { set: 'command', cycle: 'pi
 
 /** One Stop hook result read as a verdict. Claude: `continue` "takes precedence over any
  * event-specific decision fields", and stopReason is the message shown when it is false,
- * so a hook asking to stop wins over its own block whatever exit code carried it. Any
+ * so a hook asking to stop wins over its own block, and over any other hook's, whatever exit code carried it. Any
  * blocking spelling counts, including the prompt and agent hook reply schemas, and a
  * non-error additionalContext feeds back the same way so the block cap still bounds it. */
-function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: boolean; reason: string } {
+function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: boolean; reason: string; stop: boolean } {
   const parsed = tryParseJson(result.stdout)
   if (parsed?.continue === false) {
     if (parsed.stopReason) stopMessages.push(String(parsed.stopReason))
-    return { block: false, reason: '' }
+    return { block: false, reason: '', stop: true }
   }
-  if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook') }
+  if (result.code === 2) return { block: true, reason: jsonBlockVerdict(parsed, 'Stop blocked by hook')?.reason ?? (result.stderr.trim() || 'Stop blocked by hook'), stop: false }
   const verdict = jsonBlockVerdict(parsed, 'Stop blocked by hook')
-  if (verdict) return { block: true, reason: verdict.reason }
+  if (verdict) return { block: true, reason: verdict.reason, stop: false }
   const context = parsed?.hookSpecificOutput?.additionalContext
-  if (typeof context === 'string' && context.length > 0) return { block: true, reason: context }
-  return { block: false, reason: '' }
+  if (typeof context === 'string' && context.length > 0) return { block: true, reason: context, stop: false }
+  return { block: false, reason: '', stop: false }
 }
 
 /**
@@ -767,10 +767,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     const stopMessages: string[] = []
-    const block = results
-      .filter((result) => !result.timedOut)
-      .map((result) => stopVerdict(result, stopMessages))
-      .find((verdict) => verdict.block)
+    const verdicts = results.filter((result) => !result.timedOut).map((result) => stopVerdict(result, stopMessages))
+    const block = verdicts.some((verdict) => verdict.stop) ? undefined : verdicts.find((verdict) => verdict.block)
     for (const message of stopMessages) ctx.ui.notify(message, 'warning')
     if (!block) {
       // A non-blocking Stop breaks the streak: the next block starts a fresh count.
