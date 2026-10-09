@@ -168,6 +168,35 @@ export function spawnChild(command: string, args: string[], options: { cwd: stri
   }
 }
 
+/** One line of the child's JSON event stream, or undefined for a blank line, a line
+ * that is not JSON, or an event that carries no message. */
+function parseEventLine(line: string): { type?: string; message?: unknown } | undefined {
+  if (!line.trim()) return undefined
+  let event: { type?: string; message?: unknown }
+  try {
+    event = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+
+  if (!event.message) return undefined
+  return event
+}
+
+export function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefined): void {
+  if (!tmpPrompt) return
+  try {
+    fs.unlinkSync(tmpPrompt.filePath)
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.rmdirSync(tmpPrompt.dir)
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function runSingleAgent(options: RunAgentOptions): Promise<SingleResult> {
   const agent = options.agents.find((a) => a.name === options.agentName)
   if (!agent) return runSingleAgentInner(options)
@@ -200,23 +229,25 @@ export async function runSingleAgent(options: RunAgentOptions): Promise<SingleRe
   }
 }
 
+function unknownAgentResult(agents: AgentConfig[], agentName: string, task: string, step: number | undefined): SingleResult {
+  const available = agents.map((a) => `"${a.name}"`).join(', ') || 'none'
+  return {
+    agent: agentName,
+    agentSource: 'unknown',
+    task,
+    exitCode: 1,
+    messages: [],
+    stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    step,
+  }
+}
+
 async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResult> {
   const { defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails } = options
   const agent = agents.find((a) => a.name === agentName)
 
-  if (!agent) {
-    const available = agents.map((a) => `"${a.name}"`).join(', ') || 'none'
-    return {
-      agent: agentName,
-      agentSource: 'unknown',
-      task,
-      exitCode: 1,
-      messages: [],
-      stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-      step,
-    }
-  }
+  if (!agent) return unknownAgentResult(agents, agentName, task, step)
 
   const runCwd = cwd ?? defaultCwd
   // Claude's isolation: worktree gives the child an isolated copy of the repository.
@@ -252,8 +283,7 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   // --setting-sources; a child pi process has to be handed them.
   args.push(...cliSettings().forwardArgs)
 
-  let tmpPromptDir: string | null = null
-  let tmpPromptPath: string | null = null
+  let tmpPrompt: { dir: string; filePath: string } | undefined
 
   const currentResult: SingleResult = {
     agent: agentName,
@@ -279,12 +309,10 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
   try {
     const promptBody = childPromptBody(agent, options.skillRoots ?? [], memorySection)
     if (promptBody.trim()) {
-      const tmp = await writePromptToTempFile(agent.name, promptBody)
-      tmpPromptDir = tmp.dir
-      tmpPromptPath = tmp.filePath
+      tmpPrompt = await writePromptToTempFile(agent.name, promptBody)
       // Claude: the agent body IS the subagent's system prompt, replacing the
       // default, not an addition to it (--system-prompt reads a file path too).
-      args.push('--system-prompt', tmpPromptPath)
+      args.push('--system-prompt', tmpPrompt.filePath)
     }
 
     args.push(taskWithStartContext(task, options.startContexts ?? []))
@@ -306,31 +334,26 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
       let buffer = ''
       let assistantTurns = 0
 
-      const processLine = (line: string) => {
-        if (!line.trim()) return
-        let event: { type?: string; message?: unknown }
-        try {
-          event = JSON.parse(line)
-        } catch {
-          return
+      const onAssistantTurn = (msg: AssistantMessage) => {
+        accumulateAssistantMessage(currentResult, msg)
+        assistantTurns++
+        // Claude's maxTurns cap: end the child at the turn boundary once it has
+        // produced its Nth turn, so the collected output is kept and no turn is
+        // cut; the returned output is marked partial, as Claude documents.
+        if (agent.maxTurns && assistantTurns >= agent.maxTurns) {
+          currentResult.partial = true
+          killGroup('SIGTERM')
         }
+      }
 
-        if (!event.message) return
+      const processLine = (line: string) => {
+        const event = parseEventLine(line)
+        if (!event) return
 
         if (event.type === 'message_end') {
           const msg = event.message as Message
           currentResult.messages.push(msg)
-          if (msg.role === 'assistant') {
-            accumulateAssistantMessage(currentResult, msg)
-            assistantTurns++
-            // Claude's maxTurns cap: end the child at the turn boundary once it has
-            // produced its Nth turn, so the collected output is kept and no turn is
-            // cut; the returned output is marked partial, as Claude documents.
-            if (agent.maxTurns && assistantTurns >= agent.maxTurns) {
-              currentResult.partial = true
-              killGroup('SIGTERM')
-            }
-          }
+          if (msg.role === 'assistant') onAssistantTurn(msg)
           emitUpdate()
         } else if (event.type === 'tool_result_end') {
           currentResult.messages.push(event.message as Message)
@@ -400,17 +423,6 @@ async function runSingleAgentInner(options: RunAgentOptions): Promise<SingleResu
     if (worktree && (await cleanupAgentWorktree(runCwd, worktree)) === 'kept') {
       appendWorktreeNote(currentResult, worktree)
     }
-    if (tmpPromptPath)
-      try {
-        fs.unlinkSync(tmpPromptPath)
-      } catch {
-        /* ignore */
-      }
-    if (tmpPromptDir)
-      try {
-        fs.rmdirSync(tmpPromptDir)
-      } catch {
-        /* ignore */
-      }
+    removeTmpPrompt(tmpPrompt)
   }
 }

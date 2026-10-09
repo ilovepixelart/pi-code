@@ -32,7 +32,7 @@ import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { activeBackgroundRuns, allBackgroundRuns, backgroundStatusText, cancelAllBackgroundRuns } from './background.ts'
 import { buildHookAgent, forkAgent, setKnownMcpAliases } from './child.ts'
 import { checkProjectAgentGate, type ModeContext, runBackgroundMode, runChainMode, runParallelMode, runSingleMode, wantsBackground } from './modes.ts'
-import { type SubagentMode, SubagentParams } from './params.ts'
+import { type MakeDetails, type SubagentMode, SubagentParams, type SubagentParamsStatic, type ToolResult } from './params.ts'
 import { agentsListText, backgroundCompletionText, cancelResultText, resumeResultText, tasksStatusText } from './registry-text.ts'
 import { getFinalOutput } from './render.ts'
 import { renderChainCall, renderChainResult, renderParallelCall, renderParallelResult, renderSingleCall, renderSingleResult } from './render-result.ts'
@@ -47,6 +47,68 @@ export { agentsListText, backgroundCompletionText, cancelResultText, resumeResul
 // where the tests and the tool itself have always reached for them.
 export { formatTokens, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.ts'
 export { getPiInvocation } from './run.ts'
+
+type CompletionSink = Parameters<typeof resumeResultText>[2]
+
+/** The answer to a resume, cancel or status request, which manage background runs
+ * instead of starting one; undefined for a request that runs an agent. */
+function backgroundRegistryResult(params: SubagentParamsStatic, pi: ExtensionAPI, notifyBackgroundCompletion: CompletionSink, makeDetails: MakeDetails): ToolResult | undefined {
+  if (params.resume) {
+    const onResumed = (run: { id: string; agent: string }): void => {
+      pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })
+    }
+    return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, onResumed) }], details: makeDetails('single')([]) }
+  }
+
+  if (params.cancel) {
+    return { content: [{ type: 'text', text: cancelResultText(params.cancel) }], details: makeDetails('single')([]) }
+  }
+
+  if (params.status) {
+    return { content: [{ type: 'text', text: backgroundStatusText() }], details: makeDetails('single')([]) }
+  }
+  return undefined
+}
+
+function invalidModeResult(agents: AgentConfig[], makeDetails: MakeDetails): ToolResult {
+  const available = agents.map((a) => `${a.name} (${a.source})`).join(', ') || 'none'
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
+      },
+    ],
+    details: makeDetails('single')([]),
+  }
+}
+
+function requestedModes(params: SubagentParamsStatic): { hasChain: boolean; hasTasks: boolean; modeCount: number } {
+  const hasChain = (params.chain?.length ?? 0) > 0
+  const hasTasks = (params.tasks?.length ?? 0) > 0
+  const hasSingle = Boolean(params.agent && params.task)
+  const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle)
+  return { hasChain, hasTasks, modeCount }
+}
+
+function gateModeOf(hasChain: boolean, hasTasks: boolean): SubagentMode {
+  if (hasChain) return 'chain'
+  if (hasTasks) return 'parallel'
+  return 'single'
+}
+
+function runForegroundMode(params: SubagentParamsStatic, mode: ModeContext): Promise<ToolResult> {
+  if (params.chain?.length) return runChainMode(params.chain, mode)
+  if (params.tasks?.length) return runParallelMode(params.tasks, mode)
+  if (params.agent && params.task) return runSingleMode(params.agent, params.task, params.cwd, mode)
+
+  // Unreachable: execute()'s modeCount guard returns unless exactly one of these three
+  // is set, and nothing between it and here touches params. It was a second copy of
+  // that guard's message, which no input could ever produce, so a reader had to work
+  // out for themselves that it was dead. Stated as the invariant it actually is, so a
+  // future edit that breaks it says so instead of printing a confusing refusal.
+  throw new Error('subagent: exactly one mode must be set here; the mode guard should have returned')
+}
 
 export default function subagentExtension(pi: ExtensionAPI) {
   // Claude's mcp__<server> tool patterns translate against the parent's MCP roster,
@@ -196,10 +258,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       const discovery = discoverAgents(ctx.cwd, agentScope)
       const agents = discovery.agents
 
-      const hasChain = (params.chain?.length ?? 0) > 0
-      const hasTasks = (params.tasks?.length ?? 0) > 0
-      const hasSingle = Boolean(params.agent && params.task)
-      const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle)
+      const { hasChain, hasTasks, modeCount } = requestedModes(params)
 
       const makeDetails =
         (mode: 'single' | 'parallel' | 'chain') =>
@@ -210,39 +269,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
           results,
         })
 
-      if (params.resume) {
-        const onResumed = (run: { id: string; agent: string }): void => {
-          pi.events.emit(SUBAGENT_CHANNEL, { phase: 'start', agentType: run.agent, agentId: run.id })
-        }
-        return { content: [{ type: 'text', text: resumeResultText(params.resume, params.task, notifyBackgroundCompletion, onResumed) }], details: makeDetails('single')([]) }
-      }
+      const registryResult = backgroundRegistryResult(params, pi, notifyBackgroundCompletion, makeDetails)
+      if (registryResult) return registryResult
 
-      if (params.cancel) {
-        return { content: [{ type: 'text', text: cancelResultText(params.cancel) }], details: makeDetails('single')([]) }
-      }
-
-      if (params.status) {
-        return { content: [{ type: 'text', text: backgroundStatusText() }], details: makeDetails('single')([]) }
-      }
-
-      if (modeCount !== 1) {
-        const available = agents.map((a) => `${a.name} (${a.source})`).join(', ') || 'none'
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
-            },
-          ],
-          details: makeDetails('single')([]),
-        }
-      }
+      if (modeCount !== 1) return invalidModeResult(agents, makeDetails)
 
       // Gate repo-controlled project agents before any run (background included).
-      let gateMode: SubagentMode = 'single'
-      if (hasChain) gateMode = 'chain'
-      else if (hasTasks) gateMode = 'parallel'
-      const gateResult = await checkProjectAgentGate(params, agents, ctx, discovery.projectAgentsDir, gateMode, makeDetails)
+      const gateResult = await checkProjectAgentGate(params, agents, ctx, discovery.projectAgentsDir, gateModeOf(hasChain, hasTasks), makeDetails)
       if (gateResult) return gateResult
 
       // Project skills only preload and project/local agent memory stores only load
@@ -269,16 +302,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
         onPhase: (phase, agentType, agentId, lastAssistantMessage) => pi.events.emit(SUBAGENT_CHANNEL, { phase, agentType, agentId, ...(lastAssistantMessage === undefined ? {} : { lastAssistantMessage }) }),
       }
 
-      if (params.chain?.length) return runChainMode(params.chain, mode)
-      if (params.tasks?.length) return runParallelMode(params.tasks, mode)
-      if (params.agent && params.task) return runSingleMode(params.agent, params.task, params.cwd, mode)
-
-      // Unreachable: the modeCount guard above returns unless exactly one of these three
-      // is set, and nothing between it and here touches params. It was a second copy of
-      // that guard's message, which no input could ever produce, so a reader had to work
-      // out for themselves that it was dead. Stated as the invariant it actually is, so a
-      // future edit that breaks it says so instead of printing a confusing refusal.
-      throw new Error('subagent: exactly one mode must be set here; the mode guard should have returned')
+      return runForegroundMode(params, mode)
     },
 
     renderCall(args, theme, _context) {
