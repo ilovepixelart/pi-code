@@ -25,7 +25,7 @@ import { setAgentRunner } from '../internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../internal/background-agents.ts'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.ts'
 import { isProjectApprovedSilently } from '../internal/project-approval.ts'
-import { sessionMailbox } from '../internal/session-mailbox.ts'
+import { sessionHasTurns, sessionMailbox } from '../internal/session-mailbox.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
 import { skillDirs } from '../skills.ts'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
@@ -67,9 +67,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
     // The stop event fires here too, so SubagentStop hooks see resumed runs end, and it
     // carries the run's final assistant text: docs/subagents.md states SubagentStop
     // receives last_assistant_message unconditionally, and a resumed run is no exception.
-    results.deliver((current) => {
+    results.deliver((current, startsTurn) => {
       current.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, lastAssistantMessage: run.output })
-      current.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+      current.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: startsTurn })
     })
   }
 
@@ -127,8 +127,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
       })
       return getFinalOutput(result.messages)
     })
-    results.attach(pi)
+    results.attach(pi, sessionHasTurns(ctx))
   })
+
+  pi.on('agent_start', () => results.markPrompted(pi))
 
   pi.on('session_shutdown', (event, ctx) => {
     results.detach(pi)

@@ -206,7 +206,7 @@ const commandCtx = (over: Record<string, unknown> = {}) => ({ ...trustedCtx, ui:
 /** Fires session_start as pi does before any tool runs: background completions are
  * delivered to the instance whose session is current, which starts there. */
 const startSession = async () => {
-  await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+  await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
   setAgentRunner(undefined)
 }
 
@@ -292,7 +292,7 @@ describe('agent hook runner', () => {
   })
 
   it('registers a runner on session_start that spawns a restricted subagent and returns its text', async () => {
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
     expect(hasAgentRunner()).toBe(true)
 
     const decision = '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"reads /etc"}}'
@@ -314,7 +314,7 @@ describe('agent hook runner', () => {
     // context: fork skill naming an agent must not become the way a repo-controlled agent
     // definition runs anyway, since project agents win a name clash.
     discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'reviewer' })], projectAgentsDir: null })
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => false, modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', isProjectTrusted: () => false, modelRegistry: { getAvailable: () => [] } })
     script('look', { stdout: [say('done')], exitCode: 0 })
 
     await runAgent({ prompt: 'look', agent: 'reviewer' })
@@ -324,7 +324,7 @@ describe('agent hook runner', () => {
 
   it('resolves a named agent across both scopes once the project is approved', async () => {
     discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ name: 'reviewer' })], projectAgentsDir: null })
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
     script('look', { stdout: [say('done')], exitCode: 0 })
 
     await runAgent({ prompt: 'look', agent: 'reviewer' })
@@ -339,7 +339,7 @@ describe('agent hook runner', () => {
     fs.mkdirSync(join(osHoisted.home, '.claude', 'skills', 'house-style'), { recursive: true })
     fs.writeFileSync(join(osHoisted.home, '.claude', 'skills', 'house-style', 'SKILL.md'), '---\nname: house-style\ndescription: style\n---\nUSE TABS')
     discoverAgentsMock.mockReturnValue({ agents: [{ ...agentConfig({ name: 'reviewer', systemPrompt: 'Review.' }), skills: ['house-style'] }], projectAgentsDir: null })
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
     script('look', { stdout: [say('done')], exitCode: 0 })
 
     try {
@@ -353,7 +353,7 @@ describe('agent hook runner', () => {
   })
 
   it('refuses to run inside a subagent session', async () => {
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
     const saved = process.env.PI_CODE_SUBAGENT
     process.env.PI_CODE_SUBAGENT = '1'
     try {
@@ -676,7 +676,7 @@ describe('background results after a session switch', () => {
   // (loader.js assertActive). A run outliving the session that launched it must reach the
   // session that is current when it finishes, never be dropped with the stale instance.
   const STALE = 'This extension ctx is stale after session replacement or reload.'
-  const sessionCtx = { cwd: '/repo', modelRegistry: { getAvailable: () => [] }, ui: { notify: () => {} } }
+  const sessionCtx = { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [] }, ui: { notify: () => {} } }
   const completion = { id: 'bg-1a2b3c4d', agent: 'scout', state: 'done', turns: 3, output: 'all clear' }
   const completionText = 'Background subagent run bg-1a2b3c4d (scout) done after 3 turns.\n\nall clear'
 
@@ -1371,7 +1371,7 @@ describe('agent roster', () => {
     expect(discoverAgentsMock).toHaveBeenCalledTimes(1)
 
     // A new session drops the cache, so an agent added between sessions shows up.
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
     await eventHandlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, trustedCtx)
     expect(discoverAgentsMock).toHaveBeenCalledTimes(2)
   })
@@ -1969,7 +1969,7 @@ describe('agent memory', () => {
     const repo = fs.mkdtempSync(join(tmpdir(), 'sa-seam-'))
     fs.mkdirSync(join(repo, '.git'))
     writeStore(agentMemoryDir('project', 'scout', repo, home), '- seam store\n')
-    await eventHandlers.get('session_start')?.({}, { cwd: repo, isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: repo, isProjectTrusted: () => true, modelRegistry: { getAvailable: () => [] } })
     script('inspect', { stdout: [say('ok')] })
 
     await runAgent({ prompt: 'inspect', agent: 'scout' })
@@ -2349,6 +2349,8 @@ describe('execute dispatch: resume and cancel arms', () => {
 
   it('resumes through the registry, emits the start phase, and notifies on completion', async () => {
     await startSession()
+    // A tool call runs inside a turn, so the session has had one by the time it completes.
+    await eventHandlers.get('agent_start')?.({}, {})
     resumeBackgroundRunMock.mockReturnValue('resumed')
     backgroundRunMock.mockReturnValue({ id: 'bg-1', agent: 'scout', state: 'running', turns: 0 })
 
@@ -2444,7 +2446,7 @@ describe('subagent children under the command-line flags', () => {
 
   it('hands a foreground child the --settings snapshot and the source list', async () => {
     flags()
-    await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
+    await eventHandlers.get('session_start')?.({}, { sessionManager: { getBranch: () => [] }, cwd: '/repo', modelRegistry: { getAvailable: () => [{ id: 'm1' }] } })
     script('inspect', { stdout: [say('ok')], exitCode: 0 })
     await runAgent({ prompt: 'inspect', model: 'fast-1' })
     expect(forwarded(piArgs(spawnCalls[0]))).toEqual(forward)

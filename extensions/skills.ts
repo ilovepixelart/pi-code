@@ -32,7 +32,7 @@ import { managedSettingsFile } from './internal/managed-settings.ts'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.ts'
 import { isProjectApprovedSilently } from './internal/project-approval.ts'
 import { ancestorDirs } from './internal/project-root.ts'
-import { sessionMailbox } from './internal/session-mailbox.ts'
+import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.ts'
 import { errorMessage, isDirectory, isRecord } from './internal/values.ts'
@@ -135,7 +135,8 @@ function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined 
 }
 
 export default function skillsExtension(pi: ExtensionAPI) {
-  pi.on('session_start', () => forkResults.attach(pi))
+  pi.on('session_start', (_event, ctx) => forkResults.attach(pi, sessionHasTurns(ctx)))
+  pi.on('agent_start', () => forkResults.markPrompted(pi))
   pi.on('session_shutdown', () => forkResults.detach(pi))
 
   pi.on('resources_discover', async (_event, ctx) => {
@@ -198,7 +199,7 @@ function startForkedSkill(ctx: ExtensionContext, fork: { name: string; filePath:
   runningForks.add(fork.name)
   ctx.ui.notify(`Skill ${fork.name} is running in a forked subagent in the background; its result arrives here when it completes.`, 'info')
   void runForkedSkill(fork.name, fork.filePath, fork.expanded, fork.agentName)
-    .then((result) => forkResults.deliver((current) => current.sendMessage({ customType: 'skill-fork', content: result.text, display: true }, { triggerTurn: true })))
+    .then((result) => forkResults.deliver((current, startsTurn) => current.sendMessage({ customType: 'skill-fork', content: result.text, display: true }, { triggerTurn: startsTurn })))
     .catch(() => {})
     .finally(() => runningForks.delete(fork.name))
   return { action: 'handled' }
