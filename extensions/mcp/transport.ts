@@ -241,6 +241,21 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   }
 }
 
+function warnIgnoredWebSocketAuth(name: string, config: HttpServerConfig): void {
+  if (config.headers || config.bearerToken || config.bearerTokenEnv || config.headersHelper) {
+    console.warn(`pi-code-mcp: server ${name} is a WebSocket server; the SDK ws transport is url-only, so its headers/bearerToken/headersHelper are ignored`)
+  }
+}
+
+/** The configured headers, interpolated, plus the bearer token as Authorization. */
+function staticHeaders(config: HttpServerConfig, fill: (value: string) => string): { headers: Record<string, string>; token: string | undefined } {
+  const headers: Record<string, string> = {}
+  for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = fill(value)
+  const token = resolveBearerToken(config)
+  if (token) headers.Authorization = `Bearer ${token}`
+  return { headers, token }
+}
+
 export async function connect(name: string, config: ServerConfig, authUi?: AuthUi, session?: SessionDirs): Promise<Client> {
   const client = makeClient(session)
   // Names referenced by ${VAR} with no value and no default, gathered across this
@@ -279,9 +294,7 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
     // 10s while contributing nothing). Divergence: Claude documents header auth as the
     // ws mechanism ("Authentication is header-only"); under pi an authenticated ws
     // server cannot be used until the SDK transport grows header support.
-    if (config.headers || config.bearerToken || config.bearerTokenEnv || config.headersHelper) {
-      console.warn(`pi-code-mcp: server ${name} is a WebSocket server; the SDK ws transport is url-only, so its headers/bearerToken/headersHelper are ignored`)
-    }
+    warnIgnoredWebSocketAuth(name, config)
     const transport = new WebSocketClientTransport(url)
     warnMissing()
     await connectWithTimeout(client, transport, `connect ${name} (ws)`)
@@ -292,10 +305,7 @@ export async function connect(name: string, config: ServerConfig, authUi?: AuthU
   if (config.oauth?.authServerMetadataUrl) {
     console.warn(`pi-code-mcp: server ${name} sets oauth.authServerMetadataUrl, which the MCP SDK cannot override; using standard discovery`)
   }
-  const headers: Record<string, string> = {}
-  for (const [key, value] of Object.entries(config.headers ?? {})) headers[key] = fill(value)
-  const token = resolveBearerToken(config)
-  if (token) headers.Authorization = `Bearer ${token}`
+  const { headers, token } = staticHeaders(config, fill)
   // A headersHelper generates connect-time headers for non-OAuth auth schemes; its
   // JSON stdout merges over the static headers. The command text is NOT interpolated:
   // Claude expands ${VAR} in command, args, env, url and headers, and expanding it here

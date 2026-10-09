@@ -319,6 +319,16 @@ describe('callback server', () => {
     server.close()
   })
 
+  it('rejects naming the missing code when the redirect carries neither a code nor an error', async () => {
+    const { server, port } = await startCallbackServer()
+    const pending = waitForAuthCode(server, 5000)
+    const assertion = expect(pending).rejects.toThrow(/^authorization failed: no code in redirect$/)
+    const response = await fetch(`http://127.0.0.1:${port}/callback`)
+    expect(response.status).toBe(200)
+    await assertion
+    server.close()
+  })
+
   it('rejects on timeout so a stalled login cannot hang the session forever', async () => {
     const { server } = await startCallbackServer()
     await expect(waitForAuthCode(server, 50)).rejects.toThrow(/timed out/i)

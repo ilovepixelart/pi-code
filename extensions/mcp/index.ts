@@ -34,7 +34,7 @@
 
 import * as fs from 'node:fs'
 import * as os from 'node:os'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { PromptListChangedNotificationSchema, ResourceListChangedNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
@@ -50,7 +50,7 @@ import { errorMessage } from '../internal/values.ts'
 import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, flagScopeServers, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.ts'
 import { collectServerResourceEntries, listAllPrompts, listAllTools, type McpToolInfo, resourceServerFilter } from './listing.ts'
 import { formatPromptCommandName, formatToolName, type McpContentBlock, type McpPromptInfo, mapContent, mapPromptArguments, normalizeSchema, promptMessageContent } from './mapping.ts'
-import { nativeMode, nativeToolAliases, nativeToolPrefixes, piMcpRunning, toNativeServer } from './native.ts'
+import { type NativeServer, nativeMode, nativeToolAliases, nativeToolPrefixes, piMcpRunning, toNativeServer } from './native.ts'
 import { applyServerPolicy, loadManagedMcpServers, type McpPolicy, mcpAllowDeny, projectServerPolicy, splitByPolicy } from './policy.ts'
 import { type AuthUi, callRequestOptions, callTimeoutMs, connect, connectTimeoutMs, connectWithRetries, isConnectionLost, isUnauthorized, mcpConnectTimeoutMs, type ServerCallTuning, type SessionDirs, serverCallTuning, withTimeout } from './transport.ts'
 
@@ -82,6 +82,16 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
   return {
     confirm: (title, body) => ctx.ui.confirm(title, body),
     notify: (message, level) => ctx.ui.notify(message, level),
+  }
+}
+
+/** Create a plugin server's data directory before pi starts it. */
+function ensurePluginDataDir(config: ServerConfig): void {
+  if (config.pluginDataDir === undefined) return
+  try {
+    fs.mkdirSync(config.pluginDataDir, { recursive: true })
+  } catch {
+    // The server still starts; one that needs the directory reports its own failure.
   }
 }
 
@@ -292,6 +302,39 @@ export default function mcpExtension(pi: ExtensionAPI) {
   // `deploy-prod` and `deploy_prod`), mirroring `registered` for tools.
   const registeredPrompts = new Map<string, { server: string; prompt: string }>()
 
+  /** The body of a prompt's slash command: fetch the prompt from the server and drive a
+   * turn with its content, notifying instead of throwing on every failure. */
+  async function runPromptCommand(name: string, prompt: McpPromptInfo, commandName: string, args: string, ctx: ExtensionCommandContext): Promise<void> {
+    try {
+      // Resolve the live client at call time, not the one captured at registration:
+      // pi has no command unregister, so after a reconnect this closure must not keep
+      // calling the old, closed client (see registerTools for the same reason).
+      const current = clients.get(name)
+      if (!current) {
+        ctx.ui.notify(`${commandName}: MCP server "${name}" is not connected`, 'error')
+        return
+      }
+      const promptArgs = mapPromptArguments(prompt.arguments, args)
+      const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
+      if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
+      const wall = callTimeoutMs()
+      const result = await withTimeout(current.getPrompt(params, callRequestOptions(wall, callTuning(name))), wall, commandName)
+      // The prompt drives a turn exactly the way a custom slash command does
+      // (see commands.ts), carrying its image blocks through. A prompt that
+      // yields no content is reported rather than sent as an empty turn.
+      const content = promptMessageContent(result.messages)
+      if (content.length === 0) {
+        ctx.ui.notify(`${commandName}: prompt returned no content`, 'info')
+        return
+      }
+      // A bare send throws (and is silently swallowed) while the agent is
+      // streaming, so mid-stream invocations queue as a follow-up turn.
+      pi.sendUserMessage(content, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
+    } catch (error) {
+      ctx.ui.notify(`${commandName}: ${errorMessage(error)}`, 'error')
+    }
+  }
+
   /** Register a slash command for every not-yet-registered prompt of a server. pi has
    * no command unregister, so, like tools, a withdrawn prompt keeps its registration
    * and surfaces the server's own error when invoked; an edit to a prompt's declared
@@ -310,36 +353,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
       const base = prompt.description ?? `MCP prompt ${prompt.name} from ${name}`
       pi.registerCommand(commandName, {
         description: hint ? `${base} ${hint}` : base,
-        handler: async (args, ctx) => {
-          try {
-            // Resolve the live client at call time, not the one captured at registration:
-            // pi has no command unregister, so after a reconnect this closure must not keep
-            // calling the old, closed client (see registerTools for the same reason).
-            const current = clients.get(name)
-            if (!current) {
-              ctx.ui.notify(`${commandName}: MCP server "${name}" is not connected`, 'error')
-              return
-            }
-            const promptArgs = mapPromptArguments(prompt.arguments, args)
-            const params: { name: string; arguments?: Record<string, string> } = { name: prompt.name }
-            if (Object.keys(promptArgs).length > 0) params.arguments = promptArgs
-            const wall = callTimeoutMs()
-            const result = await withTimeout(current.getPrompt(params, callRequestOptions(wall, callTuning(name))), wall, commandName)
-            // The prompt drives a turn exactly the way a custom slash command does
-            // (see commands.ts), carrying its image blocks through. A prompt that
-            // yields no content is reported rather than sent as an empty turn.
-            const content = promptMessageContent(result.messages)
-            if (content.length === 0) {
-              ctx.ui.notify(`${commandName}: prompt returned no content`, 'info')
-              return
-            }
-            // A bare send throws (and is silently swallowed) while the agent is
-            // streaming, so mid-stream invocations queue as a follow-up turn.
-            pi.sendUserMessage(content, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
-          } catch (error) {
-            ctx.ui.notify(`${commandName}: ${errorMessage(error)}`, 'error')
-          }
-        },
+        handler: (args, ctx) => runPromptCommand(name, prompt, commandName, args, ctx),
       })
     }
   }
@@ -467,21 +481,26 @@ export default function mcpExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** The pi registration for a server, or undefined when pi-code's own client connects it. */
+  function nativeServerFor(name: string, config: ServerConfig): NativeServer | undefined {
+    // A malformed entry (a non-string arg or env value, no url) stays with pi-code's
+    // client, whose per-server connect reports it as failed without stopping the rest.
+    let translated: ReturnType<typeof toNativeServer>
+    try {
+      translated = toNativeServer(name, config, sessionDirs)
+    } catch {
+      return undefined
+    }
+    return 'native' in translated ? translated.native : undefined
+  }
+
   /** Hands every server pi can connect to pi.registerMcpServer and returns the rest, which
    * pi-code connects itself. */
   function registerWithPi(servers: Record<string, ServerConfig>): Record<string, ServerConfig> {
     const own: Record<string, ServerConfig> = {}
     for (const [name, config] of Object.entries(servers)) {
-      // A malformed entry (a non-string arg or env value, no url) stays with pi-code's
-      // client, whose per-server connect reports it as failed without stopping the rest.
-      let translated: ReturnType<typeof toNativeServer>
-      try {
-        translated = toNativeServer(name, config, sessionDirs)
-      } catch {
-        own[name] = config
-        continue
-      }
-      if (!('native' in translated)) {
+      const native = nativeServerFor(name, config)
+      if (!native) {
         own[name] = config
         continue
       }
@@ -489,20 +508,14 @@ export default function mcpExtension(pi: ExtensionAPI) {
       // a name keeps it, as connectServers keeps the first client (local over project). A
       // name pi-code's own client holds keeps it too: a server pi rejects (sse, a
       // headersHelper) stays here, and a later scope must not reach pi under it.
-      if (nativeRegistered.has(translated.native.name) || clients.has(name)) {
+      if (nativeRegistered.has(native.name) || clients.has(name)) {
         console.warn(`pi-code-mcp: skipping duplicate server name ${name}`)
         continue
       }
-      if (config.pluginDataDir !== undefined) {
-        try {
-          fs.mkdirSync(config.pluginDataDir, { recursive: true })
-        } catch {
-          // The server still starts; one that needs the directory reports its own failure.
-        }
-      }
+      ensurePluginDataDir(config)
       try {
-        pi.registerMcpServer(translated.native.name, translated.native.config)
-        nativeRegistered.add(translated.native.name)
+        pi.registerMcpServer(native.name, native.config)
+        nativeRegistered.add(native.name)
       } catch (error) {
         console.warn(`pi-code-mcp: pi did not accept server ${name} (${errorMessage(error)}); connecting it directly`)
         own[name] = config
@@ -626,6 +639,42 @@ export default function mcpExtension(pi: ExtensionAPI) {
     return rest as ServerConfig
   }
 
+  /** The plugin and user scope servers, policy applied, without the disabled ones and the
+   * names the flag scope defines. */
+  function userScopeServers(ctx: ExtensionContext, policy: McpPolicy, flagNames: Set<string>): Record<string, ServerConfig> {
+    // Plugin servers merge under the user scope (plugins are user-installed). Their keys
+    // are plugin:<plugin>:<server>, so a plugin server never shares a name with the user's. A server toggled off
+    // in ~/.claude.json's per-project disabledMcpServers list never connects.
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
+    const disabled = disabledServerNames(os.homedir(), ctx.cwd)
+    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name) && !flagNames.has(name)))
+    return applyServerPolicy(merged, policy)
+  }
+
+  /** The project scope servers, before policy and approval, without the names the flag
+   * scope defines. */
+  function projectScopeServers(ctx: ExtensionContext, flagNames: Set<string>): Record<string, ServerConfig> {
+    // Tag the scope on each project server: a repository-supplied headersHelper runs
+    // with credential variables stripped, unlike a user-scope one. Claude's
+    // --setting-sources without project reads no project .mcp.json, and .pi/mcp.json is
+    // the same kind of repository-supplied config.
+    const projectConfigFiles = nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)
+    const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(projectConfigFiles) : {}
+    return Object.fromEntries(
+      Object.entries(projectConfig)
+        .filter(([name]) => !flagNames.has(name))
+        .map(([name, config]) => [name, { ...config, projectScope: true }]),
+    )
+  }
+
+  /** The consented project servers to connect: none after an interactive refusal. */
+  function consentedToConnect(consentedNamed: Array<[string, ServerConfig]>, approved: boolean, interactivelyRefused: boolean): Record<string, ServerConfig> {
+    // Claude: until the folder is trusted, a project server connects with its static
+    // headers alone. Consenting to the server is not consenting to run the command it
+    // ships, so the helper is dropped (and named once) while the project is unapproved.
+    return Object.fromEntries(interactivelyRefused ? [] : consentedNamed.map(([name, config]) => [name, approved ? config : withoutUntrustedHelper(name, config)]))
+  }
+
   async function connectNormalScopes(ctx: ExtensionContext, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     // The --mcp-config servers outrank every other scope on a shared name (measured: a
     // flag server named like a .mcp.json one replaced it), and --strict-mcp-config leaves
@@ -639,13 +688,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
       return
     }
     const flagNames = new Set(Object.keys(validFlagServers))
-    // Plugin servers merge under the user scope (plugins are user-installed). Their keys
-    // are plugin:<plugin>:<server>, so a plugin server never shares a name with the user's. A server toggled off
-    // in ~/.claude.json's per-project disabledMcpServers list never connects.
-    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
-    const disabled = disabledServerNames(os.homedir(), ctx.cwd)
-    const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name) && !flagNames.has(name)))
-    const scoped = applyServerPolicy(merged, policy)
+    const scoped = userScopeServers(ctx, policy, flagNames)
     // Claude's precedence is project over user for a duplicate name. A project .mcp.json
     // server only outranks the user's own when it will actually connect (the user already
     // consented to it, or an approved project's), so a merely-present untrusted project
@@ -656,17 +699,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
     // the project only counts once the project itself has been approved.
     const projectApproved = isProjectApprovedSilently(ctx)
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), projectApproved)
-    // Tag the scope on each project server: a repository-supplied headersHelper runs
-    // with credential variables stripped, unlike a user-scope one. Claude's
-    // --setting-sources without project reads no project .mcp.json, and .pi/mcp.json is
-    // the same kind of repository-supplied config.
-    const projectConfigFiles = nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)
-    const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(projectConfigFiles) : {}
-    const projectServers = Object.fromEntries(
-      Object.entries(projectConfig)
-        .filter(([name]) => !flagNames.has(name))
-        .map(([name, config]) => [name, { ...config, projectScope: true }]),
-    )
+    const projectServers = projectScopeServers(ctx, flagNames)
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
@@ -678,10 +711,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
     // only a headless run connects them without asking. Declined, none of them connect.
     const approved = projectApproved || (ctx.hasUI && !projectConnected && consentedNamed.length > 0 && (await isProjectApproved(ctx)))
     const interactivelyRefused = ctx.hasUI && !approved
-    // Claude: until the folder is trusted, a project server connects with its static
-    // headers alone. Consenting to the server is not consenting to run the command it
-    // ships, so the helper is dropped (and named once) while the project is unapproved.
-    const consented = Object.fromEntries(interactivelyRefused ? [] : consentedNamed.map(([name, config]) => [name, approved ? config : withoutUntrustedHelper(name, config)]))
+    const consented = consentedToConnect(consentedNamed, approved, interactivelyRefused)
     const projectWinners = new Set(Object.keys(consented))
     const userServers = Object.fromEntries(Object.entries(scoped).filter(([name]) => !clients.has(name) && !projectWinners.has(name)))
     // The consented project servers carry no ordering dependency on the user scope:

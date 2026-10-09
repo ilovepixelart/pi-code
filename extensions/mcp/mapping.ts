@@ -82,9 +82,14 @@ function mergeCombinatorBranches(branches: unknown[]): { properties: Record<stri
     if (!branch || typeof branch !== 'object') continue
     const b = branch as Record<string, unknown>
     if (b.properties && typeof b.properties === 'object') Object.assign(properties, b.properties as Record<string, unknown>)
-    if (Array.isArray(b.required)) for (const name of b.required) if (typeof name === 'string') required.add(name)
+    addRequiredNames(required, b.required)
   }
   return { properties, required: [...required] }
+}
+
+/** Add the string entries of a branch's `required`, when it is an array, to the union. */
+function addRequiredNames(into: Set<string>, required: unknown): void {
+  if (Array.isArray(required)) for (const name of required) if (typeof name === 'string') into.add(name)
 }
 
 export function normalizeSchema(schema: unknown): object {
