@@ -368,3 +368,42 @@ describe('package manifest', () => {
     expect([...imported].filter((name) => !declared.has(name)).sort()).toEqual([])
   })
 })
+
+// A runtime import cycle works only while every value crossing it is used lazily: one
+// top-level use on either side and the module that loads second sees undefined. Type-only
+// imports are erased and do not count.
+describe('extension module graph', () => {
+  const runtimeImports = (file: string): string[] => {
+    const source = fs.readFileSync(file, 'utf-8')
+    const targets: string[] = []
+    for (const match of source.matchAll(/^(?:import|export)\s+(type\s+)?(?:\{([^}]*)\}|[^'"]*?)\s*from\s+'(\.[^']+)'/gm)) {
+      const [, typeOnly, names, target] = match
+      if (typeOnly) continue
+      if (names !== undefined && names.split(',').every((name) => name.trim() === '' || name.trim().startsWith('type '))) continue
+      targets.push(path.resolve(path.dirname(file), target))
+    }
+    return targets
+  }
+
+  it('has no runtime import cycle', () => {
+    const files = fs
+      .readdirSync(extensionsDir, { recursive: true, encoding: 'utf-8' })
+      .filter((entry) => entry.endsWith('.ts'))
+      .map((entry) => path.join(extensionsDir, entry))
+    const graph = new Map(files.map((file) => [file, runtimeImports(file)]))
+    const cycles: string[] = []
+    const state = new Map<string, 'visiting' | 'done'>()
+    const visit = (file: string, trail: string[]): void => {
+      if (state.get(file) === 'done') return
+      if (state.get(file) === 'visiting') {
+        cycles.push([...trail.slice(trail.indexOf(file)), file].map((f) => path.relative(extensionsDir, f)).join(' -> '))
+        return
+      }
+      state.set(file, 'visiting')
+      for (const next of graph.get(file) ?? []) visit(next, [...trail, file])
+      state.set(file, 'done')
+    }
+    for (const file of files) visit(file, [])
+    expect(cycles).toEqual([])
+  })
+})
