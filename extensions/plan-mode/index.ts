@@ -242,8 +242,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   pi.registerCommand('plan', {
     description: 'Enter plan mode; an optional description starts that task (leave with Ctrl+Alt+P or by executing the plan)',
     handler: async (args, ctx) => {
-      if (!planModeEnabled) togglePlanMode(ctx)
       const task = args.trim()
+      if (!planModeEnabled) togglePlanMode(ctx)
+      // Claude's wording with no plan yet; with one, only the first sentence applies.
+      else if (!task) ctx.ui.notify(todoItems.length > 0 ? 'Already in plan mode.' : 'Already in plan mode. No plan written yet.', 'info')
       // A bare send throws (and is silently swallowed) while the agent is streaming.
       if (task) pi.sendUserMessage(task, ctx.isIdle() ? {} : { deliverAs: 'followUp' })
     },
