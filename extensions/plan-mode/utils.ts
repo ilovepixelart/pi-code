@@ -131,11 +131,13 @@ function withoutQuoted(segment: string): string {
   let quote: Quote | undefined
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]
-    const opened = quote === undefined ? quoteOpensAt(segment, i) : undefined
     if (quote !== undefined) {
       if (ch === '\\' && quoteEscapes(quote)) i++
       else if (ch === quoteCloser(quote)) quote = undefined
-    } else if (opened !== undefined) {
+      continue
+    }
+    const opened = quoteOpensAt(segment, i)
+    if (opened !== undefined) {
       quote = opened.quote
       i += opened.length - 1
     } else if (ch === '\\') {

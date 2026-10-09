@@ -170,6 +170,10 @@ describe('parseCommandFile', () => {
     expect(parseCommandFile('---\nmodel: 3.5\n---\nB.').model).toBe('3.5')
   })
 
+  it('reads a grant list with a non-string member as no grant', () => {
+    expect(parseCommandFile('---\nallowed-tools: [Bash, 3]\n---\nBody.').allowedTools).toBeUndefined()
+  })
+
   it('keeps an explicitly empty grant distinct from an absent one', () => {
     // `[]` says no tools and must stay a restriction; no key at all is no restriction.
     expect(parseCommandFile('---\nallowed-tools: []\n---\nBody.').allowedTools).toEqual([])

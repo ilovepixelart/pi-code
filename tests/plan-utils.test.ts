@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { planToTodos } from '../extensions/plan-mode/utils.ts'
+import { planToTodos, restoredPlanState } from '../extensions/plan-mode/utils.ts'
 
 describe('planToTodos', () => {
   it('parses a numbered plan without requiring a Plan: header', () => {
@@ -24,5 +24,11 @@ describe('planToTodos', () => {
     // the header and drop every earlier step.
     const todos = planToTodos('1. Read the config loader\n2. Revise the deployment plan:\n3. Update the tests')
     expect(todos).toHaveLength(3)
+  })
+})
+
+describe('restoredPlanState', () => {
+  it('drops a todo list holding a member that is not an object', () => {
+    expect(restoredPlanState({ todos: [{ step: 1, text: 'Read', completed: false }, null] })).toEqual({})
   })
 })

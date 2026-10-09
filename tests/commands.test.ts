@@ -204,6 +204,18 @@ describe('commands extension', () => {
     expect(s.sent).toEqual(['Build web now.'])
   })
 
+  it('registers a command once when a later session start discovers it again', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'build.md', 'Build it.')
+    const s = setup(cwd)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    const register = vi.spyOn(s.commands, 'set')
+
+    await s.handlers.get('session_start')?.({}, s.ctx)
+
+    expect(register).not.toHaveBeenCalled()
+  })
+
   it('leaves ${user_config.*} literal in an ordinary (non-plugin) command', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'deploy.md', 'token is ${user_config.token}')

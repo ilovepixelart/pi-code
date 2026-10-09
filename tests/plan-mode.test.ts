@@ -328,6 +328,12 @@ describe('stale plan context filtering', () => {
     expect(result.messages[0].content).toBe('a real question')
   })
 
+  it('keeps a user message that carries no text content', async () => {
+    const s = setup()
+    const result = (await s.emit('context', { messages: [{ role: 'user', content: undefined }] })) as { messages: unknown[] }
+    expect(result.messages).toHaveLength(1)
+  })
+
   it('leaves the context untouched while plan mode is on', async () => {
     const s = setup()
     await s.runCommand('plan')
