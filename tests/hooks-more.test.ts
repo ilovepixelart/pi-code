@@ -212,6 +212,7 @@ const setupExtension = () => {
     toolCall: (toolName: string, input: unknown, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_call')({ toolName, input, toolCallId }, { ...defaultCtx, ...ctxOverride }),
     toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}, ctxOverride: Record<string, unknown> = {}) =>
       handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, { ...defaultCtx, ...ctxOverride }),
+    toolExecutionEnd: (toolName: string, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_execution_end')({ type: 'tool_execution_end', toolCallId, toolName, result: {}, isError: true }, { ...defaultCtx, ...ctxOverride }),
     userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
     input: (text: string, source = 'interactive', streamingBehavior?: 'steer' | 'followUp') => handler('input')({ text, source, streamingBehavior }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
@@ -785,7 +786,7 @@ describe('malformed hook config', () => {
 
 describe('hooks extension registration', () => {
   it('subscribes to the lifecycle events it bridges', () => {
-    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_result', 'user_bash', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'model_select', 'session_shutdown'])
+    expect(setupExtension().registered).toEqual(['session_start', 'before_agent_start', 'tool_call', 'tool_execution_end', 'tool_result', 'user_bash', 'input', 'agent_end', 'session_before_compact', 'session_compact', 'model_select', 'session_shutdown'])
   })
 })
 
@@ -1051,6 +1052,28 @@ describe('hooks extension tool_call', () => {
     expect(await ext.toolCall('bash', { command: 'make' }, 't1', { abort })).toBeUndefined()
     expect(abort).not.toHaveBeenCalled()
     await ext.toolResult('bash', { input: { command: 'make' } }, { abort })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
+  })
+
+  // pi asks extensions in load order and the first block wins; a call another extension
+  // blocks (plan mode, a later guard) never reaches tool_result, but pi still emits
+  // tool_execution_end for it (pi-agent-core agent-loop, the "immediate" path).
+  it('stops the run on a lone continue false when a later extension blocks the call', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed' })], code: 0 })
+    const abort = vi.fn()
+    expect(await ext.toolCall('bash', { command: 'make' }, 't1', { abort })).toBeUndefined()
+    await ext.toolExecutionEnd('bash', 't1', { abort })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
+  })
+
+  it('stops the run once, not again at tool_execution_end, when the call ran', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed' })], code: 0 })
+    const abort = vi.fn()
+    await ext.toolCall('bash', { command: 'make' }, 't1', { abort })
+    await ext.toolResult('bash', { input: { command: 'make' } }, { abort })
+    await ext.toolExecutionEnd('bash', 't1', { abort })
     expect(abort).toHaveBeenCalledTimes(1)
     expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
   })

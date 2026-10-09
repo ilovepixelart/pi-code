@@ -572,6 +572,17 @@ export default function hooksExtension(pi: ExtensionAPI) {
     return blockedToolCall(decision.reason)
   })
 
+  // A call these hooks allowed can still be blocked by a later extension (the first block
+  // wins), and a blocked call never reaches tool_result. pi emits tool_execution_end for
+  // every call, after tool_result for one that ran, so a stop still pending here belongs
+  // to a call that never ran.
+  pi.on('tool_execution_end', (event, ctx) => {
+    const reason = pendingStops.get(event.toolCallId)
+    if (reason === undefined) return
+    pendingStops.delete(event.toolCallId)
+    stopRun(ctx, reason)
+  })
+
   // Claude's PostToolUse (success) and PostToolUseFailure (error) both feed their
   // hook's output back next to the tool result: a decision:block reason (or exit-2
   // stderr) and additionalContext are appended, which is where Claude documents they
