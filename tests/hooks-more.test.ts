@@ -210,8 +210,8 @@ const setupExtension = () => {
     sessionStartWithLiveCtx: (reason: string, ctx: Record<string, unknown>) => handler('session_start')({ reason }, ctx),
     defaultCtx,
     toolCall: (toolName: string, input: unknown, toolCallId = 't1', ctxOverride: Record<string, unknown> = {}) => handler('tool_call')({ toolName, input, toolCallId }, { ...defaultCtx, ...ctxOverride }),
-    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}) =>
-      handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, defaultCtx),
+    toolResult: (toolName: string, opts: { input?: unknown; content?: unknown[]; details?: unknown; isError?: boolean } = {}, ctxOverride: Record<string, unknown> = {}) =>
+      handler('tool_result')({ type: 'tool_result', toolCallId: 't1', toolName, input: opts.input ?? {}, content: opts.content ?? [], details: opts.details, isError: opts.isError ?? false }, { ...defaultCtx, ...ctxOverride }),
     userBash: (command: string, ctxOverride: Record<string, unknown> = {}) => handler('user_bash')({ type: 'user_bash', command, excludeFromContext: false, cwd: '/proj' }, { ...defaultCtx, ...ctxOverride }),
     input: (text: string, source = 'interactive', streamingBehavior?: 'steer' | 'followUp') => handler('input')({ text, source, streamingBehavior }, defaultCtx),
     agentEnd: (messages: unknown[] = []) => handler('agent_end')({ messages }, defaultCtx),
@@ -1042,26 +1042,36 @@ describe('hooks extension tool_call', () => {
     expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this', terminate: true })
   })
 
-  // Claude: continue:false means "Claude stops processing entirely after the hook runs",
-  // and stopReason is the "Message shown to the user when continue is false".
-  it('stops the whole run on continue false over an ask, showing stopReason instead of prompting', async () => {
+  // Measured on Claude Code 2.1.295: a PreToolUse continue false let an allowed call run
+  // and then stopped the run, with no further model turn; beside a deny the call was
+  // blocked and the run stopped. stopReason is the "Message shown to the user".
+  it('runs the call on a lone continue false and stops the run once its result is in', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed' })], code: 0 })
+    const abort = vi.fn()
+    expect(await ext.toolCall('bash', { command: 'make' }, 't1', { abort })).toBeUndefined()
+    expect(abort).not.toHaveBeenCalled()
+    await ext.toolResult('bash', { input: { command: 'make' } }, { abort })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
+  })
+
+  it('blocks the call and stops the run on continue false beside a deny', async () => {
+    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed', hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'not now' } })], code: 0 })
+    const abort = vi.fn()
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { abort })).toEqual({ block: true, reason: 'not now', terminate: true })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
+  })
+
+  it('still asks on continue false beside an ask, then stops the run after the approved call', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed', hookSpecificOutput: { permissionDecision: 'ask' } })], code: 0 })
     const abort = vi.fn()
     const confirm = vi.fn(async () => true)
-    const notes: Array<{ msg: string; level: string }> = []
-    const ui = { notify: (msg: string, level: string) => notes.push({ msg, level }), confirm }
-    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui, abort })).toEqual({ block: true, reason: 'build failed', terminate: true })
+    const ui = { notify: () => {}, confirm }
+    expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui, abort })).toBeUndefined()
+    expect(confirm).toHaveBeenCalledTimes(1)
+    await ext.toolResult('bash', { input: { command: 'rm x' } }, { abort })
     expect(abort).toHaveBeenCalledTimes(1)
-    expect(confirm).not.toHaveBeenCalled()
-    expect(notes).toEqual([{ msg: 'build failed', level: 'warning' }])
-  })
-
-  it('stops the run with a neutral message when continue false has no stopReason (Claude documents no default)', async () => {
-    const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false })], code: 0 })
-    const abort = vi.fn()
-    expect(await ext.toolCall('bash', { command: 'ls' }, 't1', { abort })).toEqual({ block: true, reason: 'Stopped by hook', terminate: true })
-    expect(abort).toHaveBeenCalledTimes(1)
-    expect(ext.notes).toEqual([{ msg: 'Stopped by hook', level: 'warning' }])
   })
 
   it('does not stop the run on a plain deny', async () => {
@@ -1151,6 +1161,17 @@ describe('hooks extension tool_result (PostToolUse)', () => {
     return ext
   }
   const okText = [{ type: 'text', text: 'file.txt' }]
+
+  // Measured on Claude Code 2.1.295: a PostToolUse continue false stopped the run after
+  // the tool had run, with no further model turn and no Stop hook.
+  it('stops the run when a PostToolUse hook returns continue false, showing stopReason', async () => {
+    const ext = await withPostHooks([{ command: 'post' }])
+    script('post', { stdout: [JSON.stringify({ continue: false, stopReason: 'tests red' })], code: 0 })
+    const abort = vi.fn()
+    await ext.toolResult('bash', { input: { command: 'ls' }, content: okText }, { abort })
+    expect(abort).toHaveBeenCalledTimes(1)
+    expect(ext.notes).toContainEqual({ msg: 'tests red', level: 'warning' })
+  })
 
   it('runs PostToolUse hooks with the tool name, input and response in the payload', async () => {
     const ext = await withPostHooks([{ command: 'post' }])

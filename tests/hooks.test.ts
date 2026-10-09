@@ -578,23 +578,25 @@ describe('interpretHookResult', () => {
     expect(interpretHookResult(0, out, '')).toEqual({ block: true, ask: true, reason: 'confirm first' })
   })
 
-  it('stops on a top-level continue false, carrying stopReason', () => {
-    expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, stop: true, reason: 'halt' })
+  // Measured on Claude Code 2.1.295 (claude -p, a PreToolUse hook on Bash): continue false
+  // alone or beside allow let the tool run and then stopped the run; beside deny or
+  // decision block the tool was blocked and the run stopped. The stop never decides the
+  // tool: the other fields do, and the stop rides along.
+  it('lets a lone continue false allow the call and carry the stop', () => {
+    expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: false, stop: true, stopReason: 'halt' })
   })
 
-  // Claude: continue "Takes precedence over any event-specific decision fields".
   it.each([
-    ['permissionDecision ask', { hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }],
-    ['permissionDecision deny', { hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'denied' } }],
-    ['permissionDecision allow', { hookSpecificOutput: { permissionDecision: 'allow' } }],
-    ['permissionDecision defer', { hookSpecificOutput: { permissionDecision: 'defer' } }],
-    ['decision block', { decision: 'block', reason: 'blocked' }],
-  ])('lets continue false take precedence over %s', (_name, fields) => {
-    expect(interpretHookResult(0, JSON.stringify({ ...fields, continue: false, stopReason: 'halt' }), '')).toEqual({ block: true, stop: true, reason: 'halt' })
+    ['permissionDecision ask', { hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }, { block: true, ask: true, reason: 'confirm' }],
+    ['permissionDecision deny', { hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'denied' } }, { block: true, reason: 'denied' }],
+    ['permissionDecision allow', { hookSpecificOutput: { permissionDecision: 'allow' } }, { block: false }],
+    ['decision block', { decision: 'block', reason: 'blocked' }, { block: true, reason: 'blocked' }],
+  ])('decides the call from %s and adds the stop', (_name, fields, verdict) => {
+    expect(interpretHookResult(0, JSON.stringify({ ...fields, continue: false, stopReason: 'halt' }), '')).toEqual({ ...verdict, stop: true, stopReason: 'halt' })
   })
 
   it('uses a neutral stop message when continue false has no stopReason (Claude documents no default)', () => {
-    expect(interpretHookResult(0, JSON.stringify({ continue: false, decision: 'block', reason: 'blocked' }), '')).toEqual({ block: true, stop: true, reason: 'Stopped by hook' })
+    expect(interpretHookResult(0, JSON.stringify({ continue: false }), '')).toEqual({ block: false, stop: true, stopReason: 'Stopped by hook' })
   })
 
   it('allows on a clean exit', () => {
@@ -639,11 +641,11 @@ describe('runPreToolUse', () => {
     expect(await runPreToolUse(config, 'bash', {}, runner)).toEqual({ block: true, ask: true, reason: 'confirm' })
   })
 
-  it('lets one hook continue false stop the run even when an earlier hook denies', async () => {
+  it("keeps one hook's deny and another hook's continue false stop together", async () => {
     const two = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'a.sh' }, { command: 'b.sh' }] }] }
     const runner: HookRunner = async (hook) =>
       hook.command === 'a.sh' ? { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no' } }), stderr: '', timedOut: false } : { code: 0, stdout: JSON.stringify({ continue: false, stopReason: 'halt' }), stderr: '', timedOut: false }
-    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, stop: true, reason: 'halt' })
+    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, reason: 'no', stop: true, stopReason: 'halt' })
   })
 
   it('prefers a hard deny over an ask, matching Claude deny > ask precedence', async () => {

@@ -18,8 +18,11 @@ export interface HookDecision {
   /** Claude's `permissionDecision: "ask"`: the caller should prompt the user and
    * block only on decline. `block` stays true as the no-UI fallback. */
   ask?: boolean
-  /** Claude's `continue: false`: stop the whole agent run, not just this call. */
+  /** Claude's `continue: false`: stop the agent run once this call is decided. It never
+   * decides the call: the other fields do, so an allowed call still runs first. */
   stop?: boolean
+  /** The "Message shown to the user" when the run stops. */
+  stopReason?: string
 }
 
 /** Claude's stdout shape rule: only output that starts with `{` and ends with `}`
@@ -117,9 +120,17 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   // Claude: on exit 2 the blocking message is the JSON blocking decision's reason
   // when it makes one, and the stderr text otherwise.
   if (code === 2) return { block: true, reason: jsonBlockingReason(parsed) ?? (stderr.trim() || 'Blocked by hook') }
-  // Claude: continue false "Takes precedence over any event-specific decision fields".
-  // Claude documents no default stopReason, so a neutral message stands in.
-  if (parsed?.continue === false) return { block: true, stop: true, reason: parsed.stopReason ?? 'Stopped by hook' }
+  const decision = fieldDecision(parsed)
+  // Claude: continue false "stops processing entirely after the hook runs" and "takes
+  // precedence over any event-specific decision fields": measured on 2.1.295, the run
+  // stops whatever those fields say, while they still decide this call. Claude
+  // documents no default stopReason, so a neutral message stands in.
+  if (parsed?.continue === false) return { ...decision, stop: true, stopReason: parsed.stopReason ?? 'Stopped by hook' }
+  return decision
+}
+
+/** The call's verdict from the event-specific fields, continue aside. */
+function fieldDecision(parsed: ReturnType<typeof tryParseJson>): HookDecision {
   const specific = parsed?.hookSpecificOutput
   // Claude's "ask" prompts the user; the tool_call handler turns this into a
   // ctx.ui.confirm and blocks only on decline. block:true is the fallback for a
@@ -243,16 +254,17 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const context = preToolContexts(results)
   const decisions = results.map((result) => interpretHookResult(result.code, result.stdout, result.stderr))
+  // One hook's continue false stops the run whatever the combined verdict on the call.
   const stop = decisions.find((decision) => decision.stop)
-  if (stop) return stop
+  const withStop = <T extends HookDecision>(decision: T): T => (stop ? { ...decision, stop: true, stopReason: stop.stopReason } : decision)
   // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
   // scan for any deny first, and only fall back to the first ask.
   let ask: HookDecision | undefined
   for (const decision of decisions) {
-    if (decision.block && !decision.ask) return decision
-    if (decision.ask && ask === undefined) ask = decision
+    if (decision.block && !decision.ask) return withStop({ block: true, reason: decision.reason })
+    if (decision.ask && ask === undefined) ask = { block: true, ask: true, reason: decision.reason }
   }
-  return ask ?? { block: false, context: context.length > 0 ? context : undefined }
+  return withStop(ask ?? { block: false, context: context.length > 0 ? context : undefined })
 }
 
 type SystemMessageSink = (message: string) => void
