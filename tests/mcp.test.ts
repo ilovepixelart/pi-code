@@ -286,6 +286,15 @@ describe('mcp adapter helpers', () => {
     expect(interpolateEnv('${MISSING:-fallback}', {} as NodeJS.ProcessEnv)).toBe('fallback')
   })
 
+  // A plain env[name] lookup reached Object.prototype: with the real process.env,
+  // ${toString} became "function toString() { [native code] }".
+  it('reads only variables the environment defines, never inherited object properties', () => {
+    const missing: string[] = []
+    expect(interpolateEnv('${toString}|${constructor}|${__proto__}', process.env, (name) => missing.push(name))).toBe('${toString}|${constructor}|${__proto__}')
+    expect(missing).toEqual(['toString', 'constructor', '__proto__'])
+    expect(interpolateEnv('${toString:-fallback}', process.env)).toBe('fallback')
+  })
+
   it('keeps a missing ${VAR} literal and reports it rather than silently emptying', () => {
     const missing: string[] = []
     const out = interpolateEnv('Bearer ${TOKEN}', {} as NodeJS.ProcessEnv, (name) => missing.push(name))
