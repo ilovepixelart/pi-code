@@ -270,6 +270,41 @@ export async function startCallbackServer(preferredPort?: number, portRequired =
   return { server, port }
 }
 
+/** Answers one request to the loopback redirect server. Returns the callback's query
+ * when the request settles the login, or undefined when it was answered and ignored. */
+function answerAuthRequest(request: http.IncomingMessage, response: http.ServerResponse, expectedState?: string): URLSearchParams | undefined {
+  // Node's parser passes an absolute-form target through unvalidated, and a throw
+  // from a 'request' listener is not caught by node:http: it was an
+  // uncaughtException during the login window, from any local process that could
+  // reach the port.
+  let url: URL
+  try {
+    url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  } catch {
+    response.writeHead(400).end()
+    return undefined
+  }
+  // Only the redirect path settles the login. A stray request (a favicon fetch, a
+  // local port scan, or a forged redirect from another process or an open web page)
+  // is answered but ignored, so it can neither inject a code nor abort the login by
+  // rejecting the promise (a repeatable DoS on a stable, guessable loopback port).
+  if (url.pathname !== '/callback') {
+    response.writeHead(404, { 'content-type': 'text/plain' })
+    response.end('not found')
+    return undefined
+  }
+  // The CSRF check: a callback that does not echo this login's state is rejected
+  // without settling, so an attacker who cannot read the state cannot complete it.
+  if (expectedState !== undefined && url.searchParams.get('state') !== expectedState) {
+    response.writeHead(400, { 'content-type': 'text/plain' })
+    response.end('state mismatch')
+    return undefined
+  }
+  response.writeHead(200, { 'content-type': 'text/html' })
+  response.end('<html><body>pi-code: you can close this tab and return to the terminal.</body></html>')
+  return url.searchParams
+}
+
 export function waitForAuthCode(server: http.Server, timeoutMs: number, expectedState?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`authorization timed out after ${timeoutMs}ms`)), timeoutMs)
@@ -277,40 +312,13 @@ export function waitForAuthCode(server: http.Server, timeoutMs: number, expected
     // abandoned or resolved out of band, the event loop can still drain.
     timer.unref?.()
     server.on('request', (request, response) => {
-      // Node's parser passes an absolute-form target through unvalidated, and a throw
-      // from a 'request' listener is not caught by node:http: it was an
-      // uncaughtException during the login window, from any local process that could
-      // reach the port.
-      let url: URL
-      try {
-        url = new URL(request.url ?? '/', 'http://127.0.0.1')
-      } catch {
-        response.writeHead(400).end()
-        return
-      }
-      // Only the redirect path settles the login. A stray request (a favicon fetch, a
-      // local port scan, or a forged redirect from another process or an open web page)
-      // is answered but ignored, so it can neither inject a code nor abort the login by
-      // rejecting the promise (a repeatable DoS on a stable, guessable loopback port).
-      if (url.pathname !== '/callback') {
-        response.writeHead(404, { 'content-type': 'text/plain' })
-        response.end('not found')
-        return
-      }
-      // The CSRF check: a callback that does not echo this login's state is rejected
-      // without settling, so an attacker who cannot read the state cannot complete it.
-      if (expectedState !== undefined && url.searchParams.get('state') !== expectedState) {
-        response.writeHead(400, { 'content-type': 'text/plain' })
-        response.end('state mismatch')
-        return
-      }
-      const code = url.searchParams.get('code')
-      const error = url.searchParams.get('error')
-      response.writeHead(200, { 'content-type': 'text/html' })
-      response.end('<html><body>pi-code: you can close this tab and return to the terminal.</body></html>')
+      const params = answerAuthRequest(request, response, expectedState)
+      if (!params) return
+      const code = params.get('code')
+      const error = params.get('error')
       clearTimeout(timer)
       if (code) resolve(code)
-      else reject(new Error(`authorization failed: ${error ?? 'no code in redirect'} ${url.searchParams.get('error_description') ?? ''}`.trim()))
+      else reject(new Error(`authorization failed: ${error ?? 'no code in redirect'} ${params.get('error_description') ?? ''}`.trim()))
     })
   })
 }

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -2483,6 +2483,23 @@ describe('mcp prompts as slash commands', () => {
     expect(harness.sentOptions).toEqual([{}, { deliverAs: 'followUp' }])
   })
 
+  it('reports a prompt command whose server is no longer connected instead of calling it', async () => {
+    let fetched = false
+    withPrompts([{ name: 'gone' }])
+    hoisted.control.getPrompt = async () => {
+      fetched = true
+      return { messages: [{ role: 'user', content: { type: 'text', text: 'never' } }] }
+    }
+    const harness = await setupStarted({ user: { demo: { command: 'x' } } })
+    await harness.shutdown()
+
+    await harness.runSlash('mcp__demo__gone', '')
+
+    expect(fetched).toBe(false)
+    expect(harness.sent).toEqual([])
+    expect(harness.notifications).toContainEqual({ message: 'mcp__demo__gone: MCP server "demo" is not connected', level: 'error' })
+  })
+
   it('reports instead of driving a turn when a prompt returns no content', async () => {
     withPrompts([{ name: 'empty' }])
     hoisted.control.getPrompt = async () => ({ messages: [] })
@@ -3347,6 +3364,27 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     expect(harness.nativeRegistered[0].config).toMatchObject({ command: 'node', args: ['s.js'], exposure: 'direct' })
     expect(hoisted.transports).toEqual([])
     expect(harness.toolNames()).toEqual([])
+  })
+
+  it("creates a plugin server's data directory before handing the server to pi", async () => {
+    const dataDir = join(mkdtempSync(join(tmpdir(), 'mcp-data-')), 'nested', 'srv')
+    tempDirs.push(join(dataDir, '..', '..'))
+    const harness = await setup({ user: { srv: { command: 'node', pluginDataDir: dataDir } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+
+    expect(existsSync(dataDir)).toBe(true)
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['srv'])
+  })
+
+  it('still hands a plugin server to pi when its data directory cannot be created', async () => {
+    const blocker = join(mkdtempSync(join(tmpdir(), 'mcp-data-')), 'file')
+    tempDirs.push(join(blocker, '..'))
+    writeFileSync(blocker, '')
+    const harness = await setup({ user: { srv: { command: 'node', pluginDataDir: join(blocker, 'srv') } }, native: { builtinMcp: true } })
+    await harness.sessionStart()
+
+    expect(existsSync(join(blocker, 'srv'))).toBe(false)
+    expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['srv'])
   })
 
   it('keeps an SSE server on its own client, without the resource tools pi owns (MCPN-005, MCPN-002)', async () => {

@@ -482,6 +482,16 @@ describe('mcp adapter helpers', () => {
     expect(normalizeSchema({ foo: 'x' })).toEqual({ type: 'object', properties: {} })
   })
 
+  it('keeps only the string names of an allOf branch required list', () => {
+    const schema = normalizeSchema({
+      allOf: [
+        { properties: { a: { type: 'string' } }, required: ['a', 7, null] },
+        { properties: { b: { type: 'number' } }, required: 'b' },
+      ],
+    })
+    expect(schema).toEqual({ type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } }, required: ['a'] })
+  })
+
   it('maps text, image, and resource content blocks', () => {
     const mapped = mapContent([
       { type: 'text', text: 'hello' },
