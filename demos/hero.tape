@@ -55,12 +55,10 @@ Sleep 4.5s
 Escape
 Sleep 1s
 
-# Beat 5: plan mode restricts tools, enforced per call, and toggles back.
+# Beat 5: plan mode restricts tools, enforced per call, and Ctrl+Alt+P leaves it.
 Type "/plan"
 Sleep 0.8s
 Enter
 Sleep 3.5s
-Type "/plan"
-Sleep 0.8s
-Enter
+Ctrl+Alt+P
 Sleep 3.5s

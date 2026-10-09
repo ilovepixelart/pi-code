@@ -112,6 +112,8 @@ function setup(options: { flag?: boolean; activeTools?: string[] } = {}) {
       activeTools = [...activeTools, name]
     },
     runCommand: (name: string, args = '', context: unknown = ctx) => commands.get(name)?.(args, context),
+    /** Ctrl+Alt+P: /plan only enters plan mode, so leaving it goes through the shortcut. */
+    togglePlanMode: () => shortcuts[0](ctx),
     callTool: (name: string, params: Record<string, unknown>) => tools.get(name)?.('call-1', params) as Promise<ToolResult>,
     /** The { triggerTurn } options the last sendMessage of this customType carried. */
     optionsFor: (customType: string) => {
@@ -128,7 +130,7 @@ describe('plan mode toggle', () => {
     const s = setup()
     await s.runCommand('plan')
     expect(s.emitted).toContainEqual({ channel: 'pi-code:plan-mode', data: { active: true } })
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     expect(s.emitted).toContainEqual({ channel: 'pi-code:plan-mode', data: { active: false } })
   })
 
@@ -148,7 +150,7 @@ describe('plan mode toggle', () => {
   it('restores the full tool set when disabled again', async () => {
     const s = setup()
     await s.runCommand('plan')
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     expect(s.getActiveTools()).toContain('edit')
     expect(s.getActiveTools()).toContain('write')
     expect(s.notices[1]).toContain('Full access restored')
@@ -158,7 +160,7 @@ describe('plan mode toggle', () => {
     const s = setup()
     await s.runCommand('plan')
     expect(s.status.at(-1)).toContain('plan')
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     expect(s.status.at(-1)).toBeUndefined()
   })
 
@@ -166,6 +168,45 @@ describe('plan mode toggle', () => {
     const s = setup()
     await s.shortcuts[0](s.ctx)
     expect(s.getActiveTools()).not.toContain('write')
+  })
+})
+
+describe('/plan [description]', () => {
+  it('keeps plan mode on when run while plan mode is already on', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.runCommand('plan')
+    expect(s.getActiveTools()).not.toContain('write')
+    expect(s.emitted.at(-1)).toEqual({ channel: 'pi-code:plan-mode', data: { active: true } })
+  })
+
+  it('enters plan mode and starts a turn with the description', async () => {
+    const s = setup()
+    await s.runCommand('plan', '  fix the auth bug  ')
+    expect(s.getActiveTools()).not.toContain('write')
+    expect(s.userMessages).toEqual(['fix the auth bug'])
+    expect(s.userMessageOptions).toEqual([{}])
+  })
+
+  it('starts the described task when plan mode was already on', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    await s.runCommand('plan', 'fix the auth bug')
+    expect(s.getActiveTools()).not.toContain('write')
+    expect(s.userMessages).toEqual(['fix the auth bug'])
+  })
+
+  it('queues the description as a follow-up while the agent is streaming', async () => {
+    const s = setup()
+    await s.runCommand('plan', 'fix the auth bug', { ...s.ctx, isIdle: () => false })
+    expect(s.userMessageOptions).toEqual([{ deliverAs: 'followUp' }])
+  })
+
+  it('enters plan mode without sending anything when given no description', async () => {
+    const s = setup()
+    await s.runCommand('plan', '   ')
+    expect(s.getActiveTools()).not.toContain('write')
+    expect(s.userMessages).toEqual([])
   })
 })
 
@@ -506,7 +547,7 @@ describe('session restore', () => {
     const s = setup()
     await s.runCommand('plan')
     await s.callTool('plan_mode_complete', { plan: 'Plan:\n1. Inspect the parser' })
-    await s.runCommand('plan') // toggle off
+    await s.togglePlanMode() // toggle off
 
     const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
     const s2 = setup()
@@ -524,7 +565,7 @@ describe('session restore', () => {
 
     const reloaded = setup({ activeTools: afterReload(s.getActiveTools()) })
     await reloaded.emit('session_start', { reason: 'reload' }, restoreCtx(reloaded, entries))
-    await reloaded.runCommand('plan')
+    await reloaded.togglePlanMode()
 
     expect(reloaded.getActiveTools()).toContain('edit')
     expect(reloaded.getActiveTools()).toContain('write')
@@ -539,7 +580,7 @@ describe('session restore', () => {
     s.registerLateTool('github_create_issue')
     expect(s.getActiveTools()).toContain('github_create_issue')
 
-    await s.runCommand('plan')
+    await s.togglePlanMode()
 
     expect(s.getActiveTools()).toContain('github_create_issue')
     expect(s.getActiveTools()).toContain('write')
@@ -554,7 +595,7 @@ describe('session restore', () => {
     s.activate('todo')
     s.activate('memory')
 
-    await s.runCommand('plan')
+    await s.togglePlanMode()
 
     expect(s.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete'])
   })
@@ -568,7 +609,7 @@ describe('session restore', () => {
     await resumed.emit('session_start', { reason: 'resume' }, restoreCtx(resumed, entries))
     resumed.activate('todo')
     resumed.registerLateTool('github_create_issue')
-    await resumed.runCommand('plan')
+    await resumed.togglePlanMode()
 
     expect(resumed.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete', 'github_create_issue'])
   })
@@ -593,7 +634,7 @@ describe('session restore', () => {
 
     const reloaded = setup({ activeTools: afterReload(s.getActiveTools()) })
     await reloaded.emit('session_start', { reason: 'reload' }, restoreCtx(reloaded, entries))
-    await reloaded.runCommand('plan')
+    await reloaded.togglePlanMode()
 
     expect(reloaded.getActiveTools()).toEqual(['read', 'bash', 'edit', 'plan_mode_complete'])
   })
@@ -612,7 +653,7 @@ describe('session restore', () => {
     // restore would grow the session file for every reload.
     expect(reloaded.appended.filter((e) => e.type === 'plan-mode')).toEqual([])
 
-    await reloaded.runCommand('plan')
+    await reloaded.togglePlanMode()
     expect(reloaded.getActiveTools()).toContain('edit')
     expect(reloaded.getActiveTools()).toContain('write')
   })
@@ -635,7 +676,7 @@ describe('session restore', () => {
     // taken, e.g. an MCP server's tools connecting into the rebuilt session.
     const s = setup()
     await s.runCommand('plan')
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     const entries = s.appended.filter((e) => e.type === 'plan-mode').map((e) => ({ type: 'custom', customType: 'plan-mode', data: e.data }))
 
     const reloaded = setup({ activeTools: [...ALL_TOOLS, 'mcp_sonar_search'] })
@@ -651,7 +692,7 @@ describe('session restore', () => {
     await s.emit('session_start', {}, restoreCtx(s, entries))
 
     expect(s.getActiveTools()).not.toContain('write')
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     expect(s.getActiveTools()).toContain('write')
   })
 
@@ -665,7 +706,7 @@ describe('session restore', () => {
     await s.emit('session_start', {}, restoreCtx(s, entries))
 
     // Falling back to the live active set, leaving plan mode after this restores it.
-    await s.runCommand('plan')
+    await s.togglePlanMode()
     expect(s.getActiveTools()).toContain('write')
     expect(s.getActiveTools()).toContain('edit')
   })

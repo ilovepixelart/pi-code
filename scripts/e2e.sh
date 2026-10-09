@@ -118,10 +118,10 @@ fi
 # wire-asserted in e2e-full.sh.
 if capture_all | grep -q 'Rules loaded'; then ok "rules: loaded"; else warn "rules: banner not rendered (known pi TUI interaction)"; fi
 
-# 3. Plan mode toggles on and off with status badge
+# 3. /plan enters plan mode, Ctrl+Alt+P leaves it, with status badge
 send "/plan" Enter
 if wait_for '⏸ plan' 15; then ok "plan-mode: badge on"; else bad "plan-mode: badge missing"; fi
-send "/plan" Enter
+send C-M-p
 if wait_for_absent '⏸ plan' 20; then ok "plan-mode: badge off"; else bad "plan-mode: badge stuck"; fi
 
 # 4. Model turn: todo tool renders the persistent overlay
