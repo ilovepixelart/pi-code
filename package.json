@@ -54,7 +54,7 @@
     "provenance": true
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": ">=1.30.0"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
