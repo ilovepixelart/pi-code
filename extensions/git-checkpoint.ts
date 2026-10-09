@@ -404,7 +404,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     if (listed.code !== 0) return
     const indexed = new Set(listed.stdout.split('\0').filter(Boolean))
     for (const rel of paths) {
-      if (!indexed.has(rel) && fs.existsSync(path.join(workTree, rel))) await indexDirectly(rel)
+      if (!indexed.has(rel) && fs.existsSync(path.join(workTree, rel))) await indexDirectly(rel) // NOSONAR typescript:S9382 - git index lock forbids parallel index writes
     }
   }
 
@@ -427,7 +427,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
     let staged = 0
     for (const rel of paths) {
-      if ((await gitShadow(['add', '--', rel])).code === 0) staged++
+      if ((await gitShadow(['add', '--', rel])).code === 0)
+        staged++ // NOSONAR typescript:S9382 - git index lock forbids parallel adds
       else if (workTree) touched.delete(path.resolve(workTree, rel))
     }
     return staged > 0

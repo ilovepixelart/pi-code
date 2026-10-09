@@ -384,10 +384,10 @@ export async function connectWithRetries(name: string, config: ServerConfig, aut
   const retriable = !isStdio(config) && config.type !== 'ws' && config.type !== 'websocket'
   for (let attempt = 0; ; attempt++) {
     try {
-      return await connect(name, config, authUi, session)
+      return await connect(name, config, authUi, session) // NOSONAR typescript:S9382 - retries wait on the previous attempt
     } catch (error) {
       if (!retriable || attempt >= 3 || !isTransientConnectError(error)) throw error
-      await delay(1000 * 2 ** attempt)
+      await delay(1000 * 2 ** attempt) // NOSONAR typescript:S9382 - retries back off between attempts
     }
   }
 }

@@ -395,11 +395,17 @@ export default function mcpExtension(pi: ExtensionAPI) {
       async execute(_id, params) {
         const filter = resourceServerFilter(params)
         if (filter && !clients.has(filter)) throw new Error(`MCP server "${filter}" is not connected`)
-        const entries: Array<Record<string, unknown>> = []
-        for (const [name, client] of resourceServers()) {
-          if (filter && name !== filter) continue
-          await collectServerResourceEntries(entries, name, client, callTimeoutMs())
-        }
+        // Each server is listed at once, so a slow one does not hold the others back; the
+        // entries keep server order.
+        const targets = [...resourceServers()].filter(([name]) => !filter || name === filter)
+        const perServer = await Promise.all(
+          targets.map(async ([name, client]) => {
+            const own: Array<Record<string, unknown>> = []
+            await collectServerResourceEntries(own, name, client, callTimeoutMs())
+            return own
+          }),
+        )
+        const entries = perServer.flat()
         return { content: mapContent([{ type: 'text', text: JSON.stringify(entries, null, 2) }]), details: {} }
       },
     })
@@ -597,14 +603,13 @@ export default function mcpExtension(pi: ExtensionAPI) {
   async function connectManagedExclusive(managed: Record<string, ServerConfig>, policy: McpPolicy, authUi?: AuthUi): Promise<void> {
     const managedServers = applyServerPolicy(managed, policy)
     const managedNames = new Set(Object.keys(managedServers))
-    for (const [name, client] of Array.from(clients.entries())) {
-      if (managedNames.has(name)) continue
-      clients.delete(name)
-      // Bound the close like session_shutdown does: a hung server must not stall the new
-      // session start, which awaits this eviction before connecting the managed set.
-      await withTimeout(client.close(), 3000, 'close').catch(() => {})
-      status.set(name, { state: 'disabled by managed policy', tools: 0 })
-    }
+    const evicted = Array.from(clients.entries()).filter(([name]) => !managedNames.has(name))
+    for (const [name] of evicted) clients.delete(name)
+    // Bound each close like session_shutdown does, and close them together: a hung server
+    // must not stall the new session start, which awaits this eviction before connecting
+    // the managed set.
+    await Promise.all(evicted.map(([, client]) => withTimeout(client.close(), 3000, 'close').catch(() => {})))
+    for (const [name] of evicted) status.set(name, { state: 'disabled by managed policy', tools: 0 })
     await connectServers(managedServers, authUi)
   }
 
@@ -847,23 +852,25 @@ export default function mcpExtension(pi: ExtensionAPI) {
     if (event.source === 'extension') return
     const mentions = [...event.text.matchAll(/@([A-Za-z0-9_-]+):(\S+)/g)].filter((match) => clients.has(match[1]))
     if (mentions.length === 0) return
-    const sections: string[] = []
-    for (const match of mentions) {
-      const [, server, uri] = match
+    // Every mention is read at once, so the prompt waits for the slowest read, not their
+    // sum; the sections keep mention order.
+    const read = async ([, server, uri]: RegExpMatchArray): Promise<string | undefined> => {
       try {
         const client = clients.get(server)
-        if (!client) continue
+        if (!client) return undefined
         const wall = callTimeoutMs()
         const result = await withTimeout(client.readResource({ uri }, callRequestOptions(wall, callTuning(server))), wall, `read ${uri}`)
         const text = (result.contents as Array<{ text?: string }>)
           .map((entry) => entry.text)
           .filter((value): value is string => typeof value === 'string')
           .join('\n')
-        if (text) sections.push(capForContext(`<mcp-resource server="${server}" uri="${uri}">\n${text}\n</mcp-resource>`))
+        return text ? capForContext(`<mcp-resource server="${server}" uri="${uri}">\n${text}\n</mcp-resource>`) : undefined
       } catch {
         // An unreadable resource leaves the mention as plain text.
+        return undefined
       }
     }
+    const sections = (await Promise.all(mentions.map(read))).filter((section): section is string => section !== undefined)
     if (sections.length === 0) return
     return { action: 'transform', text: `${event.text}\n\n${sections.join('\n\n')}` }
   })

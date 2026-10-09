@@ -239,7 +239,7 @@ export async function expandDynamicContent(body: string, cwd: string, exec: Comm
   let cursor = 0
   for (const span of spans) {
     if (span.start < cursor) continue // a rare @/inline overlap: keep the first, skip the nested
-    out += body.slice(cursor, span.start) + (await span.run())
+    out += body.slice(cursor, span.start) + (await span.run()) // NOSONAR typescript:S9382 - spans run in document order, as their commands may depend on each other
     cursor = span.end
   }
   return out + body.slice(cursor)
