@@ -1,0 +1,45 @@
+{
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "tsconfig.json": "tsconfig.*.json",
+    "package.json": "package-lock.json, .gitignore",
+    "README.md": "CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md"
+  },
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.defaultFormatter": "biomejs.biome",
+  "editor.codeActionsOnSave": {
+    "quickfix.biome": "explicit",
+    "source.organizeImports.biome": "explicit"
+  },
+  "cSpell.words": [
+    "biomejs",
+    "checkin",
+    "CHECKINS",
+    "Dsonar",
+    "dsse",
+    "earendil",
+    "Ghostty",
+    "ilovepixelart",
+    "intoto",
+    "lcov",
+    "linebreak",
+    "Mcpjson",
+    "modelcontextprotocol",
+    "nargs",
+    "NOSONAR",
+    "parens",
+    "pipefail",
+    "rxvt",
+    "Sigstore",
+    "SLSA",
+    "sonarcloud",
+    "sonarqube",
+    "sonarsource",
+    "Streamable",
+    "typebox",
+    "ultrathink",
+    "unexpressable",
+    "Worktree"
+  ]
+}

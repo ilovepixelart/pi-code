@@ -94,10 +94,9 @@ vi.mock('node:os', async (importOriginal) => {
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: class FakeClient implements ClientRecord {
     transport?: TransportRecord
-    constructor(
-      public info: { name: string; version: string },
-      options?: unknown,
-    ) {
+    info: { name: string; version: string }
+    constructor(info: { name: string; version: string }, options?: unknown) {
+      this.info = info
       hoisted.clients.push(this)
       hoisted.clientOptions.push(options)
     }
@@ -154,7 +153,9 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
   getDefaultEnvironment: () => ({ PATH: '/usr/bin:/bin', HOME: '/home/tester' }),
   StdioClientTransport: class implements TransportRecord {
     kind = 'stdio' as const
-    constructor(public options: Record<string, unknown>) {
+    options: Record<string, unknown>
+    constructor(options: Record<string, unknown>) {
+      this.options = options
       hoisted.transports.push(this)
     }
   },
@@ -163,10 +164,11 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
   StreamableHTTPClientTransport: class implements TransportRecord {
     kind = 'http' as const
-    constructor(
-      public url: URL,
-      public options: Record<string, unknown>,
-    ) {
+    url: URL
+    options: Record<string, unknown>
+    constructor(url: URL, options: Record<string, unknown>) {
+      this.url = url
+      this.options = options
       hoisted.transports.push(this)
     }
     // The SDK exchanges the authorization code here; recording it lets a test drive the
@@ -181,7 +183,9 @@ vi.mock('@modelcontextprotocol/sdk/client/websocket.js', () => ({
   WebSocketClientTransport: class implements TransportRecord {
     kind = 'ws' as const
     options: Record<string, unknown> = {}
-    constructor(public url: URL) {
+    url: URL
+    constructor(url: URL) {
+      this.url = url
       hoisted.transports.push(this)
     }
   },
@@ -190,10 +194,11 @@ vi.mock('@modelcontextprotocol/sdk/client/websocket.js', () => ({
 vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   SSEClientTransport: class implements TransportRecord {
     kind = 'sse' as const
-    constructor(
-      public url: URL,
-      public options: Record<string, unknown>,
-    ) {
+    url: URL
+    options: Record<string, unknown>
+    constructor(url: URL, options: Record<string, unknown>) {
+      this.url = url
+      this.options = options
       hoisted.transports.push(this)
     }
   },
