@@ -31,6 +31,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         node-version: [22.x, 24.x]
+        # package.json engines is >=22.19: the floor itself is tested, not only the latest 22.
+        include:
+          - os: ubuntu-latest
+            node-version: 22.19.0
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
