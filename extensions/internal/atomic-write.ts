@@ -37,7 +37,11 @@ export function atomicWriteFile(filePath: string, content: string, options: { mo
   const tmp = `${target}.${process.pid}.tmp`
   // An explicit mode wins over the target's own: a secrets file must end up exactly that.
   const mode = options.mode ?? existingMode(target)
-  fs.writeFileSync(tmp, content, mode === undefined ? undefined : { mode })
+  // The tmp name is predictable: remove whatever is there (rm does not follow a link) and
+  // create it exclusively, so a planted file or symlink never receives the content and one
+  // planted again in between makes the write fail instead.
+  fs.rmSync(tmp, { force: true })
+  fs.writeFileSync(tmp, content, mode === undefined ? { flag: 'wx' } : { flag: 'wx', mode })
   if (mode !== undefined) fs.chmodSync(tmp, mode)
   fs.renameSync(tmp, target)
 }

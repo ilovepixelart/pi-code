@@ -88,3 +88,25 @@ describe.skipIf(process.platform === 'win32')('atomicWriteFile permissions', () 
     expect(statSync(file).mode & 0o777).toBe(0o644 & ~process.umask())
   })
 })
+
+// The temp name is predictable (target.pid.tmp). A file already sitting there, a symlink
+// above all, must not receive the content: writing through a planted link sent the token
+// to the link's target and the rename made the store itself that link.
+describe.skipIf(process.platform === 'win32')('atomicWriteFile temp file', () => {
+  const tmpFor = (file: string) => `${file}.${process.pid}.tmp`
+
+  it('never writes through a symlink planted at the temp name', () => {
+    const dir = tempDir()
+    const file = join(dir, 'oauth.json')
+    const outside = join(dir, 'outside.txt')
+    writeFileSync(outside, '')
+    symlinkSync(outside, tmpFor(file))
+
+    atomicWriteFile(file, '{"token":"secret"}', { mode: 0o600 })
+
+    expect(readFileSync(outside, 'utf8')).toBe('')
+    expect(lstatSync(file).isSymbolicLink()).toBe(false)
+    expect(readFileSync(file, 'utf8')).toBe('{"token":"secret"}')
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+})
