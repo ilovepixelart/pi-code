@@ -567,8 +567,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
         return undefined
       }
     }
-    // A blocked call has no result to wait for, so a continue false stops the run now.
-    if (decision.stop) stopRun(ctx, decision.stopReason)
+    // Stopping here would abort before pi records the block, and pi then reports
+    // "Operation aborted" in place of the reason; tool_execution_end stops the run once
+    // the blocked result is in.
+    if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
     return blockedToolCall(decision.reason)
   })
 

@@ -1075,10 +1075,15 @@ describe('hooks extension tool_call', () => {
     expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
   })
 
-  it('blocks the call and stops the run on continue false beside a deny', async () => {
+  // pi reads an aborted signal before the block, so stopping inside tool_call recorded
+  // "Operation aborted" where the deny reason belongs; the stop waits for
+  // tool_execution_end, which pi emits once the blocked result is in.
+  it('blocks the call and stops the run on continue false beside a deny, once the block is recorded', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ continue: false, stopReason: 'build failed', hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'not now' } })], code: 0 })
     const abort = vi.fn()
     expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { abort })).toEqual({ block: true, reason: 'not now', terminate: true })
+    expect(abort).not.toHaveBeenCalled()
+    await ext.toolExecutionEnd('bash', 't1', { abort })
     expect(abort).toHaveBeenCalledTimes(1)
     expect(ext.notes).toEqual([{ msg: 'build failed', level: 'warning' }])
   })
