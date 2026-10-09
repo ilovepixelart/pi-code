@@ -531,7 +531,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // reads the settings chain live so it reflects a toggle written in the same session.
   pi.registerCommand('memory', {
     description: 'Show memory file locations and toggle auto memory (/memory [on|off])',
-    handler: async (args, ctx) => {
+    handler: async (args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const home = os.homedir()
       const arg = args.trim().toLowerCase()
 
