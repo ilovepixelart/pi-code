@@ -77,6 +77,26 @@ if wire_has 'available_skills' && wire_has 'greet'; then ok "smoke: skills listi
 if wire_has "\"$MCP_TOOL\""; then ok "smoke: MCP server tool declared as $MCP_TOOL"; else bad "smoke: MCP tool $MCP_TOOL missing from payload"; fi
 if grep -q 'builtin:mcp' "$SMOKE/pi-out.log"; then bad "smoke: pi reports pi-code replacing its built-in MCP"; else ok "smoke: no built-in MCP replacement warning"; fi
 
+# --- A freshly cloned project nobody was asked about, headless: no prompt can approve it ---
+# pi itself still loads its CLAUDE.md, and an import inside the project is only more of
+# what the repository ships; everything else project-scoped stays out.
+UNTRUSTED="$SMOKE/untrusted"
+mkdir -p "$UNTRUSTED/.claude/rules" "$UNTRUSTED/notes"
+UNTRUSTED=$(cd "$UNTRUSTED" && pwd -P)
+git -C "$UNTRUSTED" init -qb main 2>/dev/null
+printf 'OUTSIDE THE PROJECT MARKER\n' > "$HOMEDIR/outside.md"
+printf 'Untrusted project context.\n\n@notes/inside.md\n@%s/outside.md\n' "$HOMEDIR" > "$UNTRUSTED/CLAUDE.md"
+printf 'INSIDE THE PROJECT MARKER\n' > "$UNTRUSTED/notes/inside.md"
+printf 'UNTRUSTED LOCAL MARKER\n' > "$UNTRUSTED/CLAUDE.local.md"
+printf -- '- UNTRUSTED RULE MARKER\n' > "$UNTRUSTED/.claude/rules/rule.md"
+WIRE="$HOMEDIR/wire-untrusted.jsonl"
+FX="$UNTRUSTED" run_pi "$PI_BIN" -p "hi" > "$SMOKE/pi-untrusted.log" 2>&1
+[ -s "$WIRE" ] || bad "smoke: no wire payload captured for the untrusted project (pi output: $(tail -1 "$SMOKE/pi-untrusted.log" 2>/dev/null))"
+if wire_has 'Untrusted project context' && wire_has 'INSIDE THE PROJECT MARKER'; then ok "smoke: untrusted CLAUDE.md and its in-project import on the wire"; else bad "smoke: untrusted CLAUDE.md or its in-project import missing"; fi
+if wire_has 'OUTSIDE THE PROJECT MARKER'; then bad "smoke: untrusted project imported a file outside it"; else ok "smoke: untrusted project's outside import refused"; fi
+if wire_has 'UNTRUSTED LOCAL MARKER'; then bad "smoke: untrusted CLAUDE.local.md on the wire"; else ok "smoke: untrusted CLAUDE.local.md kept out"; fi
+if wire_has 'UNTRUSTED RULE MARKER'; then bad "smoke: untrusted project rule on the wire"; else ok "smoke: untrusted project rule kept out"; fi
+
 printf '\n'
 printf 'e2e-smoke finished: %s passed, %s failed\n' "$PASS" "$FAIL"
 exit $((FAIL > 0))
