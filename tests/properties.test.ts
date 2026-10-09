@@ -1,9 +1,11 @@
+import { spawnSync } from 'node:child_process'
 import * as fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 
 import { matchingCommands, resetMatcherCache } from '../extensions/hooks/index.ts'
 import { substituteArgs } from '../extensions/internal/command-file.ts'
 import { globToRegExpSource, matchesPathRules } from '../extensions/internal/path-rules.ts'
+import { shellWords } from '../extensions/internal/shell-split.ts'
 import { interpolateEnv } from '../extensions/mcp/config.ts'
 
 // Property-based pins for the parser-shaped modules: each property is a stated
@@ -114,6 +116,38 @@ describe('hook matcher properties', () => {
         // Cache transparency: a cold cache answers identically.
         resetMatcherCache()
         expect(matchingCommands(config, candidate).length > 0).toBe(naive)
+      }),
+      RUNS,
+    )
+  })
+})
+
+// bash itself is the oracle: eval "set -- <input>" performs exactly the word splitting and
+// quote removal shellWords models. The alphabet holds only what bash splits on or unquotes
+// (no $, backtick, glob, tilde, separator or newline), so eval expands and runs nothing.
+// Skipped on Windows, where the bash on PATH may be WSL's rather than Git's.
+describe.skipIf(process.platform === 'win32')('shellWords properties', () => {
+  // Character soup explores unbalanced quoting; balanced pieces reach the escape rules
+  // inside quotes, which soup almost never closes around.
+  const soup = fc.array(fc.constantFrom('a', 'b', '-', "'", '"', '\\', ' ', '\t'), { minLength: 1, maxLength: 14 }).map((chars) => chars.join(''))
+  const join = (parts: string[]): string => parts.join('')
+  const escaped = fc.constantFrom('a', '-', "'", '"', '\\', ' ').map((ch) => `\\${ch}`)
+  const singleQuoted = fc.array(fc.constantFrom('a', '-', '"', '\\', ' '), { maxLength: 4 }).map((chars) => `'${join(chars)}'`)
+  const doubleQuoted = fc.array(fc.oneof(fc.constantFrom('a', '-', "'", ' '), escaped), { maxLength: 4 }).map((chars) => `"${join(chars)}"`)
+  const pieces = fc.array(fc.oneof(fc.constantFrom('a', '-', ' ', '\t'), escaped, singleQuoted, doubleQuoted), { minLength: 1, maxLength: 6 }).map(join)
+  const input = fc.oneof(soup, pieces)
+  const bashWords = (command: string): string[] | undefined => {
+    const run = spawnSync('bash', ['-c', 'eval "set -- $1" 2>/dev/null || exit 3; printf "%s\\0" "$#" "$@"', 'probe', command], { encoding: 'utf8' })
+    // The count goes first: printf with no arguments still prints one empty field.
+    return run.status === 0 ? run.stdout.slice(0, -1).split('\0').slice(1) : undefined
+  }
+
+  it('splits and unquotes exactly as bash does, wherever bash accepts the quoting', () => {
+    void fc.assert(
+      fc.property(input, (command) => {
+        const expected = bashWords(command)
+        fc.pre(expected !== undefined)
+        expect(shellWords(command)).toEqual(expected)
       }),
       RUNS,
     )
