@@ -172,6 +172,16 @@ describe('plan mode toggle', () => {
 })
 
 describe('/plan [description]', () => {
+  // Measured on Claude Code 2.1.295: a bare /plan while plan mode is on keeps it on and
+  // prints "Already in plan mode. No plan written yet."
+  it('says it is already in plan mode when a bare /plan runs while plan mode is on', async () => {
+    const s = setup()
+    await s.runCommand('plan')
+    expect(s.notices).not.toContain('Already in plan mode. No plan written yet.')
+    await s.runCommand('plan')
+    expect(s.notices.at(-1)).toBe('Already in plan mode. No plan written yet.')
+  })
+
   it('keeps plan mode on when run while plan mode is already on', async () => {
     const s = setup()
     await s.runCommand('plan')
