@@ -22,6 +22,7 @@ import * as os from 'node:os'
 import { type ExtensionAPI, getMarkdownTheme } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { setAgentRunner } from '../internal/agent-run.ts'
+import { setBackgroundAgentCounter } from '../internal/background-agents.ts'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.ts'
 import { isProjectApprovedSilently } from '../internal/project-approval.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
@@ -53,6 +54,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
   pi.events?.on(MCP_TOOLS_CHANNEL, (data) => {
     if (isMcpToolAliases(data)) setKnownMcpAliases(data)
   })
+
+  // The hooks extension holds Claude's idle_prompt while a background run is live.
+  setBackgroundAgentCounter(() => activeBackgroundRuns())
 
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.

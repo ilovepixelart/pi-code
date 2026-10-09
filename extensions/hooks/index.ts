@@ -96,6 +96,7 @@
 
 import * as os from 'node:os'
 import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
+import { runningBackgroundAgents } from '../internal/background-agents.ts'
 import { claudeEffortLevel } from '../internal/effort.ts'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.ts'
 import { readManagedSettings } from '../internal/managed-settings.ts'
@@ -690,6 +691,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (notifyCommands.length > 0) {
       const runner = boundRunner(ctx)
       idlePromptTimer = setTimeout(() => {
+        // Claude also holds it while a background agent still runs; that run's completion
+        // starts a new turn, whose end arms the notification again.
+        if (runningBackgroundAgents() > 0) return
         void runNotifyHooks(notifyCommands, { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'pi is waiting for your input' }, runner).catch(() => {})
       }, IDLE_PROMPT_DELAY_MS)
       idlePromptTimer.unref?.()
@@ -829,6 +833,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // session_start reaches this watcher: left armed, it polls for the life of the process.
     disposeSettingsWatch()
     disposeSettingsWatch = () => {}
+    // /new, /resume and /fork emit no input event, so the ending session's pending
+    // idle_prompt would otherwise fire against a disposed context.
+    cancelIdlePrompt()
     const reason = claudeSpelling(SESSION_END_REASON, event.reason)
     // SessionEnd rides Claude's short shared budget (see sessionEndTimeoutMs) so a
     // slow hook cannot stall session exit, /new or /resume.

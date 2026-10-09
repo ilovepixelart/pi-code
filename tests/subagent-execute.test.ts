@@ -6,6 +6,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { DEFAULT_MAX_LINES } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal/agent-run.ts'
+import { runningBackgroundAgents } from '../extensions/internal/background-agents.ts'
 import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, setKnownMcpAliases, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
 
@@ -1094,6 +1095,14 @@ describe('agentsListText', () => {
     expect(out).toContain('user:')
     expect(out).not.toContain('builtin:')
     expect(out).not.toContain('project:')
+  })
+})
+
+describe('background agent count seam', () => {
+  it('reports the live background run count to the idle_prompt gate in the hooks extension', () => {
+    activeBackgroundRunsMock.mockReturnValue(2)
+
+    expect(runningBackgroundAgents()).toBe(2)
   })
 })
 
