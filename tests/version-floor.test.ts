@@ -1,7 +1,8 @@
 import { VERSION } from '@earendil-works/pi-coding-agent'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { floorNotice, PI_FLOOR } from '../extensions/internal/pi-floor.ts'
+import { sharedSlot } from '../extensions/internal/shared-slot.ts'
 import { registerFloorCheck } from '../extensions/version-floor.ts'
 
 type Handler = (event: unknown, ctx: unknown) => Promise<void> | void
@@ -37,11 +38,24 @@ describe('pi version floor', () => {
 })
 
 describe('version-floor extension', () => {
+  beforeEach(() => sharedSlot<boolean>('version-floor.warned').set(undefined))
+
   it('warns once, on the first session start, when pi is below the floor', async () => {
     const { start, notify } = sessionStarts('0.79.0')
     await start()
     await start()
     expect(notify.mock.calls).toEqual([[floorNotice('0.79.0'), 'warning']])
+  })
+
+  // pi loads a fresh extension instance for each session (/new, /resume, /fork, /reload);
+  // measured on pi 0.79.10, a closure flag warned again after /new.
+  it('warns once per process, not again from the next session instance', async () => {
+    const first = sessionStarts('0.79.0')
+    await first.start()
+    const second = sessionStarts('0.79.0')
+    await second.start()
+    expect(first.notify).toHaveBeenCalledOnce()
+    expect(second.notify).not.toHaveBeenCalled()
   })
 
   it('says nothing on the pi this suite runs against', async () => {

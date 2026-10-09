@@ -9,14 +9,18 @@
 import { type ExtensionAPI, VERSION } from '@earendil-works/pi-coding-agent'
 
 import { floorNotice } from './internal/pi-floor.ts'
+import { sharedSlot } from './internal/shared-slot.ts'
+
+// pi loads a fresh instance of this extension for every session (/new, /resume, /fork,
+// /reload), so a flag in the closure would warn again in each one. pi cannot change
+// version mid-run, so one notice per process says everything a repeat would.
+const warned = sharedSlot<boolean>('version-floor.warned')
 
 export function registerFloorCheck(pi: ExtensionAPI, version: string): void {
-  // pi cannot change version mid-run, so one notice says everything a repeat would.
-  let warned = false
   pi.on('session_start', (_event, ctx) => {
     const notice = floorNotice(version)
-    if (warned || notice === undefined) return
-    warned = true
+    if (warned.get() || notice === undefined) return
+    warned.set(true)
     ctx.ui.notify(notice, 'warning')
   })
 }
