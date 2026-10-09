@@ -409,7 +409,8 @@ describe('context: fork and skillOverrides', () => {
             sent.push({ message, options })
           },
         } as never)
-        const start = async () => handlers.get('session_start')?.({ reason: 'startup' }, { cwd })
+        // A session in use has had turns; prompted false models one that has not had any yet.
+        const start = async (prompted = true) => handlers.get('session_start')?.({ reason: 'startup' }, { sessionManager: { getBranch: () => (prompted ? [{ type: 'message' }] : []) }, cwd })
         const shutdown = async (reason: string) => {
           await handlers.get('session_shutdown')?.({ reason }, { cwd })
           sendThrows = true
@@ -442,6 +443,25 @@ describe('context: fork and skillOverrides', () => {
         expect(t.sent).toHaveLength(1)
         expect(t.sent[0].message.content).toContain('FORK RESULT')
         expect(t.sent[0].options).toEqual({ triggerTurn: true })
+      } finally {
+        await t.done()
+      }
+    })
+
+    // pi 1.1.0 sends a turn an extension starts before the session's first prompt without a
+    // system prompt, and the session keeps going without one; the result is recorded for
+    // the next prompt instead.
+    it('records the result without starting a turn in a session that has had no turn yet', async () => {
+      const t = await forkSetup()
+      try {
+        await t.first.shutdown('new')
+        const second = t.session()
+        await second.start(false)
+        await t.invoke()
+        t.finish('FORK RESULT')
+        await settled()
+        expect(second.sent).toHaveLength(1)
+        expect(second.sent[0].options).toEqual({ triggerTurn: false })
       } finally {
         await t.done()
       }

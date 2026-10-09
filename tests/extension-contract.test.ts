@@ -124,7 +124,7 @@ describe('cross-extension seams meet across module graphs', () => {
     const received: string[] = []
     const pi = { sendMessage: (message: { content: string }) => received.push(message.content) } as never
     const mailbox = current.sessionMailbox('contract-test')
-    mailbox.attach(pi)
+    mailbox.attach(pi, true)
     try {
       launcher.sessionMailbox('contract-test').deliver((target) => target.sendMessage({ customType: 't', content: 'done', display: true }))
       expect(received).toEqual(['done'])
@@ -205,7 +205,7 @@ describe('pi session replacement contract', () => {
           noExtensions: true,
           extensionFactories: [
             (pi) => {
-              pi.on('session_start', () => mailbox.attach(pi))
+              pi.on('session_start', () => mailbox.attach(pi, true))
               pi.on('session_shutdown', () => mailbox.detach(pi))
             },
           ],
