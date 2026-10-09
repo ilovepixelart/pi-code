@@ -119,8 +119,8 @@ export function interpretHookResult(code: number, stdout: string, stderr: string
   const parsed = tryParseJson(stdout)
   // Claude: on exit 2 the blocking message is the JSON blocking decision's reason
   // when it makes one, and the stderr text otherwise.
-  if (code === 2) return { block: true, reason: jsonBlockingReason(parsed) ?? (stderr.trim() || 'Blocked by hook') }
-  const decision = fieldDecision(parsed)
+  // Claude reads the JSON on every exit code, so a continue false still stops the run.
+  const decision: HookDecision = code === 2 ? { block: true, reason: jsonBlockingReason(parsed) ?? (stderr.trim() || 'Blocked by hook') } : fieldDecision(parsed)
   // Claude: continue false "stops processing entirely after the hook runs" and "takes
   // precedence over any event-specific decision fields": measured on 2.1.295, the run
   // stops whatever those fields say, while they still decide this call. Claude

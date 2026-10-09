@@ -582,6 +582,13 @@ describe('interpretHookResult', () => {
   // alone or beside allow let the tool run and then stopped the run; beside deny or
   // decision block the tool was blocked and the run stopped. The stop never decides the
   // tool: the other fields do, and the stop rides along.
+  // Claude reads stdout JSON "on every exit code, not just 0"; exit 2 blocks whatever the
+  // JSON says, and its other fields still take effect.
+  it('blocks on exit 2 and still carries a continue false stop', () => {
+    expect(interpretHookResult(2, JSON.stringify({ continue: false, stopReason: 'halt' }), 'stderr text')).toEqual({ block: true, reason: 'halt', stop: true, stopReason: 'halt' })
+    expect(interpretHookResult(2, '', 'stderr text')).toEqual({ block: true, reason: 'stderr text' })
+  })
+
   it('lets a lone continue false allow the call and carry the stop', () => {
     expect(interpretHookResult(0, JSON.stringify({ continue: false, stopReason: 'halt' }), '')).toEqual({ block: false, stop: true, stopReason: 'halt' })
   })
