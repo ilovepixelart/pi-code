@@ -585,6 +585,13 @@ describe('interpretHookResult', () => {
   it('allows on a clean exit', () => {
     expect(interpretHookResult(0, 'ok', '')).toEqual({ block: false })
   })
+
+  it('allows on an exit code other than 0 and 2 with empty stdout', () => {
+    // Claude: with empty stdout any other exit code "is a non-blocking error for most
+    // hook events: the action proceeds"; only exit 2 blocks through the code alone.
+    expect(interpretHookResult(127, '', 'sh: guard.sh: not found')).toEqual({ block: false })
+    expect(interpretHookResult(3, '', '')).toEqual({ block: false })
+  })
 })
 
 describe('runPreToolUse', () => {
@@ -597,8 +604,9 @@ describe('runPreToolUse', () => {
     const notices: string[] = []
     const runner: HookRunner = async () => ({ code: 127, stdout: '', stderr: '/bin/sh: /typo/guard.sh: No such file or directory\nmore detail', timedOut: false })
 
-    await runPreToolUse({ PreToolUse: [{ hooks: [{ command: '/typo/guard.sh' }] }] }, 'bash', {}, runner, undefined, (message) => notices.push(message))
+    const decision = await runPreToolUse({ PreToolUse: [{ hooks: [{ command: '/typo/guard.sh' }] }] }, 'bash', {}, runner, undefined, (message) => notices.push(message))
 
+    expect(decision.block).toBe(false)
     expect(notices).toHaveLength(1)
     expect(notices[0]).toContain('Failed with non-blocking status code: /bin/sh: /typo/guard.sh: No such file or directory')
     expect(notices[0]).not.toContain('more detail')
