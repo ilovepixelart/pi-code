@@ -225,7 +225,7 @@ async function readCapped(response: Response, url: URL, limit: BodyLimit): Promi
     if (done) break
     if (!value) continue
     if (read + value.byteLength > limit.maxBytes && limit.overflow === 'refuse') {
-      await reader.cancel().catch(() => {})
+      await reader.cancel().catch(() => {}) // NOSONAR typescript:S9382 - a stream is read chunk by chunk
       throw tooLarge()
     }
     text += decoder.decode(value.subarray(0, limit.maxBytes - read), { stream: true })
@@ -306,7 +306,7 @@ async function fetchText(rawUrl: string, crossHost: CrossHost, limit: BodyLimit,
       void response.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${response.status} for ${url}`)
     }
-    return { kind: 'body', text: await readCapped(response, url, limit), contentType: response.headers.get('content-type') ?? '' }
+    return { kind: 'body', text: await readCapped(response, url, limit), contentType: response.headers.get('content-type') ?? '' } // NOSONAR typescript:S9382 - each redirect hop depends on the previous response
   }
   throw new Error(`too many redirects for ${rawUrl}`)
 }

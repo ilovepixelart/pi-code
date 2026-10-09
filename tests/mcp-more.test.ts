@@ -2582,6 +2582,23 @@ describe('mcp resource tools', () => {
     expect(entries).toContainEqual(expect.objectContaining({ server: 'one', uriTemplate: 'db://{id}' }))
   })
 
+  it('lists resources from every server at once, keeping server order', async () => {
+    withResourceCapability()
+    hoisted.control.listResourceTemplates = async () => ({ resourceTemplates: [] })
+    const harness = await setupStarted({ user: { one: { command: 'x' }, two: { command: 'y' } } })
+    const gate = overlap()
+    hoisted.control.listResources = async (_args, client) => {
+      await gate.enter()
+      return { resources: [{ uri: `db://${client.transport?.options.command}`, name: 'R' }] }
+    }
+
+    const out = await resourceTool(harness, 'list_mcp_resources').execute('c1', {})
+
+    expect(gate.overlapped()).toBe(true)
+    const entries = JSON.parse(out.content[0].text ?? '') as Array<Record<string, unknown>>
+    expect(entries.map((entry) => entry.server)).toEqual(['one', 'two'])
+  })
+
   it('carries description and mimeType when a server sends them, and omits them when it does not', () => {
     // Both optional-field arms in one place: a server that sends them must have them
     // listed, and one that omits them must not gain empty keys, which a model reads as
@@ -2769,6 +2786,25 @@ describe('managed-mcp.json exclusive control', () => {
     expect(harness.toolNames()).toEqual([])
     expect(hoisted.transports).toEqual([])
     expect(harness.warnings.join('\n')).toMatch(/managed-mcp\.json.*not valid JSON/)
+  })
+
+  it('closes every evicted server at once when a managed policy takes over', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setup({ user: { a: { command: 'u1' }, b: { command: 'u2' } } })
+    withoutManagedMcp()
+    await harness.sessionStart(true)
+    const gate = overlap()
+    hoisted.control.close = async () => {
+      await gate.enter()
+    }
+
+    withManagedMcp({ mcpServers: { managed: { command: 'm' } } })
+    await harness.sessionStart(true)
+
+    expect(gate.overlapped()).toBe(true)
+    const lines = await statusLinesOf(harness)
+    expect(lines).toContain('a: disabled by managed policy (0 tools)')
+    expect(lines).toContain('b: disabled by managed policy (0 tools)')
   })
 
   it('evicts an already-connected non-managed server when a policy is deployed mid-process', async () => {
@@ -3184,6 +3220,21 @@ describe('mcp resource mentions', () => {
     expect(result?.action).toBe('transform')
     expect(result?.text).toContain('analyze @srv:file:///spec.md please')
     expect(result?.text).toContain('RESOURCE BODY')
+  })
+
+  it('reads every @server:uri mention of a prompt at once, keeping their order', async () => {
+    withTools([{ name: 'go' }])
+    const harness = await setupStarted({ user: { srv: { command: 'x' } } })
+    const gate = overlap()
+    hoisted.control.readResource = async (args) => {
+      await gate.enter()
+      return { contents: [{ uri: args.uri, text: `BODY ${args.uri}` }] }
+    }
+
+    const result = (await harness.input('compare @srv:a://one with @srv:b://two')) as { text: string }
+
+    expect(gate.overlapped()).toBe(true)
+    expect(result.text.indexOf('BODY a://one')).toBeLessThan(result.text.indexOf('BODY b://two'))
   })
 
   it('leaves a mention for an unconnected server untouched', async () => {
@@ -3680,3 +3731,30 @@ describe('mcp under --mcp-config and --strict-mcp-config', () => {
     expect(commands()).toEqual(['from-managed'])
   })
 })
+
+// Calls to different servers, or different mentions, are independent: one slow server must
+// not hold the others back. overlap() holds the first caller until a second call starts, or
+// 1 s passes, and reports whether the second started while the first was still waiting, so a
+// loop that awaits each call in turn never overlaps them.
+function overlap(): { enter: () => Promise<void>; overlapped: () => boolean } {
+  let started = 0
+  let firstDone = false
+  let overlapped = false
+  let release: () => void = () => {}
+  const peer = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return {
+    enter: async () => {
+      started++
+      if (started === 1) {
+        await Promise.race([peer, new Promise((resolve) => setTimeout(resolve, 1000))])
+        firstDone = true
+        return
+      }
+      if (!firstDone) overlapped = true
+      release()
+    },
+    overlapped: () => overlapped,
+  }
+}

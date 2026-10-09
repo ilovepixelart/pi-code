@@ -15,7 +15,7 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(items: TIn[], concurren
     while (true) {
       const current = nextIndex++
       if (current >= items.length) return
-      results[current] = await fn(items[current], current)
+      results[current] = await fn(items[current], current) // NOSONAR typescript:S9382 - each worker of the pool runs its items one at a time
     }
   })
   await Promise.all(workers)
