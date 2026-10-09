@@ -25,6 +25,9 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
+      "correctness": {
+        "useImportExtensions": "error"
+      },
       "nursery": {
         "noFloatingPromises": "error",
         "noMisusedPromises": "error",

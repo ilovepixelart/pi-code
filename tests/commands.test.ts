@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import commandsExtension, { collectCommands, commandDirs, expandCommand, SHELL_DISABLED_PLACEHOLDER, shellExecutionDisabled, slashCommandBudget, slashCommandToolDescription } from '../extensions/commands.ts'
-import { parseCommandFile } from '../extensions/internal/command-file.js'
+import { parseCommandFile } from '../extensions/internal/command-file.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { makeWorktree } from './worktree-fixture.ts'
 
@@ -17,8 +17,8 @@ vi.mock('node:os', async (importOriginal) => {
 })
 // The resolver seam: these tests must not depend on pwsh being installed, so the
 // binary lookup is stubbed while everything else in the module stays real.
-vi.mock('../extensions/internal/command-spans.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../extensions/internal/command-spans.js')>()
+vi.mock('../extensions/internal/command-spans.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../extensions/internal/command-spans.ts')>()
   return { ...actual, resolvePowershellBinary: () => hoisted.pwshBinary }
 })
 

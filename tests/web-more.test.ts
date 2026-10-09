@@ -6,7 +6,7 @@ import { httpFetch } from '../extensions/internal/web-transport.ts'
 import webExtension, { isPrivateAddress, pinnedLookup } from '../extensions/web.ts'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
-vi.mock('../extensions/internal/web-transport.js', () => ({ httpFetch: vi.fn() }))
+vi.mock('../extensions/internal/web-transport.ts', () => ({ httpFetch: vi.fn() }))
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details: Record<string, unknown>; usage?: unknown }
 type Execute = (id: string, params: Record<string, unknown>, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>

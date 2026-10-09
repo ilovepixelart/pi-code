@@ -4,7 +4,8 @@
     "extensions/*.ts",
     "extensions/*/index.ts",
     "tests/**/*.test.ts",
-    "scripts/lib/wire-probe.ts"
+    "scripts/lib/wire-probe.ts",
+    "tests/resolution-probe.ts"
   ],
   "project": [
     "extensions/**/*.ts",

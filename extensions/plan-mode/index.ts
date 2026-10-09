@@ -18,8 +18,8 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from '@earendil-wor
 import { Key } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 
-import { PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.js'
-import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, restoredPlanState, type TodoItem } from './utils.js'
+import { PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.ts'
+import { extractTodoItems, isSafeCommand, markCompletedSteps, planToTodos, restoredPlanState, type TodoItem } from './utils.ts'
 
 // Tools
 const PLAN_MODE_TOOLS = ['read', 'bash', 'grep', 'find', 'ls', 'question', 'plan_mode_complete']

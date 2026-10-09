@@ -6,10 +6,10 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { readManagedSettings } from '../internal/managed-settings.js'
-import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.js'
-import { claudeSettingsChain, readSettingsChain } from '../internal/settings-chain.js'
-import { errorMessage, escapeRegExp, isRecord } from '../internal/values.js'
+import { readManagedSettings } from '../internal/managed-settings.ts'
+import { type InstalledPlugin, pluginComponentPath, substitutePluginVars } from '../internal/plugins.ts'
+import { claudeSettingsChain, readSettingsChain } from '../internal/settings-chain.ts'
+import { errorMessage, escapeRegExp, isRecord } from '../internal/values.ts'
 
 export interface HookCommand {
   type?: string

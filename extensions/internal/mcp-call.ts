@@ -7,7 +7,7 @@
  * callMcpTool. It is the direct-call analogue of the MCP_TOOLS_CHANNEL alias bus.
  */
 
-import { sharedSlot } from './shared-slot.js'
+import { sharedSlot } from './shared-slot.ts'
 
 export interface McpToolResult {
   text: string

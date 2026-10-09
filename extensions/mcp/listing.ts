@@ -4,9 +4,9 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { errorMessage } from '../internal/values.js'
-import type { McpPromptInfo } from './mapping.js'
-import { callRequestOptions, withTimeout } from './transport.js'
+import { errorMessage } from '../internal/values.ts'
+import type { McpPromptInfo } from './mapping.ts'
+import { callRequestOptions, withTimeout } from './transport.ts'
 
 export interface McpToolInfo {
   name: string

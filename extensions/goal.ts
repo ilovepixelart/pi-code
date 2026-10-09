@@ -37,7 +37,7 @@
 
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { hookFiles, readSettingsDisableAllHooks, stopHookBlockCap } from './hooks/index.js'
+import { hookFiles, readSettingsDisableAllHooks, stopHookBlockCap } from './hooks/index.ts'
 import {
   checkinIntervalMs,
   checkinText,
@@ -59,13 +59,13 @@ import {
   type RunningWork,
   renderTranscript,
   summaryText,
-} from './internal/goal-evaluator.js'
-import { readManagedSettings } from './internal/managed-settings.js'
-import { completeText } from './internal/model-complete.js'
-import { resolveModelOverride } from './internal/model-lookup.js'
-import { isProjectApprovedSilently } from './internal/project-approval.js'
-import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.js'
-import { errorMessage } from './internal/values.js'
+} from './internal/goal-evaluator.ts'
+import { readManagedSettings } from './internal/managed-settings.ts'
+import { completeText } from './internal/model-complete.ts'
+import { resolveModelOverride } from './internal/model-lookup.ts'
+import { isProjectApprovedSilently } from './internal/project-approval.ts'
+import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.ts'
+import { errorMessage } from './internal/values.ts'
 
 /** Session entry type the goal state persists under, and the custom message type its
  * transcript lines (kickoff, verdicts, check-ins) carry. */

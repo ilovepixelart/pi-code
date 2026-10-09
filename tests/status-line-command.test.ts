@@ -29,7 +29,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 // The watcher polls on a real interval; capturing its callback lets a test drive a
 // settings change deterministically under fake timers.
-vi.mock('../extensions/internal/settings-watch.js', () => ({
+vi.mock('../extensions/internal/settings-watch.ts', () => ({
   watchSettingsFiles: (_files: string[], reload: () => void) => {
     hoisted.settingsChanged = reload
     return () => {
@@ -38,8 +38,8 @@ vi.mock('../extensions/internal/settings-watch.js', () => ({
   },
 }))
 
-vi.mock('../extensions/hooks/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../extensions/hooks/index.js')>()
+vi.mock('../extensions/hooks/index.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../extensions/hooks/index.ts')>()
   return {
     ...actual,
     runHookCommand: async (command: string, payload: unknown, _timeout?: number, options?: { onChild?: (kill: () => void) => void }) => {

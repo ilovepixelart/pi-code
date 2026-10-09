@@ -29,11 +29,11 @@ const backgroundRunMock = vi.hoisted(() => vi.fn())
 const allBackgroundRunsMock = vi.hoisted(() => vi.fn((): unknown[] => []))
 
 vi.mock('node:child_process', async (importOriginal) => ({ ...(await importOriginal<object>()), spawn: spawnMock }))
-vi.mock('../extensions/subagent/agents.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../extensions/subagent/agents.js')>()),
+vi.mock('../extensions/subagent/agents.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../extensions/subagent/agents.ts')>()),
   discoverAgents: discoverAgentsMock,
 }))
-vi.mock('../extensions/subagent/background.js', () => ({
+vi.mock('../extensions/subagent/background.ts', () => ({
   backgroundStatusText: backgroundStatusTextMock,
   cancelBackgroundRun: cancelBackgroundRunMock,
   cancelAllBackgroundRuns: cancelAllBackgroundRunsMock,

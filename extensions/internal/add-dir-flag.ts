@@ -5,7 +5,7 @@
  * (the status line) through a process-wide slot.
  */
 
-import { sharedSlot } from './shared-slot.js'
+import { sharedSlot } from './shared-slot.ts'
 
 export const ADD_DIR_FLAG = 'add-dir'
 

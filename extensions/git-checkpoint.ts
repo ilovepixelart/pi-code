@@ -22,9 +22,9 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from '@earendil-works/pi-coding-agent'
-import { readUserSetting } from './internal/settings-chain.js'
-import { fileToolTarget } from './internal/tool-target.js'
-import { contentText, errorMessage } from './internal/values.js'
+import { readUserSetting } from './internal/settings-chain.ts'
+import { fileToolTarget } from './internal/tool-target.ts'
+import { contentText, errorMessage } from './internal/values.ts'
 
 const CUSTOM_TYPE = 'git-checkpoint'
 /** Sidecar inside the bare shadow repo recording the work tree it snapshots. */

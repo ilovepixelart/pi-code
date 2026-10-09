@@ -21,9 +21,9 @@ import * as path from 'node:path'
 
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 
-import { atomicWriteFile } from './atomic-write.js'
-import { gitRoot } from './project-root.js'
-import { isRecord } from './values.js'
+import { atomicWriteFile } from './atomic-write.ts'
+import { gitRoot } from './project-root.ts'
+import { isRecord } from './values.ts'
 
 /** The key for a working directory: its checkout, resolved, so the same checkout
  * reached through a symlink is the same project. */

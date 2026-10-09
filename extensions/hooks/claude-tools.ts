@@ -27,9 +27,9 @@
  */
 
 import * as path from 'node:path'
-import { asPiReadsIt } from '../internal/tool-target.js'
+import { asPiReadsIt } from '../internal/tool-target.ts'
 
-export { claudeToolName } from '../internal/claude-tool-names.js'
+export { claudeToolName } from '../internal/claude-tool-names.ts'
 
 /** Claude file-tool paths are always absolute before hooks run, and resolved the way pi's
  * tools resolve them (a leading @ stripped, `~` expanded, a file:// URL decoded), so a

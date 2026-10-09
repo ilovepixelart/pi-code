@@ -10,8 +10,8 @@ import subagentExtension, { formatTokens, formatToolCall, formatUsageStats, getD
 const discoverAgentsMock = vi.hoisted(() => vi.fn())
 const startBackgroundRunMock = vi.hoisted(() => vi.fn(() => 'bg-1'))
 
-vi.mock('../extensions/subagent/agents.js', () => ({ discoverAgents: discoverAgentsMock }))
-vi.mock('../extensions/subagent/background.js', () => ({
+vi.mock('../extensions/subagent/agents.ts', () => ({ discoverAgents: discoverAgentsMock }))
+vi.mock('../extensions/subagent/background.ts', () => ({
   backgroundStatusText: () => 'BACKGROUND-STATUS',
   startBackgroundRun: startBackgroundRunMock,
 }))

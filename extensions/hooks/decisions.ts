@@ -5,12 +5,12 @@
  */
 
 import type { ToolCallEventResult } from '@earendil-works/pi-coding-agent'
-import type { PathAnchors } from '../internal/path-rules.js'
-import { errorMessage, isRecord } from '../internal/values.js'
-import { claudeToolInput, claudeToolName, piToolInput } from './claude-tools.js'
-import type { HookCommand, HooksConfig } from './config.js'
-import { allCommands, matchingCommands, passesIfFilter } from './matcher.js'
-import { type HookRunner, type HookRunResult, timeoutMs } from './runners.js'
+import type { PathAnchors } from '../internal/path-rules.ts'
+import { errorMessage, isRecord } from '../internal/values.ts'
+import { claudeToolInput, claudeToolName, piToolInput } from './claude-tools.ts'
+import type { HookCommand, HooksConfig } from './config.ts'
+import { allCommands, matchingCommands, passesIfFilter } from './matcher.ts'
+import { type HookRunner, type HookRunResult, timeoutMs } from './runners.ts'
 
 export interface HookDecision {
   block: boolean

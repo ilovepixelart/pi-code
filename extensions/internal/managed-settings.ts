@@ -12,7 +12,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { isRecord } from './values.js'
+import { isRecord } from './values.ts'
 
 /** The OS managed-settings.json path Claude Code documents per platform. */
 export function managedSettingsPath(platform: NodeJS.Platform = process.platform): string {

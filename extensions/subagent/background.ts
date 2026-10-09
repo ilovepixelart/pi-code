@@ -10,11 +10,11 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { killProcessTree } from '../internal/process-tree.js'
-import { sharedSlot } from '../internal/shared-slot.js'
-import { errorMessage } from '../internal/values.js'
-import { taskWithStartContext } from './child.js'
-import { spawnChild, utf8Chunks } from './run.js'
+import { killProcessTree } from '../internal/process-tree.ts'
+import { sharedSlot } from '../internal/shared-slot.ts'
+import { errorMessage } from '../internal/values.ts'
+import { taskWithStartContext } from './child.ts'
+import { spawnChild, utf8Chunks } from './run.ts'
 
 export interface BackgroundRun {
   id: string

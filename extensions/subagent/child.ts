@@ -10,12 +10,12 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import type { AgentRunRequest } from '../internal/agent-run.js'
-import { claudeConfigDir } from '../internal/config-dir.js'
-import { sliceBytes } from '../internal/output-guard.js'
-import { repoRoot } from '../internal/project-root.js'
-import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.js'
-import { type AgentConfig, type AgentMemoryScope, expandMcpToolPatterns, withPreloadedSkills } from './agents.js'
+import type { AgentRunRequest } from '../internal/agent-run.ts'
+import { claudeConfigDir } from '../internal/config-dir.ts'
+import { sliceBytes } from '../internal/output-guard.ts'
+import { repoRoot } from '../internal/project-root.ts'
+import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.ts'
+import { type AgentConfig, type AgentMemoryScope, expandMcpToolPatterns, withPreloadedSkills } from './agents.ts'
 /** The system prompt for Claude's experimental `type: "agent"` hooks: the subagent
  * inspects with read-only tools and returns the same JSON decision a command hook's
  * stdout carries. A hook-supplied `systemPrompt` is appended after it. */

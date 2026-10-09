@@ -37,11 +37,11 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { readManagedSettings } from './internal/managed-settings.js'
-import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.js'
-import { claudeSettingsChain, claudeSettingsSources, type SettingsScope, type SettingsSource } from './internal/settings-chain.js'
-import { watchSettingsFiles } from './internal/settings-watch.js'
-import { isRecord } from './internal/values.js'
+import { readManagedSettings } from './internal/managed-settings.ts'
+import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.ts'
+import { claudeSettingsChain, claudeSettingsSources, type SettingsScope, type SettingsSource } from './internal/settings-chain.ts'
+import { watchSettingsFiles } from './internal/settings-watch.ts'
+import { isRecord } from './internal/values.ts'
 
 /** The `env` object of one settings scope, coerced to string values. A string is kept
  * as-is, a number or boolean becomes its String() form, and anything else (object,

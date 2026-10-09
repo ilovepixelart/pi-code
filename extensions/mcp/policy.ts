@@ -6,10 +6,10 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { managedSettingsFile } from '../internal/managed-settings.js'
-import { claudeSettingsSources } from '../internal/settings-chain.js'
-import { errorMessage, escapeRegExp, isRecord } from '../internal/values.js'
-import { interpolateEnv, type ServerConfig } from './config.js'
+import { managedSettingsFile } from '../internal/managed-settings.ts'
+import { claudeSettingsSources } from '../internal/settings-chain.ts'
+import { errorMessage, escapeRegExp, isRecord } from '../internal/values.ts'
+import { interpolateEnv, type ServerConfig } from './config.ts'
 
 export interface ProjectServerPolicy {
   disabled: Set<string>

@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto'
 
 import { DEFAULT_MAX_BYTES } from '@earendil-works/pi-coding-agent'
-import { capForContext } from '../internal/output-guard.js'
+import { capForContext } from '../internal/output-guard.ts'
 
 /** Providers take a tool name only as `^[a-zA-Z0-9_-]{1,64}$` (64 is OpenAI's cap, the
  * tighter of the two) and reject the whole request otherwise, so one bad name failed every

@@ -8,7 +8,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import { StringEnum } from '@earendil-works/pi-ai'
 import { type Static, Type } from 'typebox'
 
-import type { SingleResult, SubagentDetails } from './types.js'
+import type { SingleResult, SubagentDetails } from './types.ts'
 
 export const TaskItem = Type.Object({
   agent: Type.String({ description: 'Name of the agent to invoke' }),

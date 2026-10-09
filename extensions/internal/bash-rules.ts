@@ -10,8 +10,8 @@
  * closed, as plan mode's guard does.
  */
 
-import { hasSubstitution, splitSegments } from './shell-split.js'
-import { escapeRegExp } from './values.js'
+import { hasSubstitution, splitSegments } from './shell-split.ts'
+import { escapeRegExp } from './values.ts'
 
 /**
  * One rule against one command segment, per Claude's permission table:

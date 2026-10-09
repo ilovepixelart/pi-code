@@ -15,9 +15,9 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { CLAUDE_TOOL_MAP } from './claude-tool-names.js'
-import { parseClaudeFrontmatter } from './frontmatter.js'
-import { escapeRegExp } from './values.js'
+import { CLAUDE_TOOL_MAP } from './claude-tool-names.ts'
+import { parseClaudeFrontmatter } from './frontmatter.ts'
+import { escapeRegExp } from './values.ts'
 
 /** The pi file tools a Claude path rule can govern. */
 export type PathRuleTool = 'read' | 'edit' | 'write'

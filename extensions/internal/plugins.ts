@@ -17,11 +17,11 @@
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { claudeConfigDir } from './config-dir.js'
-import { readManagedSettings } from './managed-settings.js'
-import { userSettingsFiles } from './settings-chain.js'
-import { statToken } from './stat-token.js'
-import { errorMessage, isRecord } from './values.js'
+import { claudeConfigDir } from './config-dir.ts'
+import { readManagedSettings } from './managed-settings.ts'
+import { userSettingsFiles } from './settings-chain.ts'
+import { statToken } from './stat-token.ts'
+import { errorMessage, isRecord } from './values.ts'
 
 export interface InstalledPlugin {
   name: string
