@@ -40,7 +40,7 @@ pi install ./pi-code
 
 ## Commits and pull requests
 
-Commit subjects are imperative and specific, one topic per commit, for example `Refuse memory index writes when the index cannot be read`. Skip `feat:`/`fix:` prefixes. Pull requests squash-merge, so the PR title becomes the commit subject; keep the body to what the diff does not already show.
+Commit subjects are imperative and specific, one topic per commit, for example `Refuse memory index writes when the index cannot be read`. Skip `feat:`/`fix:` prefixes. Pull requests squash-merge, so the PR title becomes the commit subject; keep the body to what the diff does not already show. `main` takes changes only through a pull request: a ruleset requires the test matrix, both e2e smokes and both CodeQL analyses to pass, allows squash merges only, and blocks force-pushes and deletion, with no bypass.
 
 ## Releases
 
