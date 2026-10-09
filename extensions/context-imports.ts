@@ -319,9 +319,8 @@ export function rootsForImporter(importer: string, home: string, cwd: string, ex
   const fromUserConfig = isUnder(path.resolve(importer), userConfig) || (real !== undefined && isUnder(real, realRoots(userConfig)))
   if (fromUserConfig) return [ANY_ROOT]
   // The project was asked about its external imports and allowed them, so a project
-  // file may reach outside, as Claude's dialog grants. The widening is deliberately
-  // only for project files: a user-scope file's roots are its own config, and an
-  // approval given to a repository must not extend them.
+  // file may reach outside, as Claude's dialog grants. User-config files returned above
+  // already import from anywhere, with no approval involved.
   if (externalApproved) return [ANY_ROOT]
   // A non-config file is bounded at the repository root: that covers an ancestor
   // context file (a repo-root CLAUDE.md or CLAUDE.local.md in a subdirectory

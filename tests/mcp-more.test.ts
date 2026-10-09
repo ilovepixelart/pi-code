@@ -294,10 +294,6 @@ const setup = async (opts: { user?: Record<string, unknown>; project?: Record<st
       notify: (message: string, level: string) => notifications.push({ message, level }),
       confirm: opts.confirm ?? (async () => approve),
     },
-    // Always provide the capability: without it the first sessionStart in the
-    // file emits the once-per-module runtime-too-old warning into whichever
-    // test runs first, making notification assertions order-dependent under
-    // shuffle. The old-runtime path is tested in project-approval.test.ts.
     isProjectTrusted: () => trusted === true,
     isIdle: () => idle,
     sessionManager: { getSessionId: () => 'sess-mcp-1' },
