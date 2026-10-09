@@ -399,7 +399,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
     }
   })
 
-  pi.on('before_agent_start', async (event) => {
+  pi.on('before_agent_start', (event) => {
     if (rules.text.length === 0 || rulesDisabled()) return
 
     // Rules join the options the prompt is built from. A provider that rebuilds the prompt
@@ -434,7 +434,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
   // rule body to that tool's result so it enters context, once per rule per session.
   // This mirrors Claude Code, which attaches a scoped rule when a matching file is
   // read or edited rather than inlining it upfront.
-  pi.on('tool_result', async (event, ctx) => {
+  pi.on('tool_result', (event, ctx) => {
     if (attachTargets.length === 0 || rulesDisabled()) return
     const rel = fileToolTarget(event)
     if (rel === undefined) return

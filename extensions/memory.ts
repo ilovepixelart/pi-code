@@ -207,7 +207,7 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   if (!name || !description || !content) {
     return { content: [{ type: 'text', text: 'save requires name, description, and content.' }], details: {} }
   }
-  return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
+  return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => /* NOSONAR typescript:S7503 - withFileMutationQueue takes a Promise-returning function */ {
     const index = readIndex(dir)
     fs.mkdirSync(dir, { recursive: true })
     // A memory with frontmatter records its write time; one without is left as-is.
@@ -258,7 +258,7 @@ function readMemory(dir: string, name: string): MemoryToolResult {
  * pointing at a file that is gone. Each outcome is reported as what actually happened. */
 async function deleteMemory(dir: string, indexPath: string, name: string): Promise<MemoryToolResult> {
   try {
-    return await withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => {
+    return await withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => /* NOSONAR typescript:S7503 - withFileMutationQueue takes a Promise-returning function */ {
       const index = readIndex(dir)
       const remaining = removeIndexLine(index, name)
       if (remaining) writeIndex(indexPath, remaining)
@@ -451,7 +451,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // touches the parent store. Read per call so tests can flip the env var.
   const inSubagent = (): boolean => Boolean(process.env.PI_CODE_SUBAGENT)
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', (_event, ctx) => {
     if (inSubagent()) return
     migrateLegacyStore(ctx.cwd)
     const approved = isProjectApprovedSilently(ctx)
@@ -467,7 +467,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
     if (count > 0) ctx.ui.notify(`Memory: ${count} memories loaded`, 'info')
   })
 
-  pi.on('before_agent_start', async (event) => {
+  pi.on('before_agent_start', (event) => {
     if (inSubagent() || !enabled) return
     const index = readIndexCached()
     if (!index.trim()) return

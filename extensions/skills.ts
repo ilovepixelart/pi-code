@@ -139,7 +139,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
   pi.on('agent_start', () => forkResults.markPrompted(pi))
   pi.on('session_shutdown', () => forkResults.detach(pi))
 
-  pi.on('resources_discover', async (_event, ctx) => {
+  pi.on('resources_discover', (_event, ctx) => {
     // resources_discover fires after session_start, so the approval is already
     // resolved; reading it silently keeps a second trust dialog off the screen.
     const skillPaths = skillDirs(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))

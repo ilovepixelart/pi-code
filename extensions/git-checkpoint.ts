@@ -543,7 +543,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // extension instance) alive, and 'fork' can write a session from the live run's
   // in-memory entries and then fetch refs from exactly this shadow at its own
   // session_start, so this one case is left for the retention sweep as before.
-  pi.on('session_shutdown', async (event) => {
+  pi.on('session_shutdown', (event) => {
     if (ephemeralShadow && shadowDir && event.reason === 'quit') fs.rmSync(shadowDir, { recursive: true, force: true })
   })
 
@@ -553,7 +553,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // follow-up's user message with no checkpoint. agent_start re-fires per agent.continue
   // (a retry, a compaction, or a follow-up), and the extra snapshot a retry produces is
   // discarded at turn_end, since that user message already has its checkpoint.
-  pi.on('agent_start', async () => {
+  pi.on('agent_start', () => {
     runNeedsSnapshot = true
   })
 
@@ -564,7 +564,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   // resolved value.
   // Only a prompt fires before_agent_start. A provider retry, an overflow recovery and a
   // queued follow-up all re-enter through agent.continue(), with agent_start alone.
-  pi.on('before_agent_start', async () => {
+  pi.on('before_agent_start', () => {
     promptedRun = true
   })
 
@@ -611,7 +611,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     await captureBaseline(file)
   })
 
-  pi.on('turn_end', async (_event, ctx) => {
+  pi.on('turn_end', (_event, ctx) => {
     const snap = pending
     pending = undefined
     if (!snap) return

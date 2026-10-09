@@ -117,26 +117,26 @@ export default function notifyExtension(pi: ExtensionAPI) {
   // timer-based guess would otherwise say.
   let lastAborted = false
 
-  pi.on('session_start', async (_event, _ctx) => {
+  pi.on('session_start', (_event, _ctx) => {
     channel = resolveNotifChannel(readPreferredNotifChannel(os.homedir()))
     lastInputAt = undefined
     pending = false
   })
 
-  pi.on('input', async (event) => {
+  pi.on('input', (event) => {
     // A goal continuation or a subagent's own prompt is not the user; only their own
     // input is evidence they are at the keyboard (mirroring goal.ts's own check).
     if (event.source === 'extension') return
     lastInputAt = Date.now()
   })
 
-  pi.on('agent_end', async (event) => {
+  pi.on('agent_end', (event) => {
     const last = [...event.messages].reverse().find((message) => message.role === 'assistant')
     lastAborted = last?.stopReason === 'aborted'
     pending = channel !== 'off' && process.stdout.isTTY === true
   })
 
-  pi.on('agent_settled', async () => {
+  pi.on('agent_settled', () => {
     if (!pending) return
     pending = false
     if (lastAborted) return

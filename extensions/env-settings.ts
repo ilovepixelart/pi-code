@@ -171,7 +171,7 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
   // turn. pi parses flags after loading, so the --settings level also waits.
   apply(os.homedir(), process.cwd(), false)
 
-  pi.on('session_start', async (_event, ctx: ExtensionContext) => {
+  pi.on('session_start', (_event, ctx: ExtensionContext) => {
     const home = os.homedir()
     const approved = isProjectApprovedSilently(ctx)
     // The watcher's reapply closes over the cwd value, never ctx: the poll has no awaiter,
@@ -190,7 +190,7 @@ export default function envSettingsExtension(pi: ExtensionAPI) {
     disposeWatch = watchSettingsFiles(claudeSettingsChain(cwd, home, approved), reapply)
   })
 
-  pi.on('session_shutdown', async () => {
+  pi.on('session_shutdown', () => {
     disposeWatch()
     disposeWatch = () => {}
     // pi's CLI loads a fresh extension instance for every session replacement, and its

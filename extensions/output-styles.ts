@@ -233,7 +233,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     if (active) ctx.ui.notify(`Output style: ${active.name}`, 'info')
   })
 
-  pi.on('before_agent_start', async (event) => {
+  pi.on('before_agent_start', (event) => {
     const active = styleForName(styles, activeName)
     if (!active || active.body.length === 0) return
     return { systemPrompt: applyStyle(event.systemPrompt, active) }

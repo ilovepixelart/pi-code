@@ -241,7 +241,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand('plan', {
     description: 'Enter plan mode; an optional description starts that task (leave with Ctrl+Alt+P or by executing the plan)',
-    handler: async (args, ctx) => {
+    handler: async (args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const task = args.trim()
       if (!planModeEnabled) togglePlanMode(ctx)
       // Claude's wording with no plan yet; with one, only the first sentence applies.
@@ -256,7 +256,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     label: 'Plan complete',
     description: 'Submit the finished plan for user review while in plan mode. Pass the full plan as numbered steps (1. ... 2. ...). Call this exactly once, when the plan is ready.',
     parameters: Type.Object({ plan: Type.String({ description: 'The complete numbered plan' }) }),
-    async execute(_id, params) {
+    async execute(_id, params) /* NOSONAR typescript:S7503 - pi types a tool execute as returning a Promise */ {
       if (!planModeEnabled) {
         return { content: [{ type: 'text', text: 'Not in plan mode; tool ignored.' }], details: {} }
       }
@@ -269,7 +269,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand('plan-todos', {
     description: 'Show current plan todo list',
-    handler: async (_args, ctx) => {
+    handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       if (todoItems.length === 0) {
         ctx.ui.notify('No todos. Create a plan first with /plan', 'info')
         return
@@ -281,14 +281,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   pi.registerShortcut(Key.ctrlAlt('p'), {
     description: 'Toggle plan mode',
-    handler: async (ctx) => togglePlanMode(ctx),
+    handler: async (ctx) => togglePlanMode(ctx), // NOSONAR typescript:S7503 - pi catches only a rejected promise from a shortcut handler (Promise.resolve(handler()).catch)
   })
 
   // Enforce plan mode at call time, not only through the active-tool set: pi
   // activates tools registered after the restriction was applied (an MCP server
   // connecting during session_start, or a mid-session list_changed refresh), so the
   // set alone leaks write-capable tools into plan mode.
-  pi.on('tool_call', async (event) => {
+  pi.on('tool_call', (event) => {
     if (!planModeEnabled) return
     if (!PLAN_MODE_TOOLS.includes(event.toolName)) {
       return {
@@ -308,7 +308,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   })
 
   // Filter out stale plan mode context when not in plan mode
-  pi.on('context', async (event) => {
+  pi.on('context', (event) => {
     if (planModeEnabled) return
 
     return {
@@ -331,7 +331,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   })
 
   // Inject plan/execution context before agent starts
-  pi.on('before_agent_start', async () => {
+  pi.on('before_agent_start', () => {
     if (planModeEnabled) {
       return {
         message: {
@@ -379,7 +379,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
   })
 
   // Track progress after each turn
-  pi.on('turn_end', async (event, ctx) => {
+  pi.on('turn_end', (event, ctx) => {
     if (!executionMode || todoItems.length === 0) return
     if (!isAssistantMessage(event.message)) return
 
@@ -432,7 +432,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
   })
 
   // Restore state on session start/resume
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', (_event, ctx) => {
     // pi's CLI builds a fresh extension instance per session replacement; RPC mode can reuse
     // one across sessions, so clear prior state first there too: a fresh
     // session (/new, no plan entry) must not inherit the last session's plan or execution.

@@ -1336,7 +1336,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
   // touched its directory, which is the same seam claude-rules uses for a scoped
   // rule. Once per file per session, ordered shallowest first so the deepest
   // instructions are read last, matching the launch-time ordering.
-  pi.on('tool_result', async (event, ctx) => {
+  pi.on('tool_result', (event, ctx) => {
     // A nested file is a CLAUDE.md memory file too, which this variable turns off.
     if (process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS === '1') return
     const rel = fileToolTarget(event)

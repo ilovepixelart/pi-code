@@ -72,7 +72,7 @@ export function buildInitPrompt(opts: InitPromptOptions = {}): string {
 export default function initExtension(pi: ExtensionAPI) {
   pi.registerCommand('init', {
     description: 'Analyze the codebase and create or improve the project context file (AGENTS.md)',
-    handler: async (_args, ctx) => {
+    handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const root = checkoutRoot(ctx.cwd)
       const existing = findExistingContextFile(root)
       const cursorRules = statOf(path.join(root, '.cursor', 'rules'))?.isDirectory() === true || statOf(path.join(root, '.cursorrules'))?.isFile() === true
