@@ -40,8 +40,15 @@ const manager = new DefaultPackageManager({ cwd: home, agentDir, settingsManager
 const resolved = await manager.resolveExtensionSources([packageRoot], { temporary: true })
 const entries = resolved.extensions.filter((entry) => entry.enabled).map((entry) => entry.path)
 const result = await discoverAndLoadExtensions(entries, home, agentDir)
-const sourceMisses = [...misses].filter((miss) => miss.startsWith(extensionsDir) && !miss.split(path.sep).includes('node_modules'))
+// jiti hands fs forward-slash paths on Windows (C:/...), so both sides are compared in one form.
+const normalize = (target: string): string => target.replaceAll('\\', '/').toLowerCase()
+const underExtensions = [...misses].filter((miss) => normalize(miss).startsWith(`${normalize(extensionsDir)}/`))
+const isNodeModulesWalk = (miss: string): boolean => normalize(miss).split('/').includes('node_modules')
+const sourceMisses = underExtensions.filter((miss) => !isNodeModulesWalk(miss))
+// Node's lookup of a bare specifier always misses extensions/node_modules first, so a count of
+// zero here means the path comparison above matched nothing.
+const nodeModulesWalkMisses = underExtensions.filter(isNodeModulesWalk).length
 
 // Exit once the output has flushed: the extensions leave handles open, and exiting before the
 // write completes truncates a large result at the pipe's buffer size.
-process.stdout.write(JSON.stringify({ errors: result.errors, loaded: result.extensions.length, sourceMisses }), () => process.exit(0))
+process.stdout.write(JSON.stringify({ errors: result.errors, loaded: result.extensions.length, sourceMisses, nodeModulesWalkMisses }), () => process.exit(0))

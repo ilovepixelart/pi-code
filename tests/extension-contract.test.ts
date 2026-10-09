@@ -261,9 +261,10 @@ describe('pi module resolution', () => {
     const repo = path.resolve(import.meta.dirname, '..')
     const probe = spawnSync(process.execPath, [path.join(import.meta.dirname, 'resolution-probe.ts'), repo], { encoding: 'utf-8' })
     expect(probe.status, probe.stderr).toBe(0)
-    const result = JSON.parse(probe.stdout) as { errors: unknown[]; loaded: number; sourceMisses: string[] }
+    const result = JSON.parse(probe.stdout) as { errors: unknown[]; loaded: number; sourceMisses: string[]; nodeModulesWalkMisses: number }
     expect(result.errors).toEqual([])
     expect(result.loaded).toBe(scannedEntries().length)
+    expect(result.nodeModulesWalkMisses).toBeGreaterThan(0)
     expect(result.sourceMisses).toEqual([])
   }, 60_000)
 })
