@@ -85,4 +85,10 @@ afterEach(() => {
   for (const [key, value] of Object.entries(snapshot)) {
     if (process.env[key] !== value) process.env[key] = value
   }
+  // A session mailbox outlives sessions on purpose (internal/session-mailbox), so a result
+  // one test leaves held would be delivered into the next test's session start.
+  const holder = globalThis as Record<symbol, unknown>
+  for (const key of Object.getOwnPropertySymbols(holder)) {
+    if (key.description?.startsWith('pi-code.session-mailbox.')) delete holder[key]
+  }
 })
