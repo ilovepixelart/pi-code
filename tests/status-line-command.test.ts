@@ -1058,6 +1058,25 @@ describe('statusLine cadence and managed config', () => {
     expect(payload.rate_limits).toBeUndefined()
   })
 
+  it('does not re-run at a rate-limit resets_at time after the session shuts down', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+    const { handlers, ctx } = setup(cwd)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
+    await handlers.get('session_start')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: { 'anthropic-ratelimit-unified-5h-utilization': '0.9', 'anthropic-ratelimit-unified-5h-reset': '2026-08-16T00:10:00Z' } }, ctx)
+    await handlers.get('turn_end')?.({}, ctx)
+    await vi.advanceTimersByTimeAsync(400)
+    await handlers.get('session_shutdown')?.({}, ctx)
+    hoisted.runs.length = 0
+
+    await vi.advanceTimersByTimeAsync(11 * 60 * 1000)
+    expect(hoisted.runs).toEqual([])
+  })
+
   it('cancels the in-flight script when a new update triggers', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
