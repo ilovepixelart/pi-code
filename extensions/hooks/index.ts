@@ -421,6 +421,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
     try {
       const results = await runNotifyHooks(matchingCommands(config.SubagentStop, data.agentType), payload, boundRunner(ctx))
       surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+      // The child has finished, so a continue false has nothing left to stop; its
+      // stopReason is still the message Claude shows the user.
+      for (const result of results) {
+        const parsed = tryParseJson(result.stdout)
+        if (parsed?.continue === false && parsed.stopReason) ctx.ui.notify(String(parsed.stopReason), 'warning')
+      }
     } catch {
       // The bus outlives the session: an event landing between /new disposing this
       // ctx and the next session_start hits disposed getters, and nothing awaits a

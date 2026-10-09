@@ -2027,6 +2027,15 @@ describe('hooks subagent lifecycle', () => {
     expect(JSON.parse(recordFor('sub-stop').stdin)).toEqual({ ...COMMON, cwd: proj, hook_event_name: 'SubagentStop', agent_type: 'scout', agent_id: 'bg-1234' })
   })
 
+  // Claude: stopReason is the "message shown to the user when continue is false". The
+  // child has already finished, so there is nothing left to stop; the message still shows.
+  it('shows a SubagentStop hook stopReason when it returns continue false', async () => {
+    script('sub-stop', { stdout: ['{"continue":false,"stopReason":"child budget spent"}'] })
+    const { ext } = await withHooks({ SubagentStop: [{ hooks: [{ command: 'sub-stop' }] }] })
+    await ext.emitSubagent({ phase: 'stop', agentType: 'scout', agentId: 'bg-7' })
+    expect(ext.notes).toContainEqual({ msg: 'child budget spent', level: 'warning' })
+  })
+
   it('passes last_assistant_message to SubagentStop hooks when the stop event carries it', async () => {
     // Claude: SubagentStop hooks receive last_assistant_message so they need not
     // parse the transcript for the subagent's final text.
