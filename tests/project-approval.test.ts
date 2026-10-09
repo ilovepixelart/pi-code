@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { hasTrustRequiringProjectResources } from '@earendil-works/pi-coding-agent'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { hookFiles } from '../extensions/hooks/index.ts'
+import { floorNotice } from '../extensions/internal/pi-floor.ts'
 import { approvalRecheck, hasClaudeShapedConfig, isProjectApproved, isProjectApprovedSilently } from '../extensions/internal/project-approval.ts'
 import { projectConfigPaths } from '../extensions/mcp/index.ts'
 
@@ -274,63 +275,36 @@ describe('the trust trigger stays in sync with what the trust-gated extensions c
   })
 })
 
-describe('runtime version guard for a missing isProjectTrusted callback', () => {
-  // pi >= 0.79.1 hands extensions ctx.isProjectTrusted; older runtimes omit it, so the
-  // trust guard reads every project as untrusted and each project-scoped surface fails
-  // closed with nothing said. The module turns that silence into one warning, once. Each
-  // case loads a fresh module so the once-per-process guard starts un-fired.
-  const RUNTIME_TOO_OLD = 'pi-code requires pi >= 0.79.1 for project configuration; project-scoped .claude config stays disabled on this pi version'
-
-  const freshApproval = async () => {
+describe('a pi without the isProjectTrusted callback', () => {
+  // pi before 0.79.1 omits ctx.isProjectTrusted. Every such pi is below PI_FLOOR, so the
+  // version-floor extension's one session-start notice covers it; approval itself just
+  // fails closed, with no prompt and no notice of its own on every gated surface.
+  it('reads every project as unapproved on both paths, without prompting or notifying', async () => {
+    // A fresh module: nothing an earlier test ran can have used up a once-per-process notice.
     vi.resetModules()
-    return import('../extensions/internal/project-approval.ts')
-  }
-
-  it('fails closed and warns once, never repeating the notice on later calls', async () => {
-    const { isProjectApproved, isProjectApprovedSilently } = await freshApproval()
+    const { isProjectApproved, isProjectApprovedSilently } = await import('../extensions/internal/project-approval.ts')
     const notify = vi.fn()
-    const stale = ctx({ isProjectTrusted: undefined, ui: { confirm: async () => true, notify } })
+    const confirm = vi.fn(async () => true)
+    const stale = ctx({ isProjectTrusted: undefined, ui: { confirm, notify } })
 
-    expect(await isProjectApproved(stale, deps())).toBe(false)
-    expect(notify).toHaveBeenCalledOnce()
-    expect(notify).toHaveBeenCalledWith(RUNTIME_TOO_OLD, 'warning')
-
-    // A second call, through either path, must not warn again.
     expect(await isProjectApproved(stale, deps())).toBe(false)
     expect(isProjectApprovedSilently(stale, deps())).toBe(false)
-    expect(notify).toHaveBeenCalledOnce()
-  })
-
-  it('warns from the silent path too: a missing capability is not an approval prompt', async () => {
-    const { isProjectApprovedSilently } = await freshApproval()
-    const notify = vi.fn()
-    expect(isProjectApprovedSilently(ctx({ isProjectTrusted: undefined, ui: { confirm: async () => true, notify } }), deps())).toBe(false)
-    expect(notify).toHaveBeenCalledOnce()
-    expect(notify).toHaveBeenCalledWith(RUNTIME_TOO_OLD, 'warning')
-  })
-
-  it('stays silent and behaves exactly as before when the runtime provides isProjectTrusted', async () => {
-    const { isProjectApproved } = await freshApproval()
-    const notify = vi.fn()
-    // Trusted, claude-shaped, no stored decision: still prompts and approves as today.
-    expect(await isProjectApproved(ctx({ ui: { confirm: async () => true, notify } }), deps())).toBe(true)
+    expect(confirm).not.toHaveBeenCalled()
     expect(notify).not.toHaveBeenCalled()
   })
 
-  it('reads a runtime too old for project trust as unapproved, without a ui to warn through', async () => {
-    // Fail closed: a runtime that cannot report trust has not approved anything, and the
-    // silent variant has no ui to explain itself with.
-    const { isProjectApprovedSilently } = await freshApproval()
+  it('is a pi the version-floor notice warns about', () => {
+    expect(floorNotice('0.79.0')).toBeDefined()
+  })
+
+  it('reads as unapproved without a ui', () => {
     expect(isProjectApprovedSilently({ cwd: '/repo' }, deps())).toBe(false)
   })
 
-  it('does not warn when a modern runtime reports the project untrusted', async () => {
-    const { isProjectApprovedSilently } = await freshApproval()
+  it('stays silent and behaves exactly as before when the runtime provides isProjectTrusted', async () => {
     const notify = vi.fn()
-    // The guard keys on the capability being absent, not on the trust answer: a runtime
-    // that supplies isProjectTrusted and returns false is simply untrusted, not too old,
-    // so it fails closed without the RUNTIME_TOO_OLD notice.
-    expect(isProjectApprovedSilently(ctx({ isProjectTrusted: () => false, ui: { confirm: async () => true, notify } }), deps())).toBe(false)
+    // Trusted, claude-shaped, no stored decision: still prompts and approves as today.
+    expect(await isProjectApproved(ctx({ ui: { confirm: async () => true, notify } }), deps())).toBe(true)
     expect(notify).not.toHaveBeenCalled()
   })
 })

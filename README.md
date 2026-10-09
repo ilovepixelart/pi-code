@@ -19,7 +19,7 @@ What a repository ships is treated as untrusted until you approve it: project MC
 
 ## Requirements
 
-pi `>=0.80.5` (0.99.x recommended) and Node `>=22.19` for current pi.
+pi `>=0.80.5` (0.99.x recommended) and Node `>=22.19` for current pi. On an older pi, pi-code warns once at session start.
 
 ## Install
 

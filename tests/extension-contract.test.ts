@@ -6,6 +6,8 @@ import * as path from 'node:path'
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, type ExtensionContext, SessionManager } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
 
+import { PI_FLOOR } from '../extensions/internal/pi-floor.ts'
+
 // pi's loader treats every extensions/*.ts, extensions/*.js (symlinked or not) and
 // extensions/*/index.ts|index.js as an entry point and refuses to start when one does
 // not default-export a factory (pi dist/core/extensions/loader). Shared helper modules
@@ -238,8 +240,9 @@ describe('pi session replacement contract', () => {
 // (internal/project-approval.ts), this one cannot be feature-detected: registering a
 // handler for an event that never fires looks identical to one that has not fired yet.
 // pi installs packages with peer resolution disabled (--omit=peer, --legacy-peer-deps), so a
-// peerDependencies range cannot enforce it either. The README's stated floor is therefore the
-// only guard, so it is pinned here with its reason.
+// peerDependencies range cannot enforce it either. The guard is the version pi reports, checked
+// against PI_FLOOR at session start (version-floor.ts); the README states the same floor, so
+// both are pinned here with their reason.
 describe('the documented pi version floor', () => {
   const AGENT_SETTLED_SINCE = [0, 80, 4]
 
@@ -260,6 +263,12 @@ describe('the documented pi version floor', () => {
     const readme = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'README.md'), 'utf-8')
 
     expect(atLeast(parseMinimum(readme), AGENT_SETTLED_SINCE)).toBe(true)
+  })
+
+  it('is the floor the runtime check enforces', () => {
+    const readme = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'README.md'), 'utf-8')
+
+    expect(parseMinimum(readme).join('.')).toBe(PI_FLOOR)
   })
 
   it('still has extensions depending on agent_settled, the reason for that floor', () => {
