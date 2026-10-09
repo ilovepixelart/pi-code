@@ -347,24 +347,27 @@ describe('pi module resolution', () => {
 // (pi docs/packages.md); anything else must be a dependency. A missing declaration breaks
 // the install the moment an import stops being type-only.
 describe('package manifest', () => {
+  const addImportedPackages = (file: string, imported: Set<string>): void => {
+    for (const match of fs.readFileSync(file, 'utf-8').matchAll(/^import [^'"]*from '([^'.][^']*)'/gm)) {
+      const specifier = match[1]
+      if (specifier.startsWith('node:')) continue
+      imported.add(specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0])
+    }
+  }
+
+  const walk = (dir: string, imported: Set<string>): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full, imported)
+      else if (entry.name.endsWith('.ts')) addImportedPackages(full, imported)
+    }
+  }
+
   it('declares every package the extensions import', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(extensionsDir, '..', 'package.json'), 'utf-8')) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }
     const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})])
     const imported = new Set<string>()
-    const walk = (dir: string): void => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name)
-        if (entry.isDirectory()) walk(full)
-        else if (entry.name.endsWith('.ts')) {
-          for (const match of fs.readFileSync(full, 'utf-8').matchAll(/^import [^'"]*from '([^'.][^']*)'/gm)) {
-            const specifier = match[1]
-            if (specifier.startsWith('node:')) continue
-            imported.add(specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0])
-          }
-        }
-      }
-    }
-    walk(extensionsDir)
+    walk(extensionsDir, imported)
     expect([...imported].filter((name) => !declared.has(name)).sort()).toEqual([])
   })
 })
