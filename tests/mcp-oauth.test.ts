@@ -444,6 +444,7 @@ describe('runInteractiveOAuth failure typing', () => {
   // whole failure half of the flow had zero executions.
   const flow = async (over: { approve?: boolean; connect?: (attempt: number) => Promise<void> } = {}) => {
     const { runInteractiveOAuth } = await import('../extensions/mcp/oauth-flow.ts')
+    const { connectWithTimeout } = await import('../extensions/mcp/transport.ts')
     const authUi = { confirm: async () => over.approve !== false, notify: () => {} }
     let attempts = 0
     const client = {
@@ -461,6 +462,7 @@ describe('runInteractiveOAuth failure typing', () => {
       'connect srv',
       authUi as never,
       () => client as never,
+      connectWithTimeout,
     )
   }
 
@@ -633,6 +635,7 @@ describe('the authorization redirect the flow hands the SDK', () => {
     // It had never executed, so neither the browser launch nor the fallback notice that
     // carries the URL when the browser does not open was covered.
     const { runInteractiveOAuth } = await import('../extensions/mcp/oauth-flow.ts')
+    const { connectWithTimeout } = await import('../extensions/mcp/transport.ts')
     const authUrl = 'https://idp.example/authorize?client_id=abc'
     const notices: string[] = []
     const authUi = { confirm: async () => true, notify: (message: string) => notices.push(message) }
@@ -648,6 +651,7 @@ describe('the authorization redirect the flow hands the SDK', () => {
       'connect srv',
       authUi as never,
       () => client as never,
+      connectWithTimeout,
     )
 
     expect(spawnMock.calls).toHaveLength(1)

@@ -8,7 +8,11 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { FileOAuthProvider, type OAuthServerConfig, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.ts'
 import { errorMessage } from '../internal/values.ts'
-import { type AuthUi, connectWithTimeout, isUnauthorized, type MakeTransport, OAuthRequiredError } from './transport.ts'
+import { isUnauthorized, OAuthRequiredError } from './auth-errors.ts'
+import type { AuthUi, MakeTransport } from './transport.ts'
+
+/** The transport's deadline-bound connect, passed in so this module imports no transport value. */
+type ConnectWithTimeout = (client: Client, transport: Parameters<Client['connect']>[0], label: string) => Promise<void>
 
 /** Browser logins are human-paced; a connect-sized timeout would cut them off. */
 const OAUTH_FLOW_TIMEOUT_MS = 180_000
@@ -52,7 +56,7 @@ export function serializeInteractiveOAuth<T>(run: () => Promise<T>): Promise<T> 
  * token exchange error) is wrapped as an auth failure, not a transport mismatch: that
  * keeps the typeless-url caller from retrying over SSE and prompting for a second login.
  */
-export async function runInteractiveOAuth(name: string, config: { url: string; oauth?: OAuthServerConfig }, makeTransport: MakeTransport, label: string, authUi: AuthUi, newClient: () => Client): Promise<Client> {
+export async function runInteractiveOAuth(name: string, config: { url: string; oauth?: OAuthServerConfig }, makeTransport: MakeTransport, label: string, authUi: AuthUi, newClient: () => Client, connectWithTimeout: ConnectWithTimeout): Promise<Client> {
   const approved = await authUi.confirm(`MCP server "${name}" requires login`, `Open your browser to authorize ${config.url}?`)
   if (!approved) throw new OAuthRequiredError(`login declined for ${name}`)
   const provider = new FileOAuthProvider(

@@ -9,7 +9,7 @@ import * as fs from 'node:fs'
 import { pathToFileURL } from 'node:url'
 // SSE is deprecated in favour of Streamable HTTP, but the SDK notes servers still on
 // the old spec exist, so this stays as a fallback for the migration period.
-import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js' // NOSONAR
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -20,6 +20,7 @@ import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth
 import { PACKAGE_VERSION } from '../internal/package-version.ts'
 import { resolveShell } from '../internal/shell-resolve.ts'
 import { parseNumericEnv } from '../internal/values.ts'
+import { isUnauthorized, OAuthRequiredError } from './auth-errors.ts'
 import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.ts'
 import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.ts'
 
@@ -429,19 +430,7 @@ export interface AuthUi {
   notify: (message: string, level: 'info' | 'warning' | 'error') => void
 }
 
-/** A server needs OAuth pi could not complete (headless, declined, or the flow
- * failed). A typed marker so the SSE-fallback caller can tell an auth failure
- * from a transport mismatch without matching on message text. */
-export class OAuthRequiredError extends Error {}
-
-/** Whether a connect failure is an authentication problem: the SDK's own
- * UnauthorizedError, a transport error carrying HTTP 401 or 403 (Claude: "either
- * status code flags it" for OAuth), or our own marker. */
-export function isUnauthorized(error: unknown): boolean {
-  if (error instanceof UnauthorizedError || error instanceof OAuthRequiredError) return true
-  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
-  return code === 401 || code === 403
-}
+export { isUnauthorized, OAuthRequiredError } from './auth-errors.ts'
 
 // SSEClientTransport is deprecated in favour of Streamable HTTP, but both concrete
 // transports expose finishAuth (the base Transport interface does not), so the union
@@ -475,7 +464,7 @@ async function connectHttpFamily(name: string, config: { url: string; oauth?: OA
   } catch (error) {
     if (hasConfiguredAuth || !isUnauthorized(error)) throw error
     if (!authUi) throw new OAuthRequiredError(`${name} requires a login; run pi interactively to authenticate`)
-    return await serializeInteractiveOAuth(() => runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient))
+    return await serializeInteractiveOAuth(() => runInteractiveOAuth(name, config, makeTransport, label, authUi, newClient, connectWithTimeout))
   }
 }
 
