@@ -546,6 +546,13 @@ export default function hooksExtension(pi: ExtensionAPI) {
       toolStartTimes.set(event.toolCallId, Date.now())
       return undefined
     }
+    // Claude: continue false stops processing entirely, and stopReason is the
+    // "Message shown to the user"; the block reason keeps it in the conversation.
+    if (decision.stop) {
+      ctx.ui.notify(decision.reason ?? 'Stopped by hook', 'warning')
+      ctx.abort()
+      return blockedToolCall(decision.reason)
+    }
     // Claude's "ask": prompt the user and let the call through if they approve.
     // With no UI (headless) the block stands, which is the safe default.
     if (decision.ask && ctx.hasUI) {
