@@ -268,6 +268,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
   const hookSources = new Map<HookMatcher, string>()
   /** PreToolUse additionalContext per tool call, delivered alongside its result. */
   const pendingToolContext = new Map<string, string[]>()
+  /** A PreToolUse continue false on a call that still runs: Claude stops the run once the
+   * call's result is in, so the stop waits for this call's tool_result. */
+  const pendingStops = new Map<string, string>()
+  const stopRun = (ctx: ExtensionContext, reason: string | undefined): void => {
+    if (reason === undefined) return
+    ctx.ui.notify(reason, 'warning')
+    ctx.abort()
+  }
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
@@ -545,24 +553,22 @@ export default function hooksExtension(pi: ExtensionAPI) {
       if (decision.context && decision.context.length > 0) pendingToolContext.set(event.toolCallId, decision.context)
       // Claude's duration_ms excludes PreToolUse hook time, so the clock starts here.
       toolStartTimes.set(event.toolCallId, Date.now())
+      if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
       return undefined
-    }
-    // Claude: continue false stops processing entirely, and stopReason is the
-    // "Message shown to the user"; the block reason keeps it in the conversation.
-    if (decision.stop) {
-      ctx.ui.notify(decision.reason ?? 'Stopped by hook', 'warning')
-      ctx.abort()
-      return blockedToolCall(decision.reason)
     }
     // Claude's "ask": prompt the user and let the call through if they approve.
     // With no UI (headless) the block stands, which is the safe default.
     if (decision.ask && ctx.hasUI) {
       const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.')
-      if (!approved) return blockedToolCall(decision.reason)
-      // Claude's duration_ms also excludes time in permission prompts.
-      toolStartTimes.set(event.toolCallId, Date.now())
-      return undefined
+      if (approved) {
+        // Claude's duration_ms also excludes time in permission prompts.
+        toolStartTimes.set(event.toolCallId, Date.now())
+        if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
+        return undefined
+      }
     }
+    // A blocked call has no result to wait for, so a continue false stops the run now.
+    if (decision.stop) stopRun(ctx, decision.stopReason)
     return blockedToolCall(decision.reason)
   })
 
@@ -583,10 +589,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // when no PostToolUse hook is configured.
     const pending = pendingToolContext.get(event.toolCallId) ?? []
     pendingToolContext.delete(event.toolCallId)
+    const preToolStop = pendingStops.get(event.toolCallId)
+    pendingStops.delete(event.toolCallId)
     const anchors = { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() }
     const target = { piName: event.toolName, claudeName: translatedName, input: event.input, anchors }
     const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names).filter((command) => passesIfFilter(command, target))
-    if (commands.length === 0 && pending.length === 0) return
+    if (commands.length === 0 && pending.length === 0) {
+      stopRun(ctx, preToolStop)
+      return
+    }
     const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
     const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, contentText(event.content, '\n'), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
     const startedAt = toolStartTimes.get(event.toolCallId)
@@ -599,6 +610,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
+    // Claude: continue false applies to PostToolUse too, stopping the run after the call.
+    const postToolStop = results.map((result) => tryParseJson(result.stdout)).find((parsed) => parsed?.continue === false)
+    stopRun(ctx, preToolStop ?? (postToolStop ? (postToolStop.stopReason ?? 'Stopped by hook') : undefined))
     // Claude's updatedToolOutput replaces the output the model sees; a value that
     // doesn't match the tool's output schema is ignored, MCP output passes through
     // unvalidated, and a failed call keeps its error output.
