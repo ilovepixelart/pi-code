@@ -203,6 +203,13 @@ const notifyMock = vi.fn()
 /** The context a slash-command handler runs with: trustedCtx plus the notify sink. */
 const commandCtx = (over: Record<string, unknown> = {}) => ({ ...trustedCtx, ui: { ...trustedCtx.ui, notify: notifyMock }, ...over })
 
+/** Fires session_start as pi does before any tool runs: background completions are
+ * delivered to the instance whose session is current, which starts there. */
+const startSession = async () => {
+  await eventHandlers.get('session_start')?.({}, { cwd: '/repo', modelRegistry: { getAvailable: () => [] } })
+  setAgentRunner(undefined)
+}
+
 const text = (result: ToolResult): string => {
   const first = result.content[0]
   if (first?.type !== 'text') throw new Error(`expected a text content part, got ${first?.type}`)
@@ -643,6 +650,7 @@ describe('background mode', () => {
   })
 
   it('notifies the parent agent with the run outcome when the background run completes', async () => {
+    await startSession()
     await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
     const onComplete = startBackgroundRunMock.mock.calls[0][3]
 
@@ -652,12 +660,135 @@ describe('background mode', () => {
   })
 
   it('substitutes a no-output marker when the background run produced nothing', async () => {
+    await startSession()
     await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
     const onComplete = startBackgroundRunMock.mock.calls[0][3]
 
     onComplete({ id: 'bg-9', agent: 'scout', state: 'failed', turns: 0, output: '' })
 
     expect(sendMessageMock.mock.calls[0][0].content).toBe('Background subagent run bg-9 (scout) failed after 0 turns.\n\n(no output)')
+  })
+})
+
+describe('background results after a session switch', () => {
+  // pi re-runs each extension factory per session and, on /new, /resume, /fork or /reload,
+  // invalidates the old instance: its pi.sendMessage and pi.events.emit throw from then on
+  // (loader.js assertActive). A run outliving the session that launched it must reach the
+  // session that is current when it finishes, never be dropped with the stale instance.
+  const STALE = 'This extension ctx is stale after session replacement or reload.'
+  const sessionCtx = { cwd: '/repo', modelRegistry: { getAvailable: () => [] }, ui: { notify: () => {} } }
+  const completion = { id: 'bg-1a2b3c4d', agent: 'scout', state: 'done', turns: 3, output: 'all clear' }
+  const completionText = 'Background subagent run bg-1a2b3c4d (scout) done after 3 turns.\n\nall clear'
+
+  /** One pi-code subagent instance with its own pi, which goes stale on shutdown as pi's does. */
+  const instance = () => {
+    const sent: Array<[unknown, unknown]> = []
+    const events: Array<{ channel: string; data: unknown }> = []
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown> | unknown>()
+    let stale = false
+    let run: Execute | undefined
+    subagentExtension({
+      registerTool: (t: { name: string; execute: Execute }) => {
+        if (t.name === 'subagent') run = t.execute
+      },
+      registerCommand: () => {},
+      sendMessage: (message: unknown, options: unknown) => {
+        if (stale) throw new Error(STALE)
+        sent.push([message, options])
+      },
+      events: {
+        emit: (channel: string, data: unknown) => {
+          if (stale) throw new Error(STALE)
+          events.push({ channel, data })
+        },
+        on: () => () => {},
+      },
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+    } as never)
+    if (!run) throw new Error('subagent tool was not registered')
+    const execute = run
+    return {
+      sent,
+      events,
+      execute,
+      start: async () => handlers.get('session_start')?.({ reason: 'startup' }, sessionCtx),
+      shutdown: async (reason: string) => {
+        await handlers.get('session_shutdown')?.({ reason }, sessionCtx)
+        stale = true
+      },
+    }
+  }
+
+  const stopEvents = (events: Array<{ channel: string; data: unknown }>) => events.filter((e) => e.channel === 'pi-code:subagent' && (e.data as { phase: string }).phase === 'stop')
+
+  it.each(['new', 'resume', 'fork', 'reload'])('delivers a run finishing after a %s switch to the current session, once', async (reason) => {
+    const a = instance()
+    await a.start()
+    await a.execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    const onComplete = startBackgroundRunMock.mock.calls.at(-1)?.[3] as (run: unknown) => void
+    await a.shutdown(reason)
+    const b = instance()
+    await b.start()
+
+    onComplete(completion)
+
+    expect(b.sent).toEqual([[{ customType: 'subagent-background', content: completionText, display: true }, { triggerTurn: true }]])
+    expect(stopEvents(b.events)).toEqual([{ channel: 'pi-code:subagent', data: { phase: 'stop', agentType: 'scout', agentId: 'bg-1a2b3c4d', lastAssistantMessage: 'all clear' } }])
+    expect(a.sent).toEqual([])
+  })
+
+  it('holds a run finishing between sessions and delivers it once at the next session_start', async () => {
+    const a = instance()
+    await a.start()
+    await a.execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    const onComplete = startBackgroundRunMock.mock.calls.at(-1)?.[3] as (run: unknown) => void
+    await a.shutdown('new')
+
+    onComplete(completion)
+    const b = instance()
+    await b.start()
+    await b.shutdown('new')
+    const c = instance()
+    await c.start()
+
+    expect(b.sent).toEqual([[{ customType: 'subagent-background', content: completionText, display: true }, { triggerTurn: true }]])
+    expect(stopEvents(b.events)).toHaveLength(1)
+    expect(c.sent).toEqual([])
+  })
+
+  it('delivers a resumed run finishing after a switch to the current session', async () => {
+    resumeBackgroundRunMock.mockReturnValue('resumed')
+    backgroundRunMock.mockReturnValue({ id: 'bg-1', agent: 'scout', state: 'running', turns: 0 })
+    const a = instance()
+    await a.start()
+    await a.execute('c1', { resume: 'bg-1', task: 'continue the audit' }, undefined, undefined, trustedCtx)
+    const onComplete = resumeBackgroundRunMock.mock.calls.at(-1)?.[2] as (run: unknown) => void
+    await a.shutdown('resume')
+    const b = instance()
+    await b.start()
+
+    onComplete({ id: 'bg-1', agent: 'scout', state: 'done', turns: 2, output: 'all clear' })
+
+    expect(b.sent).toHaveLength(1)
+    expect((b.sent[0][0] as { content: string }).content).toBe('Background subagent run bg-1 (scout) done after 2 turns.\n\nall clear')
+    expect(stopEvents(b.events)).toHaveLength(1)
+  })
+
+  it('delivers a run finishing in its own session to that session, and only once', async () => {
+    const a = instance()
+    await a.start()
+    await a.execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
+    const onComplete = startBackgroundRunMock.mock.calls.at(-1)?.[3] as (run: unknown) => void
+
+    onComplete(completion)
+    await a.shutdown('new')
+    const b = instance()
+    await b.start()
+
+    expect(a.sent).toEqual([[{ customType: 'subagent-background', content: completionText, display: true }, { triggerTurn: true }]])
+    expect(stopEvents(a.events)).toHaveLength(1)
+    expect(b.sent).toEqual([])
+    expect(stopEvents(b.events)).toEqual([])
   })
 })
 
@@ -1592,6 +1723,7 @@ describe('parallel mode', () => {
   })
 
   it('caps the background completion notification at pi tool-output budget', async () => {
+    await startSession()
     await execute('c1', { background: true, agent: 'scout', task: 'audit' }, undefined, undefined, trustedCtx)
     const onComplete = startBackgroundRunMock.mock.calls[0][3]
     const many = Array.from({ length: DEFAULT_MAX_LINES + 1000 }, (_, i) => `l${i}`).join('\n')
@@ -2216,6 +2348,7 @@ describe('execute dispatch: resume and cancel arms', () => {
   })
 
   it('resumes through the registry, emits the start phase, and notifies on completion', async () => {
+    await startSession()
     resumeBackgroundRunMock.mockReturnValue('resumed')
     backgroundRunMock.mockReturnValue({ id: 'bg-1', agent: 'scout', state: 'running', turns: 0 })
 

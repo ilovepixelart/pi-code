@@ -13,6 +13,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { cliSettings } from '../internal/cli-settings.ts'
 import { capForContext } from '../internal/output-guard.ts'
 import { isProjectApproved } from '../internal/project-approval.ts'
+import type { SessionMailbox } from '../internal/session-mailbox.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
 import { runSubagentStartHooks } from '../internal/subagent-hooks.ts'
 import { type AgentConfig, resolveModelAlias } from './agents.ts'
@@ -117,6 +118,9 @@ export interface BackgroundContext {
   agents: AgentConfig[]
   defaultCwd: string
   pi: ExtensionAPI
+  /** Hands the completion to the session current when the run ends, which after a
+   * /new, /resume, /fork or /reload is not the one whose pi started it. */
+  deliver: SessionMailbox['deliver']
   makeDetails: MakeDetails
   skillRoots: string[]
   availableModels: ReadonlyArray<{ id: string }>
@@ -124,7 +128,7 @@ export interface BackgroundContext {
 }
 
 export async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext): Promise<ToolResult> {
-  const { agents, defaultCwd, pi, makeDetails, skillRoots, availableModels, projectApproved } = context
+  const { agents, defaultCwd, pi, deliver, makeDetails, skillRoots, availableModels, projectApproved } = context
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -194,14 +198,15 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
     (run) => {
       removeTmpPrompt(tmpPrompt)
       const finish = (): void => {
-        // Both calls throw once the session that started the run is disposed. driveRun's
-        // catch covers the synchronous path, but the worktree branch reaches here from an
-        // async continuation outside it, so the guard must live in finish itself.
+        // A delivery that throws must not escape: driveRun's catch covers the synchronous
+        // path, but the worktree branch reaches here from an async continuation outside it.
         try {
-          pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, ...(run.output?.trim() ? { lastAssistantMessage: run.output.trim() } : {}) })
-          pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+          deliver((current) => {
+            current.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, ...(run.output?.trim() ? { lastAssistantMessage: run.output.trim() } : {}) })
+            current.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+          })
         } catch {
-          // Session disposed after the run outlived it; nothing to notify.
+          // The current session refused it; nothing else can take it.
         }
       }
       if (!worktree) {

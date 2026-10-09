@@ -115,6 +115,21 @@ describe('cross-extension seams meet across module graphs', () => {
       registrar.setBackgroundAgentCounter(undefined)
     }
   })
+
+  it('a background result reaches the session instance another module graph attached', async () => {
+    type Seam = typeof import('../extensions/internal/session-mailbox.ts')
+    const [launcher, current] = await twoGraphs<Seam>('../extensions/internal/session-mailbox.ts')
+    const received: string[] = []
+    const pi = { sendMessage: (message: { content: string }) => received.push(message.content) } as never
+    const mailbox = current.sessionMailbox('contract-test')
+    mailbox.attach(pi)
+    try {
+      launcher.sessionMailbox('contract-test').deliver((target) => target.sendMessage({ customType: 't', content: 'done', display: true }))
+      expect(received).toEqual(['done'])
+    } finally {
+      mailbox.detach(pi)
+    }
+  })
 })
 
 // The settings watchers in hooks, status-line and env-settings outlive the handler that
@@ -168,6 +183,45 @@ describe('pi session replacement contract', () => {
       expect(instances[0].liveAtShutdown).toBe(true)
       expect(() => instances[0].ctx?.cwd).toThrow(/stale/)
       expect(reads(instances[1].ctx)).toBe(true)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('delivers a result held across a replacement through the next session at its session_start', async () => {
+    // The session mailbox attaches at session_start and flushes there, so pi must accept a
+    // sendMessage from inside that handler of the replacement session.
+    const { sessionMailbox } = await import('../extensions/internal/session-mailbox.ts')
+    const mailbox = sessionMailbox('contract-replacement')
+    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'contract-cwd-')))
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-agent-'))
+    const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+      const services = await createAgentSessionServices({
+        cwd,
+        agentDir,
+        resourceLoaderOptions: {
+          noExtensions: true,
+          extensionFactories: [
+            (pi) => {
+              pi.on('session_start', () => mailbox.attach(pi))
+              pi.on('session_shutdown', () => mailbox.detach(pi))
+            },
+          ],
+        },
+      })
+      return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })), services, diagnostics: services.diagnostics }
+    }
+    const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) })
+    await runtime.session.bindExtensions({})
+    try {
+      await runtime.newSession({
+        setup: async () => {
+          mailbox.deliver((pi) => pi.sendMessage({ customType: 'contract-result', content: 'late result', display: true }))
+        },
+      })
+      await runtime.session.bindExtensions({})
+      const delivered = runtime.session.messages.filter((m) => m.role === 'custom' && m.customType === 'contract-result')
+      expect(delivered.map((m) => (m.role === 'custom' ? m.content : undefined))).toEqual(['late result'])
     } finally {
       await runtime.dispose()
     }
