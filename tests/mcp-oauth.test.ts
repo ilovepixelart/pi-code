@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, statSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readdirSync, statSync } from 'node:fs'
 import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -68,6 +68,23 @@ describe('FileOAuthProvider', () => {
       const mode = statSync(join(storeDir, entries[0])).mode & 0o777
       expect(mode).toBe(0o600)
     }
+  })
+
+  // POSIX-only, as above. mode on writeFileSync applies only when the file is created, so a
+  // store left 0644 by an older version or a restore kept that mode on every token write.
+  it.skipIf(process.platform === 'win32')('makes an existing token store private again on the next write', async () => {
+    const provider = new FileOAuthProvider('linear', () => {})
+    await provider.saveTokens({ access_token: 'x', token_type: 'bearer' })
+    const storeDir = join(process.env.PI_CODING_AGENT_DIR as string, 'mcp-oauth')
+    const store = join(storeDir, readdirSync(storeDir)[0])
+    chmodSync(store, 0o644)
+    await provider.saveTokens({ access_token: 'y', token_type: 'bearer' })
+    expect(statSync(store).mode & 0o777).toBe(0o600)
+  })
+
+  it.skipIf(process.platform === 'win32')('creates the token store directory private', async () => {
+    await new FileOAuthProvider('linear', () => {}).saveTokens({ access_token: 'x', token_type: 'bearer' })
+    expect(statSync(join(process.env.PI_CODING_AGENT_DIR as string, 'mcp-oauth')).mode & 0o777).toBe(0o700)
   })
 
   it('describes itself as a public PKCE client with the bound port as redirect uri', () => {

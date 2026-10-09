@@ -18,6 +18,7 @@ import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { atomicWriteFile } from './atomic-write.ts'
 import { errorMessage } from './values.ts'
 
 interface StoredAuth {
@@ -115,8 +116,12 @@ export class FileOAuthProvider implements OAuthClientProvider {
   }
 
   private persist(): void {
-    fs.mkdirSync(path.dirname(this.storePath), { recursive: true })
-    fs.writeFileSync(this.storePath, JSON.stringify(this.data), { mode: 0o600 })
+    // mode on mkdir and writeFileSync applies only on creation, so both are made private on
+    // every write, and the store is replaced whole so a crash cannot truncate it.
+    const dir = path.dirname(this.storePath)
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    fs.chmodSync(dir, 0o700)
+    atomicWriteFile(this.storePath, JSON.stringify(this.data), { mode: 0o600 })
   }
 
   /** The configured callbackPort alone, absent when only a remembered port exists.

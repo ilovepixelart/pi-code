@@ -32,10 +32,11 @@ function existingMode(filePath: string): number | undefined {
  * settings.local.json can hold env secrets, and a fresh temp file is 0644 under the usual
  * umask. Created with that mode, the temp file is never more permissive than the target;
  * the chmod then makes it exact where the umask took bits away. */
-export function atomicWriteFile(filePath: string, content: string): void {
+export function atomicWriteFile(filePath: string, content: string, options: { mode?: number } = {}): void {
   const target = throughLinks(filePath)
   const tmp = `${target}.${process.pid}.tmp`
-  const mode = existingMode(target)
+  // An explicit mode wins over the target's own: a secrets file must end up exactly that.
+  const mode = options.mode ?? existingMode(target)
   fs.writeFileSync(tmp, content, mode === undefined ? undefined : { mode })
   if (mode !== undefined) fs.chmodSync(tmp, mode)
   fs.renameSync(tmp, target)
