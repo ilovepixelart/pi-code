@@ -25,6 +25,7 @@ import { setAgentRunner } from '../internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../internal/background-agents.ts'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.ts'
 import { isProjectApprovedSilently } from '../internal/project-approval.ts'
+import { sessionMailbox } from '../internal/session-mailbox.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
 import { skillDirs } from '../skills.ts'
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
@@ -57,14 +58,19 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
   // The hooks extension holds Claude's idle_prompt while a background run is live.
   setBackgroundAgentCounter(() => activeBackgroundRuns())
+  // A background run outlives a session switch, and this instance's pi throws once its
+  // session is replaced; completions go to whichever instance's session is current.
+  const results = sessionMailbox('subagent-results')
 
   const notifyBackgroundCompletion = (run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string }): void => {
     // Runs through driveRun's guard, same as the background-mode callback above.
     // The stop event fires here too, so SubagentStop hooks see resumed runs end, and it
     // carries the run's final assistant text: docs/subagents.md states SubagentStop
     // receives last_assistant_message unconditionally, and a resumed run is no exception.
-    pi.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, lastAssistantMessage: run.output })
-    pi.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    results.deliver((current) => {
+      current.events.emit(SUBAGENT_CHANNEL, { phase: 'stop', agentType: run.agent, agentId: run.id, lastAssistantMessage: run.output })
+      current.sendMessage({ customType: 'subagent-background', content: backgroundCompletionText(run), display: true }, { triggerTurn: true })
+    })
   }
 
   // Claude's experimental `type: "agent"` hooks spawn a read-only subagent to verify a
@@ -121,9 +127,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
       })
       return getFinalOutput(result.messages)
     })
+    results.attach(pi)
   })
 
   pi.on('session_shutdown', (event, ctx) => {
+    results.detach(pi)
     // On quit pi is exiting, so a detached background child would keep running (and
     // spending tokens) with its completion swallowed: SIGTERM every live run, killing the
     // process group the way a cancel does. On a same-process session switch
@@ -245,7 +253,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
       // unavailable tier still falls back to the session model.
       const availableModels = ctx.modelRegistry?.getAvailable?.() ?? []
 
-      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, makeDetails, skillRoots, availableModels, projectApproved })
+      if (wantsBackground(params, agents)) return runBackgroundMode(params, { agents, defaultCwd: ctx.cwd, pi, deliver: results.deliver, makeDetails, skillRoots, availableModels, projectApproved })
 
       const mode: ModeContext = {
         agents,

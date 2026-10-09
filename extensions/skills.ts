@@ -32,6 +32,7 @@ import { managedSettingsFile } from './internal/managed-settings.ts'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.ts'
 import { isProjectApprovedSilently } from './internal/project-approval.ts'
 import { ancestorDirs } from './internal/project-root.ts'
+import { sessionMailbox } from './internal/session-mailbox.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.ts'
 import { errorMessage, isDirectory, isRecord } from './internal/values.ts'
@@ -134,6 +135,9 @@ function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined 
 }
 
 export default function skillsExtension(pi: ExtensionAPI) {
+  pi.on('session_start', () => forkResults.attach(pi))
+  pi.on('session_shutdown', () => forkResults.detach(pi))
+
   pi.on('resources_discover', async (_event, ctx) => {
     // resources_discover fires after session_start, so the approval is already
     // resolved; reading it silently keeps a second trust dialog off the screen.
@@ -183,15 +187,18 @@ function forkWaits(name: string, frontmatter: Record<string, unknown>, ctx: Exte
   return !ctx.hasUI || process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === '1' || runningForks.has(name)
 }
 
+/** Where a forked skill's result goes: the session current when it completes, which after
+ * a /new, /resume, /fork or /reload is not the one whose pi started it. */
+const forkResults = sessionMailbox('skill-fork-results')
+
 /** Start a forked skill in the background and hand its result to the conversation when it
- * completes. The promise has no awaiter, and sendMessage on a pi whose session was
- * replaced meanwhile throws: the catch keeps that from exiting pi, at the cost of the
- * delivery, as a background subagent run's completion notice is lost the same way. */
-function startForkedSkill(pi: ExtensionAPI, ctx: ExtensionContext, fork: { name: string; filePath: string; expanded: string; agentName: string | undefined }): { action: 'handled' } {
+ * completes. The promise has no awaiter, so the catch keeps a delivery that throws from
+ * surfacing as an unhandled rejection, which exits pi. */
+function startForkedSkill(ctx: ExtensionContext, fork: { name: string; filePath: string; expanded: string; agentName: string | undefined }): { action: 'handled' } {
   runningForks.add(fork.name)
   ctx.ui.notify(`Skill ${fork.name} is running in a forked subagent in the background; its result arrives here when it completes.`, 'info')
   void runForkedSkill(fork.name, fork.filePath, fork.expanded, fork.agentName)
-    .then((result) => pi.sendMessage({ customType: 'skill-fork', content: result.text, display: true }, { triggerTurn: true }))
+    .then((result) => forkResults.deliver((current) => current.sendMessage({ customType: 'skill-fork', content: result.text, display: true }, { triggerTurn: true })))
     .catch(() => {})
     .finally(() => runningForks.delete(fork.name))
   return { action: 'handled' }
@@ -280,7 +287,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
     const agentName = typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined
     if (forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)
-    return startForkedSkill(pi, ctx, { name, filePath: found.filePath, expanded, agentName })
+    return startForkedSkill(ctx, { name, filePath: found.filePath, expanded, agentName })
   }
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }
 }
