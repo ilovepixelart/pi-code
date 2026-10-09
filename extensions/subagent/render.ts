@@ -41,65 +41,84 @@ export function formatUsageStats(
   return parts.join(' ')
 }
 
-export function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: Theme['fg']): string {
-  const shortenPath = (p: string) => {
-    const home = os.homedir()
-    return p.startsWith(home) ? `~${p.slice(home.length)}` : p
-  }
+function shortenPath(p: string): string {
+  const home = os.homedir()
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p
+}
 
-  switch (toolName) {
-    case 'bash': {
-      const command = (args.command as string) || '...'
-      const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command
-      return themeFg('muted', '$ ') + themeFg('toolOutput', preview)
-    }
-    case 'read': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      const filePath = shortenPath(rawPath)
-      const offset = args.offset as number | undefined
-      const limit = args.limit as number | undefined
-      let text = themeFg('accent', filePath)
-      if (offset !== undefined || limit !== undefined) {
-        const startLine = offset ?? 1
-        const endLine = limit !== undefined ? startLine + limit - 1 : ''
-        const rangeSuffix = endLine ? `-${endLine}` : ''
-        text += themeFg('warning', `:${startLine}${rangeSuffix}`)
-      }
-      return themeFg('muted', 'read ') + text
-    }
-    case 'write': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      const filePath = shortenPath(rawPath)
-      const content = (args.content || '') as string
-      const lines = content.split('\n').length
-      let text = themeFg('muted', 'write ') + themeFg('accent', filePath)
-      if (lines > 1) text += themeFg('dim', ` (${lines} lines)`)
-      return text
-    }
-    case 'edit': {
-      const rawPath = (args.file_path || args.path || '...') as string
-      return themeFg('muted', 'edit ') + themeFg('accent', shortenPath(rawPath))
-    }
-    case 'ls': {
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'ls ') + themeFg('accent', shortenPath(rawPath))
-    }
-    case 'find': {
-      const pattern = (args.pattern || '*') as string
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'find ') + themeFg('accent', pattern) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
-    }
-    case 'grep': {
-      const pattern = (args.pattern || '') as string
-      const rawPath = (args.path || '.') as string
-      return themeFg('muted', 'grep ') + themeFg('accent', `/${pattern}/`) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
-    }
-    default: {
-      const argsStr = JSON.stringify(args)
-      const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr
-      return themeFg('accent', toolName) + themeFg('dim', ` ${preview}`)
-    }
+type ToolCallFormatter = (args: Record<string, unknown>, themeFg: Theme['fg']) => string
+
+function formatBashCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const command = (args.command as string) || '...'
+  const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command
+  return themeFg('muted', '$ ') + themeFg('toolOutput', preview)
+}
+
+function formatReadCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const rawPath = (args.file_path || args.path || '...') as string
+  const filePath = shortenPath(rawPath)
+  const offset = args.offset as number | undefined
+  const limit = args.limit as number | undefined
+  let text = themeFg('accent', filePath)
+  if (offset !== undefined || limit !== undefined) {
+    const startLine = offset ?? 1
+    const endLine = limit !== undefined ? startLine + limit - 1 : ''
+    const rangeSuffix = endLine ? `-${endLine}` : ''
+    text += themeFg('warning', `:${startLine}${rangeSuffix}`)
   }
+  return themeFg('muted', 'read ') + text
+}
+
+function formatWriteCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const rawPath = (args.file_path || args.path || '...') as string
+  const filePath = shortenPath(rawPath)
+  const content = (args.content || '') as string
+  const lines = content.split('\n').length
+  let text = themeFg('muted', 'write ') + themeFg('accent', filePath)
+  if (lines > 1) text += themeFg('dim', ` (${lines} lines)`)
+  return text
+}
+
+function formatEditCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const rawPath = (args.file_path || args.path || '...') as string
+  return themeFg('muted', 'edit ') + themeFg('accent', shortenPath(rawPath))
+}
+
+function formatLsCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const rawPath = (args.path || '.') as string
+  return themeFg('muted', 'ls ') + themeFg('accent', shortenPath(rawPath))
+}
+
+function formatFindCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const pattern = (args.pattern || '*') as string
+  const rawPath = (args.path || '.') as string
+  return themeFg('muted', 'find ') + themeFg('accent', pattern) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
+}
+
+function formatGrepCall(args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const pattern = (args.pattern || '') as string
+  const rawPath = (args.path || '.') as string
+  return themeFg('muted', 'grep ') + themeFg('accent', `/${pattern}/`) + themeFg('dim', ` in ${shortenPath(rawPath)}`)
+}
+
+// A Map, not an object literal: a tool named after an Object.prototype key
+// (constructor, toString) must fall through to the generic preview.
+const TOOL_CALL_FORMATTERS = new Map<string, ToolCallFormatter>([
+  ['bash', formatBashCall],
+  ['read', formatReadCall],
+  ['write', formatWriteCall],
+  ['edit', formatEditCall],
+  ['ls', formatLsCall],
+  ['find', formatFindCall],
+  ['grep', formatGrepCall],
+])
+
+export function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: Theme['fg']): string {
+  const formatter = TOOL_CALL_FORMATTERS.get(toolName)
+  if (formatter) return formatter(args, themeFg)
+  const argsStr = JSON.stringify(args)
+  const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr
+  return themeFg('accent', toolName) + themeFg('dim', ` ${preview}`)
 }
 
 export function getFinalOutput(messages: Message[]): string {

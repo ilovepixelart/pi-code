@@ -270,6 +270,12 @@ describe('formatToolCall', () => {
     expect(formatToolCall('write', {}, fg)).toBe('write ...')
   })
 
+  it('falls back from file_path to path to an ellipsis for read and edit', () => {
+    expect(formatToolCall('read', {}, fg)).toBe('read ...')
+    expect(formatToolCall('edit', { path: '/b.ts' }, fg)).toBe('edit /b.ts')
+    expect(formatToolCall('edit', {}, fg)).toBe('edit ...')
+  })
+
   it('renders edit, ls, find and grep with their path defaults', () => {
     expect(formatToolCall('edit', { file_path: `${home}/a.ts` }, fg)).toBe('edit ~/a.ts')
     expect(formatToolCall('ls', {}, fg)).toBe('ls .')
@@ -284,6 +290,11 @@ describe('formatToolCall', () => {
     const long = { key: 'z'.repeat(80) }
     const json = JSON.stringify(long)
     expect(formatToolCall('mystery', long, fg)).toBe(`mystery ${json.slice(0, 50)}...`)
+  })
+
+  it('gives a tool named after an Object.prototype key the generic preview', () => {
+    expect(formatToolCall('constructor', { a: 1 }, fg)).toBe('constructor {"a":1}')
+    expect(formatToolCall('toString', {}, fg)).toBe('toString {}')
   })
 })
 

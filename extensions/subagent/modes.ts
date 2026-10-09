@@ -6,7 +6,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
@@ -23,7 +22,7 @@ import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS, mapWithConcurrencyLimit } from './
 import type { ChainStepParam, MakeDetails, SubagentMode, SubagentParamsStatic, TaskItemParam, ToolResult } from './params.ts'
 import { backgroundCompletionText } from './registry-text.ts'
 import { getFinalOutput } from './render.ts'
-import { getPiInvocation, type OnUpdateCallback, runSingleAgent, type SubagentPhaseSink, writePromptToTempFile } from './run.ts'
+import { getPiInvocation, type OnUpdateCallback, removeTmpPrompt, runSingleAgent, type SubagentPhaseSink, writePromptToTempFile } from './run.ts'
 import type { SingleResult } from './types.ts'
 import { type AgentWorktree, cleanupAgentWorktree, createAgentWorktree } from './worktree.ts'
 
@@ -98,37 +97,9 @@ function backgroundCapResult(makeDetails: MakeDetails): ToolResult {
   }
 }
 
-function removeTmpPrompt(tmpPrompt: { dir: string; filePath: string } | undefined): void {
-  if (!tmpPrompt) return
-  try {
-    fs.unlinkSync(tmpPrompt.filePath)
-  } catch {
-    /* ignore */
-  }
-  try {
-    fs.rmdirSync(tmpPrompt.dir)
-  } catch {
-    /* ignore */
-  }
-}
-
-/** Everything runBackgroundMode needs from the surrounding execute() call, grouped so
- * the parameter list stays in bounds. */
-export interface BackgroundContext {
-  agents: AgentConfig[]
-  defaultCwd: string
-  pi: ExtensionAPI
-  /** Hands the completion to the session current when the run ends, which after a
-   * /new, /resume, /fork or /reload is not the one whose pi started it. */
-  deliver: SessionMailbox['deliver']
-  makeDetails: MakeDetails
-  skillRoots: string[]
-  availableModels: ReadonlyArray<{ id: string }>
-  projectApproved: boolean
-}
-
-export async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext): Promise<ToolResult> {
-  const { agents, defaultCwd, pi, deliver, makeDetails, skillRoots, availableModels, projectApproved } = context
+/** The agent and task a background request names, or the refusal when it names no
+ * runnable single-mode target. */
+function backgroundTarget(params: SubagentParamsStatic, agents: AgentConfig[], makeDetails: MakeDetails): { task: string; agent: AgentConfig } | ToolResult {
   const task = params.task
   const agentName = params.agent
   if (!task || !agentName) {
@@ -152,6 +123,29 @@ export async function runBackgroundMode(params: SubagentParamsStatic, context: B
       details: makeDetails('single')([]),
     }
   }
+  return { task, agent }
+}
+
+/** Everything runBackgroundMode needs from the surrounding execute() call, grouped so
+ * the parameter list stays in bounds. */
+export interface BackgroundContext {
+  agents: AgentConfig[]
+  defaultCwd: string
+  pi: ExtensionAPI
+  /** Hands the completion to the session current when the run ends, which after a
+   * /new, /resume, /fork or /reload is not the one whose pi started it. */
+  deliver: SessionMailbox['deliver']
+  makeDetails: MakeDetails
+  skillRoots: string[]
+  availableModels: ReadonlyArray<{ id: string }>
+  projectApproved: boolean
+}
+
+export async function runBackgroundMode(params: SubagentParamsStatic, context: BackgroundContext): Promise<ToolResult> {
+  const { agents, defaultCwd, pi, deliver, makeDetails, skillRoots, availableModels, projectApproved } = context
+  const target = backgroundTarget(params, agents, makeDetails)
+  if ('content' in target) return target
+  const { task, agent } = target
   if (activeBackgroundRuns() >= MAX_BACKGROUND_RUNS) {
     return backgroundCapResult(makeDetails)
   }

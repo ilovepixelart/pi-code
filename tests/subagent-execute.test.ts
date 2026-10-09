@@ -613,6 +613,14 @@ describe('background mode', () => {
     expect(startBackgroundRunMock).not.toHaveBeenCalled()
   })
 
+  it('refuses a background run for an agent whose tools list resolves to no tool', async () => {
+    discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ tools: ['BogusTool', 'AlsoFake'] })], projectAgentsDir: null })
+    const result = await execute('c1', { background: true, agent: 'scout', task: 't' }, undefined, undefined, trustedCtx)
+
+    expect(text(result)).toBe('Agent "scout" would launch with zero tools: no entry in [BogusTool, AlsoFake] resolves to a tool.')
+    expect(startBackgroundRunMock).not.toHaveBeenCalled()
+  })
+
   it('starts the run with the agent invocation and reports the returned run id', async () => {
     discoverAgentsMock.mockReturnValue({ agents: [agentConfig({ model: 'sonnet', tools: ['read', 'bash'] })], projectAgentsDir: null })
     startBackgroundRunMock.mockReturnValue('bg-1a2b3c4d')
