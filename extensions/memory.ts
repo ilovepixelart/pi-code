@@ -12,7 +12,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { atomicWriteFile } from './internal/atomic-write.ts'
 import { claudeConfigDir } from './internal/config-dir.ts'
@@ -524,12 +524,14 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
   })
 
-  // Claude's /memory lists the memory locations, opens one for editing and toggles auto
-  // memory. The listing reads the settings chain live so it reflects a toggle written in
-  // the same session.
+  // Claude's /memory lists the memory locations and toggles auto memory, and opens one for
+  // editing. pi's only editor seam, ctx.ui.editor, cannot round-trip a file: pi-tui turns
+  // CRLF into LF and tabs into four spaces on setText and trims on submit, the ctrl+g
+  // external-editor path included. So the paths are printed rather than opened. The listing
+  // reads the settings chain live so it reflects a toggle written in the same session.
   pi.registerCommand('memory', {
-    description: 'Show memory file locations, edit one, or toggle auto memory (/memory [edit|on|off])',
-    handler: async (args, ctx) => {
+    description: 'Show memory file locations and toggle auto memory (/memory [on|off])',
+    handler: async (args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const home = os.homedir()
       const arg = args.trim().toLowerCase()
 
@@ -550,10 +552,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return
       }
 
-      if (arg === 'edit') return editMemoryFile(ctx, home)
-
       if (arg.length > 0) {
-        ctx.ui.notify('Usage: /memory [edit|on|off]', 'error')
+        ctx.ui.notify('Usage: /memory [on|off]', 'error')
         return
       }
 
@@ -562,61 +562,21 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
       const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
       const store = resolveMemoryDir(ctx.cwd, override)
-      const lines = ['Memory', `  Auto memory: ${isEnabled ? 'on' : 'off'}`, `  Store:       ${store}`, `  Index:       ${path.join(store, INDEX_FILE)}`, ...memoryFiles(ctx.cwd, home).map(({ label, file }) => `  ${label}: ${file}`), 'Edit one with /memory edit. Toggle with /memory on or /memory off.']
+      const lines = [
+        'Memory',
+        `  Auto memory: ${isEnabled ? 'on' : 'off'}`,
+        `  Store:       ${store}`,
+        `  Index:       ${path.join(store, INDEX_FILE)}`,
+        // The loader reads it from the configured directory, so CLAUDE_CONFIG_DIR moves it.
+        `  User memory (CLAUDE.md):    ${path.join(claudeConfigDir(home), 'CLAUDE.md')}`,
+        `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
+        // Claude's /memory lists every documented location, including files that
+        // do not exist yet.
+        `  Project memory (CLAUDE.local.md): ${path.join(ctx.cwd, 'CLAUDE.local.md')}`,
+        `  Project memory (alternate):       ${path.join(ctx.cwd, '.claude', 'CLAUDE.md')}`,
+        'Toggle with /memory on or /memory off.',
+      ]
       ctx.ui.notify(lines.join('\n'), 'info')
     },
   })
-}
-
-/**
- * The CLAUDE.md locations /memory lists and edits. Claude's /memory lists every documented
- * location, including files that do not exist yet. The user file is read from the
- * configured directory, so CLAUDE_CONFIG_DIR moves it.
- */
-function memoryFiles(cwd: string, home: string): Array<{ label: string; file: string }> {
-  return [
-    { label: 'User memory (CLAUDE.md)', file: path.join(claudeConfigDir(home), 'CLAUDE.md') },
-    { label: 'Project memory (CLAUDE.md)', file: path.join(cwd, 'CLAUDE.md') },
-    { label: 'Project memory (CLAUDE.local.md)', file: path.join(cwd, 'CLAUDE.local.md') },
-    { label: 'Project memory (alternate)', file: path.join(cwd, '.claude', 'CLAUDE.md') },
-  ]
-}
-
-/** The file's content, '' when it does not exist yet, or undefined when it cannot be read:
- * an editor prefilled with '' for an unreadable file would overwrite it on save. */
-function editableContent(file: string): string | undefined {
-  try {
-    return fs.readFileSync(file, 'utf-8')
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? '' : undefined
-  }
-}
-
-/** /memory edit: pick a memory file and edit it in pi's editor. A cancel, or text equal to
- * what was there, writes nothing, so an untouched missing file is never created empty. */
-async function editMemoryFile(ctx: ExtensionCommandContext, home: string): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify('/memory edit needs the interactive UI', 'error')
-    return
-  }
-  const files = memoryFiles(ctx.cwd, home)
-  const options = files.map(({ label, file }) => `${label}: ${file}`)
-  const choice = await ctx.ui.select('Edit which memory file?', options)
-  const picked = files[options.indexOf(choice ?? '')]
-  if (!picked) return
-  const current = editableContent(picked.file)
-  if (current === undefined) {
-    ctx.ui.notify(`Cannot read ${picked.file}`, 'error')
-    return
-  }
-  const edited = await ctx.ui.editor(picked.file, current)
-  if (edited === undefined || edited === current) return
-  try {
-    fs.mkdirSync(path.dirname(picked.file), { recursive: true })
-    atomicWriteFile(picked.file, edited)
-  } catch (error) {
-    ctx.ui.notify(`Could not save ${picked.file}: ${errorMessage(error)}`, 'error')
-    return
-  }
-  ctx.ui.notify(`Saved ${picked.file}`, 'info')
 }
