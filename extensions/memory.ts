@@ -7,12 +7,13 @@
  * memories through the memory tool (save / read / delete / list).
  */
 
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StringEnum } from '@earendil-works/pi-ai'
-import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir, SettingsManager, withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { atomicWriteFile } from './internal/atomic-write.ts'
 import { claudeConfigDir } from './internal/config-dir.ts'
@@ -524,13 +525,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
     },
   })
 
-  // Claude's /memory lists the memory locations and toggles auto memory, and opens one for
-  // editing. pi's only editor seam, ctx.ui.editor, cannot round-trip a file: pi-tui turns
-  // CRLF into LF and tabs into four spaces on setText and trims on submit, the ctrl+g
-  // external-editor path included. So the paths are printed rather than opened. The listing
-  // reads the settings chain live so it reflects a toggle written in the same session.
+  // Claude's /memory lists the memory locations, opens one in the user's editor and toggles
+  // auto memory. The listing reads the settings chain live so it reflects a toggle written
+  // in the same session.
   pi.registerCommand('memory', {
-    description: 'Show memory file locations and toggle auto memory (/memory [on|off])',
+    description: 'Show memory file locations, open one in your editor, or toggle auto memory (/memory [edit|on|off])',
     handler: async (args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const home = os.homedir()
       const arg = args.trim().toLowerCase()
@@ -552,8 +551,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return
       }
 
+      if (arg === 'edit') return editMemoryFile(ctx, home)
+
       if (arg.length > 0) {
-        ctx.ui.notify('Usage: /memory [on|off]', 'error')
+        ctx.ui.notify('Usage: /memory [edit|on|off]', 'error')
         return
       }
 
@@ -562,21 +563,77 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
       const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
       const store = resolveMemoryDir(ctx.cwd, override)
-      const lines = [
-        'Memory',
-        `  Auto memory: ${isEnabled ? 'on' : 'off'}`,
-        `  Store:       ${store}`,
-        `  Index:       ${path.join(store, INDEX_FILE)}`,
-        // The loader reads it from the configured directory, so CLAUDE_CONFIG_DIR moves it.
-        `  User memory (CLAUDE.md):    ${path.join(claudeConfigDir(home), 'CLAUDE.md')}`,
-        `  Project memory (CLAUDE.md): ${path.join(ctx.cwd, 'CLAUDE.md')}`,
-        // Claude's /memory lists every documented location, including files that
-        // do not exist yet.
-        `  Project memory (CLAUDE.local.md): ${path.join(ctx.cwd, 'CLAUDE.local.md')}`,
-        `  Project memory (alternate):       ${path.join(ctx.cwd, '.claude', 'CLAUDE.md')}`,
-        'Toggle with /memory on or /memory off.',
-      ]
+      const lines = ['Memory', `  Auto memory: ${isEnabled ? 'on' : 'off'}`, `  Store:       ${store}`, `  Index:       ${path.join(store, INDEX_FILE)}`, ...memoryFiles(ctx.cwd, home).map(({ label, file }) => `  ${label}: ${file}`), 'Edit one with /memory edit. Toggle with /memory on or /memory off.']
       ctx.ui.notify(lines.join('\n'), 'info')
     },
   })
+}
+
+/**
+ * The CLAUDE.md locations /memory lists and edits. Claude's /memory lists every documented
+ * location, including files that do not exist yet. The user file is read from the
+ * configured directory, so CLAUDE_CONFIG_DIR moves it.
+ */
+function memoryFiles(cwd: string, home: string): Array<{ label: string; file: string }> {
+  return [
+    { label: 'User memory (CLAUDE.md)', file: path.join(claudeConfigDir(home), 'CLAUDE.md') },
+    { label: 'Project memory (CLAUDE.md)', file: path.join(cwd, 'CLAUDE.md') },
+    { label: 'Project memory (CLAUDE.local.md)', file: path.join(cwd, 'CLAUDE.local.md') },
+    { label: 'Project memory (alternate)', file: path.join(cwd, '.claude', 'CLAUDE.md') },
+  ]
+}
+
+/** A picker entry. A symlink also names its real target: that is the file the editor writes,
+ * and a cloned repository could point its CLAUDE.md anywhere. */
+function pickerEntry({ label, file }: { label: string; file: string }): string {
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) return `${label}: ${file} -> ${fs.realpathSync(file)}`
+  } catch {
+    // Missing or unreadable: listed by its own path.
+  }
+  return `${label}: ${file}`
+}
+
+/**
+ * /memory edit: open a memory file in the user's editor, as Claude does. The editor gets the
+ * terminal (pi's TUI stopped and restarted around it, as pi's own external editor does) and
+ * writes the file itself. pi-code never reads or rewrites the bytes: pi's in-TUI editor
+ * normalises CRLF and tabs and trims, and a read-then-write would overwrite a change made
+ * meanwhile. The command is pi's own choice: its externalEditor setting, then VISUAL, EDITOR.
+ */
+async function editMemoryFile(ctx: ExtensionCommandContext, home: string): Promise<void> {
+  if (!ctx.hasUI) {
+    ctx.ui.notify('/memory edit needs the interactive UI', 'error')
+    return
+  }
+  const files = memoryFiles(ctx.cwd, home)
+  const options = files.map(pickerEntry)
+  const choice = await ctx.ui.select('Edit which memory file?', options)
+  const picked = files[options.indexOf(choice ?? '')]
+  if (!picked) return
+  const command = SettingsManager.create(ctx.cwd, getAgentDir()).getExternalEditorCommand()
+  try {
+    fs.mkdirSync(path.dirname(picked.file), { recursive: true })
+  } catch (error) {
+    ctx.ui.notify(`Could not create ${path.dirname(picked.file)}: ${errorMessage(error)}`, 'error')
+    return
+  }
+  const code = await ctx.ui.custom<number | null>((tui, _theme, _keybindings, done) => {
+    tui.stop()
+    let finished = false
+    const finish = (exit: number | null): void => {
+      if (finished) return
+      finished = true
+      tui.start()
+      tui.requestRender(true)
+      done(exit)
+    }
+    const [editor, ...editorArgs] = command.split(' ')
+    const child = spawn(editor, [...editorArgs, picked.file], { stdio: 'inherit', shell: process.platform === 'win32' })
+    child.on('error', () => finish(null))
+    child.on('close', (exit) => finish(exit))
+    return { render: () => [], invalidate: () => {} }
+  })
+  if (code === 0) return
+  ctx.ui.notify(code === null ? `Could not start the editor (${command})` : `The editor (${command}) exited with code ${code}`, 'error')
 }
