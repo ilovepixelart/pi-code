@@ -35,7 +35,7 @@ pi install ./pi-code
 - Keep each pull request to one focused change, and keep the tree green: run `npm run check` before you push.
 - Write tests first, and cover the change across the pyramid where it applies: unit tests for pure logic, integration tests against a stubbed pi API, and an e2e path when the behavior only shows in a real session.
 - Write relative imports with the `.ts` extension of the file that exists (`./internal/values.ts`, not `./internal/values.js`). pi runs the TypeScript source through jiti, which resolves a `.js` specifier for a `.ts` file only after probing dozens of missing paths, once per import in every extension: seconds of startup on Windows. Biome's `useImportExtensions` flags it and offers the fix.
-- An extension that reads project-controlled input (a cloned repo's `.claude/`) must gate on `ctx.isProjectTrusted()`. See [SECURITY.md](SECURITY.md) for the trust model.
+- An extension that reads project-controlled input (a cloned repo's `.claude/`) must gate on `isProjectApproved` (or `isProjectApprovedSilently` where a prompt would be wrong) from [`extensions/internal/project-approval.ts`](extensions/internal/project-approval.ts); `ctx.isProjectTrusted()` alone reads true for a repository that ships only `.claude/` and `.mcp.json`. See [SECURITY.md](SECURITY.md) for the trust model.
 - Parity with Claude Code is verified against the live docs at [code.claude.com/docs](https://code.claude.com/docs), not memory. Where pi cannot express a Claude behavior, document the deviation rather than approximating it silently.
 
 ## Commits and pull requests
