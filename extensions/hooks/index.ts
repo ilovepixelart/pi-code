@@ -541,7 +541,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // on the next agent start. The session_start InstructionsLoaded events arrive
   // over the bus from context-imports, which owns claudeMdExcludes; announcing
   // the raw contextFiles here would fire for a file the exclusion removed.
-  pi.on('before_agent_start', async () => {
+  pi.on('before_agent_start', () => {
     // A new turn is beginning, so the session is no longer idle.
     cancelIdlePrompt()
     if (pendingSessionContext.length === 0) return
@@ -888,7 +888,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
   // file each entry came from, is the debugging surface.
   pi.registerCommand('hooks', {
     description: 'Show the hook configuration resolved from settings',
-    handler: async (_args, ctx) => {
+    handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       // With a settings-level disable, managed policy hooks stay active and the
       // viewer still shows them; only a fully empty config reports disabled.
       if (hooksDisabled && Object.keys(config).length === 0) {

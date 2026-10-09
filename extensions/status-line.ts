@@ -431,7 +431,7 @@ export default function statusLine(pi: ExtensionAPI) {
 
   // Counted here rather than in buildPayload so the numbers accumulate across the
   // session the way Claude's counters do.
-  pi.on('tool_result', async (event) => {
+  pi.on('tool_result', (event) => {
     if (event.isError) return
     const input = event.input as Record<string, unknown>
     const lines = (text: unknown): number => (typeof text === 'string' && text.length > 0 ? text.split('\n').length : 0)
@@ -446,10 +446,10 @@ export default function statusLine(pi: ExtensionAPI) {
 
   // API round-trip timing: the window between the request and its response, summed
   // across the session. ctx exposes no API-duration getter, so it is measured here.
-  pi.on('before_provider_request', async () => {
+  pi.on('before_provider_request', () => {
     requestStartMs = Date.now()
   })
-  pi.on('after_provider_response', async (event, ctx) => {
+  pi.on('after_provider_response', (event, ctx) => {
     if (requestStartMs !== undefined) apiDurationMs += Date.now() - requestStartMs
     requestStartMs = undefined
     // Rate-limit windows and 429 handling ride on the same response event. Header
@@ -473,7 +473,7 @@ export default function statusLine(pi: ExtensionAPI) {
   })
   // The last message's token usage, for the breakdown getContextUsage() omits,
   // and the running cost total, so renders never re-walk the branch.
-  pi.on('message_end', async (event) => {
+  pi.on('message_end', (event) => {
     const usage = (event as { message?: { usage?: NonNullable<typeof lastUsage> & { cost?: { total?: number } } } }).message?.usage
     if (!usage) return
     lastUsage = usage
@@ -482,7 +482,7 @@ export default function statusLine(pi: ExtensionAPI) {
     scheduleRefresh()
   })
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', (_event, ctx) => {
     // One instance serves every session, so a fresh session must not inherit state.
     turnCount = 0
     commandLine = undefined
@@ -550,7 +550,7 @@ export default function statusLine(pi: ExtensionAPI) {
     scheduleRefresh()
   })
 
-  pi.on('turn_start', async (_event, ctx) => {
+  pi.on('turn_start', (_event, ctx) => {
     turnCount++
     // A /output-style between turns lands in settings silently; its style applies
     // from this turn, so this is the moment the cached name can go stale.
@@ -559,26 +559,26 @@ export default function statusLine(pi: ExtensionAPI) {
     show(ctx, theme.fg('accent', '●') + theme.fg('dim', ` turn ${turnCount}...`))
   })
 
-  pi.on('turn_end', async (_event, ctx) => {
+  pi.on('turn_end', (_event, ctx) => {
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('success', '✓')))
     scheduleRefresh()
   })
 
-  pi.on('agent_end', async (_event, ctx) => {
+  pi.on('agent_end', (_event, ctx) => {
     show(ctx, segmentText(ctx, ctx.ui.theme.fg('success', '✓')))
     scheduleRefresh()
   })
 
   // The model and effort segments of the payload go stale between turns; a switch
   // fires these events, so refresh at once instead of waiting for the next tick.
-  pi.on('model_select', async () => {
+  pi.on('model_select', () => {
     scheduleRefresh()
   })
-  pi.on('thinking_level_select', async () => {
+  pi.on('thinking_level_select', () => {
     scheduleRefresh()
   })
 
-  pi.on('session_compact', async (_event, ctx) => {
+  pi.on('session_compact', (_event, ctx) => {
     // Compaction replaces the branch entries; reseed the total from what remains. The last
     // response's usage describes the context that was just replaced: Claude sends
     // current_usage null until the next API call.
@@ -587,12 +587,12 @@ export default function statusLine(pi: ExtensionAPI) {
     scheduleRefresh()
   })
 
-  pi.on('session_tree', async (_event, ctx) => {
+  pi.on('session_tree', (_event, ctx) => {
     // Tree navigation swaps the branch wholesale with no message_end events.
     costTotal = sessionCost(ctx)
   })
 
-  pi.on('session_shutdown', async () => {
+  pi.on('session_shutdown', () => {
     clearInterval(refreshTimer)
     clearTimeout(debounceTimer)
     clearTimeout(expiryTimer)

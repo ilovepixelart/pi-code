@@ -227,7 +227,7 @@ export async function expandDynamicContent(body: string, cwd: string, exec: Comm
     spans.push({
       start: m.index,
       end: m.index + whole.length,
-      run: async () => {
+      run: async () => /* NOSONAR typescript:S7503 - a span run returns a Promise */ {
         const content = readReference(cwd, reference)
         return content === undefined ? whole : `${lead}\n<file path="${reference}">\n${content.trimEnd()}\n</file>\n`
       },

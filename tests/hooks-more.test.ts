@@ -179,10 +179,12 @@ const setupExtension = () => {
     sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
     registerCommand: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, spec),
   } as never)
+  // pi awaits whatever a handler returns (runner emit), so the harness does too: a handler
+  // may return its result synchronously.
   const handler = (name: string): Handler => {
     const found = handlers.get(name)
     if (!found) throw new Error(`hooks extension did not register ${name}`)
-    return found
+    return async (event, ctx) => found(event, ctx)
   }
   const notes: Array<{ msg: string; level: string }> = []
   const defaultCtx = {

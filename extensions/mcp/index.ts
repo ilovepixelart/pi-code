@@ -85,7 +85,7 @@ function authUiFor(ctx: ExtensionContext): AuthUi | undefined {
   }
 }
 
-export default async function mcpExtension(pi: ExtensionAPI) {
+export default function mcpExtension(pi: ExtensionAPI) {
   const clients = new Map<string, Client>()
   // pi 0.99 and later connect MCP servers themselves (docs/specs/mcp-native.md). Decided
   // at load, since registering /mcp here is what drops pi's own, which is before project
@@ -431,7 +431,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
    * settled after the connect-time check. */
   function subscribeToResourceChanges(client: Client): void {
     try {
-      client.setNotificationHandler(ResourceListChangedNotificationSchema, async () => {
+      client.setNotificationHandler(ResourceListChangedNotificationSchema, () => {
         ensureResourceTools()
       })
     } catch {
@@ -872,7 +872,7 @@ export default async function mcpExtension(pi: ExtensionAPI) {
   if (!native)
     pi.registerCommand('mcp', {
       description: 'Show MCP server status and tools',
-      handler: async (_args, ctx) => {
+      handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
         if (status.size === 0) {
           ctx.ui.notify('No MCP servers configured. Add them to .mcp.json, .pi/mcp.json, ~/.claude.json, or ~/.pi/agent/mcp.json', 'info')
           return

@@ -95,7 +95,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // per invocation, so a just-added agent is still runnable without a restart.
   let rosterCache: { key: string; agents: AgentConfig[] } | null = null
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', (_event, ctx) => {
     rosterCache = null
     hookCwd = ctx.cwd
     hookApproved = isProjectApprovedSilently(ctx)
@@ -156,7 +156,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // granted mid-session still widens it); project agents are included only when the
   // project is already approved, read without prompting, since a trust dialog must
   // not appear mid-turn and their descriptions are project text.
-  pi.on('before_agent_start', async (event, ctx) => {
+  pi.on('before_agent_start', (event, ctx) => {
     const scope: AgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
     const key = `${scope}\n${ctx.cwd}`
     if (rosterCache?.key !== key) rosterCache = { key, agents: discoverAgents(ctx.cwd, scope).agents }
@@ -312,7 +312,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // interrupting the agent; the only other way to see these is to ask the model.
   pi.registerCommand('tasks', {
     description: 'Show background subagent runs',
-    handler: async (_args, ctx) => {
+    handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       ctx.ui.notify(tasksStatusText(allBackgroundRuns()), 'info')
     },
   })
@@ -321,7 +321,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // silently, like the roster above: project agents list only once the project is trusted.
   pi.registerCommand('agents', {
     description: 'List discovered subagents and where they come from',
-    handler: async (_args, ctx) => {
+    handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       const { agents } = discoverAgents(ctx.cwd, isProjectApprovedSilently(ctx) ? 'both' : 'user')
       ctx.ui.notify(agentsListText(agents), 'info')
     },

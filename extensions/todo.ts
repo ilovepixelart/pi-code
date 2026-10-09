@@ -367,18 +367,18 @@ export default function todoExtension(pi: ExtensionAPI) {
     overlay.update()
   }
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', (_event, ctx) => {
     reconstructState(ctx)
     if (ctx.hasUI) overlay.setUICtx(ctx.ui)
     overlay.update()
   })
-  pi.on('session_tree', async (_event, ctx) => replayAndRefresh(ctx))
-  pi.on('session_compact', async (_event, ctx) => replayAndRefresh(ctx))
-  pi.on('session_shutdown', async () => overlay.dispose())
+  pi.on('session_tree', (_event, ctx) => replayAndRefresh(ctx))
+  pi.on('session_compact', (_event, ctx) => replayAndRefresh(ctx))
+  pi.on('session_shutdown', () => overlay.dispose())
 
   // Reads live state at render time; never replay the branch here (the
   // branch is stale until message_end runs after tool_execution_end).
-  pi.on('tool_execution_end', async (event) => {
+  pi.on('tool_execution_end', (event) => {
     if (event.toolName !== TOOL_NAME || event.isError) return
     overlay.update()
   })
@@ -456,7 +456,7 @@ export default function todoExtension(pi: ExtensionAPI) {
     ],
     parameters: TodoParams,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) /* NOSONAR typescript:S7503 - pi types a tool execute as returning a Promise */ {
       switch (params.action) {
         case 'add':
           return handleAdd(params)

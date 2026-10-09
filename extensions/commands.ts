@@ -250,7 +250,7 @@ export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, a
           const stdout = run.mergeStreams ? result.stdout + result.stderr : result.stdout
           return { stdout, stderr: result.stderr, code: result.code, killed: result.killed }
         }
-      : async () => ({ stdout: SHELL_DISABLED_PLACEHOLDER, stderr: '', code: 0 })
+      : () => Promise.resolve({ stdout: SHELL_DISABLED_PLACEHOLDER, stderr: '', code: 0 })
   let expanded = await expandDynamicContent(withVars, ctx.cwd, exec, parsed.shell === 'powershell' ? 'powershell' : 'bash')
 
   // Claude appends the raw arguments when the command never read them, so what
@@ -365,7 +365,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // so restoring there lifts the scoping before that continued run executes.
   // agent_settled fires exactly once, after the run has fully settled and no such
   // continuation remains, which is the grant's true clearing point.
-  pi.on('agent_settled', async () => {
+  pi.on('agent_settled', () => {
     void modelOverride.settle()
     void effortOverride.settle()
     liftToolScope()
@@ -397,7 +397,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
   // (here every segment of a compound command must match a rule; there the filter is
   // best effort and errs toward running the hook). A new scoped tool must be added in
   // both; the shared roster is ARG_RULE_TOOLS in internal/command-file.ts.
-  pi.on('tool_call', async (event, ctx) => {
+  pi.on('tool_call', (event, ctx) => {
     const input = event.input as Record<string, unknown>
     const text = (value: unknown): string => (typeof value === 'string' ? value : '')
     // The four scalar-scope tools share one shape: rules in force, the part of the call
