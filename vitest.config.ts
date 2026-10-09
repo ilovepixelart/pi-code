@@ -2,6 +2,9 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
+    // The default glob scans the whole repo, including agent worktrees checked out
+    // under .claude/, which would run a second copy of the suite.
+    include: ['tests/**/*.test.ts'],
     // Host-env quarantine + per-test env snapshot: the suite runs inside
     // Claude Code / pi subagents whose env carries variables the source reads.
     setupFiles: ['tests/setup.ts'],
