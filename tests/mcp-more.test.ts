@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import { makeWorktree } from './worktree-fixture.ts'
 
 /**
@@ -3417,5 +3418,47 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
     await harness.shutdown()
 
     expect(harness.nativeUnregistered).toEqual(['srv'])
+  })
+})
+
+// Claude: `--setting-sources user` reads "neither the project's settings files nor its
+// .mcp.json", and the MCP docs list it as a way to keep project servers out of a -p run.
+// pi's own .pi/mcp.json is project config in the same sense: honouring the flag for
+// .mcp.json alone would let a repository move its servers one file over.
+describe('--setting-sources and project MCP config', () => {
+  const sources = (...names: Array<'user' | 'project' | 'local'>): void => setCliSettingsReader(() => ({ settingsFile: undefined, sources: new Set(names), forwardArgs: [], errors: [] }))
+  const approveAllFromUser = (home: string): void => {
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enableAllProjectMcpServers: true }))
+  }
+
+  afterEach(() => setCliSettingsReader(undefined))
+
+  it('connects no .mcp.json server when project is not a source, even one the user approved', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ user: { mine: { command: 'm' } }, project: { repo: { command: 'r' } } })
+    approveAllFromUser(harness.home)
+    sources('user')
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames()).toEqual(['mine_a'])
+  })
+
+  it('connects no .pi/mcp.json server when project is not a source', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ user: { mine: { command: 'm' } } })
+    writeServers(join(harness.cwd, '.pi', 'mcp.json'), { piRepo: { command: 'p' } })
+    approveAllFromUser(harness.home)
+    sources('user', 'local')
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames()).toEqual(['mine_a'])
+  })
+
+  it('still connects project servers when project is a source', async () => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ user: { mine: { command: 'm' } }, project: { repo: { command: 'r' } } })
+    approveAllFromUser(harness.home)
+    sources('user', 'project')
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames().sort()).toEqual(['mine_a', 'repo_a'])
   })
 })

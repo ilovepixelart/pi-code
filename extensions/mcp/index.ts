@@ -38,6 +38,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { PromptListChangedNotificationSchema, ResourceListChangedNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Type } from 'typebox'
+import { cliSettings } from '../internal/cli-settings.ts'
 import { MCP_TOOLS_CHANNEL, type McpToolAlias } from '../internal/mcp-alias.ts'
 import { setMcpToolCaller } from '../internal/mcp-call.ts'
 import { capForContext } from '../internal/output-guard.ts'
@@ -637,8 +638,11 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     const projectApproved = isProjectApprovedSilently(ctx)
     const projectPolicy = projectServerPolicy(ctx.cwd, os.homedir(), projectApproved)
     // Tag the scope on each project server: a repository-supplied headersHelper runs
-    // with credential variables stripped, unlike a user-scope one.
-    const projectServers = Object.fromEntries(Object.entries(loadConfigFrom(nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd))).map(([name, config]) => [name, { ...config, projectScope: true }]))
+    // with credential variables stripped, unlike a user-scope one. Claude's
+    // --setting-sources without project reads no project .mcp.json, and .pi/mcp.json is
+    // the same kind of repository-supplied config.
+    const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)) : {}
+    const projectServers = Object.fromEntries(Object.entries(projectConfig).map(([name, config]) => [name, { ...config, projectScope: true }]))
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
     // stays with the local (user-side) definition, so the project's entry is dropped
