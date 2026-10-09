@@ -32,6 +32,9 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "warn"
+      },
       "correctness": {
         "useImportExtensions": "error"
       },
