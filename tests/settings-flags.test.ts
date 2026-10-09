@@ -54,12 +54,52 @@ describe('settings-flags extension', () => {
     process.stdout.isTTY = savedTty
   })
 
-  it("registers Claude's two flags as string flags", () => {
+  it("registers Claude's settings and MCP config flags", () => {
     const { flags } = wire()
     expect(flags.map((flag) => [flag.name, flag.options.type])).toEqual([
       ['settings', 'string'],
       ['setting-sources', 'string'],
+      ['mcp-config', 'string'],
+      ['strict-mcp-config', 'boolean'],
     ])
+  })
+
+  describe('--mcp-config', () => {
+    const savedArgv = process.argv
+    afterEach(() => {
+      process.argv = savedArgv
+    })
+    const config = (cwd: string, name: string, server: string): string => {
+      fs.writeFileSync(join(cwd, name), JSON.stringify({ mcpServers: { [server]: { command: server } } }))
+      return join(cwd, name)
+    }
+
+    it('loads every repeated value, as Claude does, though pi hands over only the last', async () => {
+      // Measured: `claude --mcp-config a.json --mcp-config b.json` connects a and b. pi's
+      // parser keeps one value per flag name, so the earlier ones come from the argv.
+      const cwd = fs.mkdtempSync(join(tmpdir(), 'flags-'))
+      const a = config(cwd, 'a.json', 'a')
+      const b = config(cwd, 'b.json', 'b')
+      process.argv = ['node', 'pi', '--mcp-config', a, '-p', `--mcp-config=${b}`, 'task']
+      await wire({ 'mcp-config': b }).start()
+      expect(Object.keys(cliSettings().mcp?.servers ?? {})).toEqual(['a', 'b'])
+    })
+
+    it("keeps pi's own value when the argv does not end in it", async () => {
+      // A launcher that rewrote the argv (or a parser change in pi) must not swap in
+      // values pi never handed over.
+      const cwd = fs.mkdtempSync(join(tmpdir(), 'flags-'))
+      const a = config(cwd, 'a.json', 'a')
+      const b = config(cwd, 'b.json', 'b')
+      process.argv = ['node', 'pi', '--mcp-config', a]
+      await wire({ 'mcp-config': b }).start()
+      expect(Object.keys(cliSettings().mcp?.servers ?? {})).toEqual(['b'])
+    })
+
+    it('takes --strict-mcp-config as the strict switch', async () => {
+      await wire({ 'strict-mcp-config': true }).start()
+      expect(cliSettings().mcp).toEqual({ servers: {}, strict: true })
+    })
   })
 
   it('resolves the flags for every consumer once pi has parsed them', async () => {

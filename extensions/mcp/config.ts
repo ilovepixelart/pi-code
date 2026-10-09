@@ -134,6 +134,21 @@ function serverEntries(raw: unknown, source: string): Record<string, ServerConfi
   return servers
 }
 
+/** The `--mcp-config` servers that pass Claude's startup validation. Claude skips an
+ * entry with a `url` and no `type` (it reads a typeless entry as stdio) and still loads
+ * the rest, with its own message (measured, Claude Code 2.1.295). */
+export function flagScopeServers(raw: Record<string, unknown>): Record<string, ServerConfig> {
+  const servers: Record<string, ServerConfig> = {}
+  for (const [name, config] of Object.entries(serverEntries(raw, '--mcp-config'))) {
+    if ('url' in config && config.type === undefined) {
+      console.warn(`pi-code-mcp: Skipped: MCP server "${name}" has a "url" but no "type"; add "type": "http" (or "sse" / "ws") to this entry`)
+      continue
+    }
+    servers[name] = config
+  }
+  return servers
+}
+
 export function loadConfigFrom(files: string[]): Record<string, ServerConfig> {
   const servers: Record<string, ServerConfig> = {}
   for (const file of files) {

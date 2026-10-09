@@ -162,6 +162,111 @@ describe('resolveCliSettings', () => {
   })
 })
 
+describe('resolveCliSettings: --mcp-config and --strict-mcp-config', () => {
+  // Claude: "--mcp-config | Load MCP servers from JSON files or strings (space-separated)";
+  // "--strict-mcp-config | Only use MCP servers from --mcp-config, ignoring all other MCP
+  // configurations". The refusals below are Claude Code 2.1.295's, measured with
+  // `claude -p "Reply with exactly: OK" --mcp-config <value>`: each exits 1 before a turn.
+  const dir = () => fs.mkdtempSync(join(tmpdir(), 'cli-mcp-'))
+  const server = (marker: string) => ({ command: 'sh', args: ['-c', marker] })
+  const write = (cwd: string, name: string, servers: Record<string, unknown>): string => {
+    fs.writeFileSync(join(cwd, name), JSON.stringify({ mcpServers: servers }))
+    return name
+  }
+  const managedDir = (present: boolean): string => {
+    const managed = dir()
+    if (present) fs.writeFileSync(join(managed, 'managed-mcp.json'), '{"mcpServers":{}}')
+    return join(managed, 'managed-settings.json')
+  }
+
+  it('leaves the MCP scopes alone without either flag', () => {
+    expect(resolveCliSettings({}, dir()).mcp).toBeUndefined()
+  })
+
+  it('loads the servers of a file named relative to cwd', () => {
+    const cwd = dir()
+    write(cwd, 'extra.json', { a: server('a') })
+    expect(resolveCliSettings({ mcpConfig: ['extra.json'] }, cwd).mcp).toEqual({ servers: { a: server('a') }, strict: false })
+  })
+
+  it('loads the servers of an inline JSON string', () => {
+    const inline = JSON.stringify({ mcpServers: { inl: server('inl') } })
+    expect(resolveCliSettings({ mcpConfig: [inline] }, dir()).mcp).toEqual({ servers: { inl: server('inl') }, strict: false })
+  })
+
+  it('merges several values, a later value winning a shared name', () => {
+    // Measured: `--mcp-config dx1.json dx2.json`, both naming "x", spawned dx2's command.
+    const cwd = dir()
+    write(cwd, 'one.json', { a: server('a'), x: server('first') })
+    write(cwd, 'two.json', { b: server('b'), x: server('second') })
+    expect(resolveCliSettings({ mcpConfig: ['one.json', 'two.json'] }, cwd).mcp?.servers).toEqual({ a: server('a'), b: server('b'), x: server('second') })
+  })
+
+  it('takes --strict-mcp-config alone as an empty server set', () => {
+    // Measured: `claude -p ... --strict-mcp-config` lists no MCP server at all.
+    expect(resolveCliSettings({ strictMcpConfig: true }, dir()).mcp).toEqual({ servers: {}, strict: true })
+  })
+
+  it('refuses a missing file with the absolute path, failing closed to no server at all', () => {
+    // Measured: "Error: Invalid MCP configuration:\nMCP config file not found: <path>",
+    // exit 1, even with a valid value beside it. Extensions loaded earlier start their
+    // session before the refusal ends it, so no MCP scope may connect in that window.
+    const cwd = dir()
+    write(cwd, 'good.json', { a: server('a') })
+    const resolved = resolveCliSettings({ mcpConfig: ['good.json', 'nope.json'] }, cwd)
+    expect(resolved.errors).toEqual([`Invalid MCP configuration:\nMCP config file not found: ${join(cwd, 'nope.json')}`])
+    expect(resolved.mcp).toEqual({ servers: {}, strict: true })
+    expect(resolved.forwardArgs).toEqual([])
+  })
+
+  it('treats a value that is not a JSON object as a path', () => {
+    // Measured: `--mcp-config '{bad'` reports "MCP config file not found: <cwd>/{bad".
+    const cwd = dir()
+    expect(resolveCliSettings({ mcpConfig: ['{bad'] }, cwd).errors).toEqual([`Invalid MCP configuration:\nMCP config file not found: ${join(cwd, '{bad')}`])
+  })
+
+  it('refuses a file that is not valid JSON', () => {
+    const cwd = dir()
+    fs.writeFileSync(join(cwd, 'bad.json'), '{bad')
+    expect(resolveCliSettings({ mcpConfig: ['bad.json'] }, cwd).errors).toEqual(['Invalid MCP configuration:\nMCP config is not a valid JSON'])
+  })
+
+  it('refuses a config without an mcpServers record, file or inline', () => {
+    const cwd = dir()
+    fs.writeFileSync(join(cwd, 'empty.json'), '{}')
+    const message = 'Invalid MCP configuration:\nmcpServers: Invalid input: expected record, received undefined'
+    expect(resolveCliSettings({ mcpConfig: ['empty.json'] }, cwd).errors).toEqual([message])
+    expect(resolveCliSettings({ mcpConfig: ['{"x":1}'] }, cwd).errors).toEqual([message])
+  })
+
+  it('refuses either flag while a managed-mcp.json is deployed', () => {
+    // Claude's managed-mcp doc: on a workstation Claude Code "exits at startup with `You
+    // cannot dynamically configure MCP servers when an enterprise MCP config is
+    // present`", and --strict-mcp-config "exits at startup ... alike".
+    const cwd = dir()
+    write(cwd, 'extra.json', { a: server('a') })
+    const message = 'You cannot dynamically configure MCP servers when an enterprise MCP config is present'
+    expect(resolveCliSettings({ mcpConfig: ['extra.json'] }, cwd, managedDir(true)).errors).toEqual([message])
+    expect(resolveCliSettings({ strictMcpConfig: true }, cwd, managedDir(true)).errors).toEqual([message])
+    expect(resolveCliSettings({ mcpConfig: ['extra.json'] }, cwd, managedDir(false)).errors).toEqual([])
+  })
+
+  it('hands a child a private copy that resolves to the same servers, wherever the child runs', () => {
+    // Claude's subagents run in-process and see the parent's MCP servers; a pi child is a
+    // new process, so it is handed the flags, and a relative path must not depend on its cwd.
+    const cwd = dir()
+    write(cwd, 'extra.json', { a: server('a') })
+    const parent = resolveCliSettings({ mcpConfig: ['extra.json'], strictMcpConfig: true }, cwd)
+    const at = parent.forwardArgs.indexOf('--mcp-config')
+    expect(at).toBeGreaterThanOrEqual(0)
+    const copy = parent.forwardArgs[at + 1]
+    if (process.platform !== 'win32') expect(fs.statSync(copy).mode & 0o777).toBe(0o600)
+    expect(parent.forwardArgs).toContain('--strict-mcp-config=true')
+    const child = resolveCliSettings({ mcpConfig: [copy], strictMcpConfig: true }, dir())
+    expect(child.mcp).toEqual(parent.mcp)
+  })
+})
+
 describe('cliSettings slot', () => {
   afterEach(() => setCliSettingsReader(undefined))
 

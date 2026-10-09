@@ -34,6 +34,12 @@ export function managedSettingsFile(): string {
   return managedSettingsFileOverride ?? managedSettingsPath()
 }
 
+/** The managed-mcp.json path: a sibling of managed-settings.json (same directory). Derived
+ * through the same test seam so a test can write both into one temp dir. */
+export function managedMcpPath(managedFile: string = managedSettingsFile()): string {
+  return path.join(path.dirname(managedFile), 'managed-mcp.json')
+}
+
 /** Files already reported as unparsable. Managed settings are read from sixteen call
  * sites, several of them once per turn, so one warning per broken file is the whole
  * budget; the same warn-once shape project-approval.ts uses for its runtime notice. */
