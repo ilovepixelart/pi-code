@@ -106,16 +106,18 @@ describe('isSafeCommand blocks writes an allowlisted command can make', () => {
 
 describe('isSafeCommand stays linear on hostile input', () => {
   // The command is chosen by the model, and the guard runs on the event loop. A regex that
-  // backtracks on a long run of digits took over a second for 40,000 of them.
+  // backtracks on a long run of digits took over a second for 40,000 of them. The bound is
+  // a hang detector, not a budget: these inputs take tens of milliseconds on their own,
+  // several hundred under a loaded parallel run, and a quadratic regex half a minute.
   it.each([
-    ['a long run of digits', `ls ${'1'.repeat(60_000)}`],
-    ['digits ending in a redirect', `ls ${'1'.repeat(60_000)}>&`],
-    ['a long run of redirects', `ls ${'>'.repeat(30_000)}`],
-    ['a long flag cluster', `git branch -${'a'.repeat(60_000)}`],
-  ])('classifies %s quickly', (_label, command) => {
+    ['a long run of digits', `ls ${'1'.repeat(240_000)}`],
+    ['digits ending in a redirect', `ls ${'1'.repeat(240_000)}>&`],
+    ['a long run of redirects', `ls ${'>'.repeat(120_000)}`],
+    ['a long flag cluster', `git branch -${'a'.repeat(240_000)}`],
+  ])('classifies %s without backtracking', (_label, command) => {
     const started = performance.now()
     isSafeCommand(command)
-    expect(performance.now() - started).toBeLessThan(300)
+    expect(performance.now() - started).toBeLessThan(5000)
   })
 })
 
