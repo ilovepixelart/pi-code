@@ -641,7 +641,8 @@ export default async function mcpExtension(pi: ExtensionAPI) {
     // with credential variables stripped, unlike a user-scope one. Claude's
     // --setting-sources without project reads no project .mcp.json, and .pi/mcp.json is
     // the same kind of repository-supplied config.
-    const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)) : {}
+    const projectConfigFiles = nativeActive ? claudeProjectConfigPaths(ctx.cwd) : projectConfigPaths(ctx.cwd)
+    const projectConfig = cliSettings().sources.has('project') ? loadConfigFrom(projectConfigFiles) : {}
     const projectServers = Object.fromEntries(Object.entries(projectConfig).map(([name, config]) => [name, { ...config, projectScope: true }]))
     const { consented: consentedRaw, gated } = splitByPolicy(applyServerPolicy(projectServers, policy), projectPolicy)
     // Claude's scope precedence is local over project: a name the local scope defines
