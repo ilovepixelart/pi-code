@@ -17,7 +17,7 @@ vi.mock('node:os', async (importOriginal) => {
 
 // The project scope stays approval-gated (a project env var can redirect a provider),
 // so approval is stubbed to a per-test flag rather than exercising the trust store here.
-vi.mock('../extensions/internal/project-approval.js', () => ({
+vi.mock('../extensions/internal/project-approval.ts', () => ({
   isProjectApprovedSilently: () => hoisted.approved,
   approvalRecheck: () => () => hoisted.approved,
 }))

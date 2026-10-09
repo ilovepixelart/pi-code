@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../extensions/internal/scope-rules.js'
+import { matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../extensions/internal/scope-rules.ts'
 
 /**
  * Oracles are the permissions reference's own worked examples, quoted per case, not
