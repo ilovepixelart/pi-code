@@ -134,6 +134,11 @@ function isPrivateIpv6(addr: string): boolean {
 function isPrivateIpv4(addr: string): boolean {
   const parts = addr.split('.').map(Number)
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true
+  return isReservedIpv4(parts)
+}
+
+/** True when the four parsed octets fall in a loopback, private, link-local, CGNAT or other non-public range. */
+function isReservedIpv4(parts: number[]): boolean {
   const [a, b] = parts
   if (a === 0 || a === 10 || a === 127) return true
   if (a === 169 && b === 254) return true
@@ -200,6 +205,13 @@ function decoderFor(contentType: string): TextDecoder {
   }
 }
 
+/** readCapped for a response with no body stream: the whole body is buffered, then cut or refused. */
+async function readUnstreamed(response: Response, decoder: TextDecoder, limit: BodyLimit, tooLarge: () => Error): Promise<string> {
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > limit.maxBytes && limit.overflow === 'refuse') throw tooLarge()
+  return decoder.decode(bytes.subarray(0, limit.maxBytes))
+}
+
 /** Read a response body up to `limit.maxBytes`, decoded as the content-type header's charset
  * (UTF-8 when it names none), then stop the download. Past the limit the body is cut or
  * the read throws, per `limit.overflow`; a declared content-length over a refusing limit
@@ -212,11 +224,7 @@ async function readCapped(response: Response, url: URL, limit: BodyLimit): Promi
   }
   const decoder = decoderFor(response.headers.get('content-type') ?? '')
   const reader = response.body?.getReader()
-  if (!reader) {
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    if (bytes.byteLength > limit.maxBytes && limit.overflow === 'refuse') throw tooLarge()
-    return decoder.decode(bytes.subarray(0, limit.maxBytes))
-  }
+  if (!reader) return readUnstreamed(response, decoder, limit, tooLarge)
   let text = ''
   let read = 0
   // A refusing read keeps going at exactly the limit: only the next chunk shows whether it is over.
@@ -358,6 +366,11 @@ async function answerFromPage(model: Parameters<typeof completeText>[0], prompt:
   }
 }
 
+/** A fetched page as the capped text web_fetch caches: HTML converted to markdown, anything else as is. */
+function pageBody(text: string, contentType: string): string {
+  return capFetchChars(contentType.includes('html') ? htmlToMarkdown(text) : text)
+}
+
 export default function webExtension(pi: ExtensionAPI) {
   const fetchCache = new Map<string, { expires: number; body: string }>()
   pi.registerTool({
@@ -415,7 +428,7 @@ export default function webExtension(pi: ExtensionAPI) {
         if (outcome.kind === 'redirect') {
           return { content: [{ type: 'text' as const, text: `${target} redirects to a different host: ${outcome.to}\nFetch ${outcome.to} directly to read it.` }], details: {} }
         }
-        body = capFetchChars(outcome.contentType.includes('html') ? htmlToMarkdown(outcome.text) : outcome.text)
+        body = pageBody(outcome.text, outcome.contentType)
         rememberFetch(fetchCache, target, body, now)
       }
 

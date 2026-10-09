@@ -10,7 +10,7 @@
  * header stay the real hostname, so virtual hosts and TLS still work.
  */
 
-import { request as httpRequest } from 'node:http'
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { LookupFunction } from 'node:net'
 import { Readable } from 'node:stream'
@@ -23,6 +23,16 @@ export interface TransportOptions {
 
 /** Statuses the WHATWG Response constructor forbids a body on (per the fetch spec). */
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+/** Node's incoming headers as fetch Headers; a repeated header is comma-joined. */
+function toHeaders(incoming: IncomingHttpHeaders): Headers {
+  const headers = new Headers()
+  for (const [key, value] of Object.entries(incoming)) {
+    if (typeof value === 'string') headers.set(key, value)
+    else if (Array.isArray(value)) headers.set(key, value.join(', '))
+  }
+  return headers
+}
 
 /** One request, no redirect following (the caller re-validates and re-pins per hop). */
 export function httpFetch(url: URL, opts: TransportOptions): Promise<Response> {
@@ -42,11 +52,7 @@ export function httpFetch(url: URL, opts: TransportOptions): Promise<Response> {
       },
       (res) => {
         try {
-          const headers = new Headers()
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (typeof value === 'string') headers.set(key, value)
-            else if (Array.isArray(value)) headers.set(key, value.join(', '))
-          }
+          const headers = toHeaders(res.headers)
           const status = res.statusCode ?? 0
           // The Response constructor throws for a non-null body on a null-body status
           // (204/205/304) and a RangeError for a status outside 200-599, which node's

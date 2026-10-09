@@ -204,6 +204,24 @@ function selectedLabels(options: DisplayOption[], checked: boolean[]): string {
     .join(', ')
 }
 
+/** The result line for a question that was not cancelled. */
+function renderAnswered(details: QuestionDetails, answer: string, theme: Theme): Text {
+  if (details.timedOut) {
+    const already = answer ? theme.fg('muted', ` (already selected: ${answer})`) : ''
+    return new Text(theme.fg('warning', '⏱ Auto-continued (no response)') + already, 0, 0)
+  }
+
+  if (details.wasCustom) {
+    return new Text(theme.fg('success', '✓ ') + theme.fg('muted', '(wrote) ') + theme.fg('accent', answer), 0, 0)
+  }
+  if (details.multiSelect) {
+    return new Text(theme.fg('success', '✓ ') + theme.fg('accent', answer || '(none)'), 0, 0)
+  }
+  const idx = details.options.indexOf(answer) + 1
+  const display = idx > 0 ? `${idx}. ${answer}` : answer
+  return new Text(theme.fg('success', '✓ ') + theme.fg('accent', display), 0, 0)
+}
+
 export default function question(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'question',
@@ -261,20 +279,7 @@ export default function question(pi: ExtensionAPI) {
         return new Text(theme.fg('warning', 'Cancelled'), 0, 0)
       }
 
-      if (details.timedOut) {
-        const already = details.answer ? theme.fg('muted', ` (already selected: ${details.answer})`) : ''
-        return new Text(theme.fg('warning', '⏱ Auto-continued (no response)') + already, 0, 0)
-      }
-
-      if (details.wasCustom) {
-        return new Text(theme.fg('success', '✓ ') + theme.fg('muted', '(wrote) ') + theme.fg('accent', details.answer), 0, 0)
-      }
-      if (details.multiSelect) {
-        return new Text(theme.fg('success', '✓ ') + theme.fg('accent', details.answer || '(none)'), 0, 0)
-      }
-      const idx = details.options.indexOf(details.answer) + 1
-      const display = idx > 0 ? `${idx}. ${details.answer}` : details.answer
-      return new Text(theme.fg('success', '✓ ') + theme.fg('accent', display), 0, 0)
+      return renderAnswered(details, details.answer, theme)
     },
   })
 }
@@ -532,21 +537,23 @@ export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOp
       finish({ answer, wasCustom: false, timedOut: true })
     }
 
+    function idleTick(): void {
+      if (deadline === undefined) return
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        fireTimeout()
+        return
+      }
+      const remainingSeconds = Math.ceil(remainingMs / 1000)
+      const nextCountdown = remainingMs <= COUNTDOWN_WINDOW_MS ? remainingSeconds : undefined
+      if (nextCountdown !== lastCountdown) {
+        lastCountdown = nextCountdown
+        refresh()
+      }
+    }
+
     if (timeoutMs !== undefined) {
-      idleTimer = setInterval(() => {
-        if (deadline === undefined) return
-        const remainingMs = deadline - Date.now()
-        if (remainingMs <= 0) {
-          fireTimeout()
-          return
-        }
-        const remainingSeconds = Math.ceil(remainingMs / 1000)
-        const nextCountdown = remainingMs <= COUNTDOWN_WINDOW_MS ? remainingSeconds : undefined
-        if (nextCountdown !== lastCountdown) {
-          lastCountdown = nextCountdown
-          refresh()
-        }
-      }, IDLE_TICK_MS)
+      idleTimer = setInterval(idleTick, IDLE_TICK_MS)
     }
 
     const editorTheme: EditorTheme = {
@@ -577,34 +584,46 @@ export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOp
       tui.requestRender()
     }
 
-    function handleInput(data: string) {
-      // Claude: "Press any key to restart the timer." Every branch below returns
-      // through this function, so resetting unconditionally on entry covers all of
-      // them, including the ones (arrow keys, space) that never reach `finish`.
-      resetIdleTimer()
-
-      if (editMode) {
-        if (matchesKey(data, Key.escape)) {
-          editMode = false
-          editor.setText('')
-          refresh()
-          return
-        }
-        editor.handleInput(data)
+    function handleEditInput(data: string): void {
+      if (matchesKey(data, Key.escape)) {
+        editMode = false
+        editor.setText('')
         refresh()
         return
       }
+      editor.handleInput(data)
+      refresh()
+    }
 
+    function confirmSelection(): void {
+      if (multiSelect) {
+        finish({ answer: selectedLabels(allOptions, checked), wasCustom: false })
+        return
+      }
+      const selected = allOptions[optionIndex]
+      if (selected.isOther) {
+        editMode = true
+        refresh()
+      } else {
+        finish({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
+      }
+    }
+
+    /** Moves the focus for an arrow key; false for any other key. */
+    function moveFocus(data: string): boolean {
       if (matchesKey(data, Key.up)) {
         optionIndex = Math.max(0, optionIndex - 1)
-        refresh()
-        return
-      }
-      if (matchesKey(data, Key.down)) {
+      } else if (matchesKey(data, Key.down)) {
         optionIndex = Math.min(allOptions.length - 1, optionIndex + 1)
-        refresh()
-        return
+      } else {
+        return false
       }
+      refresh()
+      return true
+    }
+
+    function handleSelectInput(data: string): void {
+      if (moveFocus(data)) return
 
       if (multiSelect && data === ' ') {
         checked[optionIndex] = !checked[optionIndex]
@@ -613,23 +632,23 @@ export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOp
       }
 
       if (matchesKey(data, Key.enter)) {
-        if (multiSelect) {
-          finish({ answer: selectedLabels(allOptions, checked), wasCustom: false })
-          return
-        }
-        const selected = allOptions[optionIndex]
-        if (selected.isOther) {
-          editMode = true
-          refresh()
-        } else {
-          finish({ answer: selected.label, wasCustom: false, index: optionIndex + 1 })
-        }
+        confirmSelection()
         return
       }
 
       if (matchesKey(data, Key.escape)) {
         finish(null)
       }
+    }
+
+    function handleInput(data: string) {
+      // Claude: "Press any key to restart the timer." Every branch below returns
+      // through this function, so resetting unconditionally on entry covers all of
+      // them, including the ones (arrow keys, space) that never reach `finish`.
+      resetIdleTimer()
+
+      if (editMode) handleEditInput(data)
+      else handleSelectInput(data)
     }
 
     function render(width: number): string[] {

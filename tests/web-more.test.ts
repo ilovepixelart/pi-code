@@ -626,6 +626,20 @@ describe('web_search', () => {
     expect(result.content[0].text).toBe('1. Title 0\n   https://site0.test/\n   Snippet 0')
   })
 
+  it('cuts a search page at 200000 bytes on the no-stream fallback too', async () => {
+    const late = '<a class="result__a" href="https://late.test/">Late</a><a class="result__snippet">L</a>'
+    const page = Buffer.from(`${resultHtml(1)}${' '.repeat(200_000)}${late}`)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: null,
+      headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+      arrayBuffer: async () => page.buffer.slice(page.byteOffset, page.byteOffset + page.byteLength),
+    } as unknown as Response)
+    const result = await setup().search({ query: 'pi' })
+    expect(result.content[0].text).toBe('1. Title 0\n   https://site0.test/\n   Snippet 0')
+  })
+
   it('surfaces an upstream http failure from the search endpoint', async () => {
     fetchMock.mockResolvedValue(respond('rate limited', { status: 429 }))
     await expect(setup().search({ query: 'pi' })).rejects.toThrow('HTTP 429 for https://html.duckduckgo.com/html/?q=pi')
