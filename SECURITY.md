@@ -12,7 +12,7 @@ An untrusted project can ship any `.claude/` content. These extensions read that
 
 | Extension | Project input gated behind trust |
 |---|---|
-| mcp | `.mcp.json` / `.pi/mcp.json` servers (a server `command` runs on connect) |
+| mcp | `.mcp.json` / `.pi/mcp.json` servers (a server `command` runs on connect). Interactive: the approval prompt is answered before any of them connects, including servers the user consented to in their own settings; declined, none connect. Headless: only user-consented servers connect, without a `headersHelper` |
 | hooks | project `settings.json` hooks (arbitrary shell on tool calls) |
 | subagent | project `.claude/agents` / `.pi/agents` (their own system prompt and tools) |
 | output-styles | project style body, injected verbatim into the system prompt |

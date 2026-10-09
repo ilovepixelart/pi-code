@@ -2051,13 +2051,13 @@ describe('per-server project approvals', () => {
     expect(harness.toolNames()).toEqual(['keep_a'])
   })
 
-  it('connects an enabledMcpjsonServers entry from the user settings without the project confirm', async () => {
+  it('connects an enabledMcpjsonServers entry from the user settings without the project confirm in a headless session', async () => {
     withTools([{ name: 'a' }])
     const harness = await setup({ project: { consented: { command: 'c' }, other: { command: 'o' } } })
     // The user's own settings file is outside the repository, so its consent stands
-    // on its own; the unlisted server still waits for the project confirm.
+    // on its own where no prompt can be shown; the unlisted server still needs approval.
     writeClaudeSettings(harness.home, 'settings.json', { enabledMcpjsonServers: ['consented'] })
-    await harness.sessionStart(true, false)
+    await harness.sessionStart(true, false, false)
     expect(harness.toolNames()).toEqual(['consented_a'])
   })
 
@@ -2076,6 +2076,69 @@ describe('per-server project approvals', () => {
     writeClaudeSettings(harness.cwd, 'settings.json', { enableAllProjectMcpServers: true, enabledMcpjsonServers: ['sneaky'] })
     await harness.sessionStart(true, false)
     expect(harness.toolNames()).toEqual([])
+  })
+
+  // Claude, for a folder whose trust is not settled: .mcp.json servers "Claude Code asks
+  // you before connecting them", while a `claude -p` run connects them without asking.
+  // The user's own consent picks which servers; it does not skip the interactive question.
+  const userConsents: Array<[string, Record<string, unknown>]> = [
+    ['enableAllProjectMcpServers', { enableAllProjectMcpServers: true }],
+    ['enabledMcpjsonServers', { enabledMcpjsonServers: ['proj'] }],
+  ]
+
+  it.each(userConsents)('asks before connecting a project server the user consented to with %s', async (_key, consent) => {
+    withTools([{ name: 'a' }])
+    let projectTransportsAtPrompt: number | undefined
+    const harness = await setup({
+      project: { proj: { command: 'proj-cmd' } },
+      confirm: async () => {
+        projectTransportsAtPrompt = hoisted.transports.filter((t) => t.options.command === 'proj-cmd').length
+        return true
+      },
+    })
+    writeClaudeSettings(harness.home, 'settings.json', consent)
+    await harness.sessionStart(true)
+    expect(projectTransportsAtPrompt).toBe(0)
+  })
+
+  it.each(userConsents)('connects no project server consented with %s when the prompt is declined, user servers still connect', async (_key, consent) => {
+    withTools([{ name: 'a' }])
+    const harness = await setup({ user: { mine: { command: 'user-cmd' } }, project: { proj: { command: 'proj-cmd' } } })
+    writeClaudeSettings(harness.home, 'settings.json', consent)
+    await harness.sessionStart(true, false)
+    expect(hoisted.transports.map((t) => t.options.command)).toEqual(['user-cmd'])
+    expect(harness.toolNames()).toEqual(['mine_a'])
+  })
+
+  it.each(userConsents)('connects a project server consented with %s once the prompt is approved, helper included', async (_key, consent) => {
+    withTools([{ name: 'a' }])
+    const helper = 'printf \'{"X-Helper":"ran"}\''
+    const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headersHelper: helper } } })
+    writeClaudeSettings(harness.home, 'settings.json', consent)
+    await harness.sessionStart(true, true)
+    expect(harness.toolNames()).toEqual(['proj_a'])
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-Helper']).toBe('ran')
+  })
+
+  it('connects a user-consented project server without asking in a headless session, helper dropped', async () => {
+    withTools([{ name: 'a' }])
+    let confirms = 0
+    const helper = 'printf \'{"X-Helper":"ran"}\''
+    const harness = await setup({
+      project: { proj: { type: 'http', url: 'https://api.example/mcp', headers: { 'X-Static': 'kept' }, headersHelper: helper } },
+      confirm: async () => {
+        confirms++
+        return true
+      },
+    })
+    writeClaudeSettings(harness.home, 'settings.json', { enableAllProjectMcpServers: true })
+    await harness.sessionStart(true, true, false)
+    expect(confirms).toBe(0)
+    expect(harness.toolNames()).toEqual(['proj_a'])
+    const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
+    expect(headers['X-Static']).toBe('kept')
+    expect(headers['X-Helper']).toBeUndefined()
   })
 
   it('lets disabled win over enabled for the same server', async () => {
@@ -2875,15 +2938,16 @@ describe('mcp headersHelper environment', () => {
     expect(await statusLinesOf(harness)).toEqual(['proj: connected (1 tools)'])
   })
 
-  it('does not run a project helper until the project is trusted, connecting with static headers alone', async () => {
+  it('does not run a project helper until the project is trusted, connecting headless with static headers alone', async () => {
     // A repository's helper is a command the user has not reviewed. Consent to the server
     // (enabledMcpjsonServers) is not consent to run its command in an untrusted folder.
+    // Headless: an interactive session asks before connecting the server at all.
     withTools([{ name: 'go' }])
     const helper = 'printf \'{"X-Helper":"ran"}\''
     const harness = await setup({ project: { proj: { type: 'http', url: 'https://api.example/mcp', headers: { 'X-Static': 'kept' }, headersHelper: helper } } })
     mkdirSync(join(harness.home, '.claude'), { recursive: true })
     writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledMcpjsonServers: ['proj'] }))
-    await harness.sessionStart(false)
+    await harness.sessionStart(false, true, false)
 
     const headers = (hoisted.transports[0].options as { requestInit: { headers: Record<string, string> } }).requestInit.headers
     expect(headers['X-Static']).toBe('kept')
