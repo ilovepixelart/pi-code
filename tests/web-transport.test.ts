@@ -99,4 +99,17 @@ describe('httpFetch pins the connection to the validated address', () => {
     const response = await httpFetch(new URL(`http://blocked.internal.test:${port}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })
     expect(response.headers.get('set-cookie')).toBe('a=1, b=2')
   })
+
+  it('carries a single-valued response header through unchanged', async () => {
+    const server = createHttpServer((_req, res) => {
+      res.setHeader('x-probe', 'one value')
+      res.end('ok')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    closers.push(() => server.close())
+    const port = (server.address() as AddressInfo).port
+
+    const response = await httpFetch(new URL(`http://blocked.internal.test:${port}/`), { signal: signal(), lookup: pinTo('127.0.0.1'), userAgent: 'pin-test/1' })
+    expect(response.headers.get('x-probe')).toBe('one value')
+  })
 })

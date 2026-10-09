@@ -701,6 +701,15 @@ describe('question overlay', () => {
     expect(out).toContain('> 2. Beta')
   })
 
+  it('moves the cursor back to the previous option on up', () => {
+    const { overlay } = openOverlay(setup())
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.up)
+    const out = overlay.render(60)
+    expect(out).toContain('> 1. Alpha')
+    expect(out).toContain('  2. Beta')
+  })
+
   it('keeps the cursor on the first option when up is pressed at the top', () => {
     const { overlay } = openOverlay(setup())
     overlay.handleInput(RAW.up)
@@ -865,6 +874,11 @@ describe('question header and multiSelect', () => {
   it('renders a multi-select result as the joined answer', () => {
     const rendered = setup().renderResult({ content: [], details: { question: 'q', options: ['Alpha', 'Beta'], answer: 'Alpha, Beta', wasCustom: false, multiSelect: true } }, {}, theme)
     expect(lines(rendered)).toEqual(['✓ Alpha, Beta'])
+  })
+
+  it('renders an empty multi-select answer as (none)', () => {
+    const rendered = setup().renderResult({ content: [], details: { question: 'q', options: ['Alpha', 'Beta'], answer: '', wasCustom: false, multiSelect: true } }, {}, theme)
+    expect(lines(rendered)).toEqual(['✓ (none)'])
   })
 })
 
