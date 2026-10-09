@@ -254,6 +254,11 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   if (onSystemMessage) surfaceSystemMessages(results, onSystemMessage)
   const context = preToolContexts(results)
   const decisions = results.map((result) => interpretHookResult(result.code, result.stdout, result.stderr))
+  return combinePreToolDecisions(decisions, context)
+}
+
+/** The combined PreToolUse verdict over every hook's decision, in config order. */
+function combinePreToolDecisions(decisions: HookDecision[], context: string[]): PreToolUseOutcome {
   // One hook's continue false stops the run whatever the combined verdict on the call.
   const stop = decisions.find((decision) => decision.stop)
   const withStop = <T extends HookDecision>(decision: T): T => (stop ? { ...decision, stop: true, stopReason: stop.stopReason } : decision)

@@ -118,6 +118,33 @@ function shellInvocation(command: string, shell: string | undefined): { file: st
   return resolved ? { file: resolved.file, spawnArgs: resolved.argsFor(command) } : undefined
 }
 
+/** The environment a command hook's child runs with. */
+function hookEnv(projectDir: string | undefined, sessionId: string | undefined, plugin: HookSpawnOptions['plugin']): NodeJS.ProcessEnv {
+  // CLAUDE_CODE_CHILD_SESSION marks per-call children (hook and status line
+  // commands), never long-lived stdio MCP servers, as Claude documents; COLUMNS
+  // and LINES carry the terminal dimensions since the script's own width
+  // detection cannot see the captured terminal.
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
+  if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
+  // Claude: "Claude Code sets this to its own process ID in the subprocesses it
+  // spawns: Bash and PowerShell tool commands and hook commands." Set unconditionally,
+  // since every hook child qualifies.
+  env.CLAUDE_PID = String(process.pid)
+  if (sessionId) env.CLAUDE_CODE_SESSION_ID = sessionId
+  // Claude: "All three are exported as environment variables to hook processes and to
+  // MCP and LSP server subprocesses", so a plugin script can read them rather than
+  // depend on inline substitution. The data directory is "created on first reference",
+  // and exporting the path is that reference: a script should not have to mkdir it.
+  if (plugin) {
+    env.CLAUDE_PLUGIN_ROOT = plugin.root
+    env.CLAUDE_PLUGIN_DATA = plugin.dataDir
+    ensureDir(plugin.dataDir)
+  }
+  if (process.stdout.columns) env.COLUMNS = String(process.stdout.columns)
+  if (process.stdout.rows) env.LINES = String(process.stdout.rows)
+  return env
+}
+
 /** The shell path specifically; the statusline reuses it for its own command. With an
  * `args` array it becomes the exec path: `command` is spawned directly with those args.
  * `onChild` hands the caller a kill for the spawned tree, so a background hook that is
@@ -130,28 +157,7 @@ export const runHookCommand: HookCommandRunner = (command, payload, timeoutMs, {
     // timeout can kill the descendants too. CLAUDE_PROJECT_DIR is Claude's documented way for a hook to
     // reference project files regardless of the shell's cwd. CLAUDECODE=1 marks every
     // subprocess Claude spawns, so it is set on the child unconditionally.
-    // CLAUDE_CODE_CHILD_SESSION marks per-call children (hook and status line
-    // commands), never long-lived stdio MCP servers, as Claude documents; COLUMNS
-    // and LINES carry the terminal dimensions since the script's own width
-    // detection cannot see the captured terminal.
-    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' }
-    if (projectDir) env.CLAUDE_PROJECT_DIR = projectDir
-    // Claude: "Claude Code sets this to its own process ID in the subprocesses it
-    // spawns: Bash and PowerShell tool commands and hook commands." Set unconditionally,
-    // since every hook child qualifies.
-    env.CLAUDE_PID = String(process.pid)
-    if (sessionId) env.CLAUDE_CODE_SESSION_ID = sessionId
-    // Claude: "All three are exported as environment variables to hook processes and to
-    // MCP and LSP server subprocesses", so a plugin script can read them rather than
-    // depend on inline substitution. The data directory is "created on first reference",
-    // and exporting the path is that reference: a script should not have to mkdir it.
-    if (plugin) {
-      env.CLAUDE_PLUGIN_ROOT = plugin.root
-      env.CLAUDE_PLUGIN_DATA = plugin.dataDir
-      ensureDir(plugin.dataDir)
-    }
-    if (process.stdout.columns) env.COLUMNS = String(process.stdout.columns)
-    if (process.stdout.rows) env.LINES = String(process.stdout.rows)
+    const env = hookEnv(projectDir, sessionId, plugin)
     // An exec-form hook (an `args` array) spawns the executable directly with those args
     // and no shell, so shell metacharacters in the args arrive literally; $ARGUMENTS in
     // each arg is replaced with the event JSON by a replacer function (so $$/$& in the

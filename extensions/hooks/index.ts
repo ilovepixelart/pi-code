@@ -95,7 +95,7 @@
  */
 
 import * as os from 'node:os'
-import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
+import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type ToolResultEvent, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
 import { runningBackgroundAgents } from '../internal/background-agents.ts'
 import { claudeEffortLevel } from '../internal/effort.ts'
 import { INSTRUCTIONS_CHANNEL, isInstructionLoadEvent } from '../internal/instruction-events.ts'
@@ -113,7 +113,7 @@ import { setSubagentStartHookRunner } from '../internal/subagent-hooks.ts'
 import { contentText, parseNumericEnv } from '../internal/values.ts'
 import { claudeToolInput, claudeToolName, claudeToolResponse, piToolOutput } from './claude-tools.ts'
 import { formatHooksSummary, type HookCommand, type HookMatcher, type HooksConfig, hookFiles, isBackgroundHook, loadHooks, loadManagedHooks, loadPluginHooks, mergeAgentEnvHooks, mergeSkillHooks, readAllowedHttpHookUrls, readDisableAllHooks, readSettingsDisableAllHooks } from './config.ts'
-import { blockedToolCall, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.ts'
+import { blockedToolCall, type HookDecision, jsonBlockVerdict, postToolFeedback, promptContext, runPreToolUse, runUserPromptSubmit, surfaceSystemMessages, tryParseJson } from './decisions.ts'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.ts'
 import { type HookRunner, type HookRunResult, runAgentHook, runHookCommand, runHttpHook, runMcpToolHook, runPromptHook, sessionEndTimeoutMs, timeoutMs } from './runners.ts'
 
@@ -193,6 +193,41 @@ function stopVerdict(result: HookRunResult, stopMessages: string[]): { block: bo
   const context = parsed?.hookSpecificOutput?.additionalContext
   if (typeof context === 'string' && context.length > 0) return { block: true, reason: context, stop: false }
   return { block: false, reason: '', stop: false }
+}
+
+/** Whether the turn ended in a user interrupt: pi marks the aborted turn's final
+ * assistant message stopReason "aborted". */
+function endedByInterrupt(event: { messages?: Array<{ role: string; stopReason?: string }> }): boolean {
+  const turnMessages = event.messages ?? []
+  const lastAssistant = [...turnMessages].reverse().find((message) => message.role === 'assistant')
+  return lastAssistant?.stopReason === 'aborted'
+}
+
+/** The stop reason of the first PostToolUse result that set continue false, if any. */
+function continueFalseReason(results: HookRunResult[]): string | undefined {
+  const postToolStop = results.map((result) => tryParseJson(result.stdout)).find((parsed) => parsed?.continue === false)
+  return postToolStop ? (postToolStop.stopReason ?? 'Stopped by hook') : undefined
+}
+
+/** The first completed result's updatedToolOutput, as the pi output text. An MCP tool
+ * also reads updatedMCPToolOutput. */
+function updatedToolOutput(results: HookRunResult[], toolName: string, isMcp: boolean): string | undefined {
+  return results
+    .filter((result) => !result.timedOut)
+    .map((result) => {
+      const parsed = tryParseJson(result.stdout)
+      const value = isMcp ? (parsed?.updatedMCPToolOutput ?? parsed?.updatedToolOutput) : parsed?.updatedToolOutput
+      return value === undefined ? undefined : piToolOutput(toolName, value, isMcp)
+    })
+    .find((text) => text !== undefined)
+}
+
+/** The tool result content with any replacement output and the hook feedback lines
+ * appended; undefined when the hooks changed nothing. */
+function postToolContent(content: ToolResultEvent['content'], replacement: string | undefined, feedback: string[]): { content: ToolResultEvent['content'] } | undefined {
+  if (replacement === undefined && feedback.length === 0) return
+  const base = replacement !== undefined ? [{ type: 'text' as const, text: replacement }] : content
+  return { content: [...base, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
 }
 
 /**
@@ -276,6 +311,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     ctx.ui.notify(reason, 'warning')
     ctx.abort()
   }
+  /** Holds a PreToolUse continue false until this call's result is in (see pendingStops). */
+  const deferToolStop = (toolCallId: string, decision: HookDecision): void => {
+    if (decision.stop) pendingStops.set(toolCallId, decision.stopReason ?? 'Stopped by hook')
+  }
   /** Claude sends session_id, transcript_path, cwd and effort on every payload. */
   const commonPayload = (ctx: ExtensionContext): Record<string, unknown> => {
     const common: Record<string, unknown> = { session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, permission_mode: permissionMode }
@@ -314,6 +353,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (parts.length === 0) return
     pi.sendMessage({ customType: 'claude-async-hook', content: parts.join('\n'), display: false }, { deliverAs: 'nextTurn' })
   }
+  /** Run one hook entry with its merged payload, by the entry's type. */
+  const dispatchHook = (ctx: ExtensionContext, hook: HookCommand, merged: Record<string, unknown>, ms: number, onChild?: (kill: () => void) => void): Promise<HookRunResult> => {
+    if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
+    if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms, ctx.modelRegistry)
+    if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
+    if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
+    return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined, sessionId: merged.session_id as string | undefined })
+  }
   /** A runner bound to the firing context, filling the common fields into each
    * payload and dispatching on the entry's type. A background hook (see
    * isBackgroundHook) is fired and the caller immediately gets a no-verdict result,
@@ -323,13 +370,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
     (ctx: ExtensionContext, extra?: Record<string, unknown>): HookRunner =>
     (hook, payload, ms) => {
       const merged = { ...commonPayload(ctx), ...extra, ...(payload as Record<string, unknown>) }
-      const dispatch = (onChild?: (kill: () => void) => void): Promise<HookRunResult> => {
-        if (hook.type === 'http') return runHttpHook(hook, merged, ms, allowedHttpHookUrls)
-        if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms, ctx.modelRegistry)
-        if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
-        if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-        return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined, sessionId: merged.session_id as string | undefined })
-      }
+      const dispatch = (onChild?: (kill: () => void) => void): Promise<HookRunResult> => dispatchHook(ctx, hook, merged, ms, onChild)
       // Claude's `once` (skill-frontmatter hooks only): removed after the first
       // successful run; a failure, block, or timeout leaves it in place.
       const markOnce = async (run: Promise<HookRunResult>): Promise<HookRunResult> => {
@@ -480,6 +521,12 @@ export default function hooksExtension(pi: ExtensionAPI) {
       loadPluginHooks(config, managedForceEnabled(installedPlugins(os.homedir())), hookSources)
       return
     }
+    mergeNonManagedHooks(files)
+  }
+
+  /** Merge the non-managed hook sources into the managed config resolveConfig loaded:
+   * settings files, plugins, a subagent child's agent hooks, and this session's skill hooks. */
+  function mergeNonManagedHooks(files: string[]): void {
     for (const [eventName, matchers] of Object.entries(loadHooks(files, hookSources))) config[eventName] = [...(config[eventName] ?? []), ...matchers]
     // Plugins are user-installed and enabled by user settings (see installedPlugins),
     // so a checked-out repo cannot toggle which code-bearing plugin hooks run.
@@ -559,24 +606,21 @@ export default function hooksExtension(pi: ExtensionAPI) {
       if (decision.context && decision.context.length > 0) pendingToolContext.set(event.toolCallId, decision.context)
       // Claude's duration_ms excludes PreToolUse hook time, so the clock starts here.
       toolStartTimes.set(event.toolCallId, Date.now())
-      if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
+      deferToolStop(event.toolCallId, decision)
       return undefined
     }
     // Claude's "ask": prompt the user and let the call through if they approve.
     // With no UI (headless) the block stands, which is the safe default.
-    if (decision.ask && ctx.hasUI) {
-      const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.')
-      if (approved) {
-        // Claude's duration_ms also excludes time in permission prompts.
-        toolStartTimes.set(event.toolCallId, Date.now())
-        if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
-        return undefined
-      }
+    if (decision.ask && ctx.hasUI && (await ctx.ui.confirm(`Allow ${event.toolName}?`, decision.reason ?? 'A hook asks you to confirm this tool call.'))) {
+      // Claude's duration_ms also excludes time in permission prompts.
+      toolStartTimes.set(event.toolCallId, Date.now())
+      deferToolStop(event.toolCallId, decision)
+      return undefined
     }
     // Stopping here would abort before pi records the block, and pi then reports
     // "Operation aborted" in place of the reason; tool_execution_end stops the run once
     // the blocked result is in.
-    if (decision.stop) pendingStops.set(event.toolCallId, decision.stopReason ?? 'Stopped by hook')
+    deferToolStop(event.toolCallId, decision)
     return blockedToolCall(decision.reason)
   })
 
@@ -591,6 +635,28 @@ export default function hooksExtension(pi: ExtensionAPI) {
     stopRun(ctx, reason)
   })
 
+  /** The PostToolUse or PostToolUseFailure hooks that match this tool result, under
+   * the pi name and its Claude spelling. */
+  const postToolCommands = (event: ToolResultEvent, ctx: ExtensionContext, translatedName: string | undefined): HookCommand[] => {
+    const names = translatedName ? [event.toolName, translatedName] : [event.toolName]
+    const anchors = { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() }
+    const target = { piName: event.toolName, claudeName: translatedName, input: event.input, anchors }
+    return matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names).filter((command) => passesIfFilter(command, target))
+  }
+  /** The PostToolUse/PostToolUseFailure payload for one tool result. Reading it consumes
+   * the call's start time. */
+  const postToolPayload = (event: ToolResultEvent, ctx: ExtensionContext, eventName: string, alias: string | undefined, translatedName: string | undefined): Record<string, unknown> => {
+    const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
+    const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, contentText(event.content, '\n'), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
+    const startedAt = toolStartTimes.get(event.toolCallId)
+    toolStartTimes.delete(event.toolCallId)
+    // Claude delivers a failure as top-level fields rather than a tool_response: "error
+    // information as top-level fields ... error ... is_interrupt". is_interrupt is false
+    // here because pi reports a cancelled tool through the result, not this event.
+    const failure = event.isError ? { error: contentText(event.content, '\n'), is_interrupt: false } : { tool_response: response }
+    return { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, ...failure, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
+  }
+
   // Claude's PostToolUse (success) and PostToolUseFailure (error) both feed their
   // hook's output back next to the tool result: a decision:block reason (or exit-2
   // stderr) and additionalContext are appended, which is where Claude documents they
@@ -602,7 +668,6 @@ export default function hooksExtension(pi: ExtensionAPI) {
   pi.on('tool_result', async (event, ctx) => {
     const alias = mcpAliases.get(event.toolName)
     const translatedName = alias ?? claudeToolName(event.toolName)
-    const names = translatedName ? [event.toolName, translatedName] : [event.toolName]
     const eventName = event.isError ? 'PostToolUseFailure' : 'PostToolUse'
     // Contexts stashed by this call's PreToolUse hooks land next to the result even
     // when no PostToolUse hook is configured.
@@ -610,45 +675,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
     pendingToolContext.delete(event.toolCallId)
     const preToolStop = pendingStops.get(event.toolCallId)
     pendingStops.delete(event.toolCallId)
-    const anchors = { cwd: ctx.cwd, projectRoot: projectDir || ctx.cwd, home: os.homedir() }
-    const target = { piName: event.toolName, claudeName: translatedName, input: event.input, anchors }
-    const commands = matchingCommands(event.isError ? config.PostToolUseFailure : config.PostToolUse, names).filter((command) => passesIfFilter(command, target))
+    const commands = postToolCommands(event, ctx, translatedName)
     if (commands.length === 0 && pending.length === 0) {
       stopRun(ctx, preToolStop)
       return
     }
-    const translatedInput = alias === undefined ? claudeToolInput(event.toolName, event.input, ctx.cwd) : undefined
-    const response = (alias === undefined && !event.isError ? claudeToolResponse(event.toolName, event.input, contentText(event.content, '\n'), event.isError, ctx.cwd) : undefined) ?? { content: event.content, details: event.details, isError: event.isError }
-    const startedAt = toolStartTimes.get(event.toolCallId)
-    toolStartTimes.delete(event.toolCallId)
-    // Claude delivers a failure as top-level fields rather than a tool_response: "error
-    // information as top-level fields ... error ... is_interrupt". is_interrupt is false
-    // here because pi reports a cancelled tool through the result, not this event.
-    const failure = event.isError ? { error: contentText(event.content, '\n'), is_interrupt: false } : { tool_response: response }
-    const payload = { hook_event_name: eventName, tool_name: translatedName ?? event.toolName, tool_input: translatedInput ?? event.input, ...failure, ...(startedAt === undefined ? {} : { duration_ms: Date.now() - startedAt }) }
+    const payload = postToolPayload(event, ctx, eventName, alias, translatedName)
     const run = boundRunner(ctx, { tool_use_id: event.toolCallId })
     const results = await Promise.all(commands.map((command) => run(command, payload, timeoutMs(command))))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     // Claude: continue false applies to PostToolUse too, stopping the run after the call.
-    const postToolStop = results.map((result) => tryParseJson(result.stdout)).find((parsed) => parsed?.continue === false)
-    stopRun(ctx, preToolStop ?? (postToolStop ? (postToolStop.stopReason ?? 'Stopped by hook') : undefined))
+    stopRun(ctx, preToolStop ?? continueFalseReason(results))
     // Claude's updatedToolOutput replaces the output the model sees; a value that
     // doesn't match the tool's output schema is ignored, MCP output passes through
     // unvalidated, and a failed call keeps its error output.
-    const replacement = event.isError
-      ? undefined
-      : results
-          .filter((result) => !result.timedOut)
-          .map((result) => {
-            const parsed = tryParseJson(result.stdout)
-            const value = alias !== undefined ? (parsed?.updatedMCPToolOutput ?? parsed?.updatedToolOutput) : parsed?.updatedToolOutput
-            return value === undefined ? undefined : piToolOutput(event.toolName, value, alias !== undefined)
-          })
-          .find((text) => text !== undefined)
+    const replacement = event.isError ? undefined : updatedToolOutput(results, event.toolName, alias !== undefined)
     const feedback = [...pending, ...results.flatMap((result) => postToolFeedback(result, eventName, event.isError))]
-    if (replacement === undefined && feedback.length === 0) return
-    const base = replacement !== undefined ? [{ type: 'text' as const, text: replacement }] : event.content
-    return { content: [...base, ...feedback.map((text) => ({ type: 'text' as const, text }))] }
+    return postToolContent(event.content, replacement, feedback)
   })
 
   // Claude's PreToolUse for Bash, extended to a command the user runs directly with the
@@ -746,6 +789,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
     await runNotifyHooks(subStop, subPayload, boundRunner(ctx)).catch(() => {})
   }
 
+  /** Feed a Stop hook's block reason back as a new turn, unless the block cap is reached. */
+  const continueFromStopBlock = (ctx: ExtensionContext, reason: string): void => {
+    stopHookBlockCount += 1
+    const cap = stopHookBlockCap()
+    if (stopHookBlockCount >= cap) {
+      // Claude overrides a Stop hook that has blocked cap times in a row with no user
+      // progress: suppress the continuation, warn, and let the turn end so the loop cannot
+      // run forever. Reset the count so a later run (or user turn) starts clean.
+      stopHookActive = false
+      stopHookBlockCount = 0
+      ctx.ui.notify(`Stop hook block cap reached (${cap} consecutive blocks); ending the turn.`, 'warning')
+      return
+    }
+    stopHookActive = true
+    pi.sendMessage({ customType: 'claude-stop-hook', content: reason, display: true }, { triggerTurn: true })
+  }
+
   pi.on('agent_end', async (event, ctx) => {
     armIdlePrompt(ctx)
     await fireChildSubagentStop(event as { messages?: Array<{ role: string; content: unknown }> }, ctx)
@@ -759,11 +819,8 @@ export default function hooksExtension(pi: ExtensionAPI) {
       stopHookActive = false
       return
     }
-    // Claude: Stop does not run when the stoppage was a user interrupt; pi marks
-    // the aborted turn's final assistant message stopReason "aborted".
-    const turnMessages = (event as { messages?: Array<{ role: string; stopReason?: string }> }).messages ?? []
-    const lastAssistant = [...turnMessages].reverse().find((message) => message.role === 'assistant')
-    if (lastAssistant?.stopReason === 'aborted') {
+    // Claude: Stop does not run when the stoppage was a user interrupt.
+    if (endedByInterrupt(event as { messages?: Array<{ role: string; stopReason?: string }> })) {
       stopHookActive = false
       return
     }
@@ -784,19 +841,7 @@ export default function hooksExtension(pi: ExtensionAPI) {
       stopHookBlockCount = 0
       return
     }
-    stopHookBlockCount += 1
-    const cap = stopHookBlockCap()
-    if (stopHookBlockCount >= cap) {
-      // Claude overrides a Stop hook that has blocked cap times in a row with no user
-      // progress: suppress the continuation, warn, and let the turn end so the loop cannot
-      // run forever. Reset the count so a later run (or user turn) starts clean.
-      stopHookActive = false
-      stopHookBlockCount = 0
-      ctx.ui.notify(`Stop hook block cap reached (${cap} consecutive blocks); ending the turn.`, 'warning')
-      return
-    }
-    stopHookActive = true
-    pi.sendMessage({ customType: 'claude-stop-hook', content: block.reason, display: true }, { triggerTurn: true })
+    continueFromStopBlock(ctx, block.reason)
   })
 
   pi.on('session_before_compact', async (event, ctx) => {
