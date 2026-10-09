@@ -105,8 +105,9 @@ BRANCH=$(gh pr view "$PR" --json headRefName -q .headRefName) \
   && wait_ci "release/$VERSION" && gate "$BUMP_PR" \
   && gh pr merge "$BUMP_PR" --squash --delete-branch \
   && git checkout main && git pull \
+  && RELEASE_SHA=$(gh pr view "$BUMP_PR" --json mergeCommit -q .mergeCommit.oid) && [ -n "$RELEASE_SHA" ] \
   && RELEASE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  && gh release create "v$VERSION" --target main --title "$VERSION" --notes "$NOTES" \
+  && gh release create "v$VERSION" --target "$RELEASE_SHA" --title "$VERSION" --notes "$NOTES" \
   && wait_publish "$RELEASE_AT" \
   && wait_npm "$VERSION" \
   && echo "RELEASED-$VERSION"
