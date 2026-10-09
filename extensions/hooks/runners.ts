@@ -7,13 +7,13 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import type { Api, Model } from '@earendil-works/pi-ai'
-import { runAgent } from '../internal/agent-run.js'
-import { callMcpTool } from '../internal/mcp-call.js'
-import { type CompletionRegistry, completeText } from '../internal/model-complete.js'
-import { killProcessTree } from '../internal/process-tree.js'
-import { resolveShell } from '../internal/shell-resolve.js'
-import { errorMessage } from '../internal/values.js'
-import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.js'
+import { runAgent } from '../internal/agent-run.ts'
+import { callMcpTool } from '../internal/mcp-call.ts'
+import { type CompletionRegistry, completeText } from '../internal/model-complete.ts'
+import { killProcessTree } from '../internal/process-tree.ts'
+import { resolveShell } from '../internal/shell-resolve.ts'
+import { errorMessage } from '../internal/values.ts'
+import { type HookCommand, httpUrlAllowed, isBackgroundHook } from './config.ts'
 
 // Claude's defaults vary by type and event (600s for command/http/mcp_tool, 30s
 // for prompt, 60s for agent, lowered to 30s on UserPromptSubmit and to a shared

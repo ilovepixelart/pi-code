@@ -19,7 +19,7 @@ import { execFile } from 'node:child_process'
 import * as os from 'node:os'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { readUserSetting } from './internal/settings-chain.js'
+import { readUserSetting } from './internal/settings-chain.ts'
 
 /** How a finished turn is announced, from Claude's `preferredNotifChannel`. */
 export type NotifChannel = 'desktop' | 'bell' | 'both' | 'off'

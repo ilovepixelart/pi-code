@@ -9,13 +9,13 @@ import { getAgentDir, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
-import { parseToolGrants } from '../internal/command-file.js'
-import { claudeConfigDir } from '../internal/config-dir.js'
-import { parseClaudeFrontmatter } from '../internal/frontmatter.js'
-import { findModel } from '../internal/model-lookup.js'
-import { installedPlugins, pluginComponentPath } from '../internal/plugins.js'
-import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.js'
-import { errorMessage } from '../internal/values.js'
+import { parseToolGrants } from '../internal/command-file.ts'
+import { claudeConfigDir } from '../internal/config-dir.ts'
+import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
+import { findModel } from '../internal/model-lookup.ts'
+import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
+import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
+import { errorMessage } from '../internal/values.ts'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block

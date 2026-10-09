@@ -10,9 +10,9 @@
 import type { getMarkdownTheme, Theme } from '@earendil-works/pi-coding-agent'
 import { Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui'
 
-import type { AgentScope } from './agents.js'
-import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.js'
-import type { SingleResult } from './types.js'
+import type { AgentScope } from './agents.ts'
+import { type DisplayItem, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from './render.ts'
+import type { SingleResult } from './types.ts'
 
 const COLLAPSED_ITEM_COUNT = 10
 

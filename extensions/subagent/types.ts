@@ -5,7 +5,7 @@
 
 import type { Message } from '@earendil-works/pi-ai'
 
-import type { AgentScope } from './agents.js'
+import type { AgentScope } from './agents.ts'
 
 export interface UsageStats {
   input: number

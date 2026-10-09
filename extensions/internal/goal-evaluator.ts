@@ -6,7 +6,7 @@
  * so goal.ts stays the lifecycle wiring and each contract is pinned on its own.
  */
 
-import { parseNumericEnv } from './values.js'
+import { parseNumericEnv } from './values.ts'
 
 /** Claude caps a goal condition at 4,000 characters. */
 export const GOAL_CONDITION_MAX_CHARS = 4000

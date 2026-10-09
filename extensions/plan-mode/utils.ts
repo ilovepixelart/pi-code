@@ -3,7 +3,7 @@
  * Extracted for testability.
  */
 
-import { hasAnsiCNumericEscape, hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, shellWords, splitSegments } from '../internal/shell-split.js'
+import { hasAnsiCNumericEscape, hasSubstitution, type Quote, quoteCloser, quoteEscapes, quoteOpensAt, shellWords, splitSegments } from '../internal/shell-split.ts'
 
 // Destructive commands blocked in plan mode. Tested against the segment's command word,
 // the one word that runs: an allowlisted head never executes its arguments, so `code`

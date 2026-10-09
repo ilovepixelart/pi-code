@@ -18,7 +18,7 @@ import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { type OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { errorMessage } from './values.js'
+import { errorMessage } from './values.ts'
 
 interface StoredAuth {
   client?: OAuthClientInformationMixed

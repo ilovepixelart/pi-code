@@ -4,13 +4,13 @@
  * commands an event fires. Owns the module-level compiled-matcher cache.
  */
 
-import { matchesBashIfFilter } from '../internal/bash-rules.js'
-import { CLAUDE_TOOL_MAP } from '../internal/claude-tool-names.js'
-import { matchesPathRules, type PathAnchors } from '../internal/path-rules.js'
-import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../internal/scope-rules.js'
-import { asPiReadsIt } from '../internal/tool-target.js'
-import { errorMessage } from '../internal/values.js'
-import type { HookCommand, HookMatcher } from './config.js'
+import { matchesBashIfFilter } from '../internal/bash-rules.ts'
+import { CLAUDE_TOOL_MAP } from '../internal/claude-tool-names.ts'
+import { matchesPathRules, type PathAnchors } from '../internal/path-rules.ts'
+import { agentNamesIn, matchesAgentRules, matchesDomainRules, matchesSkillRules } from '../internal/scope-rules.ts'
+import { asPiReadsIt } from '../internal/tool-target.ts'
+import { errorMessage } from '../internal/values.ts'
+import type { HookCommand, HookMatcher } from './config.ts'
 
 /** Claude's rule: a matcher of only letters, digits, `_`, `-`, spaces, `,` and `|`
  * is a list of exact names; anything else is an unanchored regex. */

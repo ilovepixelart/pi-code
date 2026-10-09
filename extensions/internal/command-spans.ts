@@ -8,9 +8,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { bashBinary } from './shell-resolve.js'
-import { splitSegments } from './shell-split.js'
-import { type Fence, fenceMarker, stepFence } from './strip-comments.js'
+import { bashBinary } from './shell-resolve.ts'
+import { splitSegments } from './shell-split.ts'
+import { type Fence, fenceMarker, stepFence } from './strip-comments.ts'
 export type CommandExec = (command: string) => Promise<{ stdout: string; stderr: string; code: number; killed?: boolean }>
 
 /** PowerShell single-quote escaping: inside a '...' literal the only special
@@ -23,7 +23,7 @@ export function powershellQuote(value: string): string {
   return value.replaceAll(/['‘’‚‛]/g, '$&$&')
 }
 
-export { resolvePowershellBinary } from './shell-resolve.js'
+export { resolvePowershellBinary } from './shell-resolve.ts'
 
 export interface SpanExec {
   command: string

@@ -16,12 +16,12 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.js'
-import { PACKAGE_VERSION } from '../internal/package-version.js'
-import { resolveShell } from '../internal/shell-resolve.js'
-import { parseNumericEnv } from '../internal/values.js'
-import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
-import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.js'
+import { FileOAuthProvider, type OAuthServerConfig } from '../internal/mcp-oauth.ts'
+import { PACKAGE_VERSION } from '../internal/package-version.ts'
+import { resolveShell } from '../internal/shell-resolve.ts'
+import { parseNumericEnv } from '../internal/values.ts'
+import { expandCwd, type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.ts'
+import { runInteractiveOAuth, serializeInteractiveOAuth } from './oauth-flow.ts'
 
 // Claude's MCP_TIMEOUT default: 30 seconds per connect attempt.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000

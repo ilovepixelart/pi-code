@@ -22,8 +22,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from '@earendil-works/pi-coding-agent'
 
-import { ROOT_MARKERS } from './project-root.js'
-import { localSettingsFile } from './settings-chain.js'
+import { ROOT_MARKERS } from './project-root.ts'
+import { localSettingsFile } from './settings-chain.ts'
 
 /** Project files pi-code acts on that pi's own trust check does not look for. */
 const CLAUDE_SHAPED = [

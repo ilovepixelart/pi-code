@@ -6,7 +6,7 @@
  */
 
 import * as fs from 'node:fs'
-import { errorMessage, parseNumericEnv } from './values.js'
+import { errorMessage, parseNumericEnv } from './values.ts'
 
 // Captured at module load: the poll must run on real time even under a test's
 // fake timers (the stat watcher it replaced lived in libuv and was immune too);

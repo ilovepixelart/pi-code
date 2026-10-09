@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -248,6 +249,23 @@ describe('pi load order', () => {
     expect(loaded.indexOf(path.join('extensions', 'claude-rules.ts'))).toBeLessThan(loaded.indexOf(path.join('extensions', 'context-imports.ts')))
     expect(loaded.length).toBe(scannedEntries().length)
   })
+})
+
+// pi imports each entry through jiti with moduleCache off, so every relative import is
+// resolved again in each entry's graph. A specifier naming a file that does not exist
+// (`./x.js` for x.ts) makes jiti stat ~30 candidates before it falls back to x.ts: over
+// 100,000 failed stats per startup, which is seconds on Windows. Only the node_modules
+// walk for bare specifiers may miss.
+describe('pi module resolution', () => {
+  it('resolves every relative import on its first probe', () => {
+    const repo = path.resolve(import.meta.dirname, '..')
+    const probe = spawnSync(process.execPath, [path.join(import.meta.dirname, 'resolution-probe.ts'), repo], { encoding: 'utf-8' })
+    expect(probe.status, probe.stderr).toBe(0)
+    const result = JSON.parse(probe.stdout) as { errors: unknown[]; loaded: number; sourceMisses: string[] }
+    expect(result.errors).toEqual([])
+    expect(result.loaded).toBe(scannedEntries().length)
+    expect(result.sourceMisses).toEqual([])
+  }, 60_000)
 })
 
 // pi provides its own packages to an installed package, which declares them as "*" peers

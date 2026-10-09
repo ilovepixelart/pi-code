@@ -14,7 +14,7 @@
  */
 
 import * as path from 'node:path'
-import { escapeRegExp } from './values.js'
+import { escapeRegExp } from './values.ts'
 
 export interface PathAnchors {
   cwd: string

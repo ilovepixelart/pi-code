@@ -9,7 +9,7 @@
  * are skipped rather than failing the event.
  */
 
-import { sharedSlot } from './shared-slot.js'
+import { sharedSlot } from './shared-slot.ts'
 
 export interface AgentRunRequest {
   /** The agent's task prompt, with `$ARGUMENTS` already substituted. */

@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
-import { createTurnOverride } from './internal/turn-override.js'
+import { createTurnOverride } from './internal/turn-override.ts'
 
 // The pi ThinkingLevel union, taken from the setter's parameter so it tracks the SDK.
 type ThinkingLevel = Parameters<ExtensionAPI['setThinkingLevel']>[0]

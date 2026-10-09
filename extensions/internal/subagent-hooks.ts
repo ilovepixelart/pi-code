@@ -6,7 +6,7 @@
  * pattern as mcp-call.
  */
 
-import { sharedSlot } from './shared-slot.js'
+import { sharedSlot } from './shared-slot.ts'
 
 export type SubagentStartHookRunner = (agentType: string, agentId: string) => Promise<string[]>
 

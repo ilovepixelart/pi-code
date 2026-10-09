@@ -6,9 +6,9 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { FileOAuthProvider, type OAuthServerConfig, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.js'
-import { errorMessage } from '../internal/values.js'
-import { type AuthUi, connectWithTimeout, isUnauthorized, type MakeTransport, OAuthRequiredError } from './transport.js'
+import { FileOAuthProvider, type OAuthServerConfig, openBrowser, startCallbackServer, waitForAuthCode } from '../internal/mcp-oauth.ts'
+import { errorMessage } from '../internal/values.ts'
+import { type AuthUi, connectWithTimeout, isUnauthorized, type MakeTransport, OAuthRequiredError } from './transport.ts'
 
 /** Browser logins are human-paced; a connect-sized timeout would cut them off. */
 const OAUTH_FLOW_TIMEOUT_MS = 180_000

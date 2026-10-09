@@ -4,9 +4,9 @@
  * each is a pure string function the tests can pin directly.
  */
 
-import { capForContext } from '../internal/output-guard.js'
-import type { AgentConfig, AgentSource } from './agents.js'
-import { type BackgroundRun, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun } from './background.js'
+import { capForContext } from '../internal/output-guard.ts'
+import type { AgentConfig, AgentSource } from './agents.ts'
+import { type BackgroundRun, backgroundRun, backgroundStatusText, cancelBackgroundRun, MAX_BACKGROUND_RUNS, resumeBackgroundRun } from './background.ts'
 
 /** The completion notice a background run sends when it finishes. */
 export function backgroundCompletionText(run: { id: string; agent: string; state: string; turns: number; output?: string; stderr?: string; partial?: boolean }): string {

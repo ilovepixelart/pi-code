@@ -22,8 +22,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 
-import { completeText } from './internal/model-complete.js'
-import { contentText } from './internal/values.js'
+import { completeText } from './internal/model-complete.ts'
+import { contentText } from './internal/values.ts'
 
 const TITLE_SYSTEM = 'You name a coding session from its first user message. Reply with a terse 3 to 6 word title in Title Case that captures the task. No quotes, no surrounding punctuation, no trailing period. Output the title only, nothing else.'
 /** A title is a few words; a tight cap keeps the extra call cheap and stops a runaway reply. */

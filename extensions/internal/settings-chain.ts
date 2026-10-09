@@ -10,10 +10,10 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { type CliSettings, cliSettings, type SettingSource } from './cli-settings.js'
-import { claudeConfigDir } from './config-dir.js'
-import { repoRoot } from './project-root.js'
-import { isRecord } from './values.js'
+import { type CliSettings, cliSettings, type SettingSource } from './cli-settings.ts'
+import { claudeConfigDir } from './config-dir.ts'
+import { repoRoot } from './project-root.ts'
+import { isRecord } from './values.ts'
 
 /** Whether every path given exists and belongs to the user running this process.
  * A path that is absent is not someone else's, so it does not disqualify the root. */

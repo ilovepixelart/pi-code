@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { promisify } from 'node:util'
-import { errorMessage } from '../internal/values.js'
+import { errorMessage } from '../internal/values.ts'
 
 const git = async (cwd: string, ...args: string[]): Promise<string> => {
   const { stdout } = await promisify(execFile)('git', args, { cwd })

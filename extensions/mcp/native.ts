@@ -5,11 +5,11 @@
 
 import * as os from 'node:os'
 import type { McpServerConfig } from '@earendil-works/pi-coding-agent'
-import type { McpToolAlias } from '../internal/mcp-alias.js'
-import { envCallbackPort } from '../internal/mcp-oauth.js'
-import { type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.js'
-import type { McpPolicy } from './policy.js'
-import { callBudgetMs, MAX_TIMER_MS, type SessionDirs } from './transport.js'
+import type { McpToolAlias } from '../internal/mcp-alias.ts'
+import { envCallbackPort } from '../internal/mcp-oauth.ts'
+import { type HttpServerConfig, interpolateEnv, type ServerConfig, type StdioServerConfig } from './config.ts'
+import type { McpPolicy } from './policy.ts'
+import { callBudgetMs, MAX_TIMER_MS, type SessionDirs } from './transport.ts'
 
 export interface NativeServer {
   name: string

@@ -16,7 +16,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { type CliSettings, resolveCliSettingsOnce, setCliSettingsReader } from './internal/cli-settings.js'
+import { type CliSettings, resolveCliSettingsOnce, setCliSettingsReader } from './internal/cli-settings.ts'
 
 export default function settingsFlagsExtension(pi: ExtensionAPI) {
   // Optional-called so the extension still wires under stub hosts without flags.

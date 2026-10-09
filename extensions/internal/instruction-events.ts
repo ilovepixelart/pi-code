@@ -10,7 +10,7 @@
 
 import * as path from 'node:path'
 
-import { claudeConfigDir } from './config-dir.js'
+import { claudeConfigDir } from './config-dir.ts'
 
 export const INSTRUCTIONS_CHANNEL = 'pi-code:instructions'
 

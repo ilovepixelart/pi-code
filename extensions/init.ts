@@ -17,13 +17,13 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { CONTEXT_FILE_CANDIDATES } from './internal/context-files.js'
+import { CONTEXT_FILE_CANDIDATES } from './internal/context-files.ts'
 
 export { CONTEXT_FILE_CANDIDATES }
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 
-import { checkoutRoot } from './internal/project-root.js'
+import { checkoutRoot } from './internal/project-root.ts'
 
 function statOf(target: string): fs.Stats | undefined {
   try {
