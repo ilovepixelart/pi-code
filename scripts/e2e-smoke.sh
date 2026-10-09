@@ -99,13 +99,18 @@ printf 'Untrusted project context.\n\n@notes/inside.md\n@%s/outside.md\n' "$(nat
 printf 'INSIDE THE PROJECT MARKER\n' > "$UNTRUSTED/notes/inside.md"
 printf 'UNTRUSTED LOCAL MARKER\n' > "$UNTRUSTED/CLAUDE.local.md"
 printf -- '- UNTRUSTED RULE MARKER\n' > "$UNTRUSTED/.claude/rules/rule.md"
+# A project MCP server is the vector that runs a command; unapproved, it must never connect.
+printf '{"mcpServers":{"proj":{"type":"stdio","command":"node","args":["%s/scripts/lib/mcp-echo-server.mjs"]}}}' "$(native "$REPO")" > "$UNTRUSTED/.mcp.json"
+PROJ_TOOL="${MCP_TOOL/smoke/proj}"
 WIRE="$HOMEDIR/wire-untrusted.jsonl"
 FX="$UNTRUSTED" run_pi "$PI_BIN" -p "hi" > "$SMOKE/pi-untrusted.log" 2>&1
 [ -s "$WIRE" ] || bad "smoke: no wire payload captured for the untrusted project (pi output: $(tail -1 "$SMOKE/pi-untrusted.log" 2>/dev/null))"
 if wire_has 'Untrusted project context' && wire_has 'INSIDE THE PROJECT MARKER'; then ok "smoke: untrusted CLAUDE.md and its in-project import on the wire"; else bad "smoke: untrusted CLAUDE.md or its in-project import missing"; fi
-if wire_has 'OUTSIDE THE PROJECT MARKER'; then bad "smoke: untrusted project imported a file outside it"; else ok "smoke: untrusted project's outside import refused"; fi
+# The refusal notice is the evidence the import was resolved and refused, not just absent.
+if wire_has 'OUTSIDE THE PROJECT MARKER'; then bad "smoke: untrusted project imported a file outside it"; elif wire_has 'Imports not loaded (@)'; then ok "smoke: untrusted project's outside import refused, and the prompt says so"; else bad "smoke: no refusal notice for the untrusted project's outside import"; fi
 if wire_has 'UNTRUSTED LOCAL MARKER'; then bad "smoke: untrusted CLAUDE.local.md on the wire"; else ok "smoke: untrusted CLAUDE.local.md kept out"; fi
 if wire_has 'UNTRUSTED RULE MARKER'; then bad "smoke: untrusted project rule on the wire"; else ok "smoke: untrusted project rule kept out"; fi
+if wire_has "\"$PROJ_TOOL\""; then bad "smoke: untrusted project's MCP server connected ($PROJ_TOOL on the wire)"; else ok "smoke: untrusted project's MCP server not connected"; fi
 
 printf '\n'
 printf 'e2e-smoke finished: %s passed, %s failed\n' "$PASS" "$FAIL"
