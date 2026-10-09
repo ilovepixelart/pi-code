@@ -12,7 +12,8 @@
       "tests/**/*.ts",
       "scripts/**/*.ts",
       "scripts/**/*.mjs",
-      "*.ts"
+      "*.ts",
+      "!.claude"
     ]
   },
   "formatter": {
