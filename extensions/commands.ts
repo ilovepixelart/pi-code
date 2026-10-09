@@ -306,6 +306,16 @@ export function slashCommandToolDescription(commands: SlashCommandEntry[], budge
   return ["Execute a custom slash command on the user's behalf. The command expands to instructions for you to follow in this conversation.", '', 'Available commands:', ...lines].join('\n')
 }
 
+/** A slash_command tool input split into the command name and its arguments, with the
+ * leading slash optional. */
+function splitCommandLine(input: string): { name: string; args: string } {
+  const line = input.trim().replace(/^\//, '')
+  const space = line.search(/\s/)
+  const name = space === -1 ? line : line.slice(0, space)
+  const args = space === -1 ? '' : line.slice(space + 1).trim()
+  return { name, args }
+}
+
 export default function commandsExtension(pi: ExtensionAPI) {
   const registered = new Set<string>()
   /** Every command file discovered for the current session, by name, for the
@@ -555,6 +565,26 @@ export default function commandsExtension(pi: ExtensionAPI) {
     pi.sendUserMessage(expanded)
   }
 
+  function registerUserCommand(command: DiscoveredCommand, parsed: ParsedCommand): void {
+    // pi has no unregister, so a command already registered this process keeps its
+    // original file binding; re-registering would only add a numbered duplicate.
+    if (registered.has(command.name)) return
+    registered.add(command.name)
+    pi.registerCommand(command.name, {
+      description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
+      handler: async (args, commandCtx) => {
+        // Re-read on invocation so an edited command file takes effect without a reload.
+        let current = parsed
+        try {
+          current = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
+        } catch {
+          // fall back to what was parsed at registration
+        }
+        await runCommand(current, args, commandCtx, command.filePath, command.plugin)
+      },
+    })
+  }
+
   pi.on('session_start', async (_event, ctx) => {
     // pi's CLI builds a fresh extension instance per session replacement; only RPC mode can
     // reuse one across sessions. A mid-turn /new there fires session_start on
@@ -603,23 +633,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
       // hidden from the user slash-command surface but stays in `discovered` and the tool
       // description above, so the model can still run it through the slash_command tool.
       if (!parsed.userInvocable) continue
-      // pi has no unregister, so a command already registered this process keeps its
-      // original file binding; re-registering would only add a numbered duplicate.
-      if (registered.has(command.name)) continue
-      registered.add(command.name)
-      pi.registerCommand(command.name, {
-        description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
-        handler: async (args, commandCtx) => {
-          // Re-read on invocation so an edited command file takes effect without a reload.
-          let current = parsed
-          try {
-            current = parseCommandFile(fs.readFileSync(command.filePath, 'utf-8'))
-          } catch {
-            // fall back to what was parsed at registration
-          }
-          await runCommand(current, args, commandCtx, command.filePath, command.plugin)
-        },
-      })
+      registerUserCommand(command, parsed)
     }
 
     // Claude's SlashCommand tool, registered only when there is something for the
@@ -632,10 +646,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
       description: slashCommandToolDescription(invocable, slashCommandBudget((ctx as unknown as VarContext).model?.contextWindow)),
       parameters: Type.Object({ command: Type.String({ description: 'The command to run with args, e.g. "/deploy staging"' }) }),
       async execute(_toolCallId, params, _signal, _onUpdate, execCtx) {
-        const line = params.command.trim().replace(/^\//, '')
-        const space = line.search(/\s/)
-        const name = space === -1 ? line : line.slice(0, space)
-        const args = space === -1 ? '' : line.slice(space + 1).trim()
+        const { name, args } = splitCommandLine(params.command)
         // pi marks a tool result as an error only when execute() throws, so the
         // failure paths below throw rather than return.
         const command = discovered.get(name)

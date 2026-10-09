@@ -345,6 +345,10 @@ export default function goalExtension(pi: ExtensionAPI) {
     }
     // Interrupted, cleared, or replaced during the await: this verdict must not act.
     if (ctx.signal?.aborted || generation !== startedGeneration) return
+    applyVerdict(ctx, active, verdict)
+  }
+
+  function applyVerdict(ctx: ExtensionContext, active: ActiveGoal, verdict: GoalVerdict): void {
     active.iterations += 1
     active.lastReason = verdict.reason
     if (verdict.ok) finish(ctx, 'achieved', verdict.reason)

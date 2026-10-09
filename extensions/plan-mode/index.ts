@@ -41,6 +41,17 @@ function getTextContent(message: AssistantMessage): string {
     .join('\n')
 }
 
+// Whether a user message's content carries the injected plan-mode context marker
+function carriesPlanModeMarker(content: unknown): boolean {
+  if (typeof content === 'string') {
+    return content.includes('[PLAN MODE ACTIVE]')
+  }
+  if (Array.isArray(content)) {
+    return content.some((c) => c.type === 'text' && (c as TextContent).text?.includes('[PLAN MODE ACTIVE]'))
+  }
+  return false
+}
+
 // Last element matching the predicate (the lib target predates Array.prototype.findLast)
 function findLast<T>(items: T[], match: (item: T) => boolean): T | undefined {
   for (let i = items.length - 1; i >= 0; i--) {
@@ -194,25 +205,30 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     }
   }
 
+  // Leave plan mode and start a turn that executes the plan
+  function startExecution(ctx: ExtensionContext): void {
+    planModeEnabled = false
+    executionMode = todoItems.length > 0
+    planFromTool = false
+    stalledRuns = 0
+    runProgress = false
+    restoreTools()
+    publishPlanState()
+    updateStatus(ctx)
+
+    // Persist before the turn: a crash before the first turn_end must resume into
+    // execution, not back into plan mode.
+    persistState()
+    const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
+    pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
+  }
+
   // Ask the user how to proceed after a plan is ready
   async function promptPlanNextAction(ctx: ExtensionContext): Promise<void> {
     const choice = await ctx.ui.select('Plan mode - what next?', [todoItems.length > 0 ? 'Execute the plan (track progress)' : 'Execute the plan', 'Stay in plan mode', 'Refine the plan'])
 
     if (choice?.startsWith('Execute')) {
-      planModeEnabled = false
-      executionMode = todoItems.length > 0
-      planFromTool = false
-      stalledRuns = 0
-      runProgress = false
-      restoreTools()
-      publishPlanState()
-      updateStatus(ctx)
-
-      // Persist before the turn: a crash before the first turn_end must resume into
-      // execution, not back into plan mode.
-      persistState()
-      const execMessage = todoItems.length > 0 ? `Execute the plan. Start with: ${todoItems[0].text}` : 'Execute the plan you just created.'
-      pi.sendMessage({ customType: 'plan-mode-execute', content: execMessage, display: true }, { triggerTurn: true })
+      startExecution(ctx)
     } else if (choice === 'Refine the plan') {
       // The refined turn may answer in prose; without this reset agent_end would skip
       // deriveTodosFromProse and re-display the superseded todo list.
@@ -224,6 +240,20 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         pi.sendUserMessage(refinement.trim(), ctx.isIdle() ? {} : { deliverAs: 'followUp' })
       }
     }
+  }
+
+  // Check if execution is complete, or has stalled without marker progress
+  function settleExecutionRun(ctx: ExtensionContext): void {
+    if (todoItems.every((t) => t.completed)) {
+      finalizeCompletedExecution(ctx)
+      stalledRuns = 0
+    } else if (runProgress) {
+      stalledRuns = 0
+    } else {
+      stalledRuns++
+      if (stalledRuns >= STALLED_RUN_LIMIT) endStalledExecution(ctx)
+    }
+    runProgress = false
   }
 
   // Rebuild completion state from assistant messages after the last execute marker
@@ -318,14 +348,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         if (msg.customType === 'plan-execution-context' && !executionMode) return false
         if (msg.role !== 'user') return true
 
-        const content = msg.content
-        if (typeof content === 'string') {
-          return !content.includes('[PLAN MODE ACTIVE]')
-        }
-        if (Array.isArray(content)) {
-          return !content.some((c) => c.type === 'text' && (c as TextContent).text?.includes('[PLAN MODE ACTIVE]'))
-        }
-        return true
+        return !carriesPlanModeMarker(msg.content)
       }),
     }
   })
@@ -393,18 +416,8 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
   // Handle plan completion and plan mode UI
   pi.on('agent_end', async (event, ctx) => {
-    // Check if execution is complete, or has stalled without marker progress
     if (executionMode && todoItems.length > 0) {
-      if (todoItems.every((t) => t.completed)) {
-        finalizeCompletedExecution(ctx)
-        stalledRuns = 0
-      } else if (runProgress) {
-        stalledRuns = 0
-      } else {
-        stalledRuns++
-        if (stalledRuns >= STALLED_RUN_LIMIT) endStalledExecution(ctx)
-      }
-      runProgress = false
+      settleExecutionRun(ctx)
       return
     }
 

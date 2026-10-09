@@ -352,6 +352,13 @@ function argPattern(names: string[]): RegExp {
   )
 }
 
+/** The two escape tokens argPattern matches: a doubled backslash stays as it is, and
+ * `\$` drops its backslash. */
+const ESCAPE_TOKENS = new Map([
+  [String.raw`\\`, String.raw`\\`],
+  [String.raw`\$`, '$'],
+])
+
 export interface SubstitutedArgs {
   text: string
   /** Whether any placeholder actually read the arguments; drives Claude's
@@ -379,8 +386,8 @@ export function substituteArgsDetailed(body: string, args: string, names: string
     return value
   }
   const text = body.replaceAll(argPattern(names), (token, bracketIdx?: string, defIdx?: string, defVal?: string, argsDefault?: string, shorthandIdx?: string, name?: string) => {
-    if (token === String.raw`\\`) return token
-    if (token === String.raw`\$`) return '$'
+    const escaped = ESCAPE_TOKENS.get(token)
+    if (escaped !== undefined) return escaped
     if (bracketIdx !== undefined) return fill(parts[Number(bracketIdx)], token)
     if (defIdx !== undefined) return fill(parts[Number(defIdx)], defVal ?? '')
     if (argsDefault !== undefined) {
