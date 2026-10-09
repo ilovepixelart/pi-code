@@ -22,7 +22,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './internal/atomic-write.ts'
 import { isFlagEnabled } from './internal/command-file.ts'
 import { claudeConfigDir } from './internal/config-dir.ts'
@@ -239,6 +239,12 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
     return { systemPrompt: applyStyle(event.systemPrompt, active) }
   })
 
+  const activateStyle = (ctx: ExtensionCommandContext, name: string): void => {
+    activeName = name
+    const failure = persistActiveStyle(localSettingsPath, name)
+    ctx.ui.notify(failure ?? `Output style set to ${name} (applies next turn)`, failure ? 'error' : 'info')
+  }
+
   pi.registerCommand('output-style', {
     description: 'Choose the active Claude output style (or /output-style <name>)',
     // /output-style <name> takes a style name, so complete the discovered names by the
@@ -256,9 +262,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
           ctx.ui.notify(`Unknown output style: ${requested}. Available: ${styles.map((style) => style.name).join(', ')}`, 'error')
           return
         }
-        activeName = picked.name
-        const failure = persistActiveStyle(localSettingsPath, picked.name)
-        ctx.ui.notify(failure ?? `Output style set to ${picked.name} (applies next turn)`, failure ? 'error' : 'info')
+        activateStyle(ctx, picked.name)
         return
       }
       if (!ctx.hasUI) {
@@ -273,9 +277,7 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
       const choice = await ctx.ui.select('Output style:', labels)
       if (!choice) return
       const picked = styles[labels.indexOf(choice)]
-      activeName = picked.name
-      const failure = persistActiveStyle(localSettingsPath, picked.name)
-      ctx.ui.notify(failure ?? `Output style set to ${picked.name} (applies next turn)`, failure ? 'error' : 'info')
+      activateStyle(ctx, picked.name)
     },
   })
 }

@@ -421,7 +421,7 @@ export function setAutoMemoryEnabledSetting(home: string, value: boolean): { ok:
   return { ok: true }
 }
 
-export default function memoryExtension(pi: ExtensionAPI) {
+export default function memoryExtension(pi: ExtensionAPI): void {
   let dir = memoryDir(process.cwd())
   let enabled = true
 
@@ -477,6 +477,38 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   })
 
+  const memoryToolUnavailable = () => {
+    if (inSubagent()) {
+      return { content: [{ type: 'text' as const, text: 'The memory tool is unavailable in a subagent; auto memory belongs to the main conversation. Use your agent memory directory instead if one was provided.' }], details: {} }
+    }
+    if (!enabled) {
+      return { content: [{ type: 'text' as const, text: 'Auto memory is disabled (autoMemoryEnabled is false or CLAUDE_CODE_DISABLE_AUTO_MEMORY is set). No memory was read or written.' }], details: {} }
+    }
+    return undefined
+  }
+
+  async function saveAction(indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined) {
+    try {
+      // Awaited here, not returned: the catch must see a queued write's rejection.
+      return await saveMemory(dir, indexPath, name, description, content)
+    } catch (error) {
+      return { content: [{ type: 'text' as const, text: `Memory save failed: ${errorMessage(error)}. The index was left untouched.` }], details: {} }
+    } finally {
+      indexCache = null
+    }
+  }
+
+  async function deleteAction(indexPath: string, name: string | undefined) {
+    if (!name) return { content: [{ type: 'text' as const, text: 'delete requires name.' }], details: {} }
+    // In a finally like the save path: a delete that throws mid-write must still
+    // drop the cache, or the next turn injects a stale index.
+    try {
+      return await deleteMemory(dir, indexPath, name)
+    } finally {
+      indexCache = null
+    }
+  }
+
   pi.registerTool({
     name: 'memory',
     label: 'Memory',
@@ -484,41 +516,19 @@ export default function memoryExtension(pi: ExtensionAPI) {
       'Persistent memory across sessions. Save durable facts, user preferences, corrections, and project decisions that are not derivable from the code. Give each saved memory `type` frontmatter from the documented vocabulary: user (who the user is), feedback (guidance on how to work), project (ongoing work and constraints), or reference (pointers to external resources). Actions: save (name + description + content), read (name), delete (name), list.',
     parameters: MemoryParams,
     async execute(_id, params) {
-      if (inSubagent()) {
-        return { content: [{ type: 'text' as const, text: 'The memory tool is unavailable in a subagent; auto memory belongs to the main conversation. Use your agent memory directory instead if one was provided.' }], details: {} }
-      }
-      if (!enabled) {
-        return { content: [{ type: 'text' as const, text: 'Auto memory is disabled (autoMemoryEnabled is false or CLAUDE_CODE_DISABLE_AUTO_MEMORY is set). No memory was read or written.' }], details: {} }
-      }
+      const unavailable = memoryToolUnavailable()
+      if (unavailable) return unavailable
       const name = params.name ? slugifyName(params.name) : undefined
       const indexPath = path.join(dir, INDEX_FILE)
 
-      if (params.action === 'save') {
-        try {
-          // Awaited here, not returned: the catch must see a queued write's rejection.
-          return await saveMemory(dir, indexPath, name, params.description, params.content)
-        } catch (error) {
-          return { content: [{ type: 'text' as const, text: `Memory save failed: ${errorMessage(error)}. The index was left untouched.` }], details: {} }
-        } finally {
-          indexCache = null
-        }
-      }
+      if (params.action === 'save') return saveAction(indexPath, name, params.description, params.content)
 
       if (params.action === 'read') {
         if (!name) return { content: [{ type: 'text' as const, text: 'read requires name.' }], details: {} }
         return readMemory(dir, name)
       }
 
-      if (params.action === 'delete') {
-        if (!name) return { content: [{ type: 'text' as const, text: 'delete requires name.' }], details: {} }
-        // In a finally like the save path: a delete that throws mid-write must still
-        // drop the cache, or the next turn injects a stale index.
-        try {
-          return await deleteMemory(dir, indexPath, name)
-        } finally {
-          indexCache = null
-        }
-      }
+      if (params.action === 'delete') return deleteAction(indexPath, name)
 
       const index = readIndexQuietly(dir)
       return { content: [{ type: 'text' as const, text: index.trim() || 'No memories saved for this project yet.' }], details: {} }
@@ -534,22 +544,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const home = os.homedir()
       const arg = args.trim().toLowerCase()
 
-      if (arg === 'on' || arg === 'off') {
-        const next = arg === 'on'
-        let result: { ok: true } | { ok: false; error: string }
-        try {
-          result = setAutoMemoryEnabledSetting(home, next)
-        } catch (error) {
-          ctx.ui.notify(`Could not update auto memory: ${errorMessage(error)}`, 'error')
-          return
-        }
-        if (!result.ok) {
-          ctx.ui.notify(result.error, 'error')
-          return
-        }
-        ctx.ui.notify(`Auto memory ${next ? 'enabled' : 'disabled'} in ${path.join(claudeConfigDir(home), 'settings.json')} (applies next session).`, 'info')
-        return
-      }
+      if (arg === 'on' || arg === 'off') return toggleAutoMemory(ctx, home, arg === 'on')
 
       if (arg === 'edit') return editMemoryFile(ctx, home)
 
@@ -558,15 +553,36 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return
       }
 
-      const approved = isProjectApprovedSilently(ctx)
-      const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, home, approved))
-      const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
-      const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
-      const store = resolveMemoryDir(ctx.cwd, override)
-      const lines = ['Memory', `  Auto memory: ${isEnabled ? 'on' : 'off'}`, `  Store:       ${store}`, `  Index:       ${path.join(store, INDEX_FILE)}`, ...memoryFiles(ctx.cwd, home).map(({ label, file }) => `  ${label}: ${file}`), 'Edit one with /memory edit. Toggle with /memory on or /memory off.']
-      ctx.ui.notify(lines.join('\n'), 'info')
+      showMemoryLocations(ctx, home)
     },
   })
+}
+
+/** /memory on|off: write autoMemoryEnabled to the user settings file. */
+function toggleAutoMemory(ctx: ExtensionCommandContext, home: string, next: boolean): void {
+  let result: { ok: true } | { ok: false; error: string }
+  try {
+    result = setAutoMemoryEnabledSetting(home, next)
+  } catch (error) {
+    ctx.ui.notify(`Could not update auto memory: ${errorMessage(error)}`, 'error')
+    return
+  }
+  if (!result.ok) {
+    ctx.ui.notify(result.error, 'error')
+    return
+  }
+  ctx.ui.notify(`Auto memory ${next ? 'enabled' : 'disabled'} in ${path.join(claudeConfigDir(home), 'settings.json')} (applies next session).`, 'info')
+}
+
+/** /memory with no argument: the memory locations and whether auto memory is on. */
+function showMemoryLocations(ctx: ExtensionCommandContext, home: string): void {
+  const approved = isProjectApprovedSilently(ctx)
+  const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, home, approved))
+  const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
+  const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
+  const store = resolveMemoryDir(ctx.cwd, override)
+  const lines = ['Memory', `  Auto memory: ${isEnabled ? 'on' : 'off'}`, `  Store:       ${store}`, `  Index:       ${path.join(store, INDEX_FILE)}`, ...memoryFiles(ctx.cwd, home).map(({ label, file }) => `  ${label}: ${file}`), 'Edit one with /memory edit. Toggle with /memory on or /memory off.']
+  ctx.ui.notify(lines.join('\n'), 'info')
 }
 
 /**

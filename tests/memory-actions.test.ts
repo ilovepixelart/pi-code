@@ -95,6 +95,17 @@ describe('memory tool actions', () => {
     expect((await tool.execute('3', { action: 'list' })).content[0].text).toContain('No memories')
   })
 
+  it('refuses a delete without a name and keeps every memory', async () => {
+    const { handlers, tool, cwd, dir } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'keep', description: 'kept', content: 'body' })
+    const index = readFileSync(join(dir, 'MEMORY.md'), 'utf-8')
+
+    expect((await tool.execute('2', { action: 'delete' })).content[0].text).toBe('delete requires name.')
+    expect(existsSync(join(dir, 'keep.md'))).toBe(true)
+    expect(readFileSync(join(dir, 'MEMORY.md'), 'utf-8')).toBe(index)
+  })
+
   it('injects the saved memory index into the system prompt', async () => {
     const { handlers, tool, cwd } = setup()
     await start(handlers, cwd)

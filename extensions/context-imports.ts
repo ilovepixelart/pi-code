@@ -1024,6 +1024,38 @@ function buildImportMemoKey(input: {
   return keyHash.digest('hex')
 }
 
+/** An approved project's CLAUDE.local.md files and ./.claude/CLAUDE.md, read into the
+ * session memory. A file that cannot be read is skipped. */
+function readProjectMemory(memory: { localContexts: Array<{ path: string; content: string }>; projectDotClaude?: { path: string; content: string } }, candidates: string[], dotClaudeMd: string | null): void {
+  for (const candidate of candidates) {
+    const content = readContextFile(candidate)
+    if (content !== undefined) memory.localContexts.push({ path: candidate, content })
+  }
+  if (dotClaudeMd !== null) {
+    const content = readContextFile(dotClaudeMd)
+    if (content !== undefined) memory.projectDotClaude = { path: dotClaudeMd, content }
+  }
+}
+
+/** The file as a list of zero or one entries, for spreading into the expansion set. */
+function presentFile(file: { path: string; content: string } | undefined): Array<{ path: string; content: string }> {
+  return file !== undefined ? [file] : []
+}
+
+/** A memory file that survives claudeMdExcludes, block comments stripped. */
+function keptMemoryFile(file: { path: string; content: string } | undefined, excluded: (absPath: string) => boolean): { path: string; content: string } | undefined {
+  return file !== undefined && !excluded(file.path) ? { path: file.path, content: stripBlockComments(file.content) } : undefined
+}
+
+/** ./.claude/CLAUDE.md, deduped against pi's native context so that if pi ever loads it
+ * too there is no double block, then exclude-checked and comment-stripped like the rest. */
+function keptDotClaudeMd(projectDotClaude: { path: string; content: string } | undefined, native: Array<{ path: string; content: string }>, keptSiblings: Array<{ path: string; content: string }>, excluded: (absPath: string) => boolean): { path: string; content: string } | undefined {
+  const nativeReal = new Set(realRoots(native.map((file) => file.path)))
+  const [dotReal] = projectDotClaude !== undefined ? realRoots([projectDotClaude.path]) : []
+  const siblingReal = new Set(realRoots(keptSiblings.map((sibling) => sibling.path)))
+  return projectDotClaude !== undefined && !(dotReal !== undefined && (nativeReal.has(dotReal) || siblingReal.has(dotReal))) && !excluded(projectDotClaude.path) ? { path: projectDotClaude.path, content: stripBlockComments(projectDotClaude.content) } : undefined
+}
+
 export default function contextImportsExtension(pi: ExtensionAPI) {
   let localContexts: Array<{ path: string; content: string }> = []
   // ~/.claude/CLAUDE.md, Claude's user-scope memory (all projects). The user's own
@@ -1186,14 +1218,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     const dotClaudeMd = nearestDotClaudeMd !== null && sameLocation(nearestDotClaudeMd, userClaudeMd) ? null : nearestDotClaudeMd
     if ((candidates.length === 0 && dotClaudeMd === null) || !(await isProjectApproved(ctx))) return memory
 
-    for (const candidate of candidates) {
-      const content = readContextFile(candidate)
-      if (content !== undefined) memory.localContexts.push({ path: candidate, content })
-    }
-    if (dotClaudeMd !== null) {
-      const content = readContextFile(dotClaudeMd)
-      if (content !== undefined) memory.projectDotClaude = { path: dotClaudeMd, content }
-    }
+    readProjectMemory(memory, candidates, dotClaudeMd)
     return memory
   }
 
@@ -1233,16 +1258,22 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     return approved ? expandWith(true) : result
   }
 
+  const addDirsFlagValue = (): string => (additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : '')
+
+  const environmentFor = (cwd: string, home: string): NonNullable<typeof envCache> => {
+    if (envCache?.cwd !== cwd) {
+      const managedNow = readManagedSettings()
+      envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: checkoutRoot(cwd) }
+    }
+    return envCache
+  }
+
   pi.on('before_agent_start', async (event, ctx) => {
     const home = os.homedir()
     const cwd = event.systemPromptOptions?.cwd ?? process.cwd()
     const native: Array<{ path: string; content: string }> = event.systemPromptOptions?.contextFiles ?? []
 
-    if (envCache?.cwd !== cwd) {
-      const managedNow = readManagedSettings()
-      envCache = { cwd, managed: managedNow, excludeGlobs: readClaudeMdExcludes(claudeMdExcludeFiles(cwd, home, projectApproved), managedNow), projectRoot: checkoutRoot(cwd) }
-    }
-    const { managed, excludeGlobs, projectRoot } = envCache
+    const { managed, excludeGlobs, projectRoot } = environmentFor(cwd, home)
     // CLAUDE_CODE_DISABLE_CLAUDE_MDS also covers pi's own auto-discovered native context
     // files ("including... auto memory files"), which session_start's gate cannot reach
     // since pi loads them itself. Routing through the exclusion path already used for
@@ -1267,7 +1298,7 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // claudeMdExcludes and comment-stripping like every other file. It is kept here so it
     // both gets its own block (via prependMemoryBlocks) and joins the import-expansion set
     // below, so its @imports resolve.
-    const keptUser = userContext !== undefined && !excluded(userContext.path) ? { path: userContext.path, content: stripBlockComments(userContext.content) } : undefined
+    const keptUser = keptMemoryFile(userContext, excluded)
 
     // Prepend the managed and user memory blocks (managed file, managed key, user), the
     // blocks Claude loads ahead of pi's native project context. managedFile comes back
@@ -1284,22 +1315,17 @@ export default function contextImportsExtension(pi: ExtensionAPI) {
     // turn's contextFiles say which file pi actually chose per directory.
     const keptSiblings = (projectApproved ? siblingClaudeMdFiles(native) : []).filter((sibling) => !excluded(sibling.path)).map((sibling) => ({ path: sibling.path, content: stripBlockComments(sibling.content) }))
 
-    // ./.claude/CLAUDE.md, deduped against pi's native context so that if pi ever
-    // loads it too there is no double block, then exclude-checked and comment-stripped
-    // like the rest. Its @imports resolve at project roots (rootsForImporter).
-    const nativeReal = new Set(realRoots(native.map((file) => file.path)))
-    const [dotReal] = projectDotClaude !== undefined ? realRoots([projectDotClaude.path]) : []
-    const siblingReal = new Set(realRoots(keptSiblings.map((sibling) => sibling.path)))
-    const keptProjectDotClaude = projectDotClaude !== undefined && !(dotReal !== undefined && (nativeReal.has(dotReal) || siblingReal.has(dotReal))) && !excluded(projectDotClaude.path) ? { path: projectDotClaude.path, content: stripBlockComments(projectDotClaude.content) } : undefined
+    // Its @imports resolve at project roots (rootsForImporter).
+    const keptProjectDotClaude = keptDotClaudeMd(projectDotClaude, native, keptSiblings, excluded)
 
     // The user CLAUDE.md and ./.claude/CLAUDE.md join the import-expansion set so their
     // @imports resolve (each at roots scoped to it, via rootsForImporter); their own
     // bodies are placed separately, so expansion only surfaces what they import.
-    const contextFiles = [...rewrite.kept, ...(keptUser !== undefined ? [keptUser] : []), ...keptSiblings, ...(keptProjectDotClaude !== undefined ? [keptProjectDotClaude] : []), ...keptLocals]
+    const contextFiles = [...rewrite.kept, ...presentFile(keptUser), ...keptSiblings, ...presentFile(keptProjectDotClaude), ...keptLocals]
 
     // Everything the expansion depends on, hashed: a turn whose inputs match the memo
     // and whose recorded mtimes are unchanged reuses the previous expansion outright.
-    const addDirsRaw = additionalDirsClaudeMdEnabled() ? String(pi.getFlag?.('add-dir') ?? '') : ''
+    const addDirsRaw = addDirsFlagValue()
     const expandWith = (externalApproved: boolean) => {
       const memoKey = buildImportMemoKey({ cwd, home, projectApproved, externalApproved, addDirsRaw, excludeGlobs, native, localContexts, userContext, projectDotClaude, managedFile, contextFiles })
       return resolveImports(memoKey, { native, context: contextFiles, siblings: keptSiblings }, { home, cwd, excluded, externalApproved })
