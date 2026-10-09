@@ -12,11 +12,12 @@ on:
 permissions:
   contents: read
 
-# A superseded push's run is dead weight; cancel it. Releases are unaffected
-# (publish.yaml has no concurrency group).
+# A superseded push to a pull request is dead weight; cancel it. A push to main keeps its
+# run: every main commit needs its own result and its own Sonar main-branch analysis.
+# Releases are unaffected (publish.yaml has no concurrency group).
 concurrency:
   group: pr-check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
