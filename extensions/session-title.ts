@@ -80,6 +80,18 @@ export function cleanTitle(raw: string): string {
   return title
 }
 
+function titlingDisabled(): boolean {
+  // Claude: "Set to 1 to disable automatic terminal title updates based on conversation
+  // context. In Agent SDK and claude -p sessions, this also skips the background
+  // small/fast-model request that generates the session title." setSessionName is pi's
+  // only title sink, so skipping the call here skips both effects at once.
+  if (process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE === '1') return true
+  // A subagent child's session (--no-session, or its own --session-dir once it persists
+  // one for a resumable follow-up) is never browsed by name in a session picker: the
+  // model call would only add latency and cost to how soon the child can exit.
+  return process.env.PI_CODE_SUBAGENT === '1'
+}
+
 export default function sessionTitleExtension(pi: ExtensionAPI) {
   // One title per session, reset when a new session takes over so a resumed or forked
   // session can still earn its own name.
@@ -95,15 +107,7 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
   })
 
   pi.on('agent_settled', async (_event, ctx) => {
-    // Claude: "Set to 1 to disable automatic terminal title updates based on conversation
-    // context. In Agent SDK and claude -p sessions, this also skips the background
-    // small/fast-model request that generates the session title." setSessionName is pi's
-    // only title sink, so skipping the call here skips both effects at once.
-    if (process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE === '1') return
-    // A subagent child's session (--no-session, or its own --session-dir once it persists
-    // one for a resumable follow-up) is never browsed by name in a session picker: the
-    // model call would only add latency and cost to how soon the child can exit.
-    if (process.env.PI_CODE_SUBAGENT === '1') return
+    if (titlingDisabled()) return
     if (titled) return
     // Never clobber an existing name: a user-chosen or resumed name wins.
     if (pi.getSessionName?.()) return
@@ -128,10 +132,14 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
       return // no model, provider error: leave the session untitled (best-effort)
     }
     if (!title) return
-    // Post-await ctx getters throw once the session is disposed, and an escaping rejection
-    // from this un-awaited settle can exit pi; apply the title best-effort. The name read
-    // belongs inside the guard too: pi's CLI never delivers the next session_start to this
-    // instance, so only that throw reveals a session replaced during the call.
+    applyTitle(title, startedGeneration)
+  })
+
+  // Post-await ctx getters throw once the session is disposed, and an escaping rejection
+  // from this un-awaited settle can exit pi; apply the title best-effort. The name read
+  // belongs inside the guard too: pi's CLI never delivers the next session_start to this
+  // instance, so only that throw reveals a session replaced during the call.
+  function applyTitle(title: string, startedGeneration: number): void {
     try {
       // A /new during the await moved us to a different session, or a name has since been
       // set; applying this title now would rename the wrong session, so drop it.
@@ -144,5 +152,5 @@ export default function sessionTitleExtension(pi: ExtensionAPI) {
     } catch {
       // disposed session or a setter failure: leave the session untitled.
     }
-  })
+  }
 }

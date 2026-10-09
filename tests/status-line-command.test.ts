@@ -443,6 +443,27 @@ describe('statusLine command contract', () => {
     expect(window.current_usage).toBeNull()
   })
 
+  it('sends null percentages and omits the transcript, name and thinking fields when pi has none', async () => {
+    const cwd = tempDir()
+    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+    const { handlers, ctx } = setup(cwd)
+    const bare = {
+      ...ctx,
+      thinkingLevel: undefined,
+      getContextUsage: () => ({ tokens: null, contextWindow: 131072, percent: null }),
+      sessionManager: { ...ctx.sessionManager, getSessionFile: () => undefined, getSessionName: () => undefined },
+    }
+    vi.useFakeTimers()
+    await handlers.get('session_start')?.({}, bare)
+    await vi.advanceTimersByTimeAsync(400)
+
+    const payload = hoisted.runs[0].payload as Record<string, unknown>
+    const window = payload.context_window as Record<string, unknown>
+    expect(window.used_percentage).toBeNull()
+    expect(window.remaining_percentage).toBeNull()
+    expect(Object.keys(payload).filter((key) => ['transcript_path', 'session_name', 'thinking', 'effort'].includes(key))).toEqual([])
+  })
+
   it('keeps the built-in segment when the command prints nothing', async () => {
     const cwd = tempDir()
     writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })

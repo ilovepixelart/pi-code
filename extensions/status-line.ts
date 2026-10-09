@@ -309,39 +309,51 @@ export default function statusLine(pi: ExtensionAPI) {
         total_lines_added: linesAdded,
         total_lines_removed: linesRemoved,
       },
-      context_window: {
-        context_window_size: usage.contextWindow,
-        used_percentage: usage.percent,
-        remaining_percentage: usage.percent === null ? null : 100 - usage.percent,
-        total_input_tokens: usage.tokens,
-        // The per-component breakdown from the last message's usage, which
-        // ctx.getContextUsage() (input-side estimate only) cannot provide.
-        // Present before the first response too, as Claude sends them: a script
-        // reading current_usage gets null rather than undefined.
-        total_output_tokens: lastUsage?.output ?? 0,
-        current_usage: lastUsage
-          ? {
-              input_tokens: lastUsage.input,
-              output_tokens: lastUsage.output,
-              cache_read_input_tokens: lastUsage.cacheRead,
-              cache_creation_input_tokens: lastUsage.cacheWrite,
-            }
-          : null,
-      },
+      context_window: contextWindowField(usage),
       // The true combined total when a message usage is known, else the input-side estimate.
       exceeds_200k_tokens: (lastUsage?.totalTokens ?? usage.tokens ?? 0) > 200_000,
       permission_mode: permissionMode,
     }
+    addOptionalFields(ctx, payload)
+    return payload
+  }
+
+  function contextWindowField(usage: { tokens: number | null; contextWindow: number; percent: number | null }): Record<string, unknown> {
+    return {
+      context_window_size: usage.contextWindow,
+      used_percentage: usage.percent,
+      remaining_percentage: usage.percent === null ? null : 100 - usage.percent,
+      total_input_tokens: usage.tokens,
+      // The per-component breakdown from the last message's usage, which
+      // ctx.getContextUsage() (input-side estimate only) cannot provide.
+      // Present before the first response too, as Claude sends them: a script
+      // reading current_usage gets null rather than undefined.
+      total_output_tokens: lastUsage?.output ?? 0,
+      current_usage: lastUsage
+        ? {
+            input_tokens: lastUsage.input,
+            output_tokens: lastUsage.output,
+            cache_read_input_tokens: lastUsage.cacheRead,
+            cache_creation_input_tokens: lastUsage.cacheWrite,
+          }
+        : null,
+    }
+  }
+
+  function addThinkingFields(ctx: ExtensionContext, payload: Record<string, unknown>): void {
+    // Thinking disabled says the rest, so off carries no effort field of its own.
+    payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
+    const effort = claudeEffortLevel(ctx.thinkingLevel)
+    if (effort) payload.effort = { level: effort }
+  }
+
+  /** The payload fields Claude sends only when they carry a value. */
+  function addOptionalFields(ctx: ExtensionContext, payload: Record<string, unknown>): void {
     const transcript = ctx.sessionManager.getSessionFile()
     if (transcript) payload.transcript_path = transcript
     const sessionName = ctx.sessionManager.getSessionName?.()
     if (sessionName) payload.session_name = sessionName
-    if (ctx.thinkingLevel) {
-      // Thinking disabled says the rest, so off carries no effort field of its own.
-      payload.thinking = { enabled: ctx.thinkingLevel !== 'off' }
-      const effort = claudeEffortLevel(ctx.thinkingLevel)
-      if (effort) payload.effort = { level: effort }
-    }
+    if (ctx.thinkingLevel) addThinkingFields(ctx, payload)
     if (styleName) payload.output_style = { name: styleName }
     // The current utilization of the account's rate-limit windows, when the
     // provider reported them; omitted until a response has carried them, and an
@@ -350,7 +362,6 @@ export default function statusLine(pi: ExtensionAPI) {
       const live = liveRateLimits(rateLimits)
       if (live) payload.rate_limits = live
     }
-    return payload
   }
 
   async function runCommand(ctx: ExtensionContext): Promise<void> {
