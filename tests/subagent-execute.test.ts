@@ -2004,7 +2004,7 @@ describe('agent memory', () => {
 })
 
 describe('foreground abort process group', () => {
-  it('spawns the child detached and signals its whole group on abort', async () => {
+  it('ends the whole child tree on abort', async () => {
     const controller = new AbortController()
     script('inspect', { stdout: [say('too late')], delay: 30 })
     const groupKills: Array<[unknown, unknown]> = []
@@ -2015,7 +2015,7 @@ describe('foreground abort process group', () => {
     try {
       const pending = execute('c1', { agent: 'scout', task: 'inspect' }, controller.signal, undefined, trustedCtx)
       await new Promise((resolve) => setTimeout(resolve, 10))
-      expect((spawnCalls[0].options as { detached?: boolean }).detached).toBe(true)
+      expect((spawnCalls[0].options as { detached?: boolean }).detached).toBe(process.platform !== 'win32')
       ;(spawnedChildren[0] as { pid?: number }).pid = 424242
       controller.abort()
       await expect(pending).rejects.toThrow('Subagent was aborted')

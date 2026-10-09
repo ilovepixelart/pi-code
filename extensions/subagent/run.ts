@@ -141,15 +141,19 @@ export function utf8Chunks(): (chunk: Buffer | string) => string {
  * the spawn() call site instead; catching it here, in one place with an explicit
  * return type, keeps the caller's non-null stdout/stderr narrowing that a bare
  * try/catch around an inline spawn() call loses. */
-export function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
+export function spawnChild(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }, platform: NodeJS.Platform = process.platform): { proc: ChildProcessByStdio<null, Readable, Readable> } | { error: Error } {
   try {
     const proc = spawn(command, args, {
       ...options,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Its own group, so an abort reaches grandchildren too: killing only the
-      // direct child orphans a build or dev server the agent started.
-      detached: true,
+      // direct child orphans a build or dev server the agent started. On Windows
+      // `detached` means DETACHED_PROCESS: the child has no console, so every console
+      // program it runs (each checkpoint git call) opens a visible window. There
+      // taskkill /T ends the tree instead, and the child keeps the parent's console.
+      detached: platform !== 'win32',
+      windowsHide: true,
     })
     // A third failure shape: at the descriptor limit (EMFILE, ENFILE) node returns a child
     // with no stdio and emits 'error' on the next tick. The callers wire stdout first, so
