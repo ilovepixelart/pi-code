@@ -438,8 +438,8 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
     }
     let staged = 0
     for (const rel of paths) {
-      if ((await gitShadow(['add', '--', rel])).code === 0)
-        staged++ // NOSONAR typescript:S9382 - git index lock forbids parallel adds
+      const added = (await gitShadow(['add', '--', rel])).code === 0 // NOSONAR typescript:S9382 - git index lock forbids parallel adds
+      if (added) staged++
       else if (workTree) touched.delete(path.resolve(workTree, rel))
     }
     return staged > 0
