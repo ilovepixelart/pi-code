@@ -18,8 +18,38 @@ permissions:
   contents: read
 
 jobs:
+  # The check runs the dev toolchain (vitest, biome, knip, tsc) and every devDependency it
+  # loads, so it holds no token: a compromised one cannot mint the OIDC token the build
+  # signs with or touch the tarball before it is packed and attested.
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tag, not the default branch: a dispatch recovery run must check the
+          # commit the tag names.
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check
+        run: npm run check
+
   build:
     name: Build, attest, and pack
+    needs: [check]
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload the attestation bundle to the triggering release
@@ -37,18 +67,13 @@ jobs:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
           persist-credentials: false
 
+      # No dependency install here: npm pack needs only package.json and the files it
+      # lists, so no third-party code runs while this job holds id-token: write.
       - name: Use Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           registry-url: https://registry.npmjs.org
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Check
-        run: npm run check
 
       - name: Verify the tag matches package.json
         env:
