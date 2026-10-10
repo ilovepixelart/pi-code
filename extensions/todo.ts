@@ -11,14 +11,14 @@
  * in_progress todo back to pending. An optional activeForm label (present
  * continuous, e.g. "Writing tests") is shown while a todo is in_progress.
  *
- * State is stored in tool result details (not external files), which allows
- * proper branching - when you branch, the todo state is automatically
- * correct for that point in history. The same replay runs on session_start,
- * session_tree, and session_compact, so the list survives compaction.
+ * Mutations persist copied snapshots in branch-local custom session entries,
+ * including calls nested inside other tools. Legacy tool result details still
+ * replay on older branches. The same replay runs on session_start, session_tree,
+ * and session_compact, so the list survives compaction without external files.
  */
 
 import { StringEnum } from '@earendil-works/pi-ai'
-import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, Theme } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, SessionEntry, Theme } from '@earendil-works/pi-coding-agent'
 import { matchesKey, Text, type TUI, truncateToWidth } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
 
@@ -30,6 +30,11 @@ export interface Todo {
   text: string
   status: TodoStatus
   activeForm?: string
+}
+
+interface PersistedTodoState {
+  todos?: LegacyTodo[]
+  nextId: number
 }
 
 interface TodoDetails {
@@ -62,6 +67,7 @@ const TodoParams = Type.Object({
 type TodoParamsType = Static<typeof TodoParams>
 
 const TOOL_NAME = 'todo'
+const STATE_ENTRY_TYPE = 'pi-code:todo'
 const WIDGET_KEY = 'todos'
 // Content budget: heading + todo rows + optional "+N more" summary. The
 // rendered widget is one line taller (trailing spacer below the panel).
@@ -317,6 +323,16 @@ const renderTodoListResult = (todoList: Todo[], expanded: boolean, theme: Theme)
   return new Text(listText, 0, 0)
 }
 
+/** Read provider snapshots, allowing legacy direct results until the first snapshot. */
+const persistedTodoDetails = (entry: SessionEntry, includeLegacy: boolean): PersistedTodoState | undefined => {
+  if (entry.type === 'custom' && entry.customType === STATE_ENTRY_TYPE) return entry.data as PersistedTodoState | undefined
+  if (!includeLegacy || entry.type !== 'message') return undefined
+  const message = entry.message
+  if (message.role !== 'toolResult' || message.toolName !== TOOL_NAME) return undefined
+  return message.details as PersistedTodoState | undefined
+}
+
+/** Register the branch-local Todo provider, viewer, and live widget. */
 export default function todoExtension(pi: ExtensionAPI) {
   // In-memory state (reconstructed from session on load)
   let todos: Todo[] = []
@@ -325,26 +341,24 @@ export default function todoExtension(pi: ExtensionAPI) {
 
   /**
    * Reconstruct state from session entries.
-   * Scans tool results for this tool and applies them in order. State is
-   * committed only after a full scan, so a throw (stale ctx) keeps the
-   * current state intact.
+   * Provider snapshots supersede legacy results, whose completion order can
+   * differ from mutation order. Commit only after a full scan so a stale ctx
+   * leaves the current state intact.
    */
   const reconstructState = (ctx: ExtensionContext) => {
     let replayTodos: Todo[] = []
     let replayNextId = 1
+    let hasProviderSnapshot = false
 
     for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== 'message') continue
-      const msg = entry.message
-      if (msg.role !== 'toolResult' || msg.toolName !== TOOL_NAME) continue
-
-      const details = msg.details as (Omit<TodoDetails, 'todos'> & { todos?: LegacyTodo[] }) | undefined
+      const details = persistedTodoDetails(entry, !hasProviderSnapshot)
       // pi persists a failed tool call as `details: {}`, which is truthy: a rejected
       // or blocked call would otherwise throw here and break replay for the rest of
       // the session, losing the list on every resume, fork and compaction.
       if (Array.isArray(details?.todos)) {
         replayTodos = details.todos.map(normalizeTodo)
         replayNextId = details.nextId
+        if (entry.type === 'custom') hasProviderSnapshot = true
       }
     }
 
@@ -391,7 +405,11 @@ export default function todoExtension(pi: ExtensionAPI) {
   // mutate the todo objects in place, so each result carries its own copies: without
   // them a rewind replays, and the TUI re-renders, today's statuses on earlier calls.
   const snapshot = () => todos.map((t) => ({ ...t }))
-  const ok = (action: TodoAction, text: string) => toolMessage(text, { action, todos: snapshot(), nextId })
+  /** Persist successful mutations before direct or nested execution returns. */
+  const ok = (action: TodoAction, text: string) => {
+    if (action !== 'list') pi.appendEntry(STATE_ENTRY_TYPE, { todos: snapshot(), nextId })
+    return toolMessage(text, { action, todos: snapshot(), nextId })
+  }
   const fail = (action: TodoAction, error: string) => toolMessage(`Error: ${error}`, { action, todos: snapshot(), nextId, error })
 
   const handleAdd = (params: TodoParamsType) => {

@@ -9,6 +9,7 @@ type Execute = (id: string, params: Record<string, unknown>, signal?: unknown, o
 const setup = (): { call: (params: Record<string, unknown>) => Promise<ToolResult> } => {
   let execute: Execute | undefined
   todoExtension({
+    appendEntry: () => {},
     on: () => {},
     registerCommand: () => {},
     registerTool: (tool: { name: string; execute: Execute }) => {

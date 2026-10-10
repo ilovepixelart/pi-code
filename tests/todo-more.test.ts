@@ -79,6 +79,7 @@ const setup = (): Harness => {
   let tool: Record<string, (...a: never[]) => unknown> | undefined
 
   todoExtension({
+    appendEntry: () => {},
     on: (name: string, fn: Handler) => handlers.set(name, fn),
     registerCommand: (name: string, config: { description: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, config),
     registerTool: (t: Record<string, unknown>) => {
