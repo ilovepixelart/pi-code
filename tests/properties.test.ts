@@ -145,6 +145,9 @@ describe.skipIf(process.platform === 'win32')('shellWords properties', () => {
   it('splits and unquotes exactly as bash does, wherever bash accepts the quoting', () => {
     void fc.assert(
       fc.property(input, (command) => {
+        // The oracle is version-dependent there: bash 3.2 (macOS /bin/bash) drops a trailing
+        // unquoted backslash where bash 5 keeps it, so `a\` reads as `a` or as `a\`.
+        fc.pre(!command.endsWith('\\'))
         const expected = bashWords(command)
         fc.pre(expected !== undefined)
         expect(shellWords(command)).toEqual(expected)
