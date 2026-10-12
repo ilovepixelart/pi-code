@@ -127,4 +127,11 @@ describe('provider-owned todo persistence', () => {
     harness.replay([legacy, { type: 'custom', customType: 'another-extension', data: { todos: [], nextId: 1 } }, { type: 'custom', customType: 'pi-code:todo' }])
     expect((await state(harness)).todos[0].text).toBe('Kept')
   })
+
+  it('restores a legacy result that follows an incomplete provider entry', async () => {
+    const harness = setup()
+    const legacy = toolResult({ todos: [{ id: 1, text: 'Kept', status: 'pending' }], nextId: 2 })
+    harness.replay([{ type: 'custom', customType: 'pi-code:todo' }, legacy])
+    expect((await state(harness)).todos[0].text).toBe('Kept')
+  })
 })
