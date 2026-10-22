@@ -3361,7 +3361,7 @@ describe("native mode: pi 0.99's MCP connects the servers", () => {
 
     expect(harness.commandNames()).not.toContain('mcp')
     expect(harness.nativeRegistered.map((entry) => entry.name)).toEqual(['srv'])
-    expect(harness.nativeRegistered[0].config).toMatchObject({ command: 'node', args: ['s.js'], exposure: 'direct' })
+    expect(harness.nativeRegistered[0].config).toMatchObject({ command: 'node', args: ['s.js'], exposure: 'deferred' })
     expect(hoisted.transports).toEqual([])
     expect(harness.toolNames()).toEqual([])
   })

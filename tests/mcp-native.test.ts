@@ -13,7 +13,7 @@ afterEach(() => {
 })
 
 describe('toNativeServer (MCPN-003)', () => {
-  it('translates a stdio server with Claude variables, direct exposure and the stdio idle budget', () => {
+  it('translates a stdio server with Claude variables, deferred exposure and the stdio idle budget', () => {
     expect(toNativeServer('fixture', { type: 'stdio', command: 'node', args: ['server.js'], env: { MODE: 'fast' } }, session, {})).toEqual({
       native: {
         name: 'fixture',
@@ -21,7 +21,7 @@ describe('toNativeServer (MCPN-003)', () => {
           command: 'node',
           args: ['server.js'],
           env: { MODE: 'fast', CLAUDECODE: '1', CLAUDE_PROJECT_DIR: '/repo', CLAUDE_CODE_SESSION_ID: 'sess-1' },
-          exposure: 'direct',
+          exposure: 'deferred',
           timeout: 1800,
         },
       },
@@ -30,13 +30,13 @@ describe('toNativeServer (MCPN-003)', () => {
 
   it('translates a streamable HTTP server with the remote idle budget', () => {
     expect(toNativeServer('docs', { type: 'http', url: 'https://example.com/mcp' }, session, {})).toEqual({
-      native: { name: 'docs', config: { url: 'https://example.com/mcp', exposure: 'direct', timeout: 300 } },
+      native: { name: 'docs', config: { url: 'https://example.com/mcp', exposure: 'deferred', timeout: 300 } },
     })
   })
 
   it('treats an untyped url as streamable HTTP', () => {
     expect(toNativeServer('docs', { url: 'https://example.com/mcp' }, session, {})).toEqual({
-      native: { name: 'docs', config: { url: 'https://example.com/mcp', exposure: 'direct', timeout: 300 } },
+      native: { name: 'docs', config: { url: 'https://example.com/mcp', exposure: 'deferred', timeout: 300 } },
     })
   })
 
@@ -45,21 +45,21 @@ describe('toNativeServer (MCPN-003)', () => {
     const stdio = toNativeServer('s', { command: '${BIN}', args: ['--level=${LEVEL:-info}'], env: { KEY: '${TOKEN}' } }, undefined, env)
     const http = toNativeServer('h', { type: 'http', url: 'https://${HOST}/mcp', headers: { 'X-Key': '${TOKEN}' } }, undefined, env)
 
-    expect(stdio).toEqual({ native: { name: 's', config: { command: '/opt/bin/srv', args: ['--level=info'], env: { KEY: 'abc', CLAUDECODE: '1' }, exposure: 'direct', timeout: 1800 } } })
-    expect(http).toEqual({ native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { 'X-Key': 'abc' }, exposure: 'direct', timeout: 300 } } })
+    expect(stdio).toEqual({ native: { name: 's', config: { command: '/opt/bin/srv', args: ['--level=info'], env: { KEY: 'abc', CLAUDECODE: '1' }, exposure: 'deferred', timeout: 1800 } } })
+    expect(http).toEqual({ native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { 'X-Key': 'abc' }, exposure: 'deferred', timeout: 300 } } })
   })
 
   it('escapes env and header values so pi neither runs nor expands them', () => {
     const stdio = toNativeServer('s', { command: 'srv', env: { A: '!rm -rf /', B: 'pa$$word', C: '$HOME' } }, undefined, {})
     const http = toNativeServer('h', { type: 'http', url: 'https://example.com/mcp', headers: { 'X-A': '!curl evil', 'X-B': 'a$b' } }, undefined, {})
 
-    expect(stdio).toEqual({ native: { name: 's', config: { command: 'srv', args: [], env: { A: '$!rm -rf /', B: 'pa$$$$word', C: '$$HOME', CLAUDECODE: '1' }, exposure: 'direct', timeout: 1800 } } })
-    expect(http).toEqual({ native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { 'X-A': '$!curl evil', 'X-B': 'a$$b' }, exposure: 'direct', timeout: 300 } } })
+    expect(stdio).toEqual({ native: { name: 's', config: { command: 'srv', args: [], env: { A: '$!rm -rf /', B: 'pa$$$$word', C: '$$HOME', CLAUDECODE: '1' }, exposure: 'deferred', timeout: 1800 } } })
+    expect(http).toEqual({ native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { 'X-A': '$!curl evil', 'X-B': 'a$$b' }, exposure: 'deferred', timeout: 300 } } })
   })
 
   it('keeps an undefined variable literal, escaped', () => {
     expect(toNativeServer('h', { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer ${MISSING}' } }, undefined, {})).toEqual({
-      native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer $${MISSING}' }, exposure: 'direct', timeout: 300 } },
+      native: { name: 'h', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer $${MISSING}' }, exposure: 'deferred', timeout: 300 } },
     })
   })
 
@@ -67,15 +67,15 @@ describe('toNativeServer (MCPN-003)', () => {
     const inline = toNativeServer('a', { type: 'http', url: 'https://example.com/mcp', bearerToken: '${TOKEN}' }, undefined, { TOKEN: 'tok-1' })
     const named = toNativeServer('b', { type: 'http', url: 'https://example.com/mcp', bearerTokenEnv: 'GH' }, undefined, { GH: 'tok-2' })
 
-    expect(inline).toEqual({ native: { name: 'a', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer tok-1' }, exposure: 'direct', timeout: 300 } } })
-    expect(named).toEqual({ native: { name: 'b', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer tok-2' }, exposure: 'direct', timeout: 300 } } })
+    expect(inline).toEqual({ native: { name: 'a', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer tok-1' }, exposure: 'deferred', timeout: 300 } } })
+    expect(named).toEqual({ native: { name: 'b', config: { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer tok-2' }, exposure: 'deferred', timeout: 300 } } })
   })
 
   it('maps the oauth client, callback port, scopes and MCP_CLIENT_SECRET to pi fields', () => {
     const result = toNativeServer('o', { type: 'http', url: 'https://example.com/mcp', oauth: { clientId: 'cid', callbackPort: 8765, scopes: 'read write' } }, undefined, { MCP_CLIENT_SECRET: 's$cret' })
 
     expect(result).toEqual({
-      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { clientId: 'cid', clientSecret: 's$$cret', callbackUrl: 'http://localhost:8765/callback', scope: 'read write' }, exposure: 'direct', timeout: 300 } },
+      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { clientId: 'cid', clientSecret: 's$$cret', callbackUrl: 'http://localhost:8765/callback', scope: 'read write' }, exposure: 'deferred', timeout: 300 } },
     })
   })
 
@@ -85,7 +85,7 @@ describe('toNativeServer (MCPN-003)', () => {
 
   it('redirects to localhost on MCP_OAUTH_CALLBACK_PORT when the server names no port', () => {
     expect(toNativeServer('o', { type: 'http', url: 'https://example.com/mcp' }, undefined, { MCP_OAUTH_CALLBACK_PORT: '9000' })).toEqual({
-      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://localhost:9000/callback' }, exposure: 'direct', timeout: 300 } },
+      native: { name: 'o', config: { url: 'https://example.com/mcp', oauth: { callbackUrl: 'http://localhost:9000/callback' }, exposure: 'deferred', timeout: 300 } },
     })
   })
 
@@ -95,8 +95,41 @@ describe('toNativeServer (MCPN-003)', () => {
 
     expect(home).toMatchObject({ native: { config: { cwd: `${homedir()}/app` } } })
     expect(variable).toEqual({
-      native: { name: 's', config: { command: 'srv', args: [], env: { CLAUDECODE: '1' }, cwd: '/srv/work/app', exposure: 'direct', timeout: 1800 } },
+      native: { name: 's', config: { command: 'srv', args: [], env: { CLAUDECODE: '1' }, cwd: '/srv/work/app', exposure: 'deferred', timeout: 1800 } },
     })
+  })
+})
+
+describe('toNativeServer exposure (MCPN-012)', () => {
+  const exposure = (config: Record<string, unknown>, env: NodeJS.ProcessEnv = {}): unknown => (toNativeServer('s', { command: 'srv', ...config }, undefined, env) as { native: { config: { exposure: unknown } } }).native.config.exposure
+
+  it('defers a server by default, as Claude enables tool search by default', () => {
+    expect(exposure({})).toBe('deferred')
+  })
+
+  it('declares the tools of an alwaysLoad: true server upfront', () => {
+    expect(exposure({ alwaysLoad: true })).toBe('direct')
+  })
+
+  it('defers an alwaysLoad: false server', () => {
+    expect(exposure({ alwaysLoad: false })).toBe('deferred')
+  })
+
+  it('declares every server upfront when ENABLE_TOOL_SEARCH is false', () => {
+    expect(exposure({}, { ENABLE_TOOL_SEARCH: 'false' })).toBe('direct')
+    expect(exposure({ alwaysLoad: false }, { ENABLE_TOOL_SEARCH: 'false' })).toBe('direct')
+  })
+
+  it.each(['true', 'auto', 'auto:5'])('defers a server when ENABLE_TOOL_SEARCH is %s', (value) => {
+    expect(exposure({}, { ENABLE_TOOL_SEARCH: value })).toBe('deferred')
+  })
+
+  it('keeps alwaysLoad: true upfront whatever ENABLE_TOOL_SEARCH says', () => {
+    expect(exposure({ alwaysLoad: true }, { ENABLE_TOOL_SEARCH: 'true' })).toBe('direct')
+  })
+
+  it('defers an HTTP server the same way', () => {
+    expect(toNativeServer('h', { type: 'http', url: 'https://example.com/mcp' }, undefined, {})).toMatchObject({ native: { config: { exposure: 'deferred' } } })
   })
 })
 
@@ -137,7 +170,7 @@ describe('toNativeServer for plugin servers (MCPN-004)', () => {
           command: 'srv',
           args: [],
           env: { CLAUDECODE: '1', CLAUDE_PROJECT_DIR: '/repo', CLAUDE_CODE_SESSION_ID: 'sess-1', CLAUDE_PLUGIN_ROOT: '/plugins/tools', CLAUDE_PLUGIN_DATA: '/data/tools' },
-          exposure: 'direct',
+          exposure: 'deferred',
           timeout: 1800,
         },
       },

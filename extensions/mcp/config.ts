@@ -21,6 +21,8 @@ export interface StdioServerConfig {
   cwd?: string
   /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
   timeout?: number
+  /** Claude's tool-search exemption: true declares the server's tools upfront. */
+  alwaysLoad?: boolean
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
   /** The server name as its manifest declares it, without the plugin: scope the registry
@@ -48,6 +50,8 @@ export interface HttpServerConfig {
   headersHelper?: string
   /** Per-call wall-clock budget in ms, overriding MCP_TOOL_TIMEOUT for this server. */
   timeout?: number
+  /** Claude's tool-search exemption: true declares the server's tools upfront. */
+  alwaysLoad?: boolean
   /** Plugin servers alias their tools mcp__plugin_<plugin>_<server>__<tool>. */
   aliasPrefix?: string
   /** The server name as its manifest declares it, without the plugin: scope the registry

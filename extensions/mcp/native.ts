@@ -104,6 +104,12 @@ function timeoutSeconds(config: ServerConfig): number {
   return Math.min(Math.ceil(callBudgetMs(config) / 1000), Math.floor(MAX_TIMER_MS / 1000))
 }
 
+/** Claude defers MCP tools behind tool search unless the server sets `alwaysLoad: true` or
+ * ENABLE_TOOL_SEARCH is `false`; `true`, `auto` and `auto:N` defer, as pi has no threshold. */
+function exposure(config: ServerConfig, env: NodeJS.ProcessEnv): McpServerConfig['exposure'] {
+  return config.alwaysLoad === true || env.ENABLE_TOOL_SEARCH === 'false' ? 'direct' : 'deferred'
+}
+
 /** The config pi connects for this server, or the reason pi-code keeps it: pi has no SSE
  * or WebSocket transport, no header helper, and accepts only [A-Za-z0-9_-] names. */
 export function toNativeServer(name: string, config: ServerConfig, session?: SessionDirs, env: NodeJS.ProcessEnv = process.env): NativeTranslation {
@@ -113,7 +119,7 @@ export function toNativeServer(name: string, config: ServerConfig, session?: Ses
   if (!NATIVE_NAME.test(registered)) return { reason: 'server name' }
   const fill = (value: string): string => interpolateEnv(value, env)
   const transport = 'url' in config ? httpConfig(config, fill, env) : stdioConfig(config, fill, session)
-  return { native: { name: registered, config: { ...transport, exposure: 'direct', timeout: timeoutSeconds(config) } as McpServerConfig } }
+  return { native: { name: registered, config: { ...transport, exposure: exposure(config, env), timeout: timeoutSeconds(config) } as McpServerConfig } }
 }
 
 /** Whether pi connects the servers: its API exists (pi 0.99 and later) and no MCP policy
