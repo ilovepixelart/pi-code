@@ -6,6 +6,7 @@ import { withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import memoryExtension, { memoryDir } from '../extensions/memory.ts'
+import { addMcpServersSection, MCP_SERVERS_TEXT, runPromptChain } from './prompt-chain.ts'
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown>
 type Tool = { execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }
@@ -113,6 +114,18 @@ describe('memory tool actions', () => {
     const result = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as { systemPrompt: string }
     expect(result.systemPrompt).toContain('## Memory')
     expect(result.systemPrompt).toContain('style')
+  })
+
+  it('keeps a section a later extension adds, such as pi listing its MCP servers', async () => {
+    const { handlers, tool, cwd } = setup()
+    await start(handlers, cwd)
+    await tool.execute('1', { action: 'save', name: 'style', description: 'code style', content: 'tabs' })
+
+    const prompt = await runPromptChain([handlers.get('before_agent_start') as Handler, addMcpServersSection])
+
+    expect(prompt).toContain('Persistent memories from earlier sessions')
+    expect(prompt).toContain('[style](style.md)')
+    expect(prompt).toContain(MCP_SERVERS_TEXT)
   })
 })
 

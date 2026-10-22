@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, pluginStyleDirs, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+import { addMcpServersSection, MCP_SERVERS_TEXT, runPromptChain } from './prompt-chain.ts'
 
 // The extension reads user-scope styles and settings from the home directory; point it
 // at a throwaway dir so the developer's real ~/.claude cannot influence assertions.
@@ -394,6 +394,33 @@ describe('extension wiring', () => {
     await commands.get('output-style')?.handler('', ctx)
     const saved = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.local.json'), 'utf-8'))
     expect(saved.outputStyle).toBe('Explain')
+  })
+
+  const styleHandler = async (cwd: string): Promise<(event: unknown, ctx: unknown) => Promise<unknown>> => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
+    outputStyles({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn), registerCommand: () => {} } as never)
+    await handlers.get('session_start')?.({}, { cwd, hasUI: true, isProjectTrusted: () => true, ui: { notify: () => {}, confirm: async () => true } })
+    return handlers.get('before_agent_start') as (event: unknown, ctx: unknown) => Promise<unknown>
+  }
+
+  it('replaces the coding instructions and keeps a section a later extension adds', async () => {
+    const prompt = await runPromptChain([await styleHandler(projectWithStyle('Explain', 'Explain everything.')), addMcpServersSection])
+
+    expect(prompt).toContain('Explain everything.')
+    expect(prompt).not.toContain(CODING_BASE_MARKER)
+    expect(prompt).toContain('<cwd>')
+    expect(prompt).toContain(MCP_SERVERS_TEXT)
+  })
+
+  it('keeps the coding instructions for a style that asks to and a section a later extension adds', async () => {
+    const cwd = projectWithStyle('Explain', 'Explain everything.')
+    writeFileSync(join(cwd, '.claude', 'output-styles', 'style.md'), '---\nname: Explain\nkeep-coding-instructions: true\n---\nExplain everything.')
+
+    const prompt = await runPromptChain([await styleHandler(cwd), addMcpServersSection])
+
+    expect(prompt).toContain('Explain everything.')
+    expect(prompt).toContain(CODING_BASE_MARKER)
+    expect(prompt).toContain(MCP_SERVERS_TEXT)
   })
 
   const wireSession = async (ctx: Record<string, unknown>): Promise<unknown> => {

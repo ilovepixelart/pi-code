@@ -25,6 +25,7 @@ import { setAgentRunner } from '../internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../internal/background-agents.ts'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.ts'
 import { isProjectApprovedSilently } from '../internal/project-approval.ts'
+import { addPromptSection } from '../internal/prompt-options.ts'
 import { sessionHasTurns, sessionMailbox } from '../internal/session-mailbox.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
 import { skillDirs } from '../skills.ts'
@@ -226,7 +227,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
     if (agents.length === 0) return
     const line = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 200)
     const roster = agents.map((agent) => `- ${agent.name} (${agent.source}): ${line(agent.description)}`).join('\n')
-    return { systemPrompt: `${event.systemPrompt}\n\n## Subagents\n\nDelegate isolated tasks with the subagent tool ({agent, task}). Available agents:\n${roster}` }
+    const text = `Delegate isolated tasks with the subagent tool ({agent, task}). Available agents:\n${roster}`
+    if (addPromptSection(event, 'subagents', text)) return
+    return { systemPrompt: `${event.systemPrompt}\n\n## Subagents\n\n${text}` }
   })
 
   pi.registerTool({

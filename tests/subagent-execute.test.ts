@@ -9,6 +9,7 @@ import { hasAgentRunner, runAgent, setAgentRunner } from '../extensions/internal
 import { runningBackgroundAgents } from '../extensions/internal/background-agents.ts'
 import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import subagentExtension, { AGENT_HOOK_SYSTEM, agentMemoryDir, agentMemorySection, agentsListText, buildHookAgent, getPiInvocation, setKnownMcpAliases, tasksStatusText, withMemoryTools } from '../extensions/subagent/index.ts'
+import { addMcpServersSection, MCP_SERVERS_TEXT, runPromptChain } from './prompt-chain.ts'
 
 // The agent-memory tests read settings and stores under the home directory; point
 // homedir at a throwaway dir so the developer's real ~/.claude cannot influence them.
@@ -1368,6 +1369,14 @@ describe('agent roster', () => {
     expect(result.systemPrompt).toContain('## Subagents')
     // Discovery is module-mocked here; builtin discovery is covered in the agents suite.
     expect(result.systemPrompt).toMatch(/- scout \(user\): /)
+  })
+
+  it('keeps a section a later extension adds, such as pi listing its MCP servers', async () => {
+    getExecute()
+    const prompt = await runPromptChain([eventHandlers.get('before_agent_start') as (event: unknown, ctx: unknown) => unknown, addMcpServersSection], trustedCtx)
+
+    expect(prompt).toMatch(/- scout \(user\): /)
+    expect(prompt).toContain(MCP_SERVERS_TEXT)
   })
 
   it('discovers the roster once and reuses it across turns until the next session', async () => {

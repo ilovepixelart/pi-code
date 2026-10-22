@@ -31,6 +31,7 @@ import { readManagedSettings } from './internal/managed-settings.ts'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.ts'
 import { isProjectApproved } from './internal/project-approval.ts'
 import { ancestorDirs } from './internal/project-root.ts'
+import { addPromptSection, replaceDefaultInstructions } from './internal/prompt-options.ts'
 import { claudeSettingsChain, localSettingsFile, readSettingsChain } from './internal/settings-chain.ts'
 import { errorMessage, isDirectory } from './internal/values.ts'
 
@@ -83,10 +84,14 @@ export const BUILTIN_STYLES_DIR = path.join(import.meta.dirname, 'internal', 'bu
  * replacement. Tracks pi's dist/core/system-prompt.js; a canary test pins it. */
 export const CODING_BASE_MARKER = '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)'
 
+function styleText(style: OutputStyle): string {
+  return `## Output Style: ${style.name}\n\n${style.body}`
+}
+
 /** Apply a style per Claude semantics: replace the coding instructions unless the
  * style keeps them; fall back to appending when the marker is absent. */
 export function applyStyle(systemPrompt: string, style: OutputStyle): string {
-  const styleSection = `## Output Style: ${style.name}\n\n${style.body}`
+  const styleSection = styleText(style)
   if (!style.keepCodingInstructions) {
     const idx = systemPrompt.indexOf(CODING_BASE_MARKER)
     if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
@@ -236,6 +241,8 @@ export default function outputStylesExtension(pi: ExtensionAPI) {
   pi.on('before_agent_start', (event) => {
     const active = styleForName(styles, activeName)
     if (!active || active.body.length === 0) return
+    const text = styleText(active)
+    if (active.keepCodingInstructions ? addPromptSection(event, 'output_style', text) : replaceDefaultInstructions(event, text)) return
     return { systemPrompt: applyStyle(event.systemPrompt, active) }
   })
 

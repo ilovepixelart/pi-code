@@ -21,6 +21,7 @@ import { readManagedSettings } from './internal/managed-settings.ts'
 import { capForContext } from './internal/output-guard.ts'
 import { isProjectApprovedSilently } from './internal/project-approval.ts'
 import { repoRoot } from './internal/project-root.ts'
+import { addPromptSection } from './internal/prompt-options.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { statToken } from './internal/stat-token.ts'
 import { errorMessage } from './internal/values.ts'
@@ -472,9 +473,9 @@ export default function memoryExtension(pi: ExtensionAPI): void {
     if (inSubagent() || !enabled) return
     const index = readIndexCached()
     if (!index.trim()) return
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n## Memory\n\nPersistent memories from earlier sessions (index):\n\n${capIndexForPrompt(index)}\nUse the memory tool with action "read" to load a memory's full content when relevant.`,
-    }
+    const text = `Persistent memories from earlier sessions (index):\n\n${capIndexForPrompt(index)}\nUse the memory tool with action "read" to load a memory's full content when relevant.`
+    if (addPromptSection(event, 'memory', text)) return
+    return { systemPrompt: `${event.systemPrompt}\n\n## Memory\n\n${text}` }
   })
 
   const memoryToolUnavailable = () => {
