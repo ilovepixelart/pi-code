@@ -993,9 +993,11 @@ describe('hooks extension tool_call', () => {
     return ext
   }
 
-  it('blocks the tool with the hook stderr as the reason when the hook exits 2', async () => {
+  // Claude: an exit-2 block "routes the same way as deny", whose reason is "shown to
+  // Claude"; only continue false ends the run, so the block carries no terminate.
+  it('blocks the tool with the hook stderr as the reason when the hook exits 2, leaving the run to continue', async () => {
     const ext = await withPreHook({ stderr: ['force push is not allowed'], code: 2 })
-    expect(await ext.toolCall('bash', { command: 'git push -f' })).toEqual({ block: true, reason: 'force push is not allowed', terminate: true })
+    expect(await ext.toolCall('bash', { command: 'git push -f' })).toEqual({ block: true, reason: 'force push is not allowed' })
   })
 
   it('runs a PreToolUse prompt hook through the model and blocks on its deny decision', async () => {
@@ -1004,7 +1006,7 @@ describe('hooks extension tool_call', () => {
     const ext = setupExtension()
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     const decision = await ext.toolCall('bash', { command: 'rm -rf /' }, 't1', { model: {} })
-    expect(decision).toEqual({ block: true, reason: 'looks risky', terminate: true })
+    expect(decision).toEqual({ block: true, reason: 'looks risky' })
   })
 
   it('runs a PreToolUse agent hook on the session model and blocks on its deny decision', async () => {
@@ -1018,7 +1020,7 @@ describe('hooks extension tool_call', () => {
       const ext = setupExtension()
       await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
       const decision = await ext.toolCall('bash', { command: 'rm -rf /' }, 't1', { model: { id: 'session-model' } })
-      expect(decision).toEqual({ block: true, reason: 'agent says no', terminate: true })
+      expect(decision).toEqual({ block: true, reason: 'agent says no' })
       expect(seenModel).toBe('session-model')
       expect(commandsRun()).toEqual([])
     } finally {
@@ -1037,7 +1039,7 @@ describe('hooks extension tool_call', () => {
 
   it('blocks the tool with the deny reason from hookSpecificOutput', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'secrets file' } })], code: 0 })
-    expect(await ext.toolCall('bash', { command: 'cat .env' })).toEqual({ block: true, reason: 'secrets file', terminate: true })
+    expect(await ext.toolCall('bash', { command: 'cat .env' })).toEqual({ block: true, reason: 'secrets file' })
   })
 
   it('returns undefined so the tool proceeds when the hook allows it', async () => {
@@ -1057,9 +1059,11 @@ describe('hooks extension tool_call', () => {
     expect(await ext.toolCall('bash', { command: 'rm x' }, 't1', { hasUI: true, ui })).toEqual({ block: true, reason: 'confirm this', terminate: true })
   })
 
-  it('blocks on permissionDecision ask with no UI to prompt (headless fallback)', async () => {
+  // Claude: in a -p run where no one can answer the prompt, "Claude reads the reason in
+  // the tool result instead", so the run continues.
+  it('blocks on permissionDecision ask with no UI to prompt (headless fallback), leaving the run to continue', async () => {
     const ext = await withPreHook({ stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'confirm this' } })], code: 0 })
-    expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this', terminate: true })
+    expect(await ext.toolCall('bash', { command: 'rm x' })).toEqual({ block: true, reason: 'confirm this' })
   })
 
   // Measured on Claude Code 2.1.295: a PreToolUse continue false let an allowed call run
@@ -2450,7 +2454,7 @@ describe('allowedHttpHookUrls wiring', () => {
       allowedHttpHookUrls: ['https://hooks.example.com/*'],
       hooks: { PreToolUse: [{ hooks: [{ type: 'http', url: 'https://hooks.example.com/pre' }] }] },
     })
-    expect(await ext.toolCall('bash', { command: 'ls' })).toEqual({ block: true, reason: 'nope', terminate: true })
+    expect(await ext.toolCall('bash', { command: 'ls' })).toEqual({ block: true, reason: 'nope' })
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 })
@@ -2633,14 +2637,16 @@ describe('Claude vocabulary and decision-control conformance', () => {
     expect(ext.sent).toEqual([{ message: { customType: 'claude-stop-hook', content: 'Please run the test suite before finishing.', display: true }, options: { triggerTurn: true } }])
   })
 
-  it('blocks a deferred tool call instead of running it', async () => {
+  it('blocks a deferred tool call instead of running it, and ends the run', async () => {
     // Claude: "defer exits gracefully so the tool can be resumed later"; pi cannot
-    // resume, so running the tool now would invert the intent.
+    // resume, so running the tool now would invert the intent. Claude's defer "ends
+    // the turn", which is pi's terminate.
     const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'defer' }] }] })
     script('defer', { stdout: [JSON.stringify({ hookSpecificOutput: { permissionDecision: 'defer' } })], code: 0 })
-    const decision = (await ext.toolCall('bash', { command: 'deploy' })) as { block?: boolean; reason?: string }
+    const decision = (await ext.toolCall('bash', { command: 'deploy' })) as { block?: boolean; reason?: string; terminate?: boolean }
     expect(decision?.block).toBe(true)
     expect(decision?.reason).toContain('defer')
+    expect(decision?.terminate).toBe(true)
   })
 
   it('prefers the JSON blocking reason over stderr on exit 2', async () => {
@@ -3564,7 +3570,7 @@ describe('prompt hook model override', () => {
     await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
     const decision = await ext.toolCall('bash', { command: 'ls' }, 't1', { model: { id: 'bridge-model' }, modelRegistry })
     expect(seen).toEqual(['bridge-model'])
-    expect(decision).toEqual({ block: true, reason: 'registry says no', terminate: true })
+    expect(decision).toEqual({ block: true, reason: 'registry says no' })
   })
 
   it('uses the session model when the override matches nothing or is absent', async () => {

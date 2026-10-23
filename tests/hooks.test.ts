@@ -664,6 +664,20 @@ describe('runPreToolUse', () => {
     expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, reason: 'no' })
   })
 
+  it('prefers a deny over a defer whatever the hook order, matching Claude deny > defer precedence', async () => {
+    const two = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'a.sh' }, { command: 'b.sh' }] }] }
+    const runner: HookRunner = async (hook) =>
+      hook.command === 'a.sh' ? { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'defer' } }), stderr: '', timedOut: false } : { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 'no' } }), stderr: '', timedOut: false }
+    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, reason: 'no' })
+  })
+
+  it('prefers a defer over an ask whatever the hook order, matching Claude defer > ask precedence', async () => {
+    const two = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'a.sh' }, { command: 'b.sh' }] }] }
+    const runner: HookRunner = async (hook) =>
+      hook.command === 'a.sh' ? { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'ask', permissionDecisionReason: 'maybe' } }), stderr: '', timedOut: false } : { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { permissionDecision: 'defer' } }), stderr: '', timedOut: false }
+    expect(await runPreToolUse(two, 'bash', {}, runner)).toEqual({ block: true, defer: true, reason: 'Tool call deferred by hook; pi cannot resume a deferred call, so it was not run.' })
+  })
+
   it('does not invoke the runner for a non-matching tool', async () => {
     let calls = 0
     const runner: HookRunner = async () => {

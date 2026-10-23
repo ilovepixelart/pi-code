@@ -18,6 +18,9 @@ export interface HookDecision {
   /** Claude's `permissionDecision: "ask"`: the caller should prompt the user and
    * block only on decline. `block` stays true as the no-UI fallback. */
   ask?: boolean
+  /** Claude's `permissionDecision: "defer"`, which ends the turn rather than letting the
+   * model react to the block. */
+  defer?: boolean
   /** Claude's `continue: false`: stop the agent run once this call is decided. It never
    * decides the call: the other fields do, so an allowed call still runs first. */
   stop?: boolean
@@ -141,7 +144,7 @@ function fieldDecision(parsed: ReturnType<typeof tryParseJson>): HookDecision {
   // resume a deferred call, so running it now would invert the intent. The block
   // carries its own explanation (the hook's reason is ignored for defer, as
   // documented).
-  if (specific?.permissionDecision === 'defer') return { block: true, reason: 'Tool call deferred by hook; pi cannot resume a deferred call, so it was not run.' }
+  if (specific?.permissionDecision === 'defer') return { block: true, defer: true, reason: 'Tool call deferred by hook; pi cannot resume a deferred call, so it was not run.' }
   if (parsed?.decision === 'block') return { block: true, reason: parsed.reason ?? 'Blocked by hook' }
   return { block: false }
 }
@@ -262,14 +265,16 @@ function combinePreToolDecisions(decisions: HookDecision[], context: string[]): 
   // One hook's continue false stops the run whatever the combined verdict on the call.
   const stop = decisions.find((decision) => decision.stop)
   const withStop = <T extends HookDecision>(decision: T): T => (stop ? { ...decision, stop: true, stopReason: stop.stopReason } : decision)
-  // A hard deny wins over an ask, matching Claude's deny > ask > allow precedence:
-  // scan for any deny first, and only fall back to the first ask.
+  // Claude's precedence is deny > defer > ask > allow: scan for any deny first, and
+  // only fall back to the first defer, then the first ask.
+  let defer: HookDecision | undefined
   let ask: HookDecision | undefined
   for (const decision of decisions) {
-    if (decision.block && !decision.ask) return withStop({ block: true, reason: decision.reason })
-    if (decision.ask && ask === undefined) ask = { block: true, ask: true, reason: decision.reason }
+    if (decision.defer) defer ??= { block: true, defer: true, reason: decision.reason }
+    else if (decision.ask) ask ??= { block: true, ask: true, reason: decision.reason }
+    else if (decision.block) return withStop({ block: true, reason: decision.reason })
   }
-  return withStop(ask ?? { block: false, context: context.length > 0 ? context : undefined })
+  return withStop(defer ?? ask ?? { block: false, context: context.length > 0 ? context : undefined })
 }
 
 type SystemMessageSink = (message: string) => void
@@ -343,9 +348,10 @@ export function postToolFeedback(result: HookRunResult, eventName: string, isErr
   return lines
 }
 
-/** A blocked tool_call verdict carrying pi's `terminate` flag (#7715): with it set on
- * an all-terminating tool batch, pi skips the automatic follow-up model call that a plain
- * block would otherwise pay for. */
-export function blockedToolCall(reason: string | undefined): ToolCallEventResult {
-  return { block: true, reason, terminate: true }
+/** A blocked tool_call verdict. Claude shows a deny's reason to the model, which goes on
+ * working, so a plain block leaves pi's follow-up model call in place. `terminate` makes
+ * pi skip that call once every tool in the batch agrees, ending the run: only for blocks
+ * Claude ends the turn on. */
+export function blockedToolCall(reason: string | undefined, terminate: boolean): ToolCallEventResult {
+  return terminate ? { block: true, reason, terminate: true } : { block: true, reason }
 }

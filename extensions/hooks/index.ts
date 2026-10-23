@@ -621,7 +621,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     // "Operation aborted" in place of the reason; tool_execution_end stops the run once
     // the blocked result is in.
     deferToolStop(event.toolCallId, decision)
-    return blockedToolCall(decision.reason)
+    // A continue false stop also terminates, or pi starts the next model request before
+    // the abort lands. A declined prompt keeps ending the run, with the user there to say
+    // what next.
+    return blockedToolCall(decision.reason, decision.stop === true || decision.defer === true || (decision.ask === true && ctx.hasUI))
   })
 
   // A call these hooks allowed can still be blocked by a later extension (the first block
