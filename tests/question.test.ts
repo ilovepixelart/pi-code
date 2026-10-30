@@ -681,6 +681,41 @@ describe('question renderResult', () => {
 })
 
 describe('question overlay', () => {
+  it('should wrap the full question when it exceeds the available width', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'Which deployment target should we use?', options: OPTIONS })
+
+    const out = overlay.render(20)
+
+    expect(out.slice(1, 4), 'The full question should wrap with one-space indentation').toEqual([' Which deployment', ' target should we', ' use?'])
+  })
+
+  it('should wrap the full description when it exceeds the available width', () => {
+    const { overlay } = openOverlay(setup(), [{ label: 'Alpha', description: 'Deploy to the production cluster' }, { label: 'Beta' }])
+
+    const out = overlay.render(20)
+    const start = out.indexOf('> 1. Alpha') + 1
+
+    expect(out.slice(start, start + 3), 'The full description should wrap with five-space indentation').toEqual(['     Deploy to the', '     production', '     cluster'])
+  })
+
+  it('should preserve explicit line breaks when the question and description span paragraphs', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'First line\nSecond line', options: [{ label: 'Alpha', description: 'One line\nAnother line' }, { label: 'Beta' }] })
+
+    const out = overlay.render(60)
+
+    expect(out.slice(1, 3), 'Question line breaks should produce indented rows').toEqual([' First line', ' Second line'])
+    expect(out.slice(5, 7), 'Description line breaks should produce indented rows').toEqual(['     One line', '     Another line'])
+  })
+
+  it('should rewrap content when the terminal becomes wider', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'Which deployment target should we use?', options: OPTIONS })
+    overlay.render(20)
+
+    const out = overlay.render(60)
+
+    expect(out[1], 'Resizing should lay out the complete question at the new width').toBe(' Which deployment target should we use?')
+  })
+
   it('renders the question, the numbered options with descriptions, and the navigation hint', () => {
     const { overlay } = openOverlay(setup())
     const out = overlay.render(60)
