@@ -224,7 +224,7 @@ export default function gitCheckpointExtension(pi: ExtensionAPI) {
   let refSeq = 0
 
   function gitShadow(args: string[]): ReturnType<ExtensionAPI['exec']> {
-    if (!shadowDir || !workTree) return Promise.resolve({ stdout: '', stderr: 'shadow repo not initialized', code: 1, killed: false })
+    if (!shadowDir || !workTree) return Promise.resolve({ stdout: '', stderr: 'shadow repo not initialized', code: 1, killed: false, truncated: false })
     // A snapshot layer must be byte-faithful: with the host's autocrlf (the
     // Windows default) the shadow checkout would rewrite every restored file's
     // line endings, so conversion is pinned off for every shadow operation.

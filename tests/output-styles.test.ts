@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, loadStyles, parseStyle, pluginStyleDirs, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
+import outputStyles, { applyStyle, BUILTIN_STYLES_DIR, CODING_BASE_MARKER, LEGACY_CODING_BASE_MARKER, loadStyles, parseStyle, pluginStyleDirs, readActiveStyleName, styleDirs, styleForName } from '../extensions/output-styles.ts'
 import { addMcpServersSection, MCP_SERVERS_TEXT, runPromptChain } from './prompt-chain.ts'
 
 // The extension reads user-scope styles and settings from the home directory; point it
@@ -76,6 +76,11 @@ describe('applyStyle', () => {
     const applied = applyStyle('A custom SYSTEM.md prompt.', style)
     expect(applied).toContain('A custom SYSTEM.md prompt.')
     expect(applied).toContain('## Output Style: Writer')
+  })
+
+  it('replaces the coding instructions of a host from before pi 1.5', () => {
+    const legacy = `You are a coding agent.\n${LEGACY_CODING_BASE_MARKER}\n\n<cwd>/repo</cwd>`
+    expect(applyStyle(legacy, style)).toBe('## Output Style: Writer\n\nYou are a writing assistant.\n\n<cwd>/repo</cwd>')
   })
 
   it('matches the marker in the installed pi build', () => {
@@ -407,9 +412,20 @@ describe('extension wiring', () => {
     const prompt = await runPromptChain([await styleHandler(projectWithStyle('Explain', 'Explain everything.')), addMcpServersSection])
 
     expect(prompt).toContain('Explain everything.')
+    expect(prompt).not.toContain('running inside pi')
     expect(prompt).not.toContain(CODING_BASE_MARKER)
     expect(prompt).toContain('<cwd>')
     expect(prompt).toContain(MCP_SERVERS_TEXT)
+  })
+
+  it('replaces the coding instructions after an earlier extension forced the prompt', async () => {
+    const forcePrompt = (event: unknown) => ({ systemPrompt: `${(event as { systemPrompt: string }).systemPrompt}\n\nFORCED ADDITION` })
+
+    const prompt = await runPromptChain([forcePrompt, await styleHandler(projectWithStyle('Explain', 'Explain everything.'))])
+
+    expect(prompt).toContain('Explain everything.')
+    expect(prompt).toContain('FORCED ADDITION')
+    expect(prompt).not.toContain('running inside pi')
   })
 
   it('keeps the coding instructions for a style that asks to and a section a later extension adds', async () => {
