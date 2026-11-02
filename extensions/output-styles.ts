@@ -82,7 +82,9 @@ export const BUILTIN_STYLES_DIR = path.join(import.meta.dirname, 'internal', 'bu
 /** The last line of pi's default coding instructions. Everything after it (append
  * text, project context, skills, cwd, other extensions' additions) survives a style
  * replacement. Tracks pi's dist/core/system-prompt.js; a canary test pins it. */
-export const CODING_BASE_MARKER = '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)'
+export const CODING_BASE_MARKER = '- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.'
+/** The same line on hosts before pi 1.5, which peerDependencies still admit. */
+export const LEGACY_CODING_BASE_MARKER = '- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)'
 
 function styleText(style: OutputStyle): string {
   return `## Output Style: ${style.name}\n\n${style.body}`
@@ -93,8 +95,10 @@ function styleText(style: OutputStyle): string {
 export function applyStyle(systemPrompt: string, style: OutputStyle): string {
   const styleSection = styleText(style)
   if (!style.keepCodingInstructions) {
-    const idx = systemPrompt.indexOf(CODING_BASE_MARKER)
-    if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + CODING_BASE_MARKER.length)}`
+    for (const marker of [CODING_BASE_MARKER, LEGACY_CODING_BASE_MARKER]) {
+      const idx = systemPrompt.indexOf(marker)
+      if (idx !== -1) return `${styleSection}${systemPrompt.slice(idx + marker.length)}`
+    }
   }
   return `${systemPrompt}\n\n${styleSection}`
 }
