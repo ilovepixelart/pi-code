@@ -17,10 +17,11 @@
  * and session_compact, so the list survives compaction without external files.
  */
 
-import { StringEnum } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, SessionEntry, Theme } from '@earendil-works/pi-coding-agent'
 import { matchesKey, Text, type TUI, truncateToWidth } from '@earendil-works/pi-tui'
 import { type Static, Type } from 'typebox'
+
+import { stringEnum } from './internal/string-enum.ts'
 
 type TodoStatus = 'pending' | 'in_progress' | 'completed'
 type TodoAction = 'add' | 'start' | 'complete' | 'delete' | 'clear' | 'list'
@@ -54,7 +55,7 @@ export interface LegacyTodo {
 }
 
 const TodoParams = Type.Object({
-  action: StringEnum(['add', 'start', 'complete', 'delete', 'clear', 'list'] as const),
+  action: stringEnum(['add', 'start', 'complete', 'delete', 'clear', 'list'] as const),
   text: Type.Optional(Type.String({ description: 'Todo text (for add)' })),
   activeForm: Type.Optional(
     Type.String({

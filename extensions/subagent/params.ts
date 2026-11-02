@@ -5,9 +5,9 @@
  */
 
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
-import { StringEnum } from '@earendil-works/pi-ai'
 import { type Static, Type } from 'typebox'
 
+import { stringEnum } from '../internal/string-enum.ts'
 import type { SingleResult, SubagentDetails } from './types.ts'
 
 export const TaskItem = Type.Object({
@@ -22,7 +22,7 @@ export const ChainItem = Type.Object({
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process' })),
 })
 
-const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
+const AgentScopeSchema = stringEnum(['user', 'project', 'both'] as const, {
   description: 'Which agent directories to use. Omitted, an approved project resolves to "both" and an unapproved one to "user"; "both" includes project-local agents.',
 })
 
