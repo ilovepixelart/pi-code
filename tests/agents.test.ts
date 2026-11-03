@@ -161,76 +161,106 @@ describe('argument-scoped tool grants', () => {
     expect(discoverAgents(cwd, 'project').agents).toEqual([])
   })
 
+  /** A project with one agent file whose tools: line is `tools`; returns cwd and the file path. */
+  const projectWithTools = (tools: string): { cwd: string; file: string } => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    const file = join(cwd, '.claude', 'agents', 'scoped.md')
+    writeFileSync(file, `---\nname: scoped\ndescription: scoped agent\ntools:${tools}\n---\nlook around`)
+    return { cwd, file }
+  }
+  const warningsAbout = (warn: { mock: { calls: unknown[][] } }, file: string): string[] => warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes(file))
+
   it('warns about a rejected agent once, however often discovery runs', () => {
     // Discovery reruns on every roster build and subagent call; repeating the same
     // warning each time floods the terminal without telling the user anything new.
-    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-    writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Read, Bash(git log:*)\n---\nlook around')
+    const { cwd, file } = projectWithTools(' Read, Bash(git log:*)')
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      discoverAgents(cwd, 'project')
-      discoverAgents(cwd, 'project')
-      discoverAgents(cwd, 'project')
-      const mine = warn.mock.calls.filter(([message]) => String(message).includes(join(cwd, '.claude', 'agents', 'scoped.md')))
-      expect(mine).toHaveLength(1)
-      expect(String(mine[0][0])).toContain('PI_CODE_SUBAGENT_SCOPED_TOOLS=widen')
-    } finally {
-      warn.mockRestore()
-    }
+    discoverAgents(cwd, 'project')
+    discoverAgents(cwd, 'project')
+    discoverAgents(cwd, 'project')
+    const mine = warningsAbout(warn, file)
+    expect(mine).toHaveLength(1)
+    expect(mine[0]).toContain('PI_CODE_SUBAGENT_SCOPED_TOOLS=widen')
+  })
+
+  it('keeps the once-per-process dedupe across module instances', async () => {
+    // pi loads a fresh module instance for every session and /reload; a module-level
+    // set would let each one print the same warning again.
+    const { cwd, file } = projectWithTools(' Bash(git log:*)')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    discoverAgents(cwd, 'project')
+    vi.resetModules()
+    const fresh = await import('../extensions/subagent/agents.ts')
+    fresh.discoverAgents(cwd, 'project')
+    expect(warningsAbout(warn, file)).toHaveLength(1)
+  })
+
+  it('does not suggest widening for a tools field that does not parse', () => {
+    const { cwd, file } = projectWithTools('\n  - Read\n  - 5')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    const mine = warningsAbout(warn, file)
+    expect(mine).toHaveLength(1)
+    expect(mine[0]).toContain('could not be parsed')
+    expect(mine[0]).not.toContain('PI_CODE_SUBAGENT_SCOPED_TOOLS')
   })
 
   describe('with PI_CODE_SUBAGENT_SCOPED_TOOLS=widen', () => {
-    let saved: string | undefined
+    // tests/setup.ts restores process.env after every test.
     beforeEach(() => {
-      saved = process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
       process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = 'widen'
     })
-    afterEach(() => {
-      if (saved === undefined) delete process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
-      else process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = saved
-    })
 
-    it('keeps the agent, each scoped entry granting its whole tool', () => {
-      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Read, Bash(git log:*), Bash(git status)\n---\nlook around')
+    it('keeps the agent, each scoped entry granting its whole tool, without a warning', () => {
+      const { cwd, file } = projectWithTools(' Read, Bash(git log:*), Bash(git status)')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
       expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['read', 'bash'])
+      expect(warningsAbout(warn, file)).toEqual([])
+    })
+
+    it('widens path and domain scopes too', () => {
+      const { cwd } = projectWithTools(' Read(./src/**), WebFetch(domain:example.com)')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['read', 'web_fetch'])
     })
 
     it('still rejects a tools field that does not parse', () => {
       // Widening relaxes only the argument scope; a malformed grant is still not run unrestricted.
-      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-      writeFileSync(join(cwd, '.claude', 'agents', 'odd.md'), '---\nname: odd\ndescription: odd agent\ntools:\n  - Read\n  - 5\n---\nbody')
+      const { cwd } = projectWithTools('\n  - Read\n  - 5')
 
-      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'odd')).toBeUndefined()
+      expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    })
+
+    it('rejects a tool granted only an empty scope, which allows nothing', () => {
+      // `Bash()` matches no command; widening it would turn no access into full access.
+      const { cwd, file } = projectWithTools(' Read, Bash()')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      expect(discoverAgents(cwd, 'project').agents).toEqual([])
+      expect(warningsAbout(warn, file)[0]).toContain('empty scope')
+    })
+
+    it('widens a tool whose empty scope sits beside a real one', () => {
+      const { cwd } = projectWithTools(' Bash(), Bash(git log:*)')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['bash'])
     })
 
     it('accepts the value case-insensitively and with surrounding space', () => {
       process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = ' Widen '
-      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Bash(git log:*)\n---\nlook around')
+      const { cwd } = projectWithTools(' Bash(git log:*)')
 
       expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['bash'])
     })
   })
 
   it('rejects a scoped agent when the variable names anything but widen', () => {
-    const saved = process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
     process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = 'yes'
-    try {
-      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
-      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Bash(git log:*)\n---\nlook around')
+    const { cwd } = projectWithTools(' Bash(git log:*)')
 
-      expect(discoverAgents(cwd, 'project').agents).toEqual([])
-    } finally {
-      if (saved === undefined) delete process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
-      else process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = saved
-    }
+    expect(discoverAgents(cwd, 'project').agents).toEqual([])
   })
 
   it('keeps an agent whose disallowedTools is scoped, denying the whole tool', () => {

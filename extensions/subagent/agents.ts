@@ -15,6 +15,7 @@ import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
 import { findModel } from '../internal/model-lookup.ts'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
 import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
+import { sharedSlot } from '../internal/shared-slot.ts'
 import { errorMessage } from '../internal/values.ts'
 
 /**
@@ -48,22 +49,45 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
  * top of the tool, and an agent with the tool beats no agent. The PI_CODE_ prefix
  * keeps a checked-out repository's settings env from setting it.
  */
-function scopedToolsMode(): 'reject' | 'widen' {
+export function scopedToolsMode(): 'reject' | 'widen' {
   return process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS?.trim().toLowerCase() === 'widen' ? 'widen' : 'reject'
 }
 
-/** The agent grant: the tools field, widened when the user opted in. */
-function parseAgentTools(raw: unknown): string[] | undefined | null {
-  const tools = parseToolsField(raw, true)
-  if (tools !== null || scopedToolsMode() !== 'widen') return tools
-  return parseToolsField(raw, false)
+/**
+ * The agent grant, or why the definition is rejected. Widening applies only to a
+ * field that parses and whose sole obstacle is an argument scope. A tool whose every
+ * scoped entry is empty (`Bash()`) was granted nothing, so widening it would turn no
+ * access into full access; that definition stays rejected.
+ */
+function parseAgentTools(raw: unknown): { tools: string[] | undefined } | { rejected: string } {
+  const strict = parseToolsField(raw, true)
+  if (strict !== null) return { tools: strict }
+  const wide = parseToolsField(raw, false)
+  if (wide === null) return { rejected: 'its tools: grant could not be parsed' }
+  if (scopedToolsMode() !== 'widen') {
+    return {
+      rejected: 'its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it, or set PI_CODE_SUBAGENT_SCOPED_TOOLS=widen to run such agents with the whole tool)',
+    }
+  }
+  const grants = parseToolGrants(raw)
+  const ruleSets = grants ? [grants.bashRules, grants.domainRules, grants.agentRules, grants.skillRules, ...Object.values(grants.pathRules ?? {})] : []
+  if (ruleSets.some((rules) => rules?.every((rule) => rule === ''))) {
+    return { rejected: 'its tools: grant gives a tool only an empty scope like Bash(), which allows nothing and is not widened' }
+  }
+  return { tools: wide }
 }
 
 /** Discovery runs on every roster build and every subagent call, and a rejected file
  * is rejected again each time. Each distinct warning is printed once per process so
- * it informs without flooding the terminal. */
-const warned = new Set<string>()
+ * it informs without flooding the terminal. The set lives in a shared slot because pi
+ * loads a fresh module instance for every session and /reload. */
+const warnedSlot = sharedSlot<Set<string>>('subagent.agent-warnings')
 function warnOnce(message: string): void {
+  let warned = warnedSlot.get()
+  if (!warned) {
+    warned = new Set()
+    warnedSlot.set(warned)
+  }
   if (warned.has(message)) return
   warned.add(message)
   console.warn(message)
@@ -217,14 +241,15 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   const name = agentName(frontmatter, filePath, pluginName)
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
-  const tools = parseAgentTools(frontmatter.tools)
-  if (tools === null) {
+  const toolsGrant = parseAgentTools(frontmatter.tools)
+  if ('rejected' in toolsGrant) {
     // A silent drop reads as "agent does not exist"; say why, since an
     // argument-scoped grant is a shape Claude's own docs recommend but pi cannot
     // enforce on a child process.
-    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it, or set PI_CODE_SUBAGENT_SCOPED_TOOLS=widen to run such agents with the whole tool)`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: ${toolsGrant.rejected}`)
     return null
   }
+  const { tools } = toolsGrant
   const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
   if (disallowedTools === null) return null
   const isolation = parseIsolationField(frontmatter.isolation)

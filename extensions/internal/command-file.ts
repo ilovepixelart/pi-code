@@ -221,8 +221,8 @@ function buildPathRules(acc: GrantAccumulator): ToolGrants['pathRules'] {
  * granted and the scope is kept for commands.ts to enforce at tool_call time. Every
  * specifier Claude documents for an allow rule is kept: `Bash(cmd)`, the Read/Edit
  * path rules, `WebFetch(domain:host)` and `Agent(AgentName)`. The subagent's own
- * frontmatter parsing still rejects a scoped grant outright, since it has no
- * call-time seam to enforce one in.
+ * frontmatter parsing rejects a scoped grant by default, since it has no call-time
+ * seam to enforce one in (see scopedToolsMode in subagent/agents.ts for the opt-in).
  *
  * Claude's `Tool(param:value)` form is not among them: the permissions reference
  * confines it to deny and ask rules, and `allowed-tools` is an allow surface.
