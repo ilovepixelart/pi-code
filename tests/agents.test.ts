@@ -233,19 +233,24 @@ describe('argument-scoped tool grants', () => {
       expect(discoverAgents(cwd, 'project').agents).toEqual([])
     })
 
-    it('rejects a tool granted only an empty scope, which allows nothing', () => {
-      // `Bash()` matches no command; widening it would turn no access into full access.
-      const { cwd, file } = projectWithTools(' Read, Bash()')
+    // `Bash()` matches no command; widening it would turn no access into full access.
+    it.each([' Read, Bash()', ' Edit()', ' Write()', ' Read()', ' Agent()', ' Task()', ' Skill()', ' WebFetch()', ' Bash(  )'])('rejects a tool granted only an empty scope:%s', (tools) => {
+      const { cwd, file } = projectWithTools(tools)
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
       expect(discoverAgents(cwd, 'project').agents).toEqual([])
       expect(warningsAbout(warn, file)[0]).toContain('empty scope')
     })
 
-    it('widens a tool whose empty scope sits beside a real one', () => {
-      const { cwd } = projectWithTools(' Bash(), Bash(git log:*)')
+    it.each([
+      [' Bash(), Bash(git log:*)', ['bash']],
+      [' Bash, Bash()', ['bash']],
+      [' Task, Agent()', ['subagent']],
+      [' Edit(src/**), Write()', ['edit', 'write']],
+    ])('widens a tool whose empty scope sits beside a real or unscoped grant:%s', (tools, expected) => {
+      const { cwd } = projectWithTools(tools)
 
-      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['bash'])
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(expected)
     })
 
     it('accepts the value case-insensitively and with surrounding space', () => {
@@ -254,6 +259,16 @@ describe('argument-scoped tool grants', () => {
 
       expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['bash'])
     })
+  })
+
+  it('does not suggest widening for an empty scope, which widening would not accept', () => {
+    const { cwd, file } = projectWithTools(' Read, Bash()')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    const mine = warningsAbout(warn, file)
+    expect(mine[0]).toContain('empty scope')
+    expect(mine[0]).not.toContain('PI_CODE_SUBAGENT_SCOPED_TOOLS')
   })
 
   it('rejects a scoped agent when the variable names anything but widen', () => {

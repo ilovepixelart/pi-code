@@ -55,24 +55,26 @@ export function scopedToolsMode(): 'reject' | 'widen' {
 
 /**
  * The agent grant, or why the definition is rejected. Widening applies only to a
- * field that parses and whose sole obstacle is an argument scope. A tool whose every
- * scoped entry is empty (`Bash()`) was granted nothing, so widening it would turn no
- * access into full access; that definition stays rejected.
+ * field that parses and whose sole obstacle is an argument scope. A Bash, Read, Edit,
+ * Write, WebFetch, Agent or Skill grant whose every scope is the literal empty
+ * specifier (`Bash()`) was granted nothing, so widening it would turn no access into
+ * full access; that definition stays rejected in either mode. Other specifiers the
+ * call-time matchers would refuse (`WebFetch(example.com)`) are widened like any scope.
  */
 function parseAgentTools(raw: unknown): { tools: string[] | undefined } | { rejected: string } {
   const strict = parseToolsField(raw, true)
   if (strict !== null) return { tools: strict }
   const wide = parseToolsField(raw, false)
-  if (wide === null) return { rejected: 'its tools: grant could not be parsed' }
+  const grants = parseToolGrants(raw)
+  if (wide === null || !grants) return { rejected: 'its tools: grant could not be parsed' }
+  const ruleSets = [grants.bashRules, grants.domainRules, grants.agentRules, grants.skillRules, ...Object.values(grants.pathRules ?? {})]
+  if (ruleSets.some((rules) => rules?.every((rule) => rule === ''))) {
+    return { rejected: 'its tools: grant gives a tool only an empty scope like Bash(), which allows nothing' }
+  }
   if (scopedToolsMode() !== 'widen') {
     return {
       rejected: 'its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it, or set PI_CODE_SUBAGENT_SCOPED_TOOLS=widen to run such agents with the whole tool)',
     }
-  }
-  const grants = parseToolGrants(raw)
-  const ruleSets = grants ? [grants.bashRules, grants.domainRules, grants.agentRules, grants.skillRules, ...Object.values(grants.pathRules ?? {})] : []
-  if (ruleSets.some((rules) => rules?.every((rule) => rule === ''))) {
-    return { rejected: 'its tools: grant gives a tool only an empty scope like Bash(), which allows nothing and is not widened' }
   }
   return { tools: wide }
 }
