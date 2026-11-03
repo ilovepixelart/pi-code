@@ -25,8 +25,9 @@ import { errorMessage } from '../internal/values.ts'
  * An argument-scoped grant (`Bash(git log:*)`) cannot be expressed in the child's
  * --tools allowlist, and the parent cannot reach into the child process to enforce
  * it at call time the way commands.ts does, so on the granting side it is rejected
- * like any other unexpressable restriction. A scoped *disallow* only denies more
- * than the file asked for, which is the safe direction, so it stands.
+ * like any other unexpressable restriction, unless the user opts into widening (see
+ * scopedToolsMode). A scoped *disallow* only denies more than the file asked for,
+ * which is the safe direction, so it stands.
  */
 function parseToolsField(raw: unknown, granting: boolean): string[] | undefined | null {
   if (raw === undefined) return undefined
@@ -38,6 +39,34 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
   if (!grants) return null
   if (granting && grants.scopedEntries.length > 0) return null
   return grants.tools.length > 0 ? grants.tools : undefined
+}
+
+/**
+ * What to do with an agent whose `tools:` carries an argument scope. The default
+ * rejects the definition. `PI_CODE_SUBAGENT_SCOPED_TOOLS=widen` runs it with each
+ * scoped entry granting its whole base tool instead: the scope was a restriction on
+ * top of the tool, and an agent with the tool beats no agent. The PI_CODE_ prefix
+ * keeps a checked-out repository's settings env from setting it.
+ */
+function scopedToolsMode(): 'reject' | 'widen' {
+  return process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS?.trim().toLowerCase() === 'widen' ? 'widen' : 'reject'
+}
+
+/** The agent grant: the tools field, widened when the user opted in. */
+function parseAgentTools(raw: unknown): string[] | undefined | null {
+  const tools = parseToolsField(raw, true)
+  if (tools !== null || scopedToolsMode() !== 'widen') return tools
+  return parseToolsField(raw, false)
+}
+
+/** Discovery runs on every roster build and every subagent call, and a rejected file
+ * is rejected again each time. Each distinct warning is printed once per process so
+ * it informs without flooding the terminal. */
+const warned = new Set<string>()
+function warnOnce(message: string): void {
+  if (warned.has(message)) return
+  warned.add(message)
+  console.warn(message)
 }
 
 /**
@@ -167,7 +196,7 @@ function agentName(frontmatter: Record<string, unknown>, filePath: string, plugi
   if (pluginName !== undefined) return `${pluginName}:${declared || path.basename(filePath, '.md')}`
   if (!declared) return null
   if (declared.includes(':')) {
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: names cannot contain ":", which is reserved for plugin-scoped identifiers`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: names cannot contain ":", which is reserved for plugin-scoped identifiers`)
     return null
   }
   return declared
@@ -181,19 +210,19 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   } catch (error) {
     // Malformed YAML must not abort discovery for the whole directory, but a silent drop
     // reads as "that agent does not exist", so it is named like the other rejections here.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
     return null
   }
   const { frontmatter, body } = parsed
   const name = agentName(frontmatter, filePath, pluginName)
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
-  const tools = parseToolsField(frontmatter.tools, true)
+  const tools = parseAgentTools(frontmatter.tools)
   if (tools === null) {
     // A silent drop reads as "agent does not exist"; say why, since an
     // argument-scoped grant is a shape Claude's own docs recommend but pi cannot
     // enforce on a child process.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it)`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it, or set PI_CODE_SUBAGENT_SCOPED_TOOLS=widen to run such agents with the whole tool)`)
     return null
   }
   const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
@@ -202,7 +231,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   if (isolation === null) {
     // isolation is a declared safety boundary: an unrecognized value must reject
     // the definition rather than run the agent against the real checkout.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: isolation value ${JSON.stringify(frontmatter.isolation)} is not supported (only "worktree" is)`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: isolation value ${JSON.stringify(frontmatter.isolation)} is not supported (only "worktree" is)`)
     return null
   }
   return {

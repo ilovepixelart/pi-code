@@ -161,6 +161,78 @@ describe('argument-scoped tool grants', () => {
     expect(discoverAgents(cwd, 'project').agents).toEqual([])
   })
 
+  it('warns about a rejected agent once, however often discovery runs', () => {
+    // Discovery reruns on every roster build and subagent call; repeating the same
+    // warning each time floods the terminal without telling the user anything new.
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Read, Bash(git log:*)\n---\nlook around')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      discoverAgents(cwd, 'project')
+      discoverAgents(cwd, 'project')
+      discoverAgents(cwd, 'project')
+      const mine = warn.mock.calls.filter(([message]) => String(message).includes(join(cwd, '.claude', 'agents', 'scoped.md')))
+      expect(mine).toHaveLength(1)
+      expect(String(mine[0][0])).toContain('PI_CODE_SUBAGENT_SCOPED_TOOLS=widen')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  describe('with PI_CODE_SUBAGENT_SCOPED_TOOLS=widen', () => {
+    let saved: string | undefined
+    beforeEach(() => {
+      saved = process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
+      process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = 'widen'
+    })
+    afterEach(() => {
+      if (saved === undefined) delete process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
+      else process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = saved
+    })
+
+    it('keeps the agent, each scoped entry granting its whole tool', () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Read, Bash(git log:*), Bash(git status)\n---\nlook around')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['read', 'bash'])
+    })
+
+    it('still rejects a tools field that does not parse', () => {
+      // Widening relaxes only the argument scope; a malformed grant is still not run unrestricted.
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'odd.md'), '---\nname: odd\ndescription: odd agent\ntools:\n  - Read\n  - 5\n---\nbody')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'odd')).toBeUndefined()
+    })
+
+    it('accepts the value case-insensitively and with surrounding space', () => {
+      process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = ' Widen '
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Bash(git log:*)\n---\nlook around')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools).toEqual(['bash'])
+    })
+  })
+
+  it('rejects a scoped agent when the variable names anything but widen', () => {
+    const saved = process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
+    process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = 'yes'
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Bash(git log:*)\n---\nlook around')
+
+      expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    } finally {
+      if (saved === undefined) delete process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS
+      else process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS = saved
+    }
+  })
+
   it('keeps an agent whose disallowedTools is scoped, denying the whole tool', () => {
     // A scoped disallow can only be widened here, and denying more than the file
     // asked for is the safe direction, so the agent stands.
