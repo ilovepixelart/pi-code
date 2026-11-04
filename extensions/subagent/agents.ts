@@ -9,12 +9,13 @@ import { getAgentDir, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
-import { parseToolGrants } from '../internal/command-file.ts'
+import { coerceGrantItems, parseToolGrants } from '../internal/command-file.ts'
 import { claudeConfigDir } from '../internal/config-dir.ts'
 import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
 import { findModel } from '../internal/model-lookup.ts'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
 import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
+import { sharedSlot } from '../internal/shared-slot.ts'
 import { errorMessage } from '../internal/values.ts'
 
 /**
@@ -22,11 +23,12 @@ import { errorMessage } from '../internal/values.ts'
  * list. Anything else returns null: a restriction that failed to parse must not run
  * the agent unrestricted.
  *
- * An argument-scoped grant (`Bash(git log:*)`) cannot be expressed in the child's
- * --tools allowlist, and the parent cannot reach into the child process to enforce
- * it at call time the way commands.ts does, so on the granting side it is rejected
- * like any other unexpressable restriction. A scoped *disallow* only denies more
- * than the file asked for, which is the safe direction, so it stands.
+ * As in Claude Code, a scope on a grant (`Bash(git log:*)`, `Bash()`) does not limit
+ * the agent: it gets the base tool. An entry whose scope does not close is unrecognized
+ * and grants nothing. It is dropped, since a comma inside it would split into a real
+ * tool in the child's --tools; when nothing else is left it is kept verbatim so the
+ * launch refuses and names it (see unresolvedToolsError). A *disallow* entry denies
+ * the whole tool, scoped or not, which is the safe direction.
  */
 function parseToolsField(raw: unknown, granting: boolean): string[] | undefined | null {
   if (raw === undefined) return undefined
@@ -34,10 +36,28 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
   // inside it here too: split naively, `Bash(mv, write, cp)` grants the child pi's real `write`.
   if (raw !== null && !Array.isArray(raw) && typeof raw !== 'string') return null
   if (Array.isArray(raw) && raw.some((item) => typeof item !== 'string')) return null
-  const grants = parseToolGrants(raw)
-  if (!grants) return null
-  if (granting && grants.scopedEntries.length > 0) return null
-  return grants.tools.length > 0 ? grants.tools : undefined
+  const items = coerceGrantItems(raw)
+  if (!items) return null
+  const unclosed = granting ? items.filter((item) => item.includes('(') && !item.trim().endsWith(')')) : []
+  const tools = parseToolGrants(items.filter((item) => !unclosed.includes(item)))?.tools ?? []
+  if (tools.length > 0) return tools
+  return unclosed.length > 0 ? unclosed : undefined
+}
+
+/** Discovery runs on every roster build and every subagent call, and a rejected file
+ * is rejected again each time. Each distinct warning is printed once per process so
+ * it informs without flooding the terminal. The set lives in a shared slot because pi
+ * loads a fresh module instance for every session and /reload. */
+const warnedSlot = sharedSlot<Set<string>>('subagent.agent-warnings')
+function warnOnce(message: string): void {
+  let warned = warnedSlot.get()
+  if (!warned) {
+    warned = new Set()
+    warnedSlot.set(warned)
+  }
+  if (warned.has(message)) return
+  warned.add(message)
+  console.warn(message)
 }
 
 /**
@@ -167,7 +187,7 @@ function agentName(frontmatter: Record<string, unknown>, filePath: string, plugi
   if (pluginName !== undefined) return `${pluginName}:${declared || path.basename(filePath, '.md')}`
   if (!declared) return null
   if (declared.includes(':')) {
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: names cannot contain ":", which is reserved for plugin-scoped identifiers`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: names cannot contain ":", which is reserved for plugin-scoped identifiers`)
     return null
   }
   return declared
@@ -196,7 +216,7 @@ function readAgentFile(content: string, filePath: string, pluginName?: string): 
     if (pluginName !== undefined) return { frontmatter: {}, body: bodyAfterFrontmatter(content) }
     // Malformed YAML must not abort discovery for the whole directory, but a silent drop
     // reads as "that agent does not exist", so it is named like the other rejections here.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
     return null
   }
 }
@@ -212,10 +232,8 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   if (!name || !description) return null
   const tools = parseToolsField(frontmatter.tools, true)
   if (tools === null) {
-    // A silent drop reads as "agent does not exist"; say why, since an
-    // argument-scoped grant is a shape Claude's own docs recommend but pi cannot
-    // enforce on a child process.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it)`)
+    // A silent drop reads as "agent does not exist"; say why.
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be parsed`)
     return null
   }
   const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
@@ -224,7 +242,7 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   if (isolation === null) {
     // isolation is a declared safety boundary: an unrecognized value must reject
     // the definition rather than run the agent against the real checkout.
-    console.warn(`pi-code-subagent: ignoring agent ${filePath}: isolation value ${JSON.stringify(frontmatter.isolation)} is not supported (only "worktree" is)`)
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: isolation value ${JSON.stringify(frontmatter.isolation)} is not supported (only "worktree" is)`)
     return null
   }
   return {

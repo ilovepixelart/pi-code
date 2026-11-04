@@ -273,21 +273,17 @@ describe('discoverAgents', () => {
     expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['read', 'find', 'bash', 'web_fetch', 'notebookedit'])
   })
 
-  it('rejects an agent whose tools entry hides grants inside a scope', () => {
+  it('keeps a comma inside a scope from granting another tool', () => {
     writeAgent(piUserDir, 'mv.md', { name: 'mv', description: 'scoped bash', tools: 'Bash(mv, write, cp)' })
 
-    // Splitting on the commas used to hand the child pi's real write tool; dropping
-    // the scope hands it unscoped bash. Neither is what the file granted, so the
-    // definition is rejected like any other unexpressable restriction.
-    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)).toEqual([])
+    // Splitting on the commas used to hand the child pi's real write tool.
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['bash'])
   })
 
-  it('rejects an agent whose tools grant is argument-scoped', () => {
+  it('grants the base tool for an argument-scoped entry', () => {
     writeAgent(piUserDir, 'scoped.md', { name: 'scoped', description: 'scoped tools', tools: 'Bash(git add:*), Read' })
 
-    // `Bash(git add:*)` cannot be expressed in the child's --tools allowlist, and
-    // granting unscoped bash instead widens what the file allowed.
-    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)).toEqual([])
+    expect(nonBuiltin(discoverAgents(cwd, 'user').agents)[0].tools).toEqual(['bash', 'read'])
   })
 
   it('leaves tools undefined when the tools field lists nothing usable', () => {

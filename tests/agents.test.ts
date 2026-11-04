@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
-import { agentHooksEnv } from '../extensions/subagent/child.ts'
+import { agentHooksEnv, unresolvedToolsError } from '../extensions/subagent/child.ts'
 
 // The 'both' scope also scans the user's agent dirs; point them at throwaway dirs so
 // an agent in the developer's real ~/.claude/agents or ~/.pi/agent/agents cannot
@@ -222,15 +222,114 @@ describe('plugin agents', () => {
 })
 
 describe('argument-scoped tool grants', () => {
-  it('rejects an agent whose tools grant is scoped to arguments', () => {
-    // `Bash(git log:*)` cannot be expressed in the child's --tools allowlist, and
-    // dropping the scope hands the agent more than the file granted. Rejected like
-    // any other restriction that failed to parse.
+  /** A project with one agent file whose tools: line is `tools`; returns cwd and the file path. */
+  const projectWithTools = (tools: string): { cwd: string; file: string } => {
     const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
-    writeFileSync(join(cwd, '.claude', 'agents', 'scoped.md'), '---\nname: scoped\ndescription: scoped agent\ntools: Read, Bash(git log:*)\n---\nlook around')
+    const file = join(cwd, '.claude', 'agents', 'scoped.md')
+    writeFileSync(file, `---\nname: scoped\ndescription: scoped agent\ntools:${tools}\n---\nlook around`)
+    return { cwd, file }
+  }
+  const warningsAbout = (warn: { mock: { calls: unknown[][] } }, file: string): string[] => warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes(file))
+  const loadedTools = (tools: string): string[] | undefined => discoverAgents(projectWithTools(tools).cwd, 'project').agents.find((a) => a.name === 'scoped')?.tools
+
+  // Measured on Claude Code 2.1.318: a scope in an agent's tools: neither restricts
+  // nor pre-approves a call, and the agent loads with the base tool.
+  it.each([
+    [' Read, Bash(git log:*)', ['read', 'bash']],
+    [' Bash(touch a.txt)', ['bash']],
+    [' Bash(*)', ['bash']],
+    [' Bash()', ['bash']],
+    [' Read(src/**)', ['read']],
+    [' WebFetch(domain:example.com)', ['web_fetch']],
+    [' Agent(worker, researcher)', ['subagent']],
+    [' Task(worker)', ['subagent']],
+    [' Agent()', ['subagent']],
+    [' Read()', ['read']],
+    [' Grep()', ['grep']],
+    [' WebSearch(foo)', ['web_search']],
+    ['\n  - Read\n  - "Bash(git log:*) "', ['read', 'bash']],
+  ])('loads an agent with the base tool for the scoped entry:%s', (tools, expected) => {
+    expect(loadedTools(tools)).toEqual(expected)
+  })
+
+  it('does not warn about an agent with a scoped entry', () => {
+    const { cwd, file } = projectWithTools(' Bash(git log:*)')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    discoverAgents(cwd, 'project')
+
+    expect(warningsAbout(warn, file)).toEqual([])
+  })
+
+  // Measured on Claude Code 2.1.318: an entry whose scope does not close is
+  // unrecognized and resolves to nothing, whatever follows it.
+  it.each([
+    [' Read, Bash(', ['read']],
+    [' Read, Bash(foo', ['read']],
+    [' Read, Bash(foo)bar', ['read']],
+    [' Bash, Bash(', ['bash']],
+  ])('drops an unclosed entry beside a valid one:%s', (tools, expected) => {
+    expect(loadedTools(tools)).toEqual(expected)
+  })
+
+  it('keeps a tool named after an unclosed scope from reaching the child', () => {
+    // The comma stays inside the open scope, so this is one bad entry. Passed on to
+    // the child's comma-separated --tools, it would grant write.
+    expect(loadedTools(' Read, Bash(foo, Write')).toEqual(['read'])
+  })
+
+  it.each([
+    [' Bash(', 'Bash('],
+    [' Bash(foo, Read', 'Bash(foo, Read'],
+  ])('refuses to launch when only an unclosed entry is listed:%s', (tools, named) => {
+    const { cwd } = projectWithTools(tools)
+    const agent = discoverAgents(cwd, 'project').agents.find((a) => a.name === 'scoped')
+
+    expect(agent && unresolvedToolsError(agent)).toContain(named)
+  })
+
+  it('denies the whole tool for an unclosed disallowedTools entry', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'careful.md'), '---\nname: careful\ndescription: careful agent\ndisallowedTools: Bash(\n---\nbe careful')
+
+    expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'careful')?.disallowedTools).toEqual(['bash'])
+  })
+
+  it('rejects a tools field that does not parse, naming the reason', () => {
+    const { cwd, file } = projectWithTools('\n  - Read\n  - 5')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    expect(warningsAbout(warn, file)[0]).toContain('could not be parsed')
+  })
+
+  it('warns about a rejected agent once, however often discovery runs', () => {
+    // Discovery reruns on every roster build and subagent call; repeating the same
+    // warning each time floods the terminal without telling the user anything new.
+    const { cwd, file } = projectWithTools('\n  - Read\n  - 5')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    discoverAgents(cwd, 'project')
+    discoverAgents(cwd, 'project')
+    discoverAgents(cwd, 'project')
+
+    expect(warningsAbout(warn, file)).toHaveLength(1)
+  })
+
+  it('keeps the once-per-process dedupe across module instances', async () => {
+    // pi loads a fresh module instance for every session and /reload; a module-level
+    // set would let each one print the same warning again.
+    const { cwd, file } = projectWithTools('\n  - Read\n  - 5')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    discoverAgents(cwd, 'project')
+    vi.resetModules()
+    const fresh = await import('../extensions/subagent/agents.ts')
+    fresh.discoverAgents(cwd, 'project')
+
+    expect(warningsAbout(warn, file)).toHaveLength(1)
   })
 
   it('keeps an agent whose disallowedTools is scoped, denying the whole tool', () => {
