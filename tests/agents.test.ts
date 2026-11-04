@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
-import { unresolvedToolsError } from '../extensions/subagent/child.ts'
+import { agentHooksEnv, unresolvedToolsError } from '../extensions/subagent/child.ts'
 
 // The 'both' scope also scans the user's agent dirs; point them at throwaway dirs so
 // an agent in the developer's real ~/.claude/agents or ~/.pi/agent/agents cannot
@@ -147,6 +147,77 @@ describe('plugin agents', () => {
     const agents = discoverAgents(cwd, 'user').agents
     expect(agents.find((a) => a.name === 'auditor')?.systemPrompt.trim()).toBe('USER')
     expect(agents.find((a) => a.name === 'toolkit:auditor')?.systemPrompt.trim()).toBe('PLUGIN')
+  })
+
+  // Measured on Claude Code 2.1.318 with --plugin-dir, beside a project agent as control.
+  describe('fields Claude Code ignores on a plugin agent', () => {
+    const loadPluginAgent = (file: string, content: string, name: string) => {
+      const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'toolkit', '2.0.0')
+      mkdirSync(join(root, 'agents'), { recursive: true })
+      writeFileSync(join(root, 'agents', file), content)
+      mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolkit: true } }))
+      return discoverAgents(mkdtempSync(join(tmpdir(), 'agents-')), 'user').agents.find((a) => a.name === name)
+    }
+    const hooked = 'hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./guard.sh\n'
+
+    it('drops hooks from a plugin agent, so none reach the child', () => {
+      const agent = loadPluginAgent('hooky.md', `---\nname: hooky\ndescription: d\ntools: Bash\n${hooked}---\nb`, 'toolkit:hooky')
+
+      expect(agent?.tools).toEqual(['bash'])
+      expect(agent && agentHooksEnv(agent, 'id')).toEqual({})
+    })
+
+    it('keeps hooks on a project agent', () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'hooky.md'), `---\nname: hooky\ndescription: d\ntools: Bash\n${hooked}---\nb`)
+      const agent = discoverAgents(cwd, 'project').agents.find((a) => a.name === 'hooky')
+
+      expect(agent && Object.keys(agentHooksEnv(agent, 'id'))).toEqual(['PI_CODE_AGENT_HOOKS'])
+    })
+
+    it('ignores permissionMode: plan on a plugin agent, leaving every tool', () => {
+      const agent = loadPluginAgent('planall.md', '---\nname: planall\ndescription: d\npermissionMode: plan\n---\nb', 'toolkit:planall')
+
+      expect(agent).toBeDefined()
+      expect(agent?.tools).toBeUndefined()
+    })
+
+    it('keeps permissionMode: plan read-only on a project agent', () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'planall.md'), '---\nname: planall\ndescription: d\npermissionMode: plan\n---\nb')
+
+      expect(discoverAgents(cwd, 'project').agents.find((a) => a.name === 'planall')?.tools).toEqual(['read', 'grep', 'find', 'ls'])
+    })
+
+    it('loads a plugin agent with no description under the plugin default', () => {
+      expect(loadPluginAgent('nodesc.md', '---\nname: nodesc\n---\nb', 'toolkit:nodesc')?.description).toBe('Agent from toolkit plugin')
+    })
+
+    it('treats an empty plugin agent description as missing', () => {
+      expect(loadPluginAgent('blank.md', '---\nname: blank\ndescription: ""\n---\nb', 'toolkit:blank')?.description).toBe('Agent from toolkit plugin')
+    })
+
+    it('loads a plugin agent whose frontmatter does not parse, with every field ignored', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const agent = loadPluginAgent('broken.md', '---\nname: [unclosed\ntools: Read\ndescription: d\n---\nthe body', 'toolkit:broken')
+
+      expect(agent?.description).toBe('Agent from toolkit plugin')
+      expect(agent?.tools).toBeUndefined()
+      expect(agent?.systemPrompt).toBe('the body')
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('still rejects a project agent whose frontmatter does not parse', () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+      mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+      writeFileSync(join(cwd, '.claude', 'agents', 'broken.md'), '---\nname: [unclosed\ndescription: d\n---\nb')
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      expect(discoverAgents(cwd, 'project').agents).toEqual([])
+    })
   })
 })
 

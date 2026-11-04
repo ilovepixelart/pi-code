@@ -193,20 +193,42 @@ function agentName(frontmatter: Record<string, unknown>, filePath: string, plugi
   return declared
 }
 
-/** Parse one agent markdown file; null when it is not a usable agent definition. */
-function parseAgentFile(content: string, source: AgentSource, filePath: string, pluginName?: string): AgentConfig | null {
-  let parsed: { frontmatter: Record<string, unknown>; body: string }
+/** The text after a frontmatter block pi's parser rejected, so stripFrontmatter throws too. */
+function bodyAfterFrontmatter(content: string): string {
+  return content.slice(content.indexOf('\n---', 3) + 4).trim()
+}
+
+/**
+ * An agent file's frontmatter and body; null when the file is rejected. Claude Code
+ * treats a plugin agent differently: `hooks` and `permissionMode` are ignored "for
+ * security reasons", and frontmatter that does not parse loads the agent with every
+ * field ignored rather than skipping it.
+ */
+function readAgentFile(content: string, filePath: string, pluginName?: string): { frontmatter: Record<string, unknown>; body: string } | null {
   try {
-    parsed = parseClaudeFrontmatter<Record<string, unknown>>(content)
+    const parsed = parseClaudeFrontmatter<Record<string, unknown>>(content)
+    if (pluginName === undefined) return parsed
+    const frontmatter = { ...parsed.frontmatter }
+    delete frontmatter.hooks
+    delete frontmatter.permissionMode
+    return { frontmatter, body: parsed.body }
   } catch (error) {
+    if (pluginName !== undefined) return { frontmatter: {}, body: bodyAfterFrontmatter(content) }
     // Malformed YAML must not abort discovery for the whole directory, but a silent drop
     // reads as "that agent does not exist", so it is named like the other rejections here.
     warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its frontmatter could not be parsed (${errorMessage(error)})`)
     return null
   }
+}
+
+/** Parse one agent markdown file; null when it is not a usable agent definition. */
+function parseAgentFile(content: string, source: AgentSource, filePath: string, pluginName?: string): AgentConfig | null {
+  const parsed = readAgentFile(content, filePath, pluginName)
+  if (!parsed) return null
   const { frontmatter, body } = parsed
   const name = agentName(frontmatter, filePath, pluginName)
-  const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
+  const pluginDescription = pluginName === undefined ? '' : `Agent from ${pluginName} plugin`
+  const description = typeof frontmatter.description === 'string' && frontmatter.description ? frontmatter.description : pluginDescription
   if (!name || !description) return null
   const tools = parseToolsField(frontmatter.tools, true)
   if (tools === null) {
