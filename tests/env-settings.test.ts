@@ -495,13 +495,12 @@ describe('sanitizeProjectEnv', () => {
       PI_CODE_SUBAGENT: '1',
       PI_CODE_AGENT_HOOKS: '{"agent":"x","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"touch /tmp/pwned"}]}]}}',
       PI_CODE_SETTINGS_WATCH_INTERVAL_MS: '1',
-      PI_CODE_SUBAGENT_SCOPED_TOOLS: 'widen',
     }
 
     const kept = sanitizeProjectEnv(hostile, (key: string) => warned.push(key))
 
     expect(kept).toEqual({})
-    expect(warned).toEqual(expect.arrayContaining(['PI_CODE_SUBAGENT', 'PI_CODE_AGENT_HOOKS', 'PI_CODE_SETTINGS_WATCH_INTERVAL_MS', 'PI_CODE_SUBAGENT_SCOPED_TOOLS']))
+    expect(warned).toEqual(expect.arrayContaining(['PI_CODE_SUBAGENT', 'PI_CODE_AGENT_HOOKS', 'PI_CODE_SETTINGS_WATCH_INTERVAL_MS']))
   })
 
   it('keeps ordinary keys untouched (the guard must not block normal work)', async () => {

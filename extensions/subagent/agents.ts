@@ -9,7 +9,7 @@ import { getAgentDir, stripFrontmatter } from '@earendil-works/pi-coding-agent'
 // The same mapping a command's `allowed-tools` gets: an agent's `tools:` is the same
 // Claude field, and `--tools` is an exact-name allowlist, so a name pi has no tool for
 // is not merely ignored, it narrows the child's registry.
-import { parseToolGrants } from '../internal/command-file.ts'
+import { coerceGrantItems, parseToolGrants } from '../internal/command-file.ts'
 import { claudeConfigDir } from '../internal/config-dir.ts'
 import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
 import { findModel } from '../internal/model-lookup.ts'
@@ -23,12 +23,12 @@ import { errorMessage } from '../internal/values.ts'
  * list. Anything else returns null: a restriction that failed to parse must not run
  * the agent unrestricted.
  *
- * An argument-scoped grant (`Bash(git log:*)`) cannot be expressed in the child's
- * --tools allowlist, and the parent cannot reach into the child process to enforce
- * it at call time the way commands.ts does, so on the granting side it is rejected
- * like any other unexpressable restriction, unless the user opts into widening (see
- * scopedToolsMode). A scoped *disallow* only denies more than the file asked for,
- * which is the safe direction, so it stands.
+ * As in Claude Code, a scope on a grant (`Bash(git log:*)`, `Bash()`) does not limit
+ * the agent: it gets the base tool. An entry whose scope does not close is unrecognized
+ * and grants nothing. It is dropped, since a comma inside it would split into a real
+ * tool in the child's --tools; when nothing else is left it is kept verbatim so the
+ * launch refuses and names it (see unresolvedToolsError). A *disallow* entry denies
+ * the whole tool, scoped or not, which is the safe direction.
  */
 function parseToolsField(raw: unknown, granting: boolean): string[] | undefined | null {
   if (raw === undefined) return undefined
@@ -36,47 +36,12 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
   // inside it here too: split naively, `Bash(mv, write, cp)` grants the child pi's real `write`.
   if (raw !== null && !Array.isArray(raw) && typeof raw !== 'string') return null
   if (Array.isArray(raw) && raw.some((item) => typeof item !== 'string')) return null
-  const grants = parseToolGrants(raw)
-  if (!grants) return null
-  if (granting && grants.scopedEntries.length > 0) return null
-  return grants.tools.length > 0 ? grants.tools : undefined
-}
-
-/**
- * What to do with an agent whose `tools:` carries an argument scope. The default
- * rejects the definition. `PI_CODE_SUBAGENT_SCOPED_TOOLS=widen` runs it with each
- * scoped entry granting its whole base tool instead: the scope was a restriction on
- * top of the tool, and an agent with the tool beats no agent. The PI_CODE_ prefix
- * keeps a checked-out repository's settings env from setting it.
- */
-export function scopedToolsMode(): 'reject' | 'widen' {
-  return process.env.PI_CODE_SUBAGENT_SCOPED_TOOLS?.trim().toLowerCase() === 'widen' ? 'widen' : 'reject'
-}
-
-/**
- * The agent grant, or why the definition is rejected. Widening applies only to a
- * field that parses and whose sole obstacle is an argument scope. A Bash, Read, Edit,
- * Write, WebFetch, Agent or Skill grant whose every scope is the literal empty
- * specifier (`Bash()`) was granted nothing, so widening it would turn no access into
- * full access; that definition stays rejected in either mode. Other specifiers the
- * call-time matchers would refuse (`WebFetch(example.com)`) are widened like any scope.
- */
-function parseAgentTools(raw: unknown): { tools: string[] | undefined } | { rejected: string } {
-  const strict = parseToolsField(raw, true)
-  if (strict !== null) return { tools: strict }
-  const wide = parseToolsField(raw, false)
-  const grants = parseToolGrants(raw)
-  if (wide === null || !grants) return { rejected: 'its tools: grant could not be parsed' }
-  const ruleSets = [grants.bashRules, grants.domainRules, grants.agentRules, grants.skillRules, ...Object.values(grants.pathRules ?? {})]
-  if (ruleSets.some((rules) => rules?.every((rule) => rule === ''))) {
-    return { rejected: 'its tools: grant gives a tool only an empty scope like Bash(), which allows nothing' }
-  }
-  if (scopedToolsMode() !== 'widen') {
-    return {
-      rejected: 'its tools: grant could not be applied (an argument scope like Bash(git log:*) cannot be enforced on a subagent; grant the whole tool or drop it, or set PI_CODE_SUBAGENT_SCOPED_TOOLS=widen to run such agents with the whole tool)',
-    }
-  }
-  return { tools: wide }
+  const items = coerceGrantItems(raw)
+  if (!items) return null
+  const unclosed = granting ? items.filter((item) => item.includes('(') && !item.trim().endsWith(')')) : []
+  const tools = parseToolGrants(items.filter((item) => !unclosed.includes(item)))?.tools ?? []
+  if (tools.length > 0) return tools
+  return unclosed.length > 0 ? unclosed : undefined
 }
 
 /** Discovery runs on every roster build and every subagent call, and a rejected file
@@ -243,15 +208,12 @@ function parseAgentFile(content: string, source: AgentSource, filePath: string, 
   const name = agentName(frontmatter, filePath, pluginName)
   const description = typeof frontmatter.description === 'string' ? frontmatter.description : ''
   if (!name || !description) return null
-  const toolsGrant = parseAgentTools(frontmatter.tools)
-  if ('rejected' in toolsGrant) {
-    // A silent drop reads as "agent does not exist"; say why, since an
-    // argument-scoped grant is a shape Claude's own docs recommend but pi cannot
-    // enforce on a child process.
-    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: ${toolsGrant.rejected}`)
+  const tools = parseToolsField(frontmatter.tools, true)
+  if (tools === null) {
+    // A silent drop reads as "agent does not exist"; say why.
+    warnOnce(`pi-code-subagent: ignoring agent ${filePath}: its tools: grant could not be parsed`)
     return null
   }
-  const { tools } = toolsGrant
   const disallowedTools = parseToolsField(frontmatter.disallowedTools, false)
   if (disallowedTools === null) return null
   const isolation = parseIsolationField(frontmatter.isolation)

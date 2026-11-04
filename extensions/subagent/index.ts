@@ -29,7 +29,7 @@ import { addPromptSection } from '../internal/prompt-options.ts'
 import { sessionHasTurns, sessionMailbox } from '../internal/session-mailbox.ts'
 import { SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
 import { skillDirs } from '../skills.ts'
-import { type AgentConfig, type AgentScope, discoverAgents, scopedToolsMode } from './agents.ts'
+import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { activeBackgroundRuns, allBackgroundRuns, backgroundStatusText, cancelAllBackgroundRuns } from './background.ts'
 import { buildHookAgent, forkAgent, setKnownMcpAliases } from './child.ts'
 import { checkProjectAgentGate, type ModeContext, runBackgroundMode, runChainMode, runParallelMode, runSingleMode, wantsBackground } from './modes.ts'
@@ -221,7 +221,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // not appear mid-turn and their descriptions are project text.
   pi.on('before_agent_start', (event, ctx) => {
     const scope: AgentScope = isProjectApprovedSilently(ctx) ? 'both' : 'user'
-    const key = `${scope}\n${ctx.cwd}\n${scopedToolsMode()}`
+    const key = `${scope}\n${ctx.cwd}`
     if (rosterCache?.key !== key) rosterCache = { key, agents: discoverAgents(ctx.cwd, scope).agents }
     const { agents } = rosterCache
     if (agents.length === 0) return

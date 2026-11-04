@@ -168,7 +168,7 @@ function argRules(acc: GrantAccumulator, tool: ArgRuleTool): string[] | undefine
 /** Coerce a raw grant value to its string entries: a YAML list stays a list, a
  * comma-separated string is split, and anything else (or a list with a non-string
  * member) is rejected as undefined, the same "not a grant" signal as an absent field. */
-function coerceGrantItems(raw: unknown): string[] | undefined {
+export function coerceGrantItems(raw: unknown): string[] | undefined {
   let items: unknown[]
   if (Array.isArray(raw)) items = raw
   else if (typeof raw === 'string') items = toolEntries(raw)
@@ -220,9 +220,8 @@ function buildPathRules(acc: GrantAccumulator): ToolGrants['pathRules'] {
  * pi's active-tool list is per tool, with no argument dimension, so the base tool is
  * granted and the scope is kept for commands.ts to enforce at tool_call time. Every
  * specifier Claude documents for an allow rule is kept: `Bash(cmd)`, the Read/Edit
- * path rules, `WebFetch(domain:host)` and `Agent(AgentName)`. The subagent's own
- * frontmatter parsing rejects a scoped grant by default, since it has no call-time
- * seam to enforce one in (see scopedToolsMode in subagent/agents.ts for the opt-in).
+ * path rules, `WebFetch(domain:host)` and `Agent(AgentName)`. An agent's `tools:` uses
+ * only the base tool, since a scope there does not limit the agent in Claude Code.
  *
  * Claude's `Tool(param:value)` form is not among them: the permissions reference
  * confines it to deny and ask rules, and `allowed-tools` is an allow surface.
