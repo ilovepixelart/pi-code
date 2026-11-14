@@ -205,6 +205,18 @@ describe('parseCommandFile', () => {
     expect(parsed.bashRules).toEqual(['cat, edit, tail'])
   })
 
+  it('keeps Monitor scopes, joined with the Bash scopes that also judge a monitor command', () => {
+    const rules = (allowedTools: string) => parseCommandFile(`---\nallowed-tools: ${allowedTools}\n---\nWatch.`)
+    expect(rules('Bash(git *), Monitor(tail *)')).toMatchObject({ allowedTools: ['bash', 'monitor'], bashRules: ['git *'], monitorRules: ['git *', 'tail *'] })
+    expect(rules('Monitor(tail *)').monitorRules).toEqual(['tail *'])
+    expect(rules('Bash(git *), Monitor').monitorRules).toEqual(['git *'])
+    expect(rules('Bash, Monitor(tail *)').monitorRules).toBeUndefined()
+    expect(rules('Monitor, Monitor(tail *)').monitorRules).toBeUndefined()
+    expect(rules('Monitor').monitorRules).toBeUndefined()
+    // An empty scope matches nothing; it must not read as the unscoped grant.
+    expect(rules('Monitor()').monitorRules).toEqual([''])
+  })
+
   it('reads a YAML block list, which Claude command files also use', () => {
     const md = ['---', 'allowed-tools:', '  - Bash(git add:*)', '  - Read', '---', 'Stage it.'].join('\n')
 

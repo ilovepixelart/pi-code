@@ -103,6 +103,15 @@ function scopeVerdict(rules: string[] | undefined, tool: string, subjectLabel: s
   return { block: true, reason: `allowed-tools: ${tool} is scoped for this command.\nAllowed: ${rules.join(', ')}\n${subjectLabel}: ${subject}` }
 }
 
+/** The pi tools whose scope judges a shell command. */
+const COMMAND_SCOPED_TOOLS = new Set(['bash', 'monitor'])
+
+/** A command-scoped tool's rules for the run: none unless the grant kept the tool, each
+ * rule ${CLAUDE_*}-substituted like the body. */
+function commandScope(tool: string, rules: string[] | undefined, granted: string[], vars: Record<string, string | undefined>): string[] | undefined {
+  return granted.includes(tool) ? rules?.map((rule) => substituteVars(rule, vars)) : undefined
+}
+
 /** The path rules that survive an allowed-tools intersection: only the tools the
  * grant kept get their scopes, each rule ${CLAUDE_*}-substituted like the body. */
 function scopedPathRules(pathRules: Partial<Record<PathRuleTool, string[]>>, granted: string[], vars: Record<string, string | undefined>): Partial<Record<PathRuleTool, string[]>> {
@@ -340,6 +349,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
   let tookAway = new Set<string>()
   /** `Bash(...)` scopes enforced while that run lasts; lifted with the restriction. */
   let pendingBashRules: string[] | undefined
+  /** `Bash(...)` and `Monitor(...)` scopes a monitor command is held to, the same way. */
+  let pendingMonitorRules: string[] | undefined
   /** `WebFetch(domain:...)` scopes enforced the same way. */
   let pendingDomainRules: string[] | undefined
   /** `Agent(...)`/`Task(...)` agent-name scopes enforced the same way. */
@@ -403,6 +414,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
     await effortOverride.settle()
   })
 
+  const commandRules = (tool: string): string[] | undefined => (tool === 'monitor' ? pendingMonitorRules : pendingBashRules)
+
   // The active-tool set has no argument dimension, so a scoped grant hands the turn
   // the whole tool; the scope is enforced here instead, when the call arrives. Same
   // steering-not-sandbox caveat as plan mode's guard.
@@ -415,10 +428,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
   pi.on('tool_call', (event, ctx) => {
     const input = event.input as Record<string, unknown>
     const text = (value: unknown): string => (typeof value === 'string' ? value : '')
-    // The four scalar-scope tools share one shape: rules in force, the part of the call
+    // The scalar-scope tools share one shape: rules in force, the part of the call
     // they judge, and the sentence naming both when it blocks. One helper keeps the arms
     // from drifting; only the subject and the matcher differ.
-    if (event.toolName === 'bash') return scopeVerdict(pendingBashRules, 'bash', 'Command', text(input.command), (rules) => matchesBashRules(text(input.command), rules))
+    if (COMMAND_SCOPED_TOOLS.has(event.toolName)) return scopeVerdict(commandRules(event.toolName), event.toolName, 'Command', text(input.command), (rules) => matchesBashRules(text(input.command), rules))
     if (event.toolName === 'web_fetch') return scopeVerdict(pendingDomainRules, 'web_fetch', 'Url', text(input.url), (rules) => matchesDomainRules(text(input.url), rules))
     if (event.toolName === 'subagent') {
       const names = agentNamesIn(input)
@@ -461,6 +474,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
    * and write gone) and a tool registered during the run (dropped until a /reload). */
   function liftToolScope(): void {
     pendingBashRules = undefined
+    pendingMonitorRules = undefined
     pendingDomainRules = undefined
     pendingAgentRules = undefined
     pendingSkillRules = undefined
@@ -494,7 +508,8 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // lifts an earlier command's scopes rather than stacking under them. Rules get
     // the same ${CLAUDE_*} substitution as the body, so a rule can name a bundled
     // script by its real path, as the skills docs show.
-    pendingBashRules = granted.includes('bash') ? parsed.bashRules?.map((rule) => substituteVars(rule, vars)) : undefined
+    pendingBashRules = commandScope('bash', parsed.bashRules, granted, vars)
+    pendingMonitorRules = commandScope('monitor', parsed.monitorRules, granted, vars)
     pendingDomainRules = granted.includes('web_fetch') ? parsed.domainRules : undefined
     pendingAgentRules = granted.includes('subagent') ? parsed.agentRules : undefined
     pendingSkillRules = granted.some((tool) => tool === 'slash_command' || tool === 'plugin_skill') ? parsed.skillRules : undefined
@@ -602,6 +617,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // no setActiveTools/setModel/setThinkingLevel, since the new session owns its own state.
     pendingRestore = undefined
     pendingBashRules = undefined
+    pendingMonitorRules = undefined
     pendingDomainRules = undefined
     pendingAgentRules = undefined
     pendingSkillRules = undefined

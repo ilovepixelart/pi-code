@@ -80,9 +80,10 @@ const until = async (condition: () => boolean, timeoutMs = 5000): Promise<void> 
 }
 
 // For the suites that run real commands. A stopped shell is killed asynchronously: wait
-// for it, so no process outlives the file.
+// for it, so no process outlives the file. A shell a test already stopped counts too: it
+// has no stop handle left but its process is still on its way out.
 const stopAndWait = async (): Promise<void> => {
-  const live = allShells().filter((shell) => shell.stop !== undefined)
+  const live = allShells().filter((shell) => shell.finishedAt === undefined && (shell.stop !== undefined || shell.state === 'killed'))
   resetShells()
   await until(() => live.every((shell) => shell.finishedAt !== undefined))
 }

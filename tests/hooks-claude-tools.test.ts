@@ -120,6 +120,7 @@ describe('claudeToolName covers every pi tool with a Claude counterpart', () => 
     ['slash_command', 'Skill'],
     ['plugin_skill', 'Skill'],
     ['todo', 'TodoWrite'],
+    ['monitor', 'Monitor'],
   ])('translates %s to %s', (piName, claudeName) => {
     expect(claudeToolName(piName)).toBe(claudeName)
   })

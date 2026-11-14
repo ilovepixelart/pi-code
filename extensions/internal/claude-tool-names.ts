@@ -42,6 +42,8 @@ const TOOL_NAMES: ToolNamePair[] = [
   { claude: 'AskUserQuestion', pi: 'question' },
   // Background bash commands; KillShell and KillBash are the tool's aliases in Claude.
   { claude: 'TaskStop', pi: 'task_stop', aliases: ['KillShell', 'KillBash'] },
+  // Watches a background command's output; stopped with TaskStop like a background shell.
+  { claude: 'Monitor', pi: 'monitor' },
   { claude: 'ExitPlanMode', pi: 'plan_mode_complete' },
   // Custom commands were folded into skills and the reference no longer lists a
   // SlashCommand tool, so `Skill` is canonical and `SlashCommand` is the legacy name.

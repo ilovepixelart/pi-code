@@ -30,6 +30,14 @@ describe('passesIfFilter', () => {
     expect(passesIfFilter(hookIf('Edit'), target('read', {}))).toBe(false)
   })
 
+  it('judges a Monitor command by a Bash rule, as Claude applies Bash rules to Monitor', () => {
+    expect(passesIfFilter(hookIf('Bash(tail *)'), target('monitor', { command: 'tail -F app.log' }, 'Monitor'))).toBe(true)
+    expect(passesIfFilter(hookIf('Bash(rm *)'), target('monitor', { command: 'tail -F app.log' }, 'Monitor'))).toBe(false)
+    expect(passesIfFilter(hookIf('Monitor(tail *)'), target('monitor', { command: 'tail -F app.log' }, 'Monitor'))).toBe(true)
+    expect(passesIfFilter(hookIf('Monitor(tail *)'), target('bash', { command: 'tail -F app.log' }, 'Bash'))).toBe(false)
+    expect(passesIfFilter(hookIf('Monitor'), target('monitor', {}, 'Monitor'))).toBe(true)
+  })
+
   it('runs a Bash-scoped hook for the shapes Claude documents, and only those', () => {
     // The full table lives in tests/if-filter-bash.test.ts; these pin the wiring, in
     // particular that the filter no longer borrows the permission matcher, which requires

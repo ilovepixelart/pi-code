@@ -27,18 +27,16 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
-import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { type BackgroundShell, forgetShell, MAX_OUTPUT_BYTES, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** BASH_DEFAULT_TIMEOUT_MS out of the box: two minutes. */
 const DEFAULT_TIMEOUT_MS = 120_000
 /** BASH_MAX_TIMEOUT_MS out of the box: ten minutes. */
 const MAX_TIMEOUT_MS = 600_000
-/** Claude stops a background command whose output passes 5 GB. */
-const MAX_OUTPUT_BYTES = 5 * 1024 ** 3
 
 const positiveMs = (raw: string | undefined): number | undefined => {
   const value = Number(raw)
@@ -93,16 +91,6 @@ type ToolResult = AgentToolResult<BashToolDetails | undefined>
 type Outcome = { result: ToolResult } | { error: unknown }
 
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
-
-/** pi's own bash settings, which the built-in tool reads and a replacement must too. */
-function shellSettings(ctx: ExtensionContext): { shellPath?: string; commandPrefix?: string } {
-  try {
-    const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true })
-    return { shellPath: settings.getShellPath(), commandPrefix: settings.getShellCommandPrefix() }
-  } catch {
-    return {}
-  }
-}
 
 /** The exit code a settled run reports: the built-in tool resolves with it, and throws
  * for an aborted or killed command, which has none. */
@@ -280,8 +268,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
   pi.registerTool({
     name: 'task_stop',
     label: 'task_stop',
-    description: 'Stop a running background bash command by its ID.',
-    promptSnippet: 'Stop a background bash command',
+    description: 'Stop a running background bash command or monitor by its ID.',
+    promptSnippet: 'Stop a background bash command or monitor',
     parameters: stopSchema,
     async execute(_toolCallId, params) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
       const task_id = params.task_id ?? params.shell_id
