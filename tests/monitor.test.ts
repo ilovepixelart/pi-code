@@ -381,6 +381,15 @@ describe('monitor tool', () => {
     expect(sent[0]?.message.content).toContain('\nsession=test-session')
   })
 
+  it('has closed the output file by the time the monitor has settled', async () => {
+    // Windows refuses to remove a directory that holds an open file, so a settled
+    // monitor must have let go of it, with every byte written.
+    const { monitor } = setup({ limits: HELD })
+    const id = idOf(await monitor({ command: 'head -c 3000000 /dev/zero' }))
+    await until(() => shell(id)?.finishedAt !== undefined)
+    expect(fs.statSync(shell(id)?.outputFile ?? '').size).toBe(3_000_000)
+  })
+
   it('delivers lines while the command is still running', async () => {
     const { monitor, sent } = setup()
     const id = idOf(await monitor({ command: 'echo early; sleep 5' }))
@@ -421,8 +430,10 @@ describe('monitor tool', () => {
       expect(shell(id)).toMatchObject({ state: 'killed', stopReason: tooMany })
     })
 
-    it('stops a monitor whose delivery leaves out too many lines, without delivering it', async () => {
-      const { monitor, sent } = setup({ limits: { maxOmittedLines: 100 } })
+    // The held window proves the stop does not wait for a timer: a command printing
+    // without pause can keep the event loop on its pipe, and no timer runs meanwhile.
+    it('stops a monitor that leaves out too many lines as the output arrives, without delivering it', async () => {
+      const { monitor, sent } = setup({ limits: { ...HELD, maxOmittedLines: 100 } })
       const id = idOf(await monitor({ command: 'yes line' }))
       await until(() => shell(id)?.finishedAt !== undefined)
       expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])

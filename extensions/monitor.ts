@@ -105,6 +105,8 @@ export interface LineBatcher {
   push: (text: string) => void
   /** Take what is queued now, the unterminated last line included, and stop the timer. */
   drain: () => Batch | undefined
+  /** Lines the next delivery already leaves out. */
+  omitted: () => number
 }
 
 export interface BatcherOptions {
@@ -195,6 +197,7 @@ export function createLineBatcher(options: BatcherOptions): LineBatcher {
       partial = ''
       return take()
     },
+    omitted: () => omitted,
   }
 }
 
@@ -327,7 +330,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     const allowance = tokenBucket(limits.floodBurst ?? FLOOD_BURST, limits.floodRefillMs ?? FLOOD_REFILL_MS)
     // A delivery that would flood the session is not sent: the stop notice stands in for it.
     const deliver = (batch: Batch): void => {
-      if (batch.omitted > maxOmittedLines || !allowance.tryConsume()) stopShell(id, TOO_MANY_EVENTS)
+      if (!allowance.tryConsume()) stopShell(id, TOO_MANY_EVENTS)
       else send(batchText(id, description, batch, outputFile))
     }
     const batcher = createLineBatcher({ ...limits, emit: deliver })
@@ -362,7 +365,11 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
           signal: lifetime.signal,
           onStdout: (data) => {
             record(data)
-            if (shell.state === 'running') batcher.push(decoder.write(data))
+            if (shell.state !== 'running') return
+            batcher.push(decoder.write(data))
+            // Judged as the output arrives, not at delivery: a command printing without
+            // pause can keep the event loop on its pipe, and no timer runs meanwhile.
+            if (batcher.omitted() > maxOmittedLines) stopShell(id, TOO_MANY_EVENTS)
           },
           onStderr: record,
         })
@@ -376,17 +383,23 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
 
     function finish(exitCode: number | undefined, error: unknown): void {
       clearTimeout(deadline)
-      log.end()
       batcher.push(decoder.end())
       const rest = batcher.drain()
-      const { stopReason } = shell
-      const stoppedOnRequest = shell.state === 'killed' && !reachedDeadline && stopReason === undefined
-      settleShell(shell, exitCode)
-      // Stopped through task_stop or the session ending: nothing is waiting for it.
-      if (stoppedOnRequest) return
-      // What a flooding command left queued is the flood itself.
-      const lines = rest && stopReason === undefined ? [batchText(id, description, rest, outputFile)] : []
-      send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, stopReason, exitCode, error })].join('\n'))
+      const settled = (): void => {
+        const { stopReason } = shell
+        const stoppedOnRequest = shell.state === 'killed' && !reachedDeadline && stopReason === undefined
+        settleShell(shell, exitCode)
+        // Stopped through task_stop or the session ending: nothing is waiting for it.
+        if (stoppedOnRequest) return
+        // What a flooding command left queued is the flood itself.
+        const lines = rest && stopReason === undefined ? [batchText(id, description, rest, outputFile)] : []
+        send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, stopReason, exitCode, error })].join('\n'))
+      }
+      // Settled once the output file is closed: the file named in the notice is then
+      // complete, and Windows cannot remove a directory that holds an open file.
+      if (log.closed) settled()
+      else log.once('close', settled)
+      log.end()
     }
 
     return shell
