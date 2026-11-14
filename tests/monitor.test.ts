@@ -32,7 +32,11 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     ui: { setStatus: (key: string, value: string | undefined) => statuses.set(key, value), theme: { fg: (_color: string, value: string) => value } },
     hasUI: options.hasUI ?? true,
     isProjectTrusted: () => false,
-    sessionManager: { getBranch: () => (options.prompted === false ? [] : [{ type: 'message' }]) },
+    sessionManager: {
+      getSessionId: () => 'test-session',
+      getSessionFile: () => undefined,
+      getBranch: () => (options.prompted === false ? [] : [{ type: 'message' }]),
+    },
   }
   const emit = (event: string, payload: Record<string, unknown> = {}): void => {
     for (const handler of handlers.get(event) ?? []) handler(payload, ctx)
@@ -286,6 +290,13 @@ describe('monitor tool', () => {
     const id = idOf(await monitor({ command: 'echo quiet >&2' }))
     await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ended: the command exited with code 0. Full output: ${shell(id)?.outputFile}`])
+  })
+
+  it('runs the command with the session variables the bash tool sets', async () => {
+    const { monitor, sent } = setup()
+    await monitor({ command: 'echo "session=$PI_SESSION_ID"' })
+    await until(() => sent.length > 0)
+    expect(sent[0]?.message.content).toContain('\nsession=test-session\n')
   })
 
   it('delivers lines while the command is still running', async () => {

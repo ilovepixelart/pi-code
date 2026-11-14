@@ -35,7 +35,7 @@ import { constants as osConstants } from 'node:os'
 import * as path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
-import { type AgentToolResult, type ExtensionAPI, type ExtensionContext, getShellConfig } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, getShellConfig } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
 import { allShells, type BackgroundShell, commandPreview, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
@@ -207,6 +207,7 @@ const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: bo
 interface SplitRun {
   cwd: string
   shellPath: string | undefined
+  env: NodeJS.ProcessEnv | undefined
   /** Aborting it ends the command's process tree. */
   signal: AbortSignal
   onStdout: (data: Buffer) => void
@@ -222,7 +223,7 @@ function execSplit(command: string, run: SplitRun): Promise<number> {
     const shell = getShellConfig(run.shellPath)
     const fromStdin = shell.commandTransport === 'stdin'
     // Its own process group off Windows, so the kill reaches what the shell spawned.
-    const child = spawn(shell.shell, fromStdin ? shell.args : [...shell.args, command], { cwd: run.cwd, detached: process.platform !== 'win32', stdio: [fromStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true })
+    const child = spawn(shell.shell, fromStdin ? shell.args : [...shell.args, command], { cwd: run.cwd, env: run.env, detached: process.platform !== 'win32', stdio: [fromStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true })
     if (fromStdin) {
       child.stdin?.on('error', () => {})
       child.stdin?.end(command)
@@ -255,7 +256,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     })
   }
 
-  function start(command: string, limitMs: number, ctx: ExtensionContext): BackgroundShell {
+  function start(command: string, limitMs: number, ctx: ExtensionToolContext): BackgroundShell {
     const id = `m${randomUUID().replace(/-/g, '').slice(0, 8)}`
     const outputFile = path.join(shellOutputDir(), `${id}.output`)
     const log = fs.createWriteStream(outputFile, { mode: 0o600 })
@@ -275,22 +276,30 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     deadline.unref?.()
 
     const { shellPath, commandPrefix } = shellSettings(ctx)
-    const resolved = commandPrefix ? `${commandPrefix}\n${command}` : command
-    const run = execSplit(resolved, {
-      cwd: ctx.cwd,
-      shellPath,
-      signal: lifetime.signal,
-      onStdout: (data) => {
-        log.write(data)
-        batcher.push(decoder.write(data))
+    let exitCode: number | undefined
+    // The built-in definition resolves the command (pi's prefix) and its environment
+    // (the PI_* session variables, pi's bin directory on PATH) as it does for bash.
+    // Only the process is run here, and nothing of the built-in's own result is used.
+    const operations: BashOperations = {
+      exec: async (resolved, cwd, { env }) => {
+        exitCode = await execSplit(resolved, {
+          cwd,
+          shellPath,
+          env,
+          signal: lifetime.signal,
+          onStdout: (data) => {
+            log.write(data)
+            batcher.push(decoder.write(data))
+          },
+          onStderr: (data) => log.write(data),
+        })
+        return { exitCode }
       },
-      onStderr: (data) => log.write(data),
-    })
-
-    void run.then(
-      (exitCode) => finish(exitCode, undefined),
-      (error: unknown) => finish(undefined, error),
-    )
+    }
+    const run = createBashToolDefinition(ctx.cwd, { operations, shellPath, commandPrefix }).execute(id, { command }, lifetime.signal, undefined, ctx)
+    // Without an exit code the command never ran, and the rejection says why.
+    const settle = (error?: unknown): void => finish(exitCode, exitCode === undefined ? error : undefined)
+    void run.then(() => settle(), settle)
 
     function finish(exitCode: number | undefined, error: unknown): void {
       clearTimeout(deadline)
