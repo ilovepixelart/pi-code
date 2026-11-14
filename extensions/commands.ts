@@ -612,9 +612,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
     const trusted = await isProjectApproved(ctx)
     projectApproved = trusted
     // A resume/fork/new session can switch projects in-process. pi cannot unregister a
-    // command or re-describe the slash_command tool, so a name registered in an earlier
-    // project keeps its user-path binding and the tool description stays frozen at the
-    // first session's list; that is a pi limitation. What must not persist is the map
+    // command, so a name registered in an earlier project keeps its user-path binding.
+    // pi re-describes a tool only through its prepareLoadout hook, which slash_command
+    // does not define, so its description stays at the first session's list (the
+    // plugin_skill tool in skills.ts defines the hook). What must not persist is the map
     // the model resolves against, so it is rebuilt from scratch here: a stale command
     // from a previous project resolves to "unknown" rather than being expanded.
     discovered.clear()
