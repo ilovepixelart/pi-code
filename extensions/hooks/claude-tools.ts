@@ -51,7 +51,7 @@ type InputMapper = (raw: Record<string, unknown>, cwd: string) => Record<string,
 
 const TO_CLAUDE_INPUT: Record<string, InputMapper> = {
   // pi timeout is seconds, Claude's is milliseconds.
-  bash: (raw) => pick({ command: raw.command, timeout: typeof raw.timeout === 'number' ? raw.timeout * 1000 : undefined }),
+  bash: (raw) => pick({ command: raw.command, timeout: typeof raw.timeout === 'number' ? raw.timeout * 1000 : undefined, run_in_background: raw.run_in_background }),
   write: (raw, cwd) => ({ file_path: absolutePath(raw.path, cwd), content: raw.content }),
   read: (raw, cwd) => pick({ file_path: absolutePath(raw.path, cwd), offset: raw.offset, limit: raw.limit }),
   // Claude's Edit is a single replacement; pi's edit call carries one or more. The
@@ -77,7 +77,7 @@ export function claudeToolInput(piName: string, input: unknown, cwd: string): Re
 type RewriteMapper = (updated: Record<string, unknown>) => Record<string, unknown> | undefined
 
 const FROM_CLAUDE_INPUT: Record<string, RewriteMapper> = {
-  bash: (updated) => (typeof updated.command === 'string' ? pick({ command: updated.command, timeout: typeof updated.timeout === 'number' ? updated.timeout / 1000 : undefined }) : undefined),
+  bash: (updated) => (typeof updated.command === 'string' ? pick({ command: updated.command, timeout: typeof updated.timeout === 'number' ? updated.timeout / 1000 : undefined, run_in_background: typeof updated.run_in_background === 'boolean' ? updated.run_in_background : undefined }) : undefined),
   write: (updated) => (typeof updated.file_path === 'string' && typeof updated.content === 'string' ? { path: updated.file_path, content: updated.content } : undefined),
   read: (updated) => (typeof updated.file_path === 'string' ? pick({ path: updated.file_path, offset: updated.offset, limit: updated.limit }) : undefined),
   edit: (updated) => {

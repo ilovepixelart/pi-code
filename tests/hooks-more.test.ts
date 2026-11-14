@@ -2775,6 +2775,15 @@ describe('Claude vocabulary and decision-control conformance', () => {
     expect(input).toEqual({ path: '/proj/b.ts', edits: [{ oldText: 'x', newText: 'z' }] })
   })
 
+  it('keeps a bash call in the background when a hook rewrites its command', async () => {
+    const ext = await withHooks({ PreToolUse: [{ matcher: 'Bash', hooks: [{ command: 'rewrite' }] }] })
+    script('rewrite', { stdout: [JSON.stringify({ hookSpecificOutput: { updatedInput: { command: 'npm run dev -- --port 4000', run_in_background: true } } })], code: 0 })
+    const input: Record<string, unknown> = { command: 'npm run dev', run_in_background: true }
+    await ext.toolCall('bash', input)
+    expect(JSON.parse(recordFor('rewrite').stdin).tool_input).toEqual({ command: 'npm run dev', run_in_background: true })
+    expect(input).toEqual({ command: 'npm run dev -- --port 4000', run_in_background: true })
+  })
+
   it('keeps the original pi input when a translated rewrite is missing required fields', async () => {
     const ext = await withHooks({ PreToolUse: [{ hooks: [{ command: 'rewrite' }] }] })
     script('rewrite', { stdout: [JSON.stringify({ hookSpecificOutput: { updatedInput: { file_path: '/proj/b.ts' } } })], code: 0 })
