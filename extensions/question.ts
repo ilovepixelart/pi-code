@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
+import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { readManagedSettings } from './internal/managed-settings.ts'
 import { readUserSetting } from './internal/settings-chain.ts'
@@ -160,7 +160,10 @@ function buildQuestionLines(view: QuestionView): string[] {
 
   add(theme.fg('accent', '─'.repeat(width)))
   if (header) add(theme.fg('muted', ` [${header}]`))
-  add(theme.fg('text', ` ${question}`))
+  const questionIndent = ' '.repeat(Math.min(1, Math.max(0, width - 1)))
+  for (const line of wrapTextWithAnsi(question, Math.max(1, width - questionIndent.length))) {
+    add(questionIndent + theme.fg('text', line))
+  }
   lines.push('')
 
   for (let i = 0; i < options.length; i++) {
@@ -168,7 +171,10 @@ function buildQuestionLines(view: QuestionView): string[] {
     const box = multiSelect && opt.isOther !== true ? checked[i] : undefined
     add(optionLine(opt, i, i === optionIndex, editMode, box, theme))
     if (opt.description) {
-      add(`     ${theme.fg('muted', opt.description)}`)
+      const indent = ' '.repeat(Math.min(5, Math.max(0, width - 1)))
+      for (const line of wrapTextWithAnsi(opt.description, Math.max(1, width - indent.length))) {
+        add(indent + theme.fg('muted', line))
+      }
     }
   }
 
