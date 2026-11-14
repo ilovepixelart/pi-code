@@ -62,7 +62,12 @@ quarantine()
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-code-tests-'))
 process.env.TMPDIR = tmpRoot
 process.env.TEMP = tmpRoot
-process.env.TMP = tmpRoot
+// Windows keeps the host TMP. Git Bash mounts /tmp on the directory GetTempPath reports
+// (TMP before TEMP) when its first process starts, and every msys process running at the
+// same time shares that mount table, across test files. A shell still alive after its
+// file's root is removed would leave /tmp dangling for the other workers' shells, which
+// then print "could not find /tmp" on stderr. os.tmpdir() reads TEMP first.
+if (process.platform !== 'win32') process.env.TMP = tmpRoot
 // pi's agent directory (memory, checkpoints, mcp.json, trust decisions, OAuth tokens)
 // resolves through the SDK's getAgentDir(), which a node:os mock in a test file does
 // not reach. Pointed at the per-file root unconditionally, so no suite can write into

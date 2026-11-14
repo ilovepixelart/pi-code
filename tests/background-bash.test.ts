@@ -77,6 +77,14 @@ const until = async (condition: () => boolean, timeoutMs = 5000): Promise<void> 
   }
 }
 
+// For the suites that run real commands. A stopped shell is killed asynchronously: wait
+// for it, so no process outlives the file.
+const stopAndWait = async (): Promise<void> => {
+  const live = allShells().filter((shell) => shell.stop !== undefined)
+  resetShells()
+  await until(() => live.every((shell) => shell.finishedAt !== undefined))
+}
+
 beforeEach(() => resetShells())
 afterEach(() => resetShells())
 
@@ -211,6 +219,8 @@ describe('background shell registry', () => {
 })
 
 describe('bash tool', () => {
+  afterEach(stopAndWait)
+
   it('extends the built-in schema and prompt with background guidance', () => {
     const h = setup()
     const bash = h.tool('bash')
@@ -222,7 +232,8 @@ describe('bash tool', () => {
   it('returns a quick command in the foreground, untracked', async () => {
     const h = setup()
     const result = await h.bash('t1', { command: 'echo hello' })
-    expect(textOf(result).trim()).toBe('hello')
+    // The shell's own stderr (a Git Bash startup warning) may precede the output.
+    expect(textOf(result)).toContain('hello')
     expect(result.structuredContent?.exit_code).toBe(0)
     expect(allShells()).toHaveLength(0)
   })
@@ -333,14 +344,14 @@ describe('bash tool', () => {
     process.env.BASH_DEFAULT_TIMEOUT_MS = '50'
     const h = setup()
     const result = await h.bash('t1', { command: 'sleep 0.2; echo done', run_in_background: true })
-    expect(textOf(result).trim()).toBe('done')
+    expect(textOf(result)).toContain('done')
     expect(allShells()).toHaveLength(0)
   })
 
   it('runs as pi bash does in a session without a UI', async () => {
     const h = setup({ hasUI: false })
     const result = await h.bash('t1', { command: 'echo headless', run_in_background: true })
-    expect(textOf(result).trim()).toBe('headless')
+    expect(textOf(result)).toContain('headless')
   })
 
   it('records the notice without a turn before the session has had one', async () => {
@@ -378,6 +389,8 @@ describe('bash tool', () => {
 })
 
 describe('footer status', () => {
+  afterEach(stopAndWait)
+
   it('words the count of running background commands', () => {
     expect(shellsFooterText(0)).toBeUndefined()
     expect(shellsFooterText(1)).toBe('⏵ 1 background shell')
@@ -437,6 +450,8 @@ describe('footer status', () => {
 })
 
 describe('task_stop tool', () => {
+  afterEach(stopAndWait)
+
   it('stops a running background command without a notice', async () => {
     const h = setup()
     const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
