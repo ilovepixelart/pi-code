@@ -40,7 +40,7 @@ interface QuestionTool {
 }
 
 /** Identity theme so every assertion can be made against plain, un-styled strings. */
-const theme = { fg: (_color: string, s: string) => s, bold: (s: string) => s }
+const theme = { fg: (_color: string, s: string) => s, bg: (_color: string, s: string) => s, bold: (s: string) => s }
 
 /** Editor only reaches for requestRender and terminal.rows. */
 const fakeTui = () => ({ requestRender: () => {}, terminal: { rows: 24 } })
@@ -686,11 +686,11 @@ describe('question overlay', () => {
     const out = overlay.render(60)
     expect(out[0]).toBe('─'.repeat(60))
     expect(out[1]).toBe(' Pick one')
-    expect(out).toContain('> 1. Alpha')
+    expect(out).toContain('❯ 1. Alpha')
     expect(out).toContain('     first one')
     expect(out).toContain('  2. Beta')
     expect(out).toContain('  3. Type something.')
-    expect(out).toContain(' ↑↓ navigate • Enter to select • Esc to cancel')
+    expect(out).toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
   })
 
   it('moves the cursor to the next option on down', () => {
@@ -698,7 +698,7 @@ describe('question overlay', () => {
     overlay.handleInput(RAW.down)
     const out = overlay.render(60)
     expect(out).toContain('  1. Alpha')
-    expect(out).toContain('> 2. Beta')
+    expect(out).toContain('❯ 2. Beta')
   })
 
   it('moves the cursor back to the previous option on up', () => {
@@ -706,20 +706,20 @@ describe('question overlay', () => {
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.up)
     const out = overlay.render(60)
-    expect(out).toContain('> 1. Alpha')
+    expect(out).toContain('❯ 1. Alpha')
     expect(out).toContain('  2. Beta')
   })
 
   it('keeps the cursor on the first option when up is pressed at the top', () => {
     const { overlay } = openOverlay(setup())
     overlay.handleInput(RAW.up)
-    expect(overlay.render(60)).toContain('> 1. Alpha')
+    expect(overlay.render(60)).toContain('❯ 1. Alpha')
   })
 
   it('keeps the cursor on the free-text option when down is pressed at the bottom', () => {
     const { overlay } = openOverlay(setup())
     for (let i = 0; i < 4; i++) overlay.handleInput(RAW.down)
-    expect(overlay.render(60)).toContain('> 3. Type something.')
+    expect(overlay.render(60)).toContain('❯ 3. Type something.')
   })
 
   it('re-lays out when the width changes', () => {
@@ -773,9 +773,9 @@ describe('question overlay', () => {
     for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.enter)
     const out = overlay.render(60)
-    expect(out).toContain('> 3. Type something. ✎')
+    expect(out).toContain('❯ 3. Type something. ✎')
     expect(out).toContain(' Your answer:')
-    expect(out).toContain(' Enter to submit • Esc to go back')
+    expect(out).toContain(' Enter to submit · Esc to go back')
   })
 
   it('echoes typed characters into the editor', () => {
@@ -808,8 +808,8 @@ describe('question overlay', () => {
     overlay.handleInput(RAW.escape)
 
     const out = overlay.render(60)
-    expect(out).toContain('> 3. Type something.')
-    expect(out).toContain(' ↑↓ navigate • Enter to select • Esc to cancel')
+    expect(out).toContain('❯ 3. Type something.')
+    expect(out).toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
     expect(out.some((line) => line.includes('x'))).toBe(false)
   })
 
@@ -819,7 +819,7 @@ describe('question overlay', () => {
     overlay.handleInput(RAW.enter)
     overlay.handleInput(' ')
     overlay.handleInput(RAW.enter)
-    expect(overlay.render(60)).toContain(' ↑↓ navigate • Enter to select • Esc to cancel')
+    expect(overlay.render(60)).toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
 
     overlay.handleInput(RAW.escape)
     expect((await result).content).toEqual([{ type: 'text', text: 'User cancelled the selection' }])
@@ -832,20 +832,29 @@ describe('question header and multiSelect', () => {
   it('shows the header and the multi-select hint, and no free-text option', () => {
     const { overlay } = openOverlayWith(setup(), multiParams)
     const out = overlay.render(80)
-    expect(out).toContain(' [Scope]')
+    expect(out).toContain(' ☐ Scope ')
     expect(out).toContain(' Pick some')
-    expect(out).toContain('> 1. [ ] Alpha')
+    expect(out).toContain('❯ 1. [ ] Alpha')
     expect(out).toContain('  2. [ ] Beta')
     expect(out.some((l) => l.includes('Type something.'))).toBe(false)
-    expect(out).toContain(' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel')
+    expect(out).toContain(' Space to toggle · Enter to confirm · Esc to cancel')
+  })
+
+  it('should show the header as a highlighted chip under the border and the question in bold', () => {
+    const marked = { fg: (_color: string, s: string) => s, bg: (color: string, s: string) => `<${color}>${s}</${color}>`, bold: (s: string) => `*${s}*` }
+    let overlay: Overlay | undefined
+    const ctx = { hasUI: true, mode: 'tui', ui: { custom: (factory: CustomFactory) => new Promise(() => (overlay = factory(fakeTui(), marked, {}, () => {}))) } }
+    void setup().execute('call-1', multiParams as never, undefined, undefined, ctx)
+    const out = overlay?.render(80) ?? []
+    expect(out.slice(1, 4)).toEqual(['<selectedBg> ☐ Scope </selectedBg>', '', ' *Pick some*'])
   })
 
   it('toggles a checkbox with space', () => {
     const { overlay } = openOverlayWith(setup(), multiParams)
     overlay.handleInput(RAW.space)
-    expect(overlay.render(60)).toContain('> 1. [x] Alpha')
+    expect(overlay.render(60)).toContain('❯ 1. [x] Alpha')
     overlay.handleInput(RAW.space)
-    expect(overlay.render(60)).toContain('> 1. [x] Alpha'.replace('[x]', '[ ]'))
+    expect(overlay.render(60)).toContain('❯ 1. [x] Alpha'.replace('[x]', '[ ]'))
   })
 
   it('confirms every toggled option, comma-joined, on enter', async () => {
