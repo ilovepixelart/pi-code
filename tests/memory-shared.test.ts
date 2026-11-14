@@ -242,3 +242,84 @@ describe('reading and writing a Claude-written store', () => {
     expect(capped).toContain('跑批须等用户下令')
   })
 })
+
+describe('resolving a name to one memory file', () => {
+  let cwd: string
+  let store: string
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
+    store = resolveMemoryDir(cwd)
+    mkdirSync(store, { recursive: true })
+  })
+
+  const seed = (stems: string[]): void => {
+    writeFileSync(join(store, 'MEMORY.md'), stems.map((stem) => `- [${stem}](${stem}.md): about ${stem}\n`).join(''))
+    for (const stem of stems) writeFileSync(join(store, `${stem}.md`), `${stem} body\n`)
+  }
+  const index = (): string => readFileSync(join(store, 'MEMORY.md'), 'utf-8')
+
+  it('reads, saves and deletes the exactly named file when a dash and an underscore twin both exist', async () => {
+    seed(['build_notes', 'build-notes'])
+    const t = await toolFor(cwd)
+
+    expect((await t.execute('1', { action: 'read', name: 'build-notes' })).content[0].text).toBe('build-notes body\n')
+
+    await t.execute('2', { action: 'save', name: 'build-notes', description: 'updated', content: 'new body\n' })
+    expect(readFileSync(join(store, 'build-notes.md'), 'utf-8')).toBe('new body\n')
+    expect(readFileSync(join(store, 'build_notes.md'), 'utf-8')).toBe('build_notes body\n')
+    expect(index()).toBe('- [build_notes](build_notes.md): about build_notes\n- [build-notes](build-notes.md): updated\n')
+
+    await t.execute('3', { action: 'delete', name: 'build-notes' })
+    expect(existsSync(join(store, 'build-notes.md'))).toBe(false)
+    expect(readFileSync(join(store, 'build_notes.md'), 'utf-8')).toBe('build_notes body\n')
+    expect(index()).toBe('- [build_notes](build_notes.md): about build_notes\n')
+  })
+
+  it('falls back to the other spelling only when the exact file does not exist', async () => {
+    seed(['build_notes'])
+    const t = await toolFor(cwd)
+    expect((await t.execute('1', { action: 'read', name: 'build-notes' })).content[0].text).toBe('build_notes body\n')
+    await t.execute('2', { action: 'delete', name: 'build-notes' })
+    expect(existsSync(join(store, 'build_notes.md'))).toBe(false)
+    expect(existsSync(join(store, 'MEMORY.md'))).toBe(false)
+  })
+
+  it('reaches a file whose name mixes dashes and underscores', async () => {
+    seed(['foo-bar_baz'])
+    const t = await toolFor(cwd)
+    expect((await t.execute('1', { action: 'read', name: 'foo-bar-baz' })).content[0].text).toBe('foo-bar_baz body\n')
+
+    await t.execute('2', { action: 'save', name: 'foo-bar-baz', description: 'updated', content: 'new body\n' })
+    expect(readFileSync(join(store, 'foo-bar_baz.md'), 'utf-8')).toBe('new body\n')
+    expect(existsSync(join(store, 'foo-bar-baz.md'))).toBe(false)
+    expect(index()).toBe('- [foo-bar_baz](foo-bar_baz.md): updated\n')
+
+    await t.execute('3', { action: 'delete', name: 'foo-bar-baz' })
+    expect(existsSync(join(store, 'foo-bar_baz.md'))).toBe(false)
+  })
+
+  it('reads a stored file the index does not list', async () => {
+    writeFileSync(join(store, 'loose_note.md'), 'loose body\n')
+    const t = await toolFor(cwd)
+    expect((await t.execute('1', { action: 'read', name: 'loose-note' })).content[0].text).toBe('loose body\n')
+  })
+
+  it('never follows an index link out of the store', async () => {
+    const outside = join(store, '..', 'outside.md')
+    writeFileSync(outside, 'outside body\n')
+    writeFileSync(join(store, 'MEMORY.md'), '- [escape](../outside.md): points out of the store\n')
+    const t = await toolFor(cwd)
+
+    expect((await t.execute('1', { action: 'read', name: '../outside' })).content[0].text).toBe('No memory named outside.')
+    await t.execute('2', { action: 'save', name: '../outside', description: 'kept inside', content: 'inside body\n' })
+    expect(readFileSync(outside, 'utf-8')).toBe('outside body\n')
+    expect(readFileSync(join(store, 'outside.md'), 'utf-8')).toBe('inside body\n')
+
+    await t.execute('3', { action: 'delete', name: '../outside' })
+    expect(readFileSync(outside, 'utf-8')).toBe('outside body\n')
+    expect(existsSync(join(store, 'outside.md'))).toBe(false)
+    expect(index()).toContain('- [escape](../outside.md): points out of the store\n')
+    expect(index()).not.toContain('kept inside')
+  })
+})

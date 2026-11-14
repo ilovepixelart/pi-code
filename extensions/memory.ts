@@ -214,7 +214,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
   // refusing it would strand a user whose index is already at the bound with no way
   // to revise their way back under it. An over-long description is bounded anyway,
   // since the injected index is capped at read time.
-  const isUpdate = linkedStem(index, name) !== undefined
+  const isUpdate = indexedStem(index, name) !== undefined
   if (isUpdate) return false
   // Only the loaded content counts: frontmatter and comments are stripped first.
   const next = stripNonLoaded(upsertIndexLine(index, name, description))
@@ -248,7 +248,7 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   }
   return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => /* NOSONAR typescript:S7503 - withFileMutationQueue takes a Promise-returning function */ {
     const index = readIndex(dir)
-    const stem = saveStem(dir, index, name)
+    const stem = memoryStem(dir, index, name)
     fs.mkdirSync(dir, { recursive: true })
     // A memory with frontmatter records its write time; one without is left as-is.
     fs.writeFileSync(path.join(dir, `${stem}.md`), stampModified(content, now))
@@ -276,23 +276,19 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   })
 }
 
-/** The read action: a memory's body, capped for context, or a not-found message.
- * The file may be spelled with underscores where the name has dashes. */
+/** The read action: a memory's body, capped for context, or a not-found message. */
 function readMemory(dir: string, name: string): MemoryToolResult {
-  for (const stem of nameVariants(name)) {
-    try {
-      const body = fs.readFileSync(path.join(dir, `${stem}.md`), 'utf-8')
-      return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
-    } catch (error) {
-      // Only a missing file moves on to the next spelling: a directory in its place
-      // or a permission problem is a different situation, and saying "no such memory"
-      // would send the model hunting for a name that is actually there.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${errorMessage(error)}` }], details: {} }
-      }
+  try {
+    const body = fs.readFileSync(path.join(dir, `${memoryStem(dir, readIndexQuietly(dir), name)}.md`), 'utf-8')
+    return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
+  } catch (error) {
+    // Only a missing file is "no such memory"; anything else (a directory in its place, a
+    // permission problem) sends the model hunting for a name that is actually there.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${errorMessage(error)}` }], details: {} }
     }
+    return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
   }
-  return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
 }
 
 /** The delete action: remove a memory's index line and then its file, queued on the index
@@ -304,14 +300,12 @@ async function deleteMemory(dir: string, indexPath: string, name: string): Promi
   try {
     return await withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => /* NOSONAR typescript:S7503 - withFileMutationQueue takes a Promise-returning function */ {
       const index = readIndex(dir)
-      const remaining = removeIndexLine(index, name)
+      const stem = memoryStem(dir, index, name)
+      const remaining = removeIndexLine(index, name, stem)
       if (remaining) writeIndex(indexPath, remaining)
       else fs.rmSync(indexPath, { force: true })
       try {
-        // Every spelling of the memory goes: the index's link target when it used a
-        // different one, then both dash/underscore variants.
-        const stems = [...new Set([linkedStem(index, name), ...nameVariants(name)].filter((s): s is string => s !== undefined))]
-        for (const stem of stems) fs.rmSync(path.join(dir, `${stem}.md`), { force: true })
+        fs.rmSync(path.join(dir, `${stem}.md`), { force: true })
       } catch (error) {
         // Out of the index, so it is gone from every surface the user sees; saying the
         // delete failed would be false, and silence would leave the stray file unexplained.
@@ -358,16 +352,6 @@ export function slugifyName(name: string): string {
   return slug === 'memory' ? 'memory-note' : slug
 }
 
-/** The exact key prefix of a memory's index line; matching on a substring would also
- * hit another entry whose description merely mentions this memory. */
-/** A dashed memory name's file-name variants. Claude Code names memory files
- * with underscores where pi uses dashes (`feedback_e2e_run_cadence.md` vs
- * `feedback-e2e-run-cadence.md`); both spellings name the same memory. */
-function nameVariants(name: string): string[] {
-  const underscored = name.replaceAll('-', '_')
-  return underscored === name ? [name] : [name, underscored]
-}
-
 /** One index entry line: the link it starts with names the memory, so only that
  * link identifies the entry. A link appearing later in a description is a
  * mention, not the entry. The title is free text and may itself hold brackets, so
@@ -386,47 +370,58 @@ function entryOf(line: string): { link: string; target: string; separator: strin
   return { link: match[1], target: match[2], separator: separator ? separator[0] : ': ' }
 }
 
-/** A memory file name that cannot escape the store: a single plain segment,
- * never the index file itself. Index link targets are user-controlled, so a
- * save or delete must never follow one such as ../../x out of the store. */
-function safeStem(stem: string): boolean {
-  return stem !== '' && !stem.startsWith('.') && stem.toLowerCase() !== 'memory' && path.basename(stem) === stem
+/** Dashes and underscores are one character in a memory name: Claude Code has
+ * written memory files both ways, and a name always reaches the tool dashed. */
+function stemKey(stem: string): string {
+  return stem.replaceAll('_', '-')
 }
 
-/** The memory file an index entry links for `name`, when one links a variant of
- * it: the underscored spelling a Claude-written entry uses. */
-function linkedStem(index: string, name: string): string | undefined {
-  for (const line of indexLines(index)) {
-    const entry = entryOf(line)
-    if (entry && nameVariants(name).includes(entry.target) && safeStem(entry.target)) return entry.target
-  }
-  return undefined
+/** The one of `stems` that `name` refers to: its exact spelling when present, else
+ * the first that differs from it only in dashes and underscores. */
+function matchStem(stems: string[], name: string): string | undefined {
+  if (stems.includes(name)) return name
+  const key = stemKey(name)
+  return stems.find((stem) => stemKey(stem) === key)
 }
 
-/** The file name a save writes for `name`: the entry already in the index when
- * one links a variant of the name (keeping Claude's underscored spelling), else
- * the variant already on disk, else the dashed name. */
-function saveStem(dir: string, index: string, name: string): string {
-  const linked = linkedStem(index, name)
-  if (linked !== undefined) return linked
-  for (const stem of nameVariants(name)) {
-    if (fs.existsSync(path.join(dir, `${stem}.md`))) return stem
+/** The memory file the index links for `name`, when it links one. */
+function indexedStem(index: string, name: string): string | undefined {
+  const targets = indexLines(index).flatMap((line) => entryOf(line)?.target ?? [])
+  return matchStem(targets, name)
+}
+
+/** The memory files in the store, by name without the extension. */
+function storedStems(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).flatMap((file) => (file.endsWith('.md') ? file.slice(0, -3) : []))
+  } catch {
+    return []
   }
-  return name
+}
+
+/** The single memory file `name` refers to, the same one for read, save and delete:
+ * an exactly named file, indexed or stored, wins; another spelling is used only when
+ * that one does not exist. A name is a slug (letters, digits, dashes) and a match
+ * differs from it only by underscores, so an index link such as ../../x is never
+ * followed out of the store. */
+function memoryStem(dir: string, index: string, name: string): string {
+  const stored = storedStems(dir)
+  if (stored.includes(name)) return name
+  return indexedStem(index, name) ?? matchStem(stored, name) ?? name
 }
 
 /** Add or replace this memory's line in the index, keyed by the memory file the
- * line links, so a Claude-written entry keeps its title, its underscored link
- * target, and its ` — ` separator while only its description is replaced. Blank
- * lines and headings are left exactly where they are. */
-export function upsertIndexLine(index: string, name: string, description: string, stem: string = name): string {
+ * line links, so an existing entry keeps its title, its link target and its
+ * separator while only its description is replaced. Blank lines and headings are
+ * left exactly where they are. */
+export function upsertIndexLine(index: string, name: string, description: string, stem: string = indexedStem(index, name) ?? name): string {
   // One line per memory: a newline in the description would break every later line-based match.
   const flat = description.replace(/\s+/g, ' ').trim()
   const eol = lineEnding(index)
   const lines = indexLines(index)
   for (let i = 0; i < lines.length; i++) {
     const entry = entryOf(lines[i])
-    if (entry && nameVariants(name).includes(entry.target)) {
+    if (entry?.target === stem) {
       lines[i] = `${entry.link}${entry.separator}${flat}`
       return `${lines.join(eol)}${eol}`
     }
@@ -436,12 +431,8 @@ export function upsertIndexLine(index: string, name: string, description: string
   return `${lines.join(eol)}${eol}`
 }
 
-export function removeIndexLine(index: string, name: string): string {
-  const variants = nameVariants(name)
-  const lines = indexLines(index).filter((line) => {
-    const entry = entryOf(line)
-    return !(entry !== undefined && variants.includes(entry.target))
-  })
+export function removeIndexLine(index: string, name: string, stem: string = indexedStem(index, name) ?? name): string {
+  const lines = indexLines(index).filter((line) => entryOf(line)?.target !== stem)
   const eol = lineEnding(index)
   return lines.length > 0 ? `${lines.join(eol)}${eol}` : ''
 }
