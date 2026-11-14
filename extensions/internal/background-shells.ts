@@ -35,8 +35,8 @@ export interface BackgroundShell {
   background: boolean
 }
 
-/** Finished commands kept for /tasks; older ones are evicted (their output files stay
- * on disk until pi quits, since a notification already pointed the model at them). */
+/** Finished commands kept for /tasks; older ones are evicted, and their output files
+ * removed with them. */
 export const MAX_FINISHED_SHELLS = 20
 
 /** Characters of a command shown in a listing or notification. */
@@ -105,7 +105,10 @@ export function settleShell(shell: BackgroundShell, exitCode: number | undefined
   shell.finishedAt = ++state.finishSequence
   const finished = [...state.shells.values()].filter((entry) => entry.state !== 'running')
   finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
-  for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_SHELLS))) state.shells.delete(stale.id)
+  for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_SHELLS))) {
+    state.shells.delete(stale.id)
+    fs.rmSync(stale.outputFile, { force: true })
+  }
   if (shell.background) changed()
 }
 

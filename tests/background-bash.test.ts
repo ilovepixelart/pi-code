@@ -174,6 +174,12 @@ describe('background shell registry', () => {
     expect(ids).not.toContain(shells[1]?.id)
   })
 
+  it('removes the output file of an evicted command, and no other', () => {
+    const shells = Array.from({ length: MAX_FINISHED_SHELLS + 1 }, (_, i) => fakeShell(`b${String(i).padStart(8, '0')}`))
+    for (const shell of shells) settleShell(shell, 0)
+    expect(shells.map((shell) => fs.existsSync(shell.outputFile))).toEqual([false, ...shells.slice(1).map(() => true)])
+  })
+
   it('forgets a foreground command and its output file', () => {
     const shell = fakeShell('b00000005')
     forgetShell(shell)
