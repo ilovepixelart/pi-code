@@ -26,8 +26,10 @@
  * session without a UI (print and json modes, subagents), where no later turn could
  * receive an event, refuses the tool. CLAUDE_CODE_DISABLE_BACKGROUND_TASKS does not
  * turn it off (env-vars: "MCP tasks and the Monitor tool still run in the background").
- * Claude's permission prompt has no pi counterpart; a hook `if` filter written for
- * `Bash(...)` covers Monitor commands, as Claude's Bash rules do. A session switch
+ * Claude's permission prompt has no pi counterpart; a hook `if` filter and an
+ * allowed-tools scope written for `Bash(...)` cover Monitor commands, as Claude's Bash
+ * rules do. The batch window, message rate and stop thresholds are pi-code's own
+ * (docs/monitor.md sets them against Claude's). A session switch
  * (/new, /resume, /fork) ends the watches, since their events belong to the session
  * that asked; /reload keeps them.
  */

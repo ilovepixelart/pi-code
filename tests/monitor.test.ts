@@ -5,7 +5,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension from '../extensions/background-bash.ts'
 import { allShells, registerShell, resetShells, settleShell, shellsStatusText } from '../extensions/internal/background-shells.ts'
-import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, FLOOD_BURST, FLOOD_REFILL_MS, MAX_DEADLINE_MS, MAX_OMITTED_LINES, MIN_DEADLINE_MS, type MonitorLimits, monitorAllowed, tokenBucket } from '../extensions/monitor.ts'
+import monitorExtension, {
+  BATCH_WINDOW_MS,
+  type Batch,
+  batchText,
+  createLineBatcher,
+  DEFAULT_DEADLINE_MS,
+  deadlineMs,
+  FLOOD_BURST,
+  FLOOD_REFILL_MS,
+  MAX_BATCH_CHARS,
+  MAX_BATCH_LINES,
+  MAX_DEADLINE_MS,
+  MAX_LINE_CHARS,
+  MAX_OMITTED_LINES,
+  MIN_DEADLINE_MS,
+  MIN_INTERVAL_MS,
+  type MonitorLimits,
+  monitorAllowed,
+  tokenBucket,
+} from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }> }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
@@ -234,6 +253,24 @@ describe('batchText', () => {
     expect(batchText('m1', 'errors in  the\napp log', { lines: ['x'], omitted: 0 }, '/o')).toBe('Monitor m1 ("errors in the app log") output:\nx')
     expect(batchText('m1', 'c', { lines: [], omitted: 1 }, '/o')).toContain('[1 more line not shown; full output: /o]')
     expect(batchText('m1', 'c', { lines: [], omitted: 3 }, '/o')).toContain('[3 more lines not shown')
+  })
+})
+
+describe('docs/monitor.md', () => {
+  it('states the constants in force', () => {
+    const doc = fs.readFileSync(new URL('../docs/monitor.md', import.meta.url), 'utf8')
+    const thousands = (value: number): string => value.toLocaleString('en-US')
+    const claims = [
+      `defaults to ${DEFAULT_DEADLINE_MS} `,
+      `refused under ${MIN_DEADLINE_MS},`,
+      `capped at ${MAX_DEADLINE_MS} `,
+      `opens a ${BATCH_WINDOW_MS / 1000}-second window`,
+      `at most one message every ${MIN_INTERVAL_MS / 1000} seconds`,
+      `${FLOOD_BURST} messages at once, one more every ${FLOOD_REFILL_MS / 1000} seconds`,
+      `leave out more than ${thousands(MAX_OMITTED_LINES)} lines`,
+      `cut at ${MAX_LINE_CHARS} characters; a message carries at most ${MAX_BATCH_LINES} lines and ${thousands(MAX_BATCH_CHARS)} characters`,
+    ]
+    for (const claim of claims) expect(doc).toContain(claim)
   })
 })
 

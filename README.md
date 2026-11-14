@@ -54,7 +54,7 @@ Each topic links to its own doc with the full contract and any divergences from 
 - **[WebSearch / WebFetch](docs/web.md)** — key-free search and SSRF-guarded fetch.
 - **[Claude plugins](docs/plugins.md)** — installed marketplace plugins: commands, agents, hooks, MCP servers, styles, skills.
 - **[Background Bash](docs/background-bash.md)** — `run_in_background`, commands that move to the background at their timeout instead of stopping, completion messages, and `task_stop`.
-- **[Monitor](docs/monitor.md)**: watch a background command and receive its output lines as they arrive, batched, with Claude's deadline; stopped with `task_stop`.
+- **[Monitor](docs/monitor.md)**: watch a background command and receive its stdout lines as they arrive, batched, with Claude's deadline and a stop for monitors that flood; stopped with `task_stop`.
 - **[Goal](docs/goal.md)**: `/goal <condition>` keeps the session working until a separate model check confirms the condition holds, with status, clear, block cap, background-work deferral, and resume.
 - **[Session extras](docs/session-extras.md)** — project trust, plan mode, todos, checkpoints/rewind, AskUserQuestion, notifications, think keywords, session titles, `/context`, `/init`.
 
