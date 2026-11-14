@@ -221,6 +221,22 @@ describe('reading and writing a Claude-written store', () => {
     expect(index()).toBe('- [first](first.md) — the first one\n')
   })
 
+  it('writes the name and description frontmatter Claude relies on', async () => {
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'new-lesson', description: 'fresh: keep it\nshort', content: 'body\n' })
+    expect(readFileSync(join(store, 'new-lesson.md'), 'utf-8')).toMatch(/^---\nname: new-lesson\ndescription: "fresh: keep it short"\nmodified: \S+\n---\n\nbody\n$/)
+  })
+
+  it('nests a given type under metadata and keeps the fields the content already has', async () => {
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'typed', description: 'from the tool', content: '---\ntype: feedback\n---\nbody\n' })
+    expect(readFileSync(join(store, 'typed.md'), 'utf-8')).toMatch(/^---\nname: typed\ndescription: "from the tool"\nmetadata:\n {2}type: feedback\n {2}modified: \S+\n---\nbody\n$/)
+
+    const complete = '---\nname: complete\ndescription: its own\nmetadata:\n  type: project\n---\nbody\n'
+    await t.execute('2', { action: 'save', name: 'complete', description: 'from the tool', content: complete })
+    expect(readFileSync(join(store, 'complete.md'), 'utf-8')).toMatch(/^---\nname: complete\ndescription: its own\nmetadata:\n {2}type: project\n {2}modified: \S+\n---\nbody\n$/)
+  })
+
   it('counts an existing underscored entry as an edit, not index growth', () => {
     expect(indexWouldOverflow(CLAUDE_INDEX, 'feedback-e2e-run-cadence', 'updated description')).toBe(false)
   })
@@ -291,6 +307,12 @@ describe('resolving a name to one memory file', () => {
 
     await t.execute('3', { action: 'delete', name: 'foo-bar-baz' })
     expect(existsSync(join(store, 'foo-bar_baz.md'))).toBe(false)
+  })
+
+  it('adds no frontmatter in the pi store', async () => {
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'plain', description: 'a note', content: 'body\n' })
+    expect(readFileSync(join(store, 'plain.md'), 'utf-8')).toBe('body\n')
   })
 
   it('reads a stored file the index does not list', async () => {

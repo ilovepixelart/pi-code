@@ -149,15 +149,44 @@ function stampedLines(lines: string[], iso: string): string[] {
   return [...lines.slice(0, end), `${indent}modified: ${iso}`, ...lines.slice(end)]
 }
 
+type Frontmatter = { lines: string[]; eol: string; rest: string }
+
+/** A memory's YAML frontmatter block as lines, the line break it uses, and the
+ * text after the block; undefined when the content has no block. */
+function frontmatterOf(content: string): Frontmatter | undefined {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
+  if (!match) return undefined
+  return { lines: match[1] === '' ? [] : match[1].split(/\r?\n/), eol: lineEnding(match[0]), rest: content.slice(match[0].length) }
+}
+
+function withFrontmatter({ lines, eol, rest }: Frontmatter): string {
+  return `---${eol}${lines.join(eol)}${eol}---${rest}`
+}
+
 /** Set or replace the ISO 8601 `modified:` field inside a memory's YAML frontmatter.
  * Files without frontmatter are returned untouched: Claude never adds frontmatter to
  * a file that has none. */
 export function stampModified(content: string, iso: string): string {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  if (!match) return content
-  const eol = lineEnding(match[0])
-  const lines = match[1] === '' ? [] : match[1].split(/\r?\n/)
-  return `---${eol}${stampedLines(lines, iso).join(eol)}${eol}---${content.slice(match[0].length)}`
+  const block = frontmatterOf(content)
+  return block ? withFrontmatter({ ...block, lines: stampedLines(block.lines, iso) }) : content
+}
+
+/** Collapse text to one line. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/** `content` with the frontmatter Claude Code's recall reads: `name`, `description`
+ * (Claude flags a memory without one as unreliable), and the type nested under
+ * `metadata`, where Claude keeps it. A field the content already has is kept. The
+ * description is written as a JSON string, which is a YAML double-quoted scalar, so
+ * a colon or a hash in it cannot break the block. */
+function claudeFrontmatter(content: string, name: string, description: string): string {
+  const block = frontmatterOf(content) ?? { lines: [], eol: '\n', rest: `\n\n${content}` }
+  const has = (key: string): boolean => block.lines.some((line) => line.startsWith(`${key}:`))
+  const added = [has('name') ? [] : `name: ${name}`, has('description') ? [] : `description: ${JSON.stringify(oneLine(description))}`].flat()
+  const lines = has('metadata') ? block.lines : block.lines.flatMap((line) => (line.startsWith('type:') ? ['metadata:', `  ${line}`] : line))
+  return withFrontmatter({ ...block, lines: [...added, ...lines] })
 }
 
 /** Length of the line break `text` starts with: CRLF, LF, or none. */
@@ -260,8 +289,10 @@ async function saveMemory(dir: string, indexPath: string, storage: MemoryStorage
     const index = readIndex(dir)
     const stem = memoryStem(dir, index, name)
     fs.mkdirSync(dir, { recursive: true })
-    // A memory with frontmatter records its write time; one without is left as-is.
-    fs.writeFileSync(path.join(dir, `${stem}.md`), stampModified(content, now))
+    // A memory with frontmatter records its write time; one without is left as-is
+    // in pi's own store and given Claude's frontmatter in Claude's.
+    const file = storage === 'claude' ? claudeFrontmatter(content, name, description) : content
+    fs.writeFileSync(path.join(dir, `${stem}.md`), stampModified(file, now))
     const nextIndex = upsertIndexLine(index, name, description, storage, stem)
     writeIndex(indexPath, nextIndex)
     // Claude measures the index after the write: over a read limit the write still
@@ -430,7 +461,7 @@ function memoryStem(dir: string, index: string, name: string): string {
  * writes its index without one. */
 export function upsertIndexLine(index: string, name: string, description: string, storage: MemoryStorage = 'pi', stem: string = indexedStem(index, name) ?? name): string {
   // One line per memory: a newline in the description would break every later line-based match.
-  const flat = description.replace(/\s+/g, ' ').trim()
+  const flat = oneLine(description)
   const eol = lineEnding(index)
   const lines = indexLines(index)
   for (let i = 0; i < lines.length; i++) {
