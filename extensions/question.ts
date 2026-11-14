@@ -228,6 +228,26 @@ function navHint(typing: boolean, multiSelect: boolean, tabs: boolean): string {
   return tabs ? ` ${keys} · Tab/←→ to switch questions · Esc to cancel` : ` ${keys} · Esc to cancel`
 }
 
+/** The first and last tab that fit in `room` columns, one column apart, grown
+ * outward from the active tab so it always stays visible. */
+function tabWindow(widths: number[], active: number, room: number): [number, number] {
+  let first = active
+  let last = active
+  let used = widths[active]
+  for (let grew = true; grew; ) {
+    grew = false
+    if (first > 0 && used + 1 + widths[first - 1] <= room) {
+      used += 1 + widths[--first]
+      grew = true
+    }
+    if (last < widths.length - 1 && used + 1 + widths[last + 1] <= room) {
+      used += 1 + widths[++last]
+      grew = true
+    }
+  }
+  return [first, last]
+}
+
 /** The result line for a question that was not cancelled. */
 function renderAnswered(details: QuestionDetails, answer: string, theme: Theme): string {
   if (details.skipped) return theme.fg('warning', 'User skipped this question')
@@ -689,13 +709,14 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function receive(index: number, value: QuestionAnswer): void {
         if (finished) return
         resetIdleTimer()
-        if (value === null) finish(null)
-        else {
-          restoreRemoteAnswer(index, value)
-          if (states.every((state) => state.remotelyAnswered)) finish({ kind: 'submit', answers: answers() })
-          else if (index === active) navigate(active + 1)
-          else refresh()
+        if (value === null) {
+          finish(null)
+          return
         }
+        restoreRemoteAnswer(index, value)
+        if (states.every((state) => state.remotelyAnswered)) finish({ kind: 'submit', answers: answers() })
+        else if (index === active) navigate(active + 1)
+        else refresh()
       }
       function attachRemote(index: number): void {
         remotes[index]?.attach((value) => receive(index, value), resetIdleTimer)
@@ -764,28 +785,31 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         refresh()
         return true
       }
+      function toggleChecked(state: QuestionState): void {
+        const row = state.rows[state.cursor]
+        if (state.mode !== 'multi' || row.kind !== 'option') return
+        state.checked[row.index] = !state.checked[row.index]
+        state.remotelyAnswered = false
+      }
+      function handleTypingInput(state: QuestionState, data: string): void {
+        if (matchesKey(data, Key.escape)) {
+          state.typing = false
+          state.draft.setText('')
+        } else if (!matchesKey(data, Key.tab) && !matchesKey(data, Key.shift('tab'))) {
+          state.remotelyAnswered = false
+          state.draft.handleInput(data)
+        }
+        refresh()
+      }
       function handleQuestionInput(state: QuestionState, data: string): void {
         if (state.typing) {
-          if (matchesKey(data, Key.escape)) {
-            state.typing = false
-            state.draft.setText('')
-          } else if (!matchesKey(data, Key.tab) && !matchesKey(data, Key.shift('tab'))) {
-            state.remotelyAnswered = false
-            state.draft.handleInput(data)
-          }
-          refresh()
+          handleTypingInput(state, data)
           return
         }
         if (moveFocus(state, data)) return
-        const row = state.rows[state.cursor]
-        if (matchesKey(data, Key.escape)) {
-          finish(null)
-        } else if (matchesKey(data, Key.enter)) {
-          confirmSelection(state)
-        } else if (state.mode === 'multi' && data === ' ' && row.kind === 'option') {
-          state.checked[row.index] = !state.checked[row.index]
-          state.remotelyAnswered = false
-        }
+        if (matchesKey(data, Key.escape)) finish(null)
+        else if (matchesKey(data, Key.enter)) confirmSelection(state)
+        else if (data === ' ') toggleChecked(state)
         refresh()
       }
       function navigateWithKey(data: string): boolean {
@@ -796,11 +820,14 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         navigate((active + (previous ? specs.length : 1)) % (specs.length + 1))
         return true
       }
+      function chooseReviewOption(): void {
+        finish(reviewIndex === 0 ? { kind: 'submit', answers: answers() } : null)
+      }
       function handleReviewInput(data: string): void {
         if (matchesKey(data, Key.up)) reviewIndex = 0
-        if (matchesKey(data, Key.down)) reviewIndex = 1
-        if (matchesKey(data, Key.enter)) finish(reviewIndex === 0 ? { kind: 'submit', answers: answers() } : null)
-        if (matchesKey(data, Key.escape)) finish(null)
+        else if (matchesKey(data, Key.down)) reviewIndex = 1
+        else if (matchesKey(data, Key.enter)) chooseReviewOption()
+        else if (matchesKey(data, Key.escape)) finish(null)
         refresh()
       }
       function handleInput(data: string): void {
@@ -815,23 +842,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function renderTabs(width: number, saved: Array<Answer | undefined>): string {
         const tabs = specs.map((spec, index) => ` ${saved[index] ? '☒' : '☐'} ${spec.header ?? `Q${index + 1}`} `)
         tabs.push(' ✔ Submit ')
-        const arrows = tabs[active].length + 4 <= width
-        const room = arrows ? width - 4 : width
-        let first = active
-        let last = active
-        let used = tabs[active].length
-        // Grow outward from the active tab so it always stays visible.
-        for (let grew = true; grew; ) {
-          grew = false
-          if (first > 0 && used + 1 + tabs[first - 1].length <= room) {
-            used += 1 + tabs[--first].length
-            grew = true
-          }
-          if (last < tabs.length - 1 && used + 1 + tabs[last + 1].length <= room) {
-            used += 1 + tabs[++last].length
-            grew = true
-          }
-        }
+        const widths = tabs.map((tab) => tab.length)
+        const arrows = widths[active] + 4 <= width
+        const [first, last] = tabWindow(widths, active, arrows ? width - 4 : width)
         const shown = tabs.slice(first, last + 1).map((tab, offset) => (first + offset === active ? theme.bg('selectedBg', theme.fg('text', tab)) : theme.fg('text', tab)))
         return arrows ? `${theme.fg('dim', '←')} ${shown.join(' ')} ${theme.fg('dim', '→')}` : shown.join(' ')
       }
