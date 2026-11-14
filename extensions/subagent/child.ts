@@ -11,10 +11,12 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import type { AgentRunRequest } from '../internal/agent-run.ts'
+import { expandSkillToolNames } from '../internal/claude-tool-names.ts'
 import { claudeConfigDir } from '../internal/config-dir.ts'
 import { sliceBytes } from '../internal/output-guard.ts'
 import { repoRoot } from '../internal/project-root.ts'
 import { autoMemoryEnabled, capIndexForPrompt, INDEX_MAX_BYTES, INDEX_MAX_LINES, memorySettingsFiles, readMemorySettings } from '../memory.ts'
+import { pluginSkills } from '../skills.ts'
 import { type AgentConfig, type AgentMemoryScope, expandMcpToolPatterns, withPreloadedSkills } from './agents.ts'
 /** The system prompt for Claude's experimental `type: "agent"` hooks: the subagent
  * inspects with read-only tools and returns the same JSON decision a command hook's
@@ -119,7 +121,9 @@ export function withMemoryTools(tools: string[] | undefined): string[] | undefin
 /** The child's --append-system-prompt body: the skills-preloaded prompt plus the
  * agent memory section, without a stray separator when either part is empty. */
 export function childPromptBody(agent: AgentConfig, skillRoots: string[], memorySection: string | undefined): string {
-  const prompt = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots)
+  // A plugin agent is named `<plugin>:<agent>`; its bare skill names prefer that plugin.
+  const ownPlugin = agent.source === 'plugin' ? agent.name.slice(0, agent.name.indexOf(':')) : undefined
+  const prompt = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots, agent.skills?.length ? pluginSkills(os.homedir()) : [], ownPlugin)
   if (!memorySection) return prompt
   return [prompt, memorySection].filter((part) => part.trim()).join('\n\n')
 }
@@ -136,7 +140,7 @@ export function setKnownMcpAliases(aliases: ReadonlyArray<{ pi: string; claude: 
 /** pi's built-in ToolName union (core/tools/index.d.ts; the package's export map
  * does not expose allToolNames, so this mirrors it) plus the tools pi-code's own
  * extensions register in a child. Claude's capitalized spellings fold onto these. */
-const CHILD_TOOL_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'web_fetch', 'web_search', 'list_mcp_resources', 'read_mcp_resource', 'todo', 'question', 'memory', 'slash_command', 'plan_mode_complete'])
+const CHILD_TOOL_NAMES = new Set(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'web_fetch', 'web_search', 'list_mcp_resources', 'read_mcp_resource', 'todo', 'question', 'memory', 'slash_command', 'plugin_skill', 'plan_mode_complete'])
 
 /** Claude: when no entry in a `tools` list resolves to a tool, the subagent fails
  * to launch with an error naming the entries, instead of running tool-less. */
@@ -168,8 +172,8 @@ export function agentInvocationArgs(agent: AgentConfig, aliasModel?: string): st
   // Claude's mcp__<server> / mcp__* patterns expand against the parent's MCP roster;
   // without this a server-level deny removed nothing (fail open) and a server-level
   // grant granted nothing.
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', expandMcpToolPatterns(agent.tools, knownMcpAliases).join(','))
-  if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', expandMcpToolPatterns(agent.disallowedTools, knownMcpAliases).join(','))
+  if (agent.tools && agent.tools.length > 0) args.push('--tools', expandMcpToolPatterns(expandSkillToolNames(agent.tools), knownMcpAliases).join(','))
+  if (agent.disallowedTools && agent.disallowedTools.length > 0) args.push('--exclude-tools', expandMcpToolPatterns(expandSkillToolNames(agent.disallowedTools), knownMcpAliases).join(','))
   // Claude: "Explore and Plan are the only subagents that omit CLAUDE.md" (and no
   // field or setting changes which agents skip them), to keep research fast.
   if (agent.source === 'builtin' && (agent.name === 'Explore' || agent.name === 'Plan')) args.push('--no-context-files')

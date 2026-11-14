@@ -44,6 +44,7 @@ import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { matchesBashRules } from './internal/bash-rules.ts'
+import { expandSkillToolNames } from './internal/claude-tool-names.ts'
 import { type DiscoveredCommand, discoverCommandFiles, type ParsedCommand, type PathRuleTool, parseCommandFile, substituteArgsDetailed, substituteVars } from './internal/command-file.ts'
 import { type CommandExec, expandDynamicContent, resolvePowershellBinary, spanExec } from './internal/command-spans.ts'
 import { claudeConfigDir } from './internal/config-dir.ts'
@@ -86,6 +87,11 @@ function resolveCommandModel(model: string | undefined, available: ReadonlyArray
 function substitutePathRule(rule: string, vars: Record<string, string | undefined>): string {
   const substituted = substituteVars(rule, vars)
   return rule.trimStart().startsWith('${CLAUDE_') && path.isAbsolute(substituted) ? `/${substituted}` : substituted
+}
+
+/** Skill grants include plugin_skill even when slash_command is not active. */
+function withPluginSkill(allowed: string[], available: string[]): string[] {
+  return expandSkillToolNames(allowed).filter((tool) => available.includes(tool))
 }
 
 /** One scalar argument scope checked against one call: undefined when the tool is
@@ -148,7 +154,7 @@ export function collectCommands(dirs: string[]): DiscoveredCommand[] {
 
 /** A plugin's command files, namespaced `plugin:name` as Claude registers them.
  * The manifest may point `commands` somewhere else; the default is `commands/`. */
-function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] {
+export function pluginCommands(plugins: InstalledPlugin[]): DiscoveredCommand[] {
   const found: DiscoveredCommand[] = []
   for (const plugin of plugins) {
     const declared = plugin.manifest.commands
@@ -418,7 +424,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
       const names = agentNamesIn(input)
       return scopeVerdict(pendingAgentRules, 'subagent', 'Agents', names.join(', '), (rules) => matchesAgentRules(names, rules))
     }
-    if (event.toolName === 'slash_command') return scopeVerdict(pendingSkillRules, 'slash_command', 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
+    if (event.toolName === 'slash_command' || event.toolName === 'plugin_skill') return scopeVerdict(pendingSkillRules, event.toolName, 'Command', text(input.command), (rules) => matchesSkillRules(text(input.command), rules))
     const rules = pendingPathRules?.[event.toolName as PathRuleTool]
     if (!rules) return
     // The shared reader takes pi's `path` (or Claude's `file_path`) and normalises the
@@ -478,7 +484,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     // command must grant and restore against that original set, or its own tools
     // are intersected away by the first command's narrowing.
     const original = captureRestorePoint()
-    const granted = allowed.filter((tool) => original.includes(tool))
+    const granted = withPluginSkill(allowed, original)
     // `allowed-tools: []` says no tools, and is honored. A non-empty list that
     // intersects to nothing named only tools pi has none of: that restriction cannot
     // be expressed, and applying it as "no tools" is not what the command asked for.
@@ -491,7 +497,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
     pendingBashRules = granted.includes('bash') ? parsed.bashRules?.map((rule) => substituteVars(rule, vars)) : undefined
     pendingDomainRules = granted.includes('web_fetch') ? parsed.domainRules : undefined
     pendingAgentRules = granted.includes('subagent') ? parsed.agentRules : undefined
-    pendingSkillRules = granted.includes('slash_command') ? parsed.skillRules : undefined
+    pendingSkillRules = granted.some((tool) => tool === 'slash_command' || tool === 'plugin_skill') ? parsed.skillRules : undefined
     pendingPathRules = parsed.pathRules ? scopedPathRules(parsed.pathRules, granted, vars) : undefined
   }
 
@@ -501,7 +507,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
     const disallowed = parsed.disallowedTools
     if (!disallowed || disallowed.length === 0) return
     captureRestorePoint()
-    pi.setActiveTools(pi.getActiveTools().filter((tool) => !disallowed.includes(tool)))
+    // Skill covers the plugin-skill tool as well as slash_command, so disallowing it
+    // removes both; leaving plugin_skill would keep the skills the command excluded.
+    const denied = expandSkillToolNames(disallowed)
+    pi.setActiveTools(pi.getActiveTools().filter((tool) => !denied.includes(tool)))
     noteTakenAway()
   }
 
@@ -602,9 +611,10 @@ export default function commandsExtension(pi: ExtensionAPI) {
     const trusted = await isProjectApproved(ctx)
     projectApproved = trusted
     // A resume/fork/new session can switch projects in-process. pi cannot unregister a
-    // command or re-describe the slash_command tool, so a name registered in an earlier
-    // project keeps its user-path binding and the tool description stays frozen at the
-    // first session's list; that is a pi limitation. What must not persist is the map
+    // command, so a name registered in an earlier project keeps its user-path binding.
+    // pi re-describes a tool only through its prepareLoadout hook, which slash_command
+    // does not define, so its description stays at the first session's list (the
+    // plugin_skill tool in skills.ts defines the hook). What must not persist is the map
     // the model resolves against, so it is rebuilt from scratch here: a stale command
     // from a previous project resolves to "unknown" rather than being expanded.
     discovered.clear()

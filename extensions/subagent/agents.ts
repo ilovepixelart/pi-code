@@ -15,8 +15,9 @@ import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
 import { findModel } from '../internal/model-lookup.ts'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
 import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
-import { sharedSlot } from '../internal/shared-slot.ts'
 import { errorMessage } from '../internal/values.ts'
+import { warnOnce } from '../internal/warn-once.ts'
+import { findPluginSkill } from '../skills.ts'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -42,22 +43,6 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
   const tools = parseToolGrants(items.filter((item) => !unclosed.includes(item)))?.tools ?? []
   if (tools.length > 0) return tools
   return unclosed.length > 0 ? unclosed : undefined
-}
-
-/** Discovery runs on every roster build and every subagent call, and a rejected file
- * is rejected again each time. Each distinct warning is printed once per process so
- * it informs without flooding the terminal. The set lives in a shared slot because pi
- * loads a fresh module instance for every session and /reload. */
-const warnedSlot = sharedSlot<Set<string>>('subagent.agent-warnings')
-function warnOnce(message: string): void {
-  let warned = warnedSlot.get()
-  if (!warned) {
-    warned = new Set()
-    warnedSlot.set(warned)
-  }
-  if (warned.has(message)) return
-  warned.add(message)
-  console.warn(message)
 }
 
 /**
@@ -129,14 +114,35 @@ function parseSkillsField(raw: unknown): string[] | undefined {
  * does not inherit the parent's skill discovery, so the bodies travel in the prompt.
  * A name that resolves to nothing is reported rather than dropped: a silently missing
  * instruction is worse than a visible gap. */
-export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[]): string {
+export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: readonly PreloadablePluginSkill[] = [], ownPlugin?: string): string {
   if (!skills || skills.length === 0) return prompt
   const sections: string[] = []
   for (const name of skills) {
-    const body = readSkillBody(name, skillDirs)
+    const body = readSkillBody(name, skillDirs) ?? readPluginSkillBody(name, plugins, ownPlugin)
     sections.push(body === undefined ? `<skill name="${name}">(skill not found)</skill>` : `<skill name="${name}">\n${body.trim()}\n</skill>`)
   }
   return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
+}
+
+type PreloadablePluginSkill = { name: string; alias?: string; filePath: string; plugin: { root: string } }
+
+/** Qualified names select a plugin exactly, by the skill's name or its directory alias.
+ * A bare name follows Claude's order after personal/project skills: the skill of the
+ * plugin the agent itself belongs to, then the first plugin that ships the name. */
+function findPreloadablePluginSkill(name: string, plugins: readonly PreloadablePluginSkill[], ownPlugin: string | undefined): PreloadablePluginSkill | undefined {
+  if (name.includes(':')) return findPluginSkill(plugins, name)
+  const own = ownPlugin === undefined ? undefined : findPluginSkill(plugins, `${ownPlugin}:${name}`)
+  return own ?? plugins.find((entry) => entry.name.endsWith(`:${name}`)) ?? plugins.find((entry) => entry.alias?.endsWith(`:${name}`))
+}
+
+function readPluginSkillBody(name: string, plugins: readonly PreloadablePluginSkill[], ownPlugin: string | undefined): string | undefined {
+  const skill = findPreloadablePluginSkill(name, plugins, ownPlugin)
+  if (!skill) return undefined
+  try {
+    return readConfined(skill.filePath, fs.realpathSync(skill.plugin.root))
+  } catch {
+    return undefined
+  }
 }
 
 /** A skill name is a single directory or file stem, never a path. The name comes from
