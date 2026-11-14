@@ -201,6 +201,28 @@ describe('extension wiring', () => {
     expect(pluginSkills(home).map((skill) => skill.name)).toEqual(['kit:deploy'])
   })
 
+  it('reports a plugin skill name collision once per process', () => {
+    const home = hoisted.home
+    for (const market of ['market', 'other']) {
+      const root = join(home, '.claude', 'plugins', 'cache', market, 'kit', '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: from ${market}\n---\nFrom ${market}`)
+    }
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // Discovery reruns on every session start, input and tool call.
+      pluginSkills(home)
+      pluginSkills(home)
+      expect(warn.mock.calls.filter(([message]) => String(message).includes('is hidden by'))).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('does not register a plugin skill over a command that already owns its name', async () => {
     const cwd = tempDir('cs-proj-')
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')

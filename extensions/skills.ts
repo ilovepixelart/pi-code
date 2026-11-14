@@ -43,6 +43,7 @@ import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.ts'
 import { errorMessage, isDirectory, isRecord } from './internal/values.ts'
+import { warnOnce } from './internal/warn-once.ts'
 
 /** The extra skill directories a manifest declares, as a list. A string is one entry,
  * a list is itself, anything else declares none. */
@@ -156,12 +157,12 @@ export function pluginSkills(home: string): PluginSkill[] {
   for (const skill of found) {
     // Commands retain their established name even if the skills extension loads first.
     if (commandNames.has(skill.name)) {
-      console.warn(`pi-code-skills: /${skill.name} is a plugin command; ignoring ${skill.filePath}`)
+      warnOnce(`pi-code-skills: /${skill.name} is a plugin command; ignoring ${skill.filePath}`)
       continue
     }
     const existing = byName.get(skill.name)
     if (existing) {
-      console.warn(`pi-code-skills: /${skill.name} from ${skill.filePath} is hidden by ${existing.filePath}`)
+      warnOnce(`pi-code-skills: /${skill.name} from ${skill.filePath} is hidden by ${existing.filePath}`)
       continue
     }
     byName.set(skill.name, skill)

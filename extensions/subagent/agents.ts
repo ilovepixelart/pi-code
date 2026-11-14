@@ -15,8 +15,8 @@ import { parseClaudeFrontmatter } from '../internal/frontmatter.ts'
 import { findModel } from '../internal/model-lookup.ts'
 import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
 import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
-import { sharedSlot } from '../internal/shared-slot.ts'
 import { errorMessage } from '../internal/values.ts'
+import { warnOnce } from '../internal/warn-once.ts'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -42,22 +42,6 @@ function parseToolsField(raw: unknown, granting: boolean): string[] | undefined 
   const tools = parseToolGrants(items.filter((item) => !unclosed.includes(item)))?.tools ?? []
   if (tools.length > 0) return tools
   return unclosed.length > 0 ? unclosed : undefined
-}
-
-/** Discovery runs on every roster build and every subagent call, and a rejected file
- * is rejected again each time. Each distinct warning is printed once per process so
- * it informs without flooding the terminal. The set lives in a shared slot because pi
- * loads a fresh module instance for every session and /reload. */
-const warnedSlot = sharedSlot<Set<string>>('subagent.agent-warnings')
-function warnOnce(message: string): void {
-  let warned = warnedSlot.get()
-  if (!warned) {
-    warned = new Set()
-    warnedSlot.set(warned)
-  }
-  if (warned.has(message)) return
-  warned.add(message)
-  console.warn(message)
 }
 
 /**
