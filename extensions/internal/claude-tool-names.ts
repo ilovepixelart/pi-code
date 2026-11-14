@@ -38,6 +38,10 @@ const TOOL_NAMES: ToolNamePair[] = [
   // `Task` was renamed `Agent`; both spellings resolve, the payload reports `Agent`.
   { claude: 'Agent', pi: 'subagent', aliases: ['Task'] },
   { claude: 'AskUserQuestion', pi: 'question' },
+  // Background bash commands; KillShell is the tool's earlier name.
+  { claude: 'TaskStop', pi: 'task_stop', aliases: ['KillShell'] },
+  // Watches a background command's output; stopped with TaskStop like a background shell.
+  { claude: 'Monitor', pi: 'monitor' },
   { claude: 'ExitPlanMode', pi: 'plan_mode_complete' },
   // Custom commands were folded into skills and the reference no longer lists a
   // SlashCommand tool, so `Skill` is canonical and `SlashCommand` is the legacy name.

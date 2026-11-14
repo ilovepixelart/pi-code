@@ -1287,7 +1287,7 @@ describe('session_shutdown background runs', () => {
 
 describe('viewer commands', () => {
   it('registers /tasks and /agents with descriptions', () => {
-    expect(command('tasks').description).toBe('Show background subagent runs')
+    expect(command('tasks').description).toBe('Show background subagent runs and shell commands')
     expect(command('agents').description).toBe('List discovered subagents and where they come from')
   })
 
@@ -1321,6 +1321,19 @@ describe('viewer commands', () => {
     const out = notifyMock.mock.calls[0][0] as string
     expect(out).toContain('bg-11111111 scout: done (3 turns) - audit the API surface')
     expect(out).toContain('All clear.')
+  })
+
+  it('/tasks lists background shell commands after the runs', async () => {
+    const shells = await import('../extensions/internal/background-shells.ts')
+    shells.resetShells()
+    const outputFile = `${shells.shellOutputDir()}/b12345678.output`
+    shells.registerShell({ id: 'b12345678', command: 'npm run dev', outputFile, stop: () => {} })
+    try {
+      await command('tasks').handler('', commandCtx())
+      expect(notifyMock).toHaveBeenCalledWith(`No background subagent runs.\n\nBackground shells:\nb12345678 shell: running - npm run dev\n  output: ${outputFile}`, 'info')
+    } finally {
+      shells.resetShells()
+    }
   })
 
   it('/tasks says so when the registry has evicted every run', async () => {
