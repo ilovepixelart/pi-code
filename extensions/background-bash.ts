@@ -37,6 +37,9 @@ import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 const DEFAULT_TIMEOUT_MS = 120_000
 /** BASH_MAX_TIMEOUT_MS out of the box: ten minutes. */
 const MAX_TIMEOUT_MS = 600_000
+/** setTimeout keeps its delay in 32 bits and fires a larger one after 1 ms; pi's bash
+ * rejects a timeout over this many milliseconds. */
+const MAX_TIMER_MS = 2_147_483_647
 
 const positiveMs = (raw: string | undefined): number | undefined => {
   const value = Number(raw)
@@ -49,7 +52,7 @@ const positiveMs = (raw: string | undefined): number | undefined => {
 export function foregroundLimitMs(timeoutSeconds: number | undefined, env: NodeJS.ProcessEnv = process.env): number {
   const fallback = positiveMs(env.BASH_DEFAULT_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS
   const ceiling = Math.max(fallback, positiveMs(env.BASH_MAX_TIMEOUT_MS) ?? MAX_TIMEOUT_MS)
-  return timeoutSeconds === undefined ? fallback : Math.min(timeoutSeconds * 1000, ceiling)
+  return Math.min(timeoutSeconds === undefined ? fallback : Math.min(timeoutSeconds * 1000, ceiling), MAX_TIMER_MS)
 }
 
 /** Claude stops, rather than backgrounds, a command that "starts with `sleep`". */
