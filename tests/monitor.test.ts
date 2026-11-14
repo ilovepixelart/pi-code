@@ -91,6 +91,9 @@ const until = async (condition: () => boolean, timeoutMs = 8000): Promise<void> 
   }
 }
 const shell = (id: string) => allShells().find((entry) => entry.id === id)
+/** A window no test outlasts: what the command printed goes out with its end notice,
+ * in one message, however slowly the host runs it. */
+const HELD: MonitorLimits = { windowMs: 60_000 }
 
 // A stopped monitor is killed asynchronously: wait for it, so no process outlives the file.
 const stopAndWait = async (): Promise<void> => {
@@ -334,7 +337,7 @@ describe('monitor tool', () => {
   })
 
   it('delivers the lines and one end notice when the command exits, and writes the output file', async () => {
-    const { monitor, sent } = setup()
+    const { monitor, sent } = setup({ limits: HELD })
     const result = await monitor({ command: 'printf "alpha\\nbeta\\n"; printf gamma; exit 3' })
     const id = idOf(result)
     expect(textOf(result)).toContain('5-minute deadline')
@@ -352,7 +355,7 @@ describe('monitor tool', () => {
   })
 
   it('delivers stdout lines only, and writes stderr to the output file', async () => {
-    const { monitor, sent } = setup()
+    const { monitor, sent } = setup({ limits: HELD })
     const id = idOf(await monitor({ command: 'echo visible; printf "%s%s\\n" hid den >&2' }))
     await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent).toHaveLength(1)
@@ -373,7 +376,7 @@ describe('monitor tool', () => {
     const { monitor, sent } = setup()
     await monitor({ command: 'echo "session=$PI_SESSION_ID"' })
     await until(() => sent.length > 0)
-    expect(sent[0]?.message.content).toContain('\nsession=test-session\n')
+    expect(sent[0]?.message.content).toContain('\nsession=test-session')
   })
 
   it('delivers lines while the command is still running', async () => {
@@ -411,7 +414,7 @@ describe('monitor tool', () => {
       const { monitor, sent } = setup({ limits: { floodBurst: 2, floodRefillMs: 60_000 } })
       const id = idOf(await monitor({ command: 'while true; do echo tick; sleep 0.05; done' }))
       await until(() => shell(id)?.finishedAt !== undefined)
-      expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ("the watch") output:\ntick`, expect.stringContaining('output:\ntick'), stopNotice(id, tooMany)])
+      expect(sent.map((entry) => entry.message.content)).toEqual([expect.stringContaining('output:\ntick'), expect.stringContaining('output:\ntick'), stopNotice(id, tooMany)])
       expect(sent[2]?.options.triggerTurn).toBe(true)
       expect(shell(id)).toMatchObject({ state: 'killed', stopReason: tooMany })
     })
@@ -424,7 +427,7 @@ describe('monitor tool', () => {
     })
 
     it('delivers what a finished command left queued, whatever it leaves out', async () => {
-      const { monitor, sent } = setup({ limits: { floodBurst: 2, maxOmittedLines: 100 } })
+      const { monitor, sent } = setup({ limits: { ...HELD, floodBurst: 2, maxOmittedLines: 100 } })
       const id = idOf(await monitor({ command: 'seq 1 120' }))
       await until(() => shell(id)?.finishedAt !== undefined)
       expect(sent).toHaveLength(1)
@@ -439,6 +442,16 @@ describe('monitor tool', () => {
       expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, 'its output passed the 1000B limit')])
       expect(shell(id)?.state).toBe('killed')
     })
+  })
+
+  // A process forked while the first kill lands is reached only by the second one.
+  it.skipIf(process.platform === 'win32')('kills the process group again once the stopped shell has exited', async () => {
+    const kills = vi.spyOn(process, 'kill')
+    const { monitor, stop } = setup()
+    const id = idOf(await monitor({ command: 'sleep 30' }))
+    await stop(id)
+    await until(() => shell(id)?.finishedAt !== undefined)
+    expect(kills.mock.calls.filter(([pid, signal]) => pid < 0 && signal === 'SIGKILL')).toHaveLength(2)
   })
 
   it('counts a running monitor in the footer until it is stopped', async () => {

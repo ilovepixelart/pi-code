@@ -283,10 +283,11 @@ function execSplit(command: string, run: SplitRun): Promise<number> {
     child.once('error', reject)
     // A process the shell forked while the kill was landing survives it and holds the
     // pipes open, so 'close' would never come: once the stopped shell is gone, end
-    // whatever is left of its group and let go of the pipes.
+    // whatever is left of its group and let go of the pipes. Not on Windows, where
+    // there is no group and the shell's process ID may already belong to another process.
     child.once('exit', () => {
       if (!run.signal.aborted) return
-      kill()
+      if (process.platform !== 'win32') kill()
       child.stdout?.destroy()
       child.stderr?.destroy()
     })
