@@ -502,6 +502,17 @@ describe('bash tool', () => {
       expect(sizeOf(allShells()[0]?.outputFile)).toBe(2 * 108894)
     })
 
+    // Windows may keep listing a removed file until the stream writing it has closed.
+    it.skipIf(process.platform === 'win32')('removes the built-in copy at quit, without waiting for the command to end', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '300'
+      const h = setup()
+      const updates: unknown[] = []
+      await h.bash('t1', { command: 'seq 1 20000; sleep 10' }, undefined, (update) => updates.push(update))
+      expect(builtinCopies()).toHaveLength(1)
+      h.emit('session_shutdown', { reason: 'quit' })
+      expect(builtinCopies()).toEqual([])
+    })
+
     it('keeps the built-in copy a foreground result points at', async () => {
       const h = setup()
       const result = await h.bash('t1', { command: 'seq 1 20000' })

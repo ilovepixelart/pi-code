@@ -169,7 +169,24 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
     if (signal?.aborted) lifetime.abort()
     else signal?.addEventListener('abort', forwardAbort, { once: true })
 
-    const shell = registerShell({ id, command: params.command, outputFile, stop: () => lifetime.abort(), background: backgrounded })
+    /** The file the built-in tool saved the full output to, if it truncated any. The
+     * model was pointed at the output file, never at this copy. */
+    let builtinCopy: string | undefined
+    const dropBuiltinCopy = (): void => {
+      if (!backgrounded || !builtinCopy) return
+      try {
+        fs.rmSync(builtinCopy, { force: true })
+      } catch {
+        // Windows can refuse while the built-in tool still has the file open; the call
+        // made when the command settles, after it has closed the file, removes it.
+      }
+    }
+    // At quit pi exits before a stopped command settles, so the copy goes with the stop.
+    const stop = (): void => {
+      lifetime.abort()
+      dropBuiltinCopy()
+    }
+    const shell = registerShell({ id, command: params.command, outputFile, stop, background: backgrounded })
     let written = 0
     /** Every chunk goes to the output file. The built-in tool's accumulator gets it only
      * while the call is waiting on the result: once the command is in the background
@@ -190,8 +207,6 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
       exec: (command, cwd, options) => local.exec(command, cwd, { ...options, timeout: undefined, signal: lifetime.signal, onData: (data) => onData(data, options.onData) }),
     }
     const tool = createBashToolDefinition(ctx.cwd, { operations, shellPath, commandPrefix })
-    /** The file the built-in tool saved the full output to, if it truncated any. */
-    let builtinCopy: string | undefined
     // Updates stop with the tool call: the call has returned once the command is in the background.
     const update = (partial: ToolResult): void => {
       builtinCopy = partial.details?.fullOutputPath ?? builtinCopy
@@ -206,9 +221,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
       signal?.removeEventListener('abort', forwardAbort)
       log.end()
       settleShell(shell, exitCodeOf(outcome))
+      dropBuiltinCopy()
       if (!backgrounded) return
-      // The model was pointed at the output file, never at the built-in tool's copy.
-      if (builtinCopy) fs.rm(builtinCopy, { force: true }, () => {})
       // Stopped through task_stop: the model asked for it and needs no notice.
       if (shell.state !== 'killed' || shell.stopReason) notify(shell)
     })
