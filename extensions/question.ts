@@ -130,7 +130,7 @@ function checkbox(checked: boolean): string {
 }
 
 function optionLine(label: string, index: number, selected: boolean, theme: Theme): string {
-  return (selected ? theme.fg('accent', '> ') : '  ') + theme.fg(selected ? 'accent' : 'text', `${index + 1}. ${label}`)
+  return (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(selected ? 'accent' : 'text', `${index + 1}. ${label}`)
 }
 
 /** One row of a question; the cursor indexes into the question's rows. */
@@ -187,7 +187,10 @@ function buildQuestionLines(view: QuestionView): string[] {
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
   add(theme.fg('accent', '─'.repeat(width)))
-  if (header) add(theme.fg('muted', ` [${header}]`))
+  if (header) {
+    add(theme.bg('selectedBg', theme.fg('text', ` ☐ ${header} `)))
+    lines.push('')
+  }
   const wrapIndented = (text: string, indent: number, color: 'text' | 'muted') => {
     // Leave at least one column for text when the terminal is narrower than the indent.
     const pad = ' '.repeat(Math.max(0, Math.min(indent, width - 1)))
@@ -220,9 +223,9 @@ function buildQuestionLines(view: QuestionView): string[] {
 }
 
 function navHint(typing: boolean, multiSelect: boolean, tabs: boolean): string {
-  if (typing) return ' Enter to submit • Esc to go back'
-  if (tabs) return ` ↑↓ navigate • ${multiSelect ? 'Space to toggle • Enter to confirm' : 'Enter to select'} • Tab/←→ switch questions • Esc to cancel`
-  return multiSelect ? ' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel' : ' ↑↓ navigate • Enter to select • Esc to cancel'
+  if (typing) return ' Enter to submit · Esc to go back'
+  const keys = multiSelect ? 'Space to toggle · ↑/↓ to navigate · Enter to confirm' : 'Enter to select · ↑/↓ to navigate'
+  return tabs ? ` ${keys} · Tab/←→ to switch questions · Esc to cancel` : ` ${keys} · Esc to cancel`
 }
 
 /** The result line for a question that was not cancelled. */
@@ -857,7 +860,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const spec = specs[active]
         const saved = answers()
         const rule = theme.fg('accent', '─'.repeat(width))
-        const lines = state ? buildQuestionLines({ width, question: spec.question, header: lone ? spec.header : undefined, state, theme }) : [rule, ...reviewBody(width, saved)]
+        const lines = state ? buildQuestionLines({ width, question: theme.bold(spec.question), header: lone ? spec.header : undefined, state, theme }) : [rule, ...reviewBody(width, saved)]
         lines.push('', theme.fg('dim', navHint(state?.typing === true, spec?.multiSelect === true, !lone)))
         if (countdown !== undefined) lines.push(theme.fg('warning', ` Auto-continuing in ${countdown}s if idle · press any key to stay`))
         lines.push(rule)
