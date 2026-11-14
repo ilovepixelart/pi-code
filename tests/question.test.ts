@@ -821,10 +821,26 @@ describe('question overlay', () => {
     expect(overlay.render(60)).toContain('❯ 1. Alpha')
   })
 
-  it('keeps the cursor on the free-text option when down is pressed at the bottom', () => {
+  it('should keep the cursor on Chat about this when Down is pressed at the bottom', () => {
     const { overlay } = openOverlay(setup())
-    for (let i = 0; i < 4; i++) overlay.handleInput(RAW.down)
-    expect(overlay.render(60).map(stripTerminalSequences), 'The cursor should stop on the last row').toContain('❯ 3. Type something.')
+    for (let i = 0; i < 5; i++) overlay.handleInput(RAW.down)
+    expect(overlay.render(60), 'The cursor should stop on the last row').toContain('❯ 4. Chat about this')
+  })
+
+  it('should send Claude Code clarify text when Chat about this is chosen for a single question', async () => {
+    const tool = setup()
+    const { overlay, result } = openOverlay(tool)
+
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.down)
+    const rendered = overlay.render(60)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(rendered.indexOf('❯ 4. Chat about this') - 1, 'The separator should directly precede the Chat row').toBe(rendered.lastIndexOf('─'.repeat(60), rendered.indexOf('❯ 4. Chat about this')))
+    expect(submitted.content[0].text, 'The model should get the clarify text with the question unanswered').toBe(
+      'The user wants to clarify these questions.\n    This means they may have additional information, context or questions for you.\n    Take their response into account and then reformulate the questions if appropriate.\n    Start by asking them what they would like to clarify.\n\n    Questions asked:\n- "Pick one"\n  (No answer provided)',
+    )
+    expect(submitted.details?.answer, 'Chat should not read as a cancel').toBe('')
   })
 
   it('re-lays out when the width changes', () => {
@@ -1384,6 +1400,73 @@ describe('question batch submission', () => {
     const submitted = await result
 
     expect(submitted.content[0].text, 'Enter on a blank field should cancel, as in Claude Code').toBe('User cancelled the selection')
+  })
+
+  it('should send confirmed answers only when Chat about this is chosen in a batch', async () => {
+    const tool = setup()
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('draft')
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'Only the confirmed answer should be listed').toMatch(/Questions asked:\n- "First\?"\n {2}Answer: Beta\n- "Second\?"\n {2}\(No answer provided\)$/)
+    expect(submitted.details, 'The details should mark the call as a chat').toMatchObject({ chat: true })
+    expect(lines(tool.renderResult(submitted, {}, theme)), 'The transcript should say the user wants to clarify').toEqual(['User wants to clarify these questions'])
+  })
+
+  it('should send unconfirmed checks when Chat about this is chosen on a multi-select question, as Submit would', async () => {
+    const { overlay, result } = openOverlayWith(setup(), { question: 'Pick some', options: OPTIONS, multiSelect: true })
+
+    overlay.handleInput(RAW.space)
+    // Down stops on Chat, the last row.
+    for (let i = 0; i < 5; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'A check should count as an answer before Enter').toMatch(/Questions asked:\n- "Pick some"\n {2}Answer: Alpha$/)
+  })
+
+  it('should send multi-select text left without Enter when Chat about this is chosen, as Submit would', async () => {
+    const { overlay, result } = openOverlayWith(setup(), { question: 'Pick some', options: OPTIONS, multiSelect: true })
+
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('zz')
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'Text left in the multi-select field should count as an answer').toMatch(/Questions asked:\n- "Pick some"\n {2}Answer: zz$/)
+  })
+
+  it('should send what is checked when a confirmed multi-select answer changes before Chat about this', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.space)
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'The confirmed question should list what is checked').toContain('- "First?"\n  Answer: Alpha, Beta\n')
   })
 
   it('should cancel the whole call when Cancel is chosen in the review', async () => {
@@ -2327,6 +2410,30 @@ describe('question batch lifecycle', () => {
 
     expect(rendered, 'The remote answer should check its option').toContain('1. [x] Alpha')
     expect(rendered, 'The remote answer should replace the local draft, so what is shown is what is submitted').toContain('3. [ ] Type something')
+  })
+
+  it('should close live remote offers and send the remote answer when Chat about this is chosen', async () => {
+    const offers: RemoteQuestionOffer[] = []
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      offers.push(offer)
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    replies[1]?.({ action: 'answer', indices: [2] })
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(offers[0].signal.aborted, 'Chat should close the offer still live').toBe(true)
+    expect(replies[0]?.({ action: 'answer', indices: [1] }), 'A reply after Chat should be rejected').toBe(false)
+    expect(submitted.content[0].text, 'The remote answer should be listed as confirmed').toMatch(/- "First\?"\n {2}\(No answer provided\)\n- "Second\?"\n {2}Answer: Beta$/)
   })
 
   it('should cancel after remote withdrawal when the turn aborts', async () => {
