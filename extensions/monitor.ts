@@ -68,9 +68,10 @@ export const MAX_LINE_CHARS = 500
 /** Messages one monitor may send at once before it counts as flooding; Claude's bucket
  * also holds 10. */
 export const FLOOD_BURST = 10
-/** How long until a monitor may send one more message. Claude refills every 2 seconds;
- * a message costs a turn here, so the allowance comes back more slowly. */
-export const FLOOD_REFILL_MS = 30_000
+/** How long until a monitor may send one more message; Claude's value. It must not
+ * exceed MIN_INTERVAL_MS, or a monitor delivering at that interval is stopped as a
+ * flood; while it does not, the allowance is never spent. */
+export const FLOOD_REFILL_MS = 2_000
 /** Lines one delivery may leave out before the command counts as unfiltered output. */
 export const MAX_OMITTED_LINES = 1_000
 

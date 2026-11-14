@@ -227,7 +227,62 @@ describe('tokenBucket', () => {
   })
 
   it('has the documented flood constants', () => {
-    expect([FLOOD_BURST, FLOOD_REFILL_MS, MAX_OMITTED_LINES]).toEqual([10, 30_000, 1000])
+    expect([FLOOD_BURST, FLOOD_REFILL_MS, MAX_OMITTED_LINES]).toEqual([10, 2_000, 1000])
+  })
+})
+
+describe('flood limits with the constants in force', () => {
+  /** A watch as `start` wires it: the batcher's deliveries spend the allowance, the
+   * omitted lines are judged as each chunk arrives, and a stop drops what is queued. */
+  const watch = () => {
+    const delivered: string[] = []
+    let stoppedAt: number | undefined
+    const startedAt = Date.now()
+    const allowance = tokenBucket(FLOOD_BURST, FLOOD_REFILL_MS)
+    const batcher = createLineBatcher({ emit: (batch) => (allowance.tryConsume() ? delivered.push(...batch.lines) : stop()) })
+    const stop = (): void => {
+      stoppedAt ??= Date.now() - startedAt
+      batcher.drain()
+    }
+    const push = (chunk: string): void => {
+      if (stoppedAt !== undefined) return
+      batcher.push(chunk)
+      if (batcher.omitted() > MAX_OMITTED_LINES) stop()
+    }
+    return { delivered, push, stoppedAt: () => stoppedAt }
+  }
+
+  const everySeconds = [5, 10, 30]
+  const watches = [DEFAULT_DEADLINE_MS, MAX_DEADLINE_MS]
+  const cases = everySeconds.flatMap((seconds) => watches.map((watchMs) => ({ seconds, minutes: watchMs / 60_000, watchMs })))
+
+  it.each(cases)('delivers every line of a command printing one every $seconds s through a $minutes-minute watch', ({ seconds, watchMs }) => {
+    vi.useFakeTimers()
+    const { delivered, push, stoppedAt } = watch()
+    const lines = Array.from({ length: watchMs / (seconds * 1000) }, (_, index) => `tick ${index + 1}`)
+    for (const line of lines) {
+      push(`${line}\n`)
+      vi.advanceTimersByTime(seconds * 1000)
+    }
+    expect({ stoppedAt: stoppedAt(), delivered }).toEqual({ stoppedAt: undefined, delivered: lines })
+  })
+
+  it('stops a command that prints 5,000 lines in one chunk before anything is delivered', () => {
+    vi.useFakeTimers()
+    const { delivered, push, stoppedAt } = watch()
+    push('line\n'.repeat(5000))
+    expect({ stoppedAt: stoppedAt(), delivered }).toEqual({ stoppedAt: 0, delivered: [] })
+  })
+
+  it('stops a command that prints 2,000 lines a second within its first second', () => {
+    vi.useFakeTimers()
+    const { delivered, push, stoppedAt } = watch()
+    for (let chunk = 0; chunk < 30; chunk++) {
+      push('line\n'.repeat(200))
+      vi.advanceTimersByTime(100)
+    }
+    expect(stoppedAt()).toBeLessThan(BATCH_WINDOW_MS)
+    expect(delivered).toEqual([])
   })
 })
 
@@ -434,6 +489,13 @@ describe('monitor tool', () => {
     // without pause can keep the event loop on its pipe, and no timer runs meanwhile.
     it('stops a monitor that leaves out too many lines as the output arrives, without delivering it', async () => {
       const { monitor, sent } = setup({ limits: { ...HELD, maxOmittedLines: 100 } })
+      const id = idOf(await monitor({ command: 'yes line' }))
+      await until(() => shell(id)?.finishedAt !== undefined)
+      expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
+    })
+
+    it('stops a command that prints without pause under the limits in force, with one notice', async () => {
+      const { monitor, sent } = setup()
       const id = idOf(await monitor({ command: 'yes line' }))
       await until(() => shell(id)?.finishedAt !== undefined)
       expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
