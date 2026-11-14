@@ -395,6 +395,17 @@ describe('resolving a name to one memory file', () => {
     expect(existsSync(join(store, 'a.md'))).toBe(false)
   })
 
+  it('deletes only the entry a memory starts, keeping the lines that mention it', async () => {
+    const mentions = '- [docs](https://example.com/guide) relates to [b](b.md)\n- [ ] todo: revisit [b](b.md) later\n'
+    writeFileSync(join(store, 'MEMORY.md'), `# Memory index\n${mentions}- [b](b.md): two\n- [c](c.md): three\n`)
+    writeFileSync(join(store, 'b.md'), 'b body\n')
+    const t = await toolFor(cwd)
+
+    await t.execute('1', { action: 'delete', name: 'b' })
+    expect(index()).toBe(`# Memory index\n${mentions}- [c](c.md): three\n`)
+    expect(existsSync(join(store, 'b.md'))).toBe(false)
+  })
+
   it('adds no frontmatter in the pi store', async () => {
     const t = await toolFor(cwd)
     await t.execute('1', { action: 'save', name: 'plain', description: 'a note', content: 'body\n' })
