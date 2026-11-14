@@ -1073,6 +1073,33 @@ describe('question tab navigation', () => {
   })
 })
 
+describe('question navigation hints', () => {
+  it('should fit every hint variant in 80 columns', () => {
+    const single = { question: 'One?', options: OPTIONS }
+    const multi = { ...single, multiSelect: true }
+    const pair = { questions: [single, single] }
+    const typing = [RAW.down, RAW.down, RAW.enter]
+    const hint = (params: Record<string, unknown>, keys: string[] = []): string => {
+      const { overlay } = openOverlayWith(setup(), params)
+      for (const key of keys) overlay.handleInput(key)
+      return overlay.render(200).at(-2) ?? ''
+    }
+
+    const hints = [hint(single), hint(multi), hint(single, typing), hint(pair), hint({ questions: [multi, single] }), hint(pair, typing), hint(pair, [RAW.right, RAW.right])]
+
+    expect(hints, 'Each form state should show its own keys').toEqual([
+      ' Enter to select · ↑/↓ to navigate · Esc to cancel',
+      ' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel',
+      ' Enter to submit · Esc to go back',
+      ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+      ' Space to toggle · Tab/Arrow keys to navigate · Enter to confirm · Esc to cancel',
+      ' Enter to submit · Esc to go back',
+      ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+    ])
+    for (const text of hints) expect(visibleWidth(text), `"${text}" should fit an 80 column terminal`).toBeLessThanOrEqual(80)
+  })
+})
+
 describe('question batch submission', () => {
   it('should submit no default choices when every question is left unanswered', async () => {
     const { overlay, result } = openOverlayWith(setup(), {
@@ -1454,7 +1481,7 @@ describe('question batch submission', () => {
     overlay.handleInput(RAW.enter)
     const submitted = await result
 
-    expect(options, 'Escape in the editor should return to the option list').toContain('Enter to select · ↑/↓ to navigate · Tab/←→ to switch questions · Esc to cancel')
+    expect(options, 'Escape in the editor should return to the option list').toContain('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
     expect(submitted.content[0].text, 'The confirmed option should reach the model').toContain('First?\nUser selected: 1. Alpha')
     expect(submitted.content[0].text, 'The draft should not replace the confirmed answer').not.toContain('draft')
   })

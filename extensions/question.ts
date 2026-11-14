@@ -227,8 +227,9 @@ function buildQuestionLines(view: QuestionView): string[] {
 
 function navHint(typing: boolean, multiSelect: boolean, tabs: boolean): string {
   if (typing) return ' Enter to submit · Esc to go back'
-  const keys = multiSelect ? 'Space to toggle · ↑/↓ to navigate · Enter to confirm' : 'Enter to select · ↑/↓ to navigate'
-  return tabs ? ` ${keys} · Tab/←→ to switch questions · Esc to cancel` : ` ${keys} · Esc to cancel`
+  // The longest variant, a multiSelect question in a batch, is exactly 80 columns.
+  const move = tabs ? 'Tab/Arrow keys to navigate' : '↑/↓ to navigate'
+  return multiSelect ? ` Space to toggle · ${move} · Enter to confirm · Esc to cancel` : ` Enter to select · ${move} · Esc to cancel`
 }
 
 /** The first and last tab that fit in `room` columns, one column apart, grown
