@@ -346,19 +346,47 @@ describe('bash tool', () => {
     await expect(h.bash('t1', { command: 'echo x', timeout: -1 })).rejects.toThrow('Invalid timeout')
   })
 
-  it('runs as pi bash does with background tasks disabled', async () => {
-    process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1'
-    process.env.BASH_DEFAULT_TIMEOUT_MS = '50'
-    const h = setup()
-    const result = await h.bash('t1', { command: 'sleep 0.2; echo done', run_in_background: true })
-    expect(textOf(result)).toContain('done')
-    expect(allShells()).toHaveLength(0)
-  })
+  describe.each([
+    ['with background tasks disabled', { env: '1' }],
+    ['in a session without a UI', { hasUI: false }],
+  ])('%s', (_name, { env, hasUI }: { env?: string; hasUI?: boolean }) => {
+    const off = (): Harness => {
+      if (env) process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = env
+      return setup({ hasUI })
+    }
 
-  it('runs as pi bash does in a session without a UI', async () => {
-    const h = setup({ hasUI: false })
-    const result = await h.bash('t1', { command: 'echo headless', run_in_background: true })
-    expect(textOf(result)).toContain('headless')
+    it('does not offer run_in_background or mention background commands', () => {
+      const bash = off().tool('bash')
+      expect(Object.keys(bash.parameters.properties)).toEqual(['command', 'timeout'])
+      expect(JSON.stringify([bash.description, bash.parameters, bash.promptGuidelines])).not.toMatch(/background|task_stop/)
+      expect((bash.parameters.properties.timeout as { description: string }).description).toContain('stopped after 120 seconds')
+    })
+
+    it('rejects run_in_background instead of blocking on the command', async () => {
+      const h = off()
+      await expect(h.bash('t1', { command: 'sleep 2', run_in_background: true })).rejects.toThrow('Background commands are not available')
+      expect(allShells()).toHaveLength(0)
+    })
+
+    it('stops a command at the default timeout', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '100'
+      const h = off()
+      await expect(h.bash('t1', { command: 'echo early; sleep 2' })).rejects.toThrow('timed out after 0.1 seconds')
+      expect(allShells()).toHaveLength(0)
+    })
+
+    it('caps a requested timeout', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '100'
+      process.env.BASH_MAX_TIMEOUT_MS = '200'
+      const h = off()
+      await expect(h.bash('t1', { command: 'echo early; sleep 2', timeout: 60 })).rejects.toThrow('timed out after 0.2 seconds')
+    })
+
+    it('runs a quick command', async () => {
+      const result = await off().bash('t1', { command: 'echo quick' })
+      expect(textOf(result)).toContain('quick')
+      expect(result.structuredContent?.exit_code).toBe(0)
+    })
   })
 
   it('records the notice without a turn before the session has had one', async () => {

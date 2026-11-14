@@ -17,10 +17,10 @@
  * formatting, truncation, renderer and exit-code handling are pi's own. This extension
  * only owns the process lifetime, so a command can outlive the tool call that started it.
  *
- * Deviations: with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, or in a session without a UI
- * (print and json modes, subagents), where no later turn could receive a notification,
- * the tool runs as pi's bash does, which has no default timeout. Claude's Ctrl+B is not
- * offered.
+ * With CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 the tool has no `run_in_background`
+ * parameter and a command is stopped at its timeout, as in Claude. Deviation: the same
+ * holds in a session without a UI (print and json modes, subagents), where no later turn
+ * could receive a notification. Claude's Ctrl+B is not offered.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -63,12 +63,21 @@ export function backgroundAllowed(ctx: Pick<ExtensionContext, 'hasUI'>, env: Nod
 
 const formatSeconds = (ms: number): string => `${Math.round(ms / 100) / 10}s`
 
+const commandParam = Type.String({ description: 'Shell command to execute' })
+
 /** `defaultMs` is the timeout in force when the model passes none. */
 const bashSchema = (defaultMs: number) =>
   Type.Object({
-    command: Type.String({ description: 'Shell command to execute' }),
+    command: commandParam,
     timeout: Type.Optional(Type.Number({ description: `Timeout in seconds (optional). With no timeout, a command still running after ${defaultMs / 1000} seconds moves to the background.` })),
     run_in_background: Type.Optional(Type.Boolean({ description: 'Run the command in the background and continue working; you are notified when it finishes.' })),
+  })
+
+/** The schema where background commands are off: Claude removes the parameter there. */
+const foregroundSchema = (defaultMs: number) =>
+  Type.Object({
+    command: commandParam,
+    timeout: Type.Optional(Type.Number({ description: `Timeout in seconds (optional). With no timeout, a command is stopped after ${defaultMs / 1000} seconds.` })),
   })
 
 type BashParams = Static<ReturnType<typeof bashSchema>>
@@ -186,30 +195,38 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     return text(`Command did not complete within its ${formatSeconds(limitMs)} timeout and was moved to the background (ID: ${id}). ${where}. You will be notified when it completes; use task_stop to stop it.`)
   }
 
-  pi.registerTool({
-    name: 'bash',
-    label: 'bash',
-    description: `${builtin.description} Set run_in_background to start a long-running command (a dev server, a watcher, a long build) and keep working; a command that reaches its timeout also moves to the background instead of stopping, except one starting with sleep. Background output is written to a file you read with the read tool, and a message arrives when the command finishes.`,
-    promptSnippet: builtin.promptSnippet,
-    promptGuidelines: [...(builtin.promptGuidelines ?? []), 'Use bash run_in_background for commands that keep running, then read the output file it reports; do not poll with sleep. Stop a background command with task_stop.'],
-    parameters: bashSchema(foregroundLimitMs(undefined)),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const { run_in_background, ...input } = params
-      const native = (): Promise<ToolResult> => {
-        const { shellPath, commandPrefix } = shellSettings(ctx)
-        return createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix }).execute(toolCallId, input, signal, onUpdate as never, ctx) as Promise<ToolResult>
-      }
-      if (!backgroundAllowed(ctx)) return native()
-      // An invalid timeout gets the built-in tool's own error.
-      if (input.timeout !== undefined && !(Number.isFinite(input.timeout) && input.timeout > 0)) return native()
-      const limitMs = foregroundLimitMs(input.timeout)
-      if (!run_in_background && startsWithSleep(input.command)) {
-        const { shellPath, commandPrefix } = shellSettings(ctx)
-        return createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix }).execute(toolCallId, { command: input.command, timeout: limitMs / 1000 }, signal, onUpdate as never, ctx) as Promise<ToolResult>
-      }
-      return runTask(toolCallId, { ...input, run_in_background }, limitMs, signal, onUpdate as never, ctx)
-    },
-  })
+  /** What the model is shown follows the session: pi re-describes a registered tool's
+   * parameters only by registering it again, and whether a session has a UI is not known
+   * before it starts. */
+  const registerBash = (background: boolean): void => {
+    const defaultMs = foregroundLimitMs(undefined)
+    pi.registerTool({
+      name: 'bash',
+      label: 'bash',
+      description: background
+        ? `${builtin.description} Set run_in_background to start a long-running command (a dev server, a watcher, a long build) and keep working; a command that reaches its timeout also moves to the background instead of stopping, except one starting with sleep. Background output is written to a file you read with the read tool, and a message arrives when the command finishes.`
+        : `${builtin.description} A command still running at its timeout is stopped.`,
+      promptSnippet: builtin.promptSnippet,
+      promptGuidelines: background ? [...(builtin.promptGuidelines ?? []), 'Use bash run_in_background for commands that keep running, then read the output file it reports; do not poll with sleep. Stop a background command with task_stop.'] : builtin.promptGuidelines,
+      parameters: (background ? bashSchema(defaultMs) : foregroundSchema(defaultMs)) as ReturnType<typeof bashSchema>,
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const { run_in_background, ...input } = params
+        // The built-in tool, which stops a command at `timeout`; an invalid timeout gets its own error.
+        const stopAtTimeout = (timeout: number | undefined): Promise<ToolResult> => {
+          const { shellPath, commandPrefix } = shellSettings(ctx)
+          return createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix }).execute(toolCallId, { command: input.command, timeout }, signal, onUpdate as never, ctx) as Promise<ToolResult>
+        }
+        if (input.timeout !== undefined && !(Number.isFinite(input.timeout) && input.timeout > 0)) return stopAtTimeout(input.timeout)
+        const allowed = backgroundAllowed(ctx)
+        // Running it in the foreground instead would block the turn on a command that may never exit.
+        if (run_in_background && !allowed) throw new Error('Background commands are not available in this session. Run the command in the foreground, with a timeout if it may not exit.')
+        const limitMs = foregroundLimitMs(input.timeout)
+        if (!allowed || (!run_in_background && startsWithSleep(input.command))) return stopAtTimeout(limitMs / 1000)
+        return runTask(toolCallId, { ...input, run_in_background }, limitMs, signal, onUpdate as never, ctx)
+      },
+    })
+  }
+  registerBash(backgroundAllowed({ hasUI: true }))
 
   pi.registerTool({
     name: 'task_stop',
@@ -233,6 +250,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
   }
 
   pi.on('session_start', (_event, ctx) => {
+    registerBash(backgroundAllowed(ctx))
     notices.attach(pi, sessionHasTurns(ctx))
     setShellsListener(() => showFooter(ctx))
     // Commands that kept running across a session switch show from the start.
