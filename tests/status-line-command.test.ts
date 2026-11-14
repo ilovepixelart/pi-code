@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setAddDirReader } from '../extensions/internal/add-dir-flag.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import statusLine, { activeStatusLine, readStatusLineConfig } from '../extensions/status-line.ts'
-import { makeWorktree } from './worktree-fixture.ts'
 
 const hoisted = vi.hoisted(() => ({ home: '', runs: [] as Array<{ command: string; payload: unknown }>, result: { code: 0, stdout: '', stderr: '', timedOut: false }, gate: undefined as Promise<void> | undefined, settingsChanged: undefined as (() => void) | undefined, fsReads: [] as string[], kills: [] as number[] }))
 
@@ -369,25 +368,8 @@ describe('statusLine command contract', () => {
     expect(payload.exceeds_200k_tokens).toBe(true)
   })
 
-  it('anchors workspace.project_dir at the worktree a session runs in, not the main checkout', async () => {
-    const { main, tree } = makeWorktree(tempDir())
-    const sub = join(tree, 'packages', 'api')
-    mkdirSync(sub, { recursive: true })
-    writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
-    const { handlers, ctx } = setup(sub)
-    vi.useFakeTimers()
-    await handlers.get('session_start')?.({}, ctx)
-    await vi.advanceTimersByTimeAsync(400)
-
-    const workspace = (hoisted.runs[0].payload as { workspace: { project_dir: string } }).workspace
-    expect(workspace.project_dir).toBe(tree)
-    expect(workspace.project_dir).not.toBe(main)
-    await handlers.get('session_shutdown')?.({}, ctx)
-  })
-
-  it('anchors workspace.project_dir at the repository, not the starting directory', async () => {
-    // A script reading .workspace.project_dir to label the repo showed the
-    // subdirectory the session happened to start in.
+  it('should set workspace.project_dir to the launch directory when the session starts in a repo subdirectory', async () => {
+    // Claude: project_dir is the "Directory where Claude Code was launched".
     const repo = tempDir()
     mkdirSync(join(repo, '.git'))
     const sub = join(repo, 'packages', 'api')
@@ -399,8 +381,8 @@ describe('statusLine command contract', () => {
     await vi.advanceTimersByTimeAsync(400)
 
     const workspace = (hoisted.runs[0].payload as { workspace: { current_dir: string; project_dir: string } }).workspace
-    expect(workspace.current_dir).toBe(sub)
-    expect(workspace.project_dir).toBe(repo)
+    expect(workspace.current_dir, 'current_dir is the session cwd').toBe(sub)
+    expect(workspace.project_dir, 'project_dir is the launch directory, not the repo root').toBe(sub)
   })
 
   // Claude: workspace.git_worktree is the "Git worktree name when the current directory is

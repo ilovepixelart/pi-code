@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui'
+import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { readManagedSettings } from './internal/managed-settings.ts'
 import { readUserSetting } from './internal/settings-chain.ts'
@@ -163,7 +163,12 @@ function buildQuestionLines(view: QuestionView): string[] {
     add(theme.bg('selectedBg', theme.fg('text', ` ☐ ${header} `)))
     lines.push('')
   }
-  add(theme.fg('text', ` ${question}`))
+  const wrapIndented = (text: string, indent: number, color: 'text' | 'muted') => {
+    // Leave at least one column for text when the terminal is narrower than the indent.
+    const pad = ' '.repeat(Math.max(0, Math.min(indent, width - 1)))
+    for (const line of wrapTextWithAnsi(text.trimEnd(), Math.max(1, width - pad.length))) add(pad + theme.fg(color, line))
+  }
+  wrapIndented(question, 1, 'text')
   lines.push('')
 
   for (let i = 0; i < options.length; i++) {
@@ -171,7 +176,7 @@ function buildQuestionLines(view: QuestionView): string[] {
     const box = multiSelect && opt.isOther !== true ? checked[i] : undefined
     add(optionLine(opt, i, i === optionIndex, editMode, box, theme))
     if (opt.description) {
-      add(`     ${theme.fg('muted', opt.description)}`)
+      wrapIndented(opt.description, 5, 'muted')
     }
   }
 

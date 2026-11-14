@@ -6,7 +6,7 @@ Registers `.claude/commands/**/*.md` as slash commands with Claude's command con
 
 - Commands load from every project `.claude/commands` between the working directory and the repository root, then the personal `~/.claude/commands`, then the enterprise directory beside the managed settings file; per Claude, enterprise overrides personal and personal overrides project. A command is named by its file name alone (subdirectories only organize the files).
 - `$ARGUMENTS` (the `ARGUMENTS:` append fires only when no placeholder received an argument), 0-based `$ARGUMENTS[N]`/`$N`, named `arguments:` frontmatter. The model-facing listing always keeps every command name; over budget only descriptions are shed.
-- `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}` in bodies and `allowed-tools` rules.
+- `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}` in bodies and `allowed-tools` rules. `CLAUDE_PROJECT_DIR` is the directory the session started in, not the repository root, and a `!` span runs with the same value in its environment.
 
 ## Dynamic content
 
