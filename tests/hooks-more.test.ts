@@ -737,6 +737,96 @@ describe('loadHooks malformed config shapes', () => {
   })
 })
 
+describe('plugin manifest hooks', () => {
+  /** A plugin root holding each named hooks file, every file registering one SessionStart command named after it. */
+  const pluginWith = (files: string[], hooks: unknown) => {
+    const root = tempDir('hooks-plugin-')
+    for (const file of files) {
+      mkdirSync(join(root, file, '..'), { recursive: true })
+      writeFileSync(join(root, file), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `from-${file}` }] }] } }))
+    }
+    return { name: 'multi', root, dataDir: '/d', manifest: { hooks } }
+  }
+  const commands = (config: Record<string, { hooks: { command: string }[] }[]>): string[] =>
+    Object.values(config)
+      .flatMap((matchers) => matchers.flatMap((matcher) => matcher.hooks.map((hook) => hook.command)))
+      .sort()
+
+  it('should load every listed hooks file and inline object when the manifest declares an array', () => {
+    const plugin = pluginWith(['a.json', 'b.json'], ['./a.json', './b.json', { Stop: [{ hooks: [{ type: 'command', command: 'inline.sh' }] }] }])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'a.json, b.json and the inline Stop entry each register their hook').toEqual(['from-a.json', 'from-b.json', 'inline.sh'])
+  })
+
+  it('should load hooks/hooks.json alongside the declared files when the manifest declares an array', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'extra.json'], ['./extra.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the declared file both register').toEqual(['from-extra.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load hooks/hooks.json alongside the declared file when the manifest declares a single path', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'extra.json'], './extra.json')
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the declared file both register').toEqual(['from-extra.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load hooks/hooks.json alongside the inline object when the manifest declares an object', () => {
+    const plugin = pluginWith(['hooks/hooks.json'], { Stop: [{ hooks: [{ type: 'command', command: 'inline.sh' }] }] })
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the inline Stop entry both register').toEqual(['from-hooks/hooks.json', 'inline.sh'])
+  })
+
+  it('should load hooks/hooks.json when the manifest declares an empty array', () => {
+    const plugin = pluginWith(['hooks/hooks.json'], [])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file still registers').toEqual(['from-hooks/hooks.json'])
+  })
+
+  it('should load a file once when the manifest lists it twice or names the default file', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'a.json'], ['./a.json', 'a.json', './hooks/hooks.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'each file registers its hook exactly once').toEqual(['from-a.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load the remaining entries when a listed file is missing', () => {
+    const plugin = pluginWith(['a.json', 'c.json'], ['./a.json', './missing.json', './c.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the files on both sides of the missing one register').toEqual(['from-a.json', 'from-c.json'])
+  })
+
+  it('should skip and warn about an entry when it is neither a path nor an object', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = pluginWith(['a.json'], [null, 42, true, ['./a.json'], './a.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the valid path after the invalid entries still registers').toEqual(['from-a.json'])
+    expect(warn, 'each of the four invalid entries is reported').toHaveBeenCalledTimes(4)
+  })
+})
+
 describe('malformed hook config', () => {
   it('skips a null entry in a plugin manifest instead of throwing out of the load', () => {
     // The pre-pass that drops shell-form user_config references ran before any shape
@@ -879,11 +969,107 @@ describe('hooks extension session_start', () => {
     expect(options.env?.PATH).toBe(process.env.PATH)
   })
 
-  it('points CLAUDE_PROJECT_DIR at the worktree a session started in, not the main checkout', async () => {
-    // Claude: "the project root where the session started". repoRoot resolves a worktree to
-    // its main checkout, so `cd "$CLAUDE_PROJECT_DIR" && npm run format` acted on the user's
-    // main checkout from inside an isolated tree.
+  it('should set CLAUDE_PROJECT_DIR to the session cwd when the session starts in a repo subdirectory', async () => {
+    // Claude 2.1.322 passes the launch directory, not the repo root.
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub })
+    await ext.toolCall('bash', {})
+
+    const options = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the subdirectory the session started in').toBe(sub)
+  })
+
+  // Claude keeps settings.local.json in the cwd on Windows, so a repo-root or main-checkout file never loads there.
+  it.skipIf(process.platform === 'win32')('should give a repo-root settings.local.json hook the repo as CLAUDE_PROJECT_DIR when the session starts in a subdirectory', async () => {
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+    writeSettings(repo, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"' }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    const local = recordFor('"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"').options as { env?: Record<string, string> }
+    const user = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(local.env?.CLAUDE_PROJECT_DIR, 'the local settings hook gets the folder holding its .claude').toBe(repo)
+    expect(user.env?.CLAUDE_PROJECT_DIR, 'the user settings hook gets the session cwd').toBe(sub)
+  })
+
+  const scriptHook = '"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"'
+  const trustedStart = { isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } }
+
+  it.skipIf(process.platform === 'win32')('should point a local settings hook at the worktree, not the main checkout, when the session starts at the worktree root', async () => {
+    // The worktree's settings.local.json lives in the main checkout, where `cd "$CLAUDE_PROJECT_DIR"` must not land.
     const { main, tree } = makeWorktree(tempDir('hooks-wt-'))
+    writeSettings(main, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tree, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: tree })
+
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the worktree root').toBe(tree)
+  })
+
+  it.skipIf(process.platform === 'win32')('should point a local settings hook at the worktree root when the session starts in a worktree subdirectory', async () => {
+    const { main, tree } = makeWorktree(tempDir('hooks-wt-'))
+    const sub = join(tree, 'src')
+    mkdirSync(sub)
+    writeSettings(main, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the worktree root').toBe(tree)
+  })
+
+  it.skipIf(process.platform === 'win32')('should run a handler declared in user and local settings once with the local projectDir when the session starts in a subdirectory', async () => {
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] }
+    writeSettings(hoisted.home, 'settings.json', config)
+    writeSettings(repo, 'settings.local.json', config)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    expect(commandsRun(), 'the identical handler runs once').toEqual([scriptHook])
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'the run gets the local file folder').toBe(repo)
+  })
+
+  it('should anchor a /-rooted if path at the session cwd when the session starts in a repo subdirectory', async () => {
+    // Claude 2.1.322 runs an `Edit(/src/**)` hook for <cwd>/src, not <repo>/src.
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ hooks: [{ command: 'src-guard', if: 'Edit(/src/**)' }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub })
+    await ext.toolCall('edit', { path: join(sub, 'src', 'a.ts') }, 't1', { cwd: sub })
+    expect(commandsRun(), 'a file under the subdirectory src/ matches /src/**').toEqual(['src-guard'])
+    await ext.toolCall('edit', { path: join(repo, 'src', 'a.ts') }, 't2', { cwd: sub })
+    expect(commandsRun(), 'a file under the repo root src/ does not match /src/**').toEqual(['src-guard'])
+  })
+
+  it('should set CLAUDE_PROJECT_DIR to the session cwd when the session starts inside a worktree subdirectory', async () => {
+    const { tree } = makeWorktree(tempDir('hooks-wt-'))
     mkdirSync(join(tree, 'src'))
     writeSettings(hoisted.home, 'settings.json', homeConfig)
 
@@ -892,8 +1078,7 @@ describe('hooks extension session_start', () => {
     await ext.toolCall('bash', {})
 
     const options = recordFor('home-pre').options as { env?: Record<string, string> }
-    expect(options.env?.CLAUDE_PROJECT_DIR).toBe(tree)
-    expect(options.env?.CLAUDE_PROJECT_DIR).not.toBe(main)
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the cwd the session started in').toBe(join(tree, 'src'))
   })
 
   it('exports CLAUDE_CODE_SESSION_ID and CLAUDE_PID to hook commands', async () => {

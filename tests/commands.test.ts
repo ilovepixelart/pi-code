@@ -256,6 +256,20 @@ describe('commands extension', () => {
     expect(outside?.block).toBe(true)
   })
 
+  it('should expose the launch directory as CLAUDE_PROJECT_DIR when the session starts in a repo subdirectory', async () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeCommand(sub, 'ctx.md', 'root: ${CLAUDE_PROJECT_DIR}\nhere: !`pwd`')
+    const s = setup(sub)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ctx')?.handler('', s.ctx)
+
+    expect(s.execCalls[0].shell, 'the span exports the subdirectory').toContain(`export CLAUDE_PROJECT_DIR='${sub}'`)
+    expect(s.sent[0], 'the body substitutes the subdirectory').toContain(`root: ${sub}`)
+  })
+
   it('exposes CLAUDE_PROJECT_DIR to a bash span, as hooks do', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'ctx.md', 'here: !`pwd`')
@@ -955,6 +969,35 @@ describe('allowed-tools argument scopes', () => {
     expect(parallel?.block).toBe(true)
     const chain = (await s.handlers.get('tool_call')?.({ toolName: 'subagent', input: { chain: [{ agent: 'Plan', task: 't' }] } }, s.ctx)) as { block?: boolean }
     expect(chain?.block).toBe(true)
+  })
+
+  it('treats plugin_skill as Skill for grants and for disallowed-tools', async () => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'wrap.md', '---\nallowed-tools: Skill(review-pr *)\n---\nWrap up.')
+    writeCommand(cwd, 'ro.md', '---\ndisallowed-tools: Skill\n---\nLook.')
+    const s = setup(cwd, true, ['bash', 'read', 'slash_command', 'plugin_skill'])
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('wrap')?.handler('', s.ctx)
+
+    expect(s.activeTools()).toEqual(['slash_command', 'plugin_skill'])
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'plugin_skill', input: { command: '/review-pr 12' } }, s.ctx)).toBeUndefined()
+    const blocked = (await s.handlers.get('tool_call')?.({ toolName: 'plugin_skill', input: { command: '/deploy prod' } }, s.ctx)) as { block?: boolean }
+    expect(blocked?.block).toBe(true)
+
+    await s.handlers.get('agent_settled')?.({}, s.ctx)
+    await s.commands.get('ro')?.handler('', s.ctx)
+    expect(s.activeTools()).toEqual(['bash', 'read'])
+  })
+
+  it.each(['Skill', 'plugin_skill'])('grants and scopes %s when slash_command is not active', async (toolName) => {
+    const cwd = tempDir()
+    writeCommand(cwd, 'wrap.md', `---\nallowed-tools: ${toolName}(kit:deploy *)\n---\nWrap up.`)
+    const s = setup(cwd, true, ['bash', 'plugin_skill'])
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('wrap')?.handler('', s.ctx)
+    expect(s.activeTools()).toEqual(['plugin_skill'])
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'plugin_skill', input: { command: '/kit:deploy prod' } }, s.ctx)).toBeUndefined()
+    expect(await s.handlers.get('tool_call')?.({ toolName: 'plugin_skill', input: { command: '/kit:other' } }, s.ctx)).toMatchObject({ block: true })
   })
 
   it('grants slash_command but enforces the skill scope at call time', async () => {

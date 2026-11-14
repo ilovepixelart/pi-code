@@ -12,7 +12,8 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => hoisted.home }
 })
 
-const { default: skillsExt, skillDirs } = await import('../extensions/skills.ts')
+const { default: skillsExt, skillDirs, pluginSkills } = await import('../extensions/skills.ts')
+const { sharedSlot } = await import('../extensions/internal/shared-slot.ts')
 
 const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
 
@@ -57,7 +58,9 @@ describe('skillDirs', () => {
     expect(skillDirs(cwd, home, true)).toEqual([])
   })
 
-  it('includes an enabled plugin skills directory', () => {
+  it('keeps an enabled plugin skills directory out of the loader scan', () => {
+    // pi's loader would name the skill by its directory, dropping the plugin prefix, so
+    // plugin skills are registered as /plugin:name commands instead of contributed here.
     const cwd = tempDir('cs-proj-')
     const home = tempDir('cs-home-')
     const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
@@ -65,7 +68,7 @@ describe('skillDirs', () => {
     mkdirSync(join(home, '.claude'), { recursive: true })
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'skills')])
+    expect(skillDirs(cwd, home, false)).toEqual([])
   })
 
   it('skips a plugin skills directory declared outside the plugin root', () => {
@@ -82,11 +85,11 @@ describe('skillDirs', () => {
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: relative(root, outside) }))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    // The outside path is refused; the plugin's own default skills/ is still scanned,
-    // since a declaration adds to that scan rather than replacing it.
+    // The outside path is refused, and the plugin's own skills are not part of the loader
+    // scan either: a declaration adds to the plugin's own scan (see pluginSkills).
     const dirs = skillDirs(cwd, home, false)
     expect(dirs).not.toContain(outside)
-    expect(dirs).toEqual([join(root, 'skills')])
+    expect(dirs).toEqual([])
   })
 
   it('adds a declared skills directory to the default scan rather than replacing it', () => {
@@ -96,14 +99,17 @@ describe('skillDirs', () => {
     const cwd = tempDir('cs-proj-')
     const home = tempDir('cs-home-')
     const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
-    mkdirSync(join(root, 'skills'), { recursive: true })
-    mkdirSync(join(root, 'extra'), { recursive: true })
+    mkdirSync(join(root, 'skills', 'bundled-skill'), { recursive: true })
+    mkdirSync(join(root, 'extra', 'extra-skill'), { recursive: true })
+    writeFileSync(join(root, 'skills', 'bundled-skill', 'SKILL.md'), '---\nname: bundled-skill\ndescription: bundled\n---\nBundled')
+    writeFileSync(join(root, 'extra', 'extra-skill', 'SKILL.md'), '---\nname: extra-skill\ndescription: extra\n---\nExtra')
     mkdirSync(join(root, '.claude-plugin'), { recursive: true })
     mkdirSync(join(home, '.claude'), { recursive: true })
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: 'extra' }))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'extra'), join(root, 'skills')])
+    expect(skillDirs(cwd, home, false)).toEqual([])
+    expect(pluginSkills(home).map((skill) => skill.name)).toEqual(['kit:extra-skill', 'kit:bundled-skill'])
   })
 
   it('finds project skills at the repository root from a subdirectory session', () => {
@@ -147,6 +153,404 @@ describe('extension wiring', () => {
 
     const untrusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => false })) as { skillPaths: string[] } | undefined
     expect(untrusted).toEqual({ skillPaths: [homeSkills] })
+  })
+
+  it('registers an enabled plugin skill as a /plugin:name command and expands it', async () => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\nargument-hint: "[target]"\n---\nDeploy $ARGUMENTS now.')
+
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<unknown> }>()
+    const sent: string[] = []
+    skillsExt({
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: unknown) => Promise<unknown> }) => commands.set(name, options),
+      registerTool: () => {},
+      sendUserMessage: (text: string) => sent.push(text),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+    } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] } })
+
+    expect([...commands.keys()]).toEqual(['kit:deploy'])
+    expect(commands.get('kit:deploy')?.description).toContain('[target]')
+    // The menu runs the command handler, not the input pipeline, so the handler has to
+    // expand the skill itself. pi would otherwise deliver the raw "/kit:deploy" text.
+    await commands.get('kit:deploy')?.handler('prod', { cwd, isIdle: () => true, isProjectTrusted: () => true, hasUI: false, waitForIdle: async () => {} })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toContain('<skill name="kit:deploy"')
+    expect(sent[0]).toContain('Deploy prod now.')
+  })
+
+  it('keeps one skill when two plugins register the same name', () => {
+    const home = hoisted.home
+    for (const market of ['market', 'other']) {
+      const root = join(home, '.claude', 'plugins', 'cache', market, 'kit', '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: from ${market}\n---\nFrom ${market}`)
+    }
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+
+    expect(pluginSkills(home).map((skill) => skill.name)).toEqual(['kit:deploy'])
+  })
+
+  it('reports a plugin skill name collision once per process', () => {
+    const home = hoisted.home
+    for (const market of ['market', 'other']) {
+      const root = join(home, '.claude', 'plugins', 'cache', market, 'kit', '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: from ${market}\n---\nFrom ${market}`)
+    }
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // Discovery reruns on every session start, input and tool call.
+      pluginSkills(home)
+      pluginSkills(home)
+      expect(warn.mock.calls.filter(([message]) => String(message).includes('is hidden by'))).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('does not register a plugin skill over a command that already owns its name', async () => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDeploy')
+
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, unknown>()
+    skillsExt({
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      getCommands: () => [{ name: 'kit:deploy', source: 'command' }],
+      registerCommand: (name: string) => commands.set(name, true),
+      registerTool: () => {},
+    } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true })
+
+    expect(commands.has('kit:deploy')).toBe(false)
+  })
+
+  const pluginFixture = (body = '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS', dir = 'deploy') => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    const filePath = join(root, 'skills', dir, 'SKILL.md')
+    const settingsPath = join(hoisted.home, '.claude', 'settings.json')
+    mkdirSync(join(root, 'skills', dir), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(settingsPath, JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(filePath, body)
+    const ctx = { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true, isIdle: () => true, hasUI: false, waitForIdle: vi.fn(async () => {}), ui: { notify: vi.fn() } }
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    type Tool = {
+      description: string
+      prepareLoadout: () => { descriptions: { plugin_skill: string } }
+      execute: (id: string, params: { command: string }, signal: undefined, update: undefined, ctx: unknown) => Promise<{ content: Array<{ text: string }> }>
+    }
+    const tools = new Map<string, Tool>()
+    const sendUserMessage = vi.fn()
+    const emit = vi.fn()
+    const exec = vi.fn(async () => ({ stdout: 'SPAN-OUT', stderr: '', code: 0 }))
+    const piCommands: Array<{ name: string; source: string; sourceInfo: { path: string } }> = []
+    skillsExt({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, fn),
+      getCommands: () => piCommands,
+      registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, options),
+      registerTool: (tool: Tool & { name: string }) => tools.set(tool.name, tool),
+      sendUserMessage,
+      exec,
+      events: { emit },
+    } as never)
+    const start = (context = ctx) => handlers.get('session_start')?.({}, context)
+    const invoke = (context = ctx, command = '/kit:deploy prod') => tools.get('plugin_skill')!.execute('call', { command }, undefined, undefined, context)
+    const input = (text: string, context = ctx) => handlers.get('input')?.({ text, source: 'interactive' }, context) as Promise<{ action: string; text?: string } | undefined>
+    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, piCommands, start, invoke, input }
+  }
+
+  it.each(['\n', '\t', ' '])('splits the name from the arguments on any whitespace (%j)', async (separator) => {
+    const t = pluginFixture()
+    await t.start()
+    const result = await t.invoke(t.ctx, `/kit:deploy${separator}prod`)
+    expect(result.content[0].text).toContain('Deploy prod')
+    expect((await t.input(`/kit:deploy${separator}prod`))?.text).toContain('Deploy prod')
+  })
+
+  // Claude: "Plugin skills are not affected by skillOverrides. Manage those through
+  // /plugin instead." A key written for a personal skill of the same bare name must not
+  // reach a plugin's skill either.
+  it.each([
+    ['kit:deploy', 'off'],
+    ['kit:deploy', 'user-invocable-only'],
+    ['kit:deploy', 'name-only'],
+    ['deploy', 'off'],
+  ])('leaves a plugin skill untouched by skillOverrides %s: %s', async (key, state) => {
+    const t = pluginFixture()
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { [key]: state } }))
+    await t.start()
+    expect(t.commands.has('kit:deploy')).toBe(true)
+    expect(t.tools.get('plugin_skill')?.description).toContain('/kit:deploy - deploys')
+    expect((await t.invoke()).content[0].text).toContain('Deploy prod')
+    expect((await t.input('/kit:deploy prod'))?.text).toContain('Deploy prod')
+    expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+  })
+
+  it.each(['/kit:deploy prod', '/skill:kit:deploy prod'])('refuses typed %s for a plugin skill marked user-invocable: false', async (text) => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\nuser-invocable: false\n---\nDeploy $ARGUMENTS !`git diff`')
+    await t.start()
+    expect(t.commands.has('kit:deploy')).toBe(false)
+    expect(await t.input(text, { ...t.ctx, hasUI: true })).toEqual({ action: 'handled' })
+    expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('user-invocable: false'), 'info')
+    expect(t.exec).not.toHaveBeenCalled()
+    // The model path is the one such a skill exists for.
+    expect((await t.invoke()).content[0].text).toContain('Deploy prod')
+  })
+
+  // Claude names a plugin skill `plugin:<directory>` internally and shows the frontmatter
+  // name; both spellings have to reach the same skill, listed once.
+  it.each(['/kit:ship prod', '/skill:kit:ship prod'])('accepts the directory name as an alias in typed %s', async (text) => {
+    const t = pluginFixture(undefined, 'ship')
+    await t.start()
+    expect([...t.commands.keys()]).toEqual(['kit:deploy'])
+    const outcome = await t.input(text)
+    expect(outcome?.text).toContain('<skill name="kit:deploy"')
+    expect(outcome?.text).toContain('Deploy prod')
+  })
+
+  it('accepts the directory name as an alias in the plugin_skill tool without listing it', async () => {
+    const t = pluginFixture(undefined, 'ship')
+    await t.start()
+    const tool = t.tools.get('plugin_skill')!
+    expect(tool.description).toContain('/kit:deploy')
+    expect(tool.description).not.toContain('/kit:ship')
+    expect((await t.invoke(t.ctx, '/kit:ship prod')).content[0].text).toContain('<skill name="kit:deploy"')
+  })
+
+  it('prefers a frontmatter name over the directory alias of another skill', async () => {
+    const t = pluginFixture('---\nname: release\ndescription: releases\n---\nRELEASE BODY')
+    mkdirSync(join(t.root, 'skills', 'other'))
+    writeFileSync(join(t.root, 'skills', 'other', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDEPLOY BODY')
+    await t.start()
+    expect((await t.input('/kit:deploy'))?.text).toContain('DEPLOY BODY')
+    expect((await t.invoke(t.ctx, '/kit:deploy')).content[0].text).toContain('DEPLOY BODY')
+    expect((await t.input('/kit:other'))?.text).toContain('DEPLOY BODY')
+  })
+
+  describe('the bare /skill:name form of a plugin skill', () => {
+    // The notice is once per process; each test starts with nothing reported.
+    beforeEach(() => sharedSlot<Set<string>>('warned-once').set(undefined))
+
+    const secondPlugin = (name: string) => {
+      const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', name, '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: deploys\n---\nFROM ${name}`)
+      writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true, [name]: true } }))
+    }
+
+    it('still resolves to the one plugin skill of that name, with one deprecation notice', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const ui = { ...t.ctx, hasUI: true }
+      const first = await t.input('/skill:deploy prod', ui)
+      expect(first?.text).toContain('<skill name="kit:deploy"')
+      expect(first?.text).toContain('Deploy prod')
+      expect((await t.input('/skill:deploy again', ui))?.text).toContain('Deploy again')
+      expect(t.ctx.ui.notify).toHaveBeenCalledTimes(1)
+      expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/\/skill:deploy is deprecated.*\/kit:deploy/), 'warning')
+    })
+
+    it('prints the deprecation to stderr when there is no UI', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        expect((await t.input('/skill:deploy prod'))?.text).toContain('Deploy prod')
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Use /kit:deploy instead'))
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it('does not warn for the qualified forms', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const ui = { ...t.ctx, hasUI: true }
+      await t.input('/skill:kit:deploy prod', ui)
+      await t.input('/kit:deploy prod', ui)
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('leaves a personal skill of that name in charge', async () => {
+      const t = pluginFixture()
+      mkdirSync(join(hoisted.home, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: mine\n---\nPERSONAL BODY')
+      await t.start()
+      const outcome = await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })
+      expect(outcome?.text).toContain('PERSONAL BODY')
+      expect(outcome?.text).toContain('<skill name="deploy"')
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('leaves a skill pi loaded under that name to pi', async () => {
+      const t = pluginFixture()
+      t.piCommands.push({ name: 'skill:deploy', source: 'skill', sourceInfo: { path: join(tempDir('cs-pi-'), 'SKILL.md') } })
+      await t.start()
+      expect(await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })).toBeUndefined()
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('names the qualified skills instead of guessing when several plugins ship the name', async () => {
+      const t = pluginFixture()
+      secondPlugin('aaa')
+      await t.start()
+      expect(await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })).toEqual({ action: 'handled' })
+      expect(t.ctx.ui.notify).toHaveBeenCalledTimes(1)
+      const [message] = t.ctx.ui.notify.mock.calls[0]
+      expect(message).toContain('/aaa:deploy')
+      expect(message).toContain('/kit:deploy')
+    })
+  })
+
+  it('rechecks disable-model-invocation on every model call', async () => {
+    const t = pluginFixture()
+    await t.start()
+    writeFileSync(t.filePath, '---\nname: deploy\ndescription: deploys\ndisable-model-invocation: true\n---\nUser only')
+    await expect(t.invoke()).rejects.toThrow('user-only')
+  })
+
+  it('uses the current tool context for file and plugin variable expansion', async () => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n@config.txt\n${CLAUDE_PROJECT_DIR}\n${CLAUDE_PLUGIN_ROOT}\n$ARGUMENTS')
+    const other = tempDir('cs-other-')
+    writeFileSync(join(t.ctx.cwd, 'config.txt'), 'WRONG PROJECT')
+    writeFileSync(join(other, 'config.txt'), 'CURRENT PROJECT')
+    await t.start()
+    const result = await t.invoke({ ...t.ctx, cwd: other }, 'kit:deploy prod')
+    expect(result.content[0].text).toContain('CURRENT PROJECT')
+    expect(result.content[0].text).not.toContain('WRONG PROJECT')
+    expect(result.content[0].text).toContain(other)
+    expect(result.content[0].text).toContain(t.root)
+    expect(result.content[0].text).toContain('prod')
+  })
+
+  it('emits skill hooks and runs a model-invoked fork with the expanded prompt', async () => {
+    const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\ncontext: fork\nagent: reviewer\nhooks:\n  Stop: []\n---\nReview $ARGUMENTS')
+    const runner = vi.fn(async () => 'FORK RESULT')
+    setAgentRunner(runner)
+    try {
+      await t.start()
+      const result = await t.invoke()
+      expect(result.content[0].text).toContain('FORK RESULT')
+      expect(runner).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'Review prod', agent: 'reviewer' }))
+      expect(t.emit).toHaveBeenCalledWith('pi-code:skill-hooks', expect.objectContaining({ skillName: 'kit:deploy' }))
+      expect(t.sendUserMessage).not.toHaveBeenCalled()
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
+  it('returns a model-invoked fork through the tool in an interactive session', async () => {
+    // With a UI and no background: false a typed fork runs in the background; the tool
+    // has no later channel for the result, so it must wait for it.
+    const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\ncontext: fork\n---\nReview $ARGUMENTS')
+    setAgentRunner(vi.fn(async () => 'FORK RESULT'))
+    try {
+      await t.start()
+      const result = await t.invoke({ ...t.ctx, hasUI: true })
+      expect(result.content[0].text).toContain('FORK RESULT')
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
+  it.each([
+    [true, {}],
+    [false, { deliverAs: 'followUp' }],
+  ])('sends the typed command when the agent is idle (%s) with delivery %j', async (idle, delivery) => {
+    const t = pluginFixture()
+    await t.start()
+    await t.commands.get('kit:deploy')?.handler('prod', { ...t.ctx, isIdle: () => idle })
+    expect(t.sendUserMessage).toHaveBeenCalledTimes(1)
+    expect(t.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining('Deploy prod'), delivery)
+  })
+
+  it('expands the explicit /skill:plugin:name form', async () => {
+    const t = pluginFixture()
+    await t.start()
+    const outcome = await t.input('/skill:kit:deploy prod')
+    expect(outcome?.action).toBe('transform')
+    expect(outcome?.text).toContain('<skill name="kit:deploy"')
+    expect(outcome?.text).toContain('Deploy prod')
+  })
+
+  it('treats a plugin skill with unparseable frontmatter as pi treats a personal one', async () => {
+    // pi's loader skips a skill whose frontmatter it cannot parse, so /skill:name for
+    // a personal skill passes through as typed. The plugin path matches: no command,
+    // no listing, and the input is left alone rather than failing.
+    const t = pluginFixture('---\nname: [broken yaml\n---\nRough body')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await t.start()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(t.filePath))
+      expect(t.commands.size).toBe(0)
+      expect(t.tools.has('plugin_skill')).toBe(false)
+      await expect(t.input('/kit:deploy prod')).resolves.toBeUndefined()
+      await expect(t.input('/skill:deploy prod')).resolves.toBeUndefined()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps model expansion from executing injected shell', async () => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n!`git diff`')
+    await t.start()
+    await t.invoke()
+    expect(t.exec).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the listing across sessions without registering duplicate commands', async () => {
+    const t = pluginFixture()
+    await t.start()
+    const tool = t.tools.get('plugin_skill')!
+    expect(tool.prepareLoadout().descriptions.plugin_skill).toContain('/kit:deploy')
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: false } }))
+    await t.start()
+    expect(tool.prepareLoadout().descriptions.plugin_skill).not.toContain('/kit:deploy')
+    await expect(t.invoke()).rejects.toThrow('not available')
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true } }))
+    await t.start()
+    expect(tool.prepareLoadout().descriptions.plugin_skill).toContain('/kit:deploy')
+    expect(t.commands.size).toBe(1)
+  })
+
+  it('lets a plugin command win a skill name collision before registering either extension', async () => {
+    const t = pluginFixture()
+    mkdirSync(join(t.root, 'commands'))
+    writeFileSync(join(t.root, 'commands', 'deploy.md'), 'Run the command')
+    await t.start()
+    expect(pluginSkills(hoisted.home)).toEqual([])
+    expect(t.commands.has('kit:deploy')).toBe(false)
   })
 })
 
@@ -404,6 +808,8 @@ describe('context: fork and skillOverrides', () => {
         skillsExt({
           on: (name: string, fn: never) => handlers.set(name, fn),
           exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+          registerCommand: () => {},
+          registerTool: () => {},
           sendMessage: (message: { content?: string }, options: unknown) => {
             if (sendThrows) throw new Error('This extension ctx is stale after session replacement or reload')
             sent.push({ message, options })

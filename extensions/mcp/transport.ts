@@ -148,8 +148,8 @@ function isStdio(config: ServerConfig): config is StdioServerConfig {
   return 'command' in config && (config.type === undefined || config.type === 'stdio')
 }
 
-/** The session's directories: the launch directory answers roots/list, and the
- * project root becomes CLAUDE_PROJECT_DIR in a stdio server's environment. */
+/** The session's directories: the launch directory answers roots/list, and projectDir
+ * becomes CLAUDE_PROJECT_DIR in a stdio server's environment. */
 export interface SessionDirs {
   projectDir: string
   launchDir: string

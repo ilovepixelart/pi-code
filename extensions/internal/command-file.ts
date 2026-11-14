@@ -183,11 +183,12 @@ export function coerceGrantItems(raw: unknown): string[] | undefined {
 function addGrantEntry(acc: GrantAccumulator, item: string): void {
   const entry = item.trim()
   const name = normalizeToolName(entry)
+  const scopeName = name === 'plugin_skill' ? 'slash_command' : name
   if (!name) return
   if (!acc.tools.includes(name)) acc.tools.push(name)
   const open = entry.indexOf('(')
   if (open === -1) {
-    if (isArgRuleTool(name)) acc.argUnscoped.add(name)
+    if (isArgRuleTool(scopeName)) acc.argUnscoped.add(scopeName)
     for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathUnscoped.add(tool)
     return
   }
@@ -196,7 +197,7 @@ function addGrantEntry(acc: GrantAccumulator, item: string): void {
   // An empty specifier (`Bash()`, `Read()`) matches nothing and must not read as
   // the unscoped grant it explicitly is not: it is recorded so the tool stays
   // restricted, and the matchers treat an empty rule as matching no input.
-  if (isArgRuleTool(name)) acc.argScopes[name].push(scope)
+  if (isArgRuleTool(scopeName)) acc.argScopes[scopeName].push(scope)
   for (const tool of PATH_RULE_TOOLS[name] ?? []) acc.pathScopes[tool].push(scope)
 }
 
