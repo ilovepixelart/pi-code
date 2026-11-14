@@ -20,16 +20,23 @@ const SOURCE_LABEL: Record<EnablementSource, string> = {
   default: 'plugin default',
 }
 
+/** The sources that outrank `piCode.enabledPlugins`, so a toggle saved there would not take effect. */
+const LOCKED_NOTE: Partial<Record<EnablementSource, string>> = {
+  managed: 'Set by managed settings',
+  flag: 'Set by the --settings flag for this session',
+}
+
 const MAX_VISIBLE = 15
 
 export function pluginLabel(state: PluginState): string {
-  return `${state.enabled ? '●' : '○'} ${state.qualified} — ${state.enabled ? 'on' : 'off'} (${SOURCE_LABEL[state.decidedBy]})`
+  return `${state.enabled ? '●' : '○'} ${state.qualified}: ${state.enabled ? 'on' : 'off'} (${SOURCE_LABEL[state.decidedBy]})`
 }
 
 function settingItem(state: PluginState): SettingItem {
   const value = state.enabled ? 'on' : 'off'
-  // An item without `values` cannot be cycled: managed settings decide it.
-  if (state.decidedBy === 'managed') return { id: state.qualified, label: state.qualified, currentValue: value, description: 'Set by managed settings' }
+  const locked = LOCKED_NOTE[state.decidedBy]
+  // An item without `values` cannot be cycled.
+  if (locked) return { id: state.qualified, label: state.qualified, currentValue: value, description: locked }
   return { id: state.qualified, label: state.qualified, currentValue: value, values: ['on', 'off'], description: `Currently from ${SOURCE_LABEL[state.decidedBy]}` }
 }
 

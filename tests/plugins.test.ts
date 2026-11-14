@@ -799,7 +799,7 @@ describe('/claude-plugins command', () => {
 
     const notices = await runPlugin(h, [], 'print')
 
-    expect(notices, 'one notice, one line per plugin, and no list is opened').toEqual(['● formatter@community — on (plugin default)\n○ linter@community — off (pi override)'])
+    expect(notices, 'one notice, one line per plugin, and no list is opened').toEqual(['● formatter@community: on (plugin default)\n○ linter@community: off (pi override)'])
   })
 
   it('should say no plugins are installed when the cache is empty', async () => {
@@ -851,6 +851,26 @@ describe('/claude-plugins command', () => {
       expect(readFileSync(file, 'utf-8'), 'no pi entry is written').toBe('{}')
     } finally {
       setManagedSettingsPath(undefined)
+    }
+  })
+
+  it('should not toggle a plugin that the --settings flag decides', async () => {
+    initTheme()
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    const file = piSettings('{}')
+    const flag = join(mkdtempSync(join(tmpdir(), 'plugins-flag-')), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ enabledPlugins: { 'formatter@community': false } }))
+    setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+
+    try {
+      const notices = await runPlugin(h, [' ', '\r', '\x1b'])
+
+      expect(notices, 'a pi entry could not take effect, so none is saved or announced').toEqual([])
+      expect(screen, 'the row keeps its state and names the flag').toMatch(/formatter@community\s+off\b[\s\S]*Set by the --settings flag for this session/)
+      expect(readFileSync(file, 'utf-8'), 'no pi entry is written').toBe('{}')
+    } finally {
+      setCliSettingsReader(undefined)
     }
   })
 })
