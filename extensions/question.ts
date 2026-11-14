@@ -127,7 +127,7 @@ function checkbox(checked: boolean | undefined): string {
 
 function optionLine(opt: DisplayOption, index: number, selected: boolean, editMode: boolean, checked: boolean | undefined, theme: Theme): string {
   const label = `${index + 1}. ${checkbox(checked)}${opt.label}`
-  const prefix = selected ? theme.fg('accent', '> ') : '  '
+  const prefix = selected ? theme.fg('accent', '❯ ') : '  '
   if (opt.isOther === true && editMode) {
     return prefix + theme.fg('accent', `${label} ✎`)
   }
@@ -159,7 +159,10 @@ function buildQuestionLines(view: QuestionView): string[] {
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
   add(theme.fg('accent', '─'.repeat(width)))
-  if (header) add(theme.fg('muted', ` [${header}]`))
+  if (header) {
+    add(theme.bg('selectedBg', theme.fg('text', ` ☐ ${header} `)))
+    lines.push('')
+  }
   const wrapIndented = (text: string, indent: number, color: 'text' | 'muted') => {
     // Leave at least one column for text when the terminal is narrower than the indent.
     const pad = ' '.repeat(Math.max(0, Math.min(indent, width - 1)))
@@ -196,9 +199,9 @@ function buildQuestionLines(view: QuestionView): string[] {
 }
 
 function navHint(editMode: boolean, multiSelect: boolean): string {
-  if (editMode) return ' Enter to submit • Esc to go back'
-  if (multiSelect) return ' ↑↓ navigate • Space to toggle • Enter to confirm • Esc to cancel'
-  return ' ↑↓ navigate • Enter to select • Esc to cancel'
+  if (editMode) return ' Enter to submit · Esc to go back'
+  if (multiSelect) return ' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel'
+  return ' Enter to select · ↑/↓ to navigate · Esc to cancel'
 }
 
 /** The comma-joined labels of the checked options, in order. */
@@ -659,7 +662,7 @@ export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOp
     function render(width: number): string[] {
       if (cachedLines && cachedWidth === width) return cachedLines
       cachedWidth = width
-      cachedLines = buildQuestionLines({ width, question: params.question, header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds: lastCountdown })
+      cachedLines = buildQuestionLines({ width, question: theme.bold(params.question), header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds: lastCountdown })
       return cachedLines
     }
 
