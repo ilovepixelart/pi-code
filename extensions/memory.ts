@@ -134,7 +134,7 @@ export function claudeMemoryDir(cwd: string, home: string = os.homedir()): strin
 }
 
 /** The `autoMemoryStorage` setting: 'claude' selects Claude Code's per-project
- * store; anything else — absent or mistyped — keeps pi's own, so a typo cannot
+ * store; anything else, absent or mistyped, keeps pi's own, so a typo cannot
  * silently strand an existing store. */
 function memoryStorageSetting(setting: unknown): MemoryStorage {
   return typeof setting === 'string' && setting.trim().toLowerCase() === 'claude' ? 'claude' : 'pi'
