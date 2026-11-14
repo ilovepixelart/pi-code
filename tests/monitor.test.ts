@@ -7,22 +7,22 @@ import backgroundBashExtension from '../extensions/background-bash.ts'
 import { allShells, registerShell, resetShells, settleShell, shellsStatusText } from '../extensions/internal/background-shells.ts'
 import monitorExtension, {
   BATCH_WINDOW_MS,
-  type Batch,
-  batchText,
   createLineBatcher,
   DEFAULT_DEADLINE_MS,
   deadlineMs,
+  eventGate,
+  eventText,
   FLOOD_BURST,
   FLOOD_REFILL_MS,
-  MAX_BATCH_CHARS,
-  MAX_BATCH_LINES,
   MAX_DEADLINE_MS,
+  MAX_EVENT_CHARS,
   MAX_LINE_CHARS,
-  MAX_OMITTED_LINES,
+  MAX_PARTIAL_CHARS,
   MIN_DEADLINE_MS,
-  MIN_INTERVAL_MS,
   type MonitorLimits,
   monitorAllowed,
+  SUPPRESSION_LIMIT_MS,
+  suppressionNotice,
   tokenBucket,
 } from '../extensions/monitor.ts'
 
@@ -43,8 +43,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
-  // The real window and interval are a second and five; the batcher's own tests cover them.
-  monitorExtension(pi as never, { windowMs: 10, minIntervalMs: 20, minDeadlineMs: 100, ...options.limits })
+  monitorExtension(pi as never, { windowMs: 10, minDeadlineMs: 100, ...options.limits })
   backgroundBashExtension(pi as never)
   const statuses = new Map<string, string | undefined>()
   const ctx = {
@@ -111,105 +110,80 @@ afterEach(() => {
 })
 
 describe('createLineBatcher', () => {
-  const harness = (options: Partial<Parameters<typeof createLineBatcher>[0]> = {}) => {
-    const batches: Batch[] = []
-    const batcher = createLineBatcher({ emit: (batch) => batches.push(batch), windowMs: 100, minIntervalMs: 1000, ...options })
-    return { batches, batcher }
+  const harness = () => {
+    const events: string[] = []
+    const batcher = createLineBatcher({ emit: (event) => events.push(event) })
+    return { events, batcher }
   }
 
-  it('coalesces the lines that arrive within the window into one delivery', () => {
+  it('makes one event of the lines that arrive within 200 ms of the first, and a second of a line after that', () => {
     vi.useFakeTimers()
-    const { batches, batcher } = harness()
+    const { events, batcher } = harness()
     batcher.push('one\ntw')
+    vi.advanceTimersByTime(199)
     batcher.push('o\nthree\n')
-    expect(batches).toEqual([])
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['one', 'two', 'three'], omitted: 0 }])
-  })
-
-  it('waits out the minimum interval before the next delivery', () => {
-    vi.useFakeTimers()
-    const { batches, batcher } = harness()
-    batcher.push('a\n')
-    vi.advanceTimersByTime(100)
-    batcher.push('b\n')
-    // Due a full interval after the first delivery, not a window after the line.
-    vi.advanceTimersByTime(999)
-    expect(batches).toHaveLength(1)
+    expect(events).toEqual([])
     vi.advanceTimersByTime(1)
-    expect(batches).toEqual([
-      { lines: ['a'], omitted: 0 },
-      { lines: ['b'], omitted: 0 },
-    ])
+    expect(events).toEqual(['one\ntwo\nthree'])
+    vi.advanceTimersByTime(1)
+    batcher.push('four\n')
+    vi.advanceTimersByTime(199)
+    expect(events).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    expect(events).toEqual(['one\ntwo\nthree', 'four'])
   })
 
-  it('caps a delivery by lines and counts the rest', () => {
+  it('trims lines and skips blank ones', () => {
     vi.useFakeTimers()
-    const { batches, batcher } = harness({ maxLines: 2 })
-    batcher.push('a\nb\nc\nd\n')
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['a', 'b'], omitted: 2 }])
-  })
-
-  it('caps a delivery by characters and cuts a long line', () => {
-    vi.useFakeTimers()
-    const { batches, batcher } = harness({ maxChars: 12, maxLineChars: 6 })
-    batcher.push('abcdefghij\nxyz\nmore\n')
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['abcde…', 'xyz'], omitted: 1 }])
-  })
-
-  it('omits every line after the first one that did not fit', () => {
-    vi.useFakeTimers()
-    const { batches, batcher } = harness({ maxChars: 10 })
-    batcher.push('aaaa\nbbbbbbbb\ncc\n')
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['aaaa'], omitted: 2 }])
-  })
-
-  it('skips blank lines and strips a carriage return', () => {
-    vi.useFakeTimers()
-    const { batches, batcher } = harness()
-    batcher.push('\n  \r\nok\r\n')
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['ok'], omitted: 0 }])
+    const { events, batcher } = harness()
+    batcher.push('\n  \r\n  ok \r\n')
+    vi.advanceTimersByTime(BATCH_WINDOW_MS)
+    expect(events).toEqual(['ok'])
   })
 
   it('schedules nothing for output that holds no line', () => {
     vi.useFakeTimers()
-    const { batches, batcher } = harness()
+    const { events, batcher } = harness()
     batcher.push('\n\n')
     vi.advanceTimersByTime(5000)
-    expect(batches).toEqual([])
+    expect(events).toEqual([])
     expect(batcher.drain()).toBeUndefined()
   })
 
   it('drains what is queued, the unterminated line included, and cancels the timer', () => {
     vi.useFakeTimers()
-    const { batches, batcher } = harness()
+    const { events, batcher } = harness()
     batcher.push('done\npartial')
-    expect(batcher.drain()).toEqual({ lines: ['done', 'partial'], omitted: 0 })
+    expect(batcher.drain()).toBe('done\npartial')
     vi.advanceTimersByTime(1000)
-    expect(batches).toEqual([])
+    expect(events).toEqual([])
   })
 
-  it('queues a line that never ends once it grows past the cap', () => {
+  it('cuts a line at 500 characters', () => {
     vi.useFakeTimers()
-    const { batches, batcher } = harness({ maxLineChars: 5 })
-    batcher.push('x'.repeat(30))
-    vi.advanceTimersByTime(100)
-    expect(batches).toEqual([{ lines: ['xxxx…'], omitted: 0 }])
+    const { events, batcher } = harness()
+    batcher.push(`${'x'.repeat(500)}\n${'y'.repeat(501)}\n`)
+    vi.advanceTimersByTime(BATCH_WINDOW_MS)
+    expect(events).toEqual([`${'x'.repeat(500)}\n${'y'.repeat(500)}...(truncated)`])
   })
 
-  it('uses the documented defaults when none are given', () => {
+  it('cuts an event at 3,000 characters, however many lines follow', () => {
     vi.useFakeTimers()
-    const batches: Batch[] = []
-    const batcher = createLineBatcher({ emit: (batch) => batches.push(batch) })
-    batcher.push('a\n')
-    vi.advanceTimersByTime(999)
-    expect(batches).toEqual([])
-    vi.advanceTimersByTime(1)
-    expect(batches).toHaveLength(1)
+    const { events, batcher } = harness()
+    const line = 'z'.repeat(299)
+    batcher.push(`${line}\n`.repeat(10))
+    vi.advanceTimersByTime(BATCH_WINDOW_MS)
+    batcher.push(`${line}\n`.repeat(10_000))
+    vi.advanceTimersByTime(BATCH_WINDOW_MS)
+    const whole = Array.from({ length: 10 }, () => line).join('\n')
+    expect(whole).toHaveLength(2999)
+    expect(events).toEqual([whole, `${whole}\n\n...(truncated)`])
+  })
+
+  it('keeps the end of a line that never ends', () => {
+    const { batcher } = harness()
+    batcher.push(`a${'b'.repeat(MAX_PARTIAL_CHARS)}`)
+    expect(batcher.drain()).toBe(`${'b'.repeat(500)}...(truncated)`)
   })
 })
 
@@ -217,40 +191,146 @@ describe('tokenBucket', () => {
   it('allows the burst, then one more per refill interval, never past the burst', () => {
     let now = 0
     const bucket = tokenBucket(2, 1000, () => now)
+    expect(bucket.tokens()).toBe(2)
     expect([bucket.tryConsume(), bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, true, false])
     now = 999
     expect(bucket.tryConsume()).toBe(false)
     now = 1000
+    expect(bucket.tokens()).toBe(1)
     expect([bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, false])
     now = 60_000
+    expect(bucket.tokens()).toBe(2)
     expect([bucket.tryConsume(), bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, true, false])
-  })
-
-  it('has the documented flood constants', () => {
-    expect([FLOOD_BURST, FLOOD_REFILL_MS, MAX_OMITTED_LINES]).toEqual([10, 2_000, 1000])
   })
 })
 
-describe('flood limits with the constants in force', () => {
-  /** A watch as `start` wires it: the batcher's deliveries spend the allowance, the
-   * omitted lines are judged as each chunk arrives, and a stop drops what is queued. */
+describe('eventGate', () => {
+  const stopped = (count: number, seconds: number): string => `[Monitor stopped: too much output (${count} events suppressed over ${seconds}s). Restart with a more selective source.]`
+  const harness = (options: Partial<Parameters<typeof eventGate>[0]> = {}) => {
+    const clock = { now: 0 }
+    const sent: string[] = []
+    const stops: string[] = []
+    const gate = eventGate({ send: (event) => sent.push(event), stop: (notice) => stops.push(notice), now: () => clock.now, ...options })
+    const offer = (count: number, prefix = 'e'): void => {
+      for (let index = 0; index < count; index++) gate.offer(`${prefix}${index + 1}`)
+    }
+    return { clock, sent, stops, gate, offer }
+  }
+
+  it('has the constants Claude Code has', () => {
+    expect([BATCH_WINDOW_MS, MAX_LINE_CHARS, MAX_EVENT_CHARS, FLOOD_BURST, FLOOD_REFILL_MS, SUPPRESSION_LIMIT_MS]).toEqual([200, 500, 3000, 10, 2000, 30_000])
+  })
+
+  it('delivers 10 events at once, suppresses the 11th, and reports it ahead of the next one delivered', () => {
+    const { clock, sent, stops, gate, offer } = harness()
+    offer(11)
+    expect(sent).toEqual(['e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8', 'e9', 'e10'])
+    clock.now = 1999
+    gate.offer('early')
+    clock.now = 2000
+    gate.offer('next')
+    expect(sent.slice(10)).toEqual(['[2 events suppressed: output rate too high. Consider using task_stop to restart this monitor with a more selective filter.]', 'next'])
+    expect(stops).toEqual([])
+  })
+
+  it('counts one suppressed event as "1 events", as Claude does', () => {
+    expect(suppressionNotice(1)).toBe('[1 events suppressed: output rate too high. Consider using task_stop to restart this monitor with a more selective filter.]')
+    const { clock, sent, gate, offer } = harness()
+    offer(11)
+    clock.now = 2000
+    gate.offer('next')
+    expect(sent.slice(10)).toEqual([suppressionNotice(1), 'next'])
+  })
+
+  it('stops a monitor once it has been suppressed for more than 30 seconds without a break', () => {
+    const { clock, sent, stops, gate, offer } = harness()
+    offer(11)
+    for (clock.now = 1000; clock.now <= 30_000; clock.now += 1000) gate.offer('more')
+    expect(stops).toEqual([])
+    clock.now = 30_001
+    gate.offer('last')
+    expect(stops).toEqual([stopped(1, 30)])
+    expect(sent.filter((event) => event === 'more')).toHaveLength(15)
+  })
+
+  it('starts the 30 seconds again after 6 seconds without an event', () => {
+    const { clock, stops, gate, offer } = harness()
+    offer(11)
+    for (clock.now = 1000; clock.now <= 24_000; clock.now += 1000) gate.offer('more')
+    // Exactly three refills of quiet are not a break: the suppression that began at 0 goes on.
+    clock.now = 30_000
+    offer(4)
+    expect(stops).toEqual([])
+    clock.now = 30_001
+    gate.offer('late')
+    expect(stops).toEqual([stopped(2, 30)])
+
+    const second = harness()
+    second.offer(11)
+    for (second.clock.now = 1000; second.clock.now <= 24_000; second.clock.now += 1000) second.gate.offer('more')
+    second.clock.now = 30_001
+    second.offer(5)
+    for (second.clock.now = 31_001; second.clock.now <= 60_001; second.clock.now += 1000) second.gate.offer('more')
+    expect(second.stops).toEqual([])
+    second.clock.now = 61_001
+    second.gate.offer('late')
+    expect(second.stops).toEqual([stopped(1, 31)])
+  })
+
+  it('starts the 30 seconds again once the allowance is whole', () => {
+    const { clock, sent, stops, gate } = harness({ capacity: 1, suppressionLimitMs: 3000 })
+    for (clock.now = 0; clock.now <= 20_000; clock.now += 2000) {
+      gate.offer('kept')
+      gate.offer('dropped')
+    }
+    expect(stops).toEqual([])
+    expect(sent.filter((event) => event === 'kept')).toHaveLength(11)
+    // One token short of whole: the suppression that began at 0 goes on.
+    const short = harness({ capacity: 2, suppressionLimitMs: 3000 })
+    short.offer(3)
+    short.clock.now = 2000
+    short.offer(2)
+    short.clock.now = 4000
+    short.offer(2)
+    expect(short.stops).toEqual([stopped(1, 4)])
+  })
+
+  it('admits an event without stopping the monitor, for the one a command ends on', () => {
+    const { clock, sent, stops, gate, offer } = harness()
+    offer(12)
+    clock.now = 40_000
+    expect(gate.admit()).toBe(true)
+    expect(sent.slice(10)).toEqual([suppressionNotice(2)])
+    const spent = harness()
+    spent.offer(10)
+    spent.clock.now = 1000
+    expect(spent.gate.admit()).toBe(false)
+    expect([...stops, ...spent.stops]).toEqual([])
+  })
+})
+
+describe('events under the limits in force', () => {
+  /** A watch as `start` wires it: the batcher's events go through the gate, and a stop
+   * drops what is queued. */
   const watch = () => {
-    const delivered: string[] = []
+    const sent: string[] = []
     let stoppedAt: number | undefined
     const startedAt = Date.now()
-    const allowance = tokenBucket(FLOOD_BURST, FLOOD_REFILL_MS)
-    const batcher = createLineBatcher({ emit: (batch) => (allowance.tryConsume() ? delivered.push(...batch.lines) : stop()) })
-    const stop = (): void => {
-      stoppedAt ??= Date.now() - startedAt
-      batcher.drain()
-    }
+    const gate = eventGate({
+      send: (event) => sent.push(event),
+      stop: (notice) => {
+        sent.push(notice)
+        stoppedAt = Date.now() - startedAt
+        batcher.drain()
+      },
+    })
+    const batcher = createLineBatcher({ emit: gate.offer })
     const push = (chunk: string): void => {
-      if (stoppedAt !== undefined) return
-      batcher.push(chunk)
-      if (batcher.omitted() > MAX_OMITTED_LINES) stop()
+      if (stoppedAt === undefined) batcher.push(chunk)
     }
-    return { delivered, push, stoppedAt: () => stoppedAt }
+    return { sent, push, stoppedAt: () => stoppedAt }
   }
+  const isNotice = (event: string): boolean => event.startsWith('[')
 
   const everySeconds = [5, 10, 30]
   const watches = [DEFAULT_DEADLINE_MS, MAX_DEADLINE_MS]
@@ -258,31 +338,41 @@ describe('flood limits with the constants in force', () => {
 
   it.each(cases)('delivers every line of a command printing one every $seconds s through a $minutes-minute watch', ({ seconds, watchMs }) => {
     vi.useFakeTimers()
-    const { delivered, push, stoppedAt } = watch()
+    const { sent, push, stoppedAt } = watch()
     const lines = Array.from({ length: watchMs / (seconds * 1000) }, (_, index) => `tick ${index + 1}`)
     for (const line of lines) {
       push(`${line}\n`)
       vi.advanceTimersByTime(seconds * 1000)
     }
-    expect({ stoppedAt: stoppedAt(), delivered }).toEqual({ stoppedAt: undefined, delivered: lines })
+    expect({ stoppedAt: stoppedAt(), sent }).toEqual({ stoppedAt: undefined, sent: lines })
   })
 
-  it('stops a command that prints 5,000 lines in one chunk before anything is delivered', () => {
+  it('delivers 28 of 120 lines printed two a second, reports the rest as counts, and stops after 30 seconds of suppression', () => {
     vi.useFakeTimers()
-    const { delivered, push, stoppedAt } = watch()
-    push('line\n'.repeat(5000))
-    expect({ stoppedAt: stoppedAt(), delivered }).toEqual({ stoppedAt: 0, delivered: [] })
+    const { sent, push, stoppedAt } = watch()
+    for (let line = 1; line <= 120; line++) {
+      push(`b ${line}\n`)
+      vi.advanceTimersByTime(500)
+    }
+    const kept = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 73]
+    expect(sent.filter((event) => !isNotice(event))).toEqual(kept.map((line) => `b ${line}`))
+    expect(sent.filter(isNotice)).toEqual([...Array.from({ length: 15 }, () => suppressionNotice(3)), '[Monitor stopped: too much output (2 events suppressed over 31s). Restart with a more selective source.]'])
+    expect(sent.slice(13, 16)).toEqual([suppressionNotice(3), 'b 17', suppressionNotice(3)])
+    expect(stoppedAt()).toBe(37_200)
   })
 
-  it('stops a command that prints 2,000 lines a second within its first second', () => {
+  it('stops a command that prints without pause after 30 seconds of suppression', () => {
     vi.useFakeTimers()
-    const { delivered, push, stoppedAt } = watch()
-    for (let chunk = 0; chunk < 30; chunk++) {
-      push('line\n'.repeat(200))
+    const { sent, push, stoppedAt } = watch()
+    for (let chunk = 0; chunk < 400; chunk++) {
+      push('line\n'.repeat(2000))
       vi.advanceTimersByTime(100)
     }
-    expect(stoppedAt()).toBeLessThan(BATCH_WINDOW_MS)
-    expect(delivered).toEqual([])
+    const events = sent.filter((event) => !isNotice(event))
+    expect(new Set(events)).toEqual(new Set([`${'line\n'.repeat(600)}\n...(truncated)`]))
+    expect(events).toHaveLength(26)
+    expect(sent.at(-1)).toBe('[Monitor stopped: too much output (3 events suppressed over 30s). Restart with a more selective source.]')
+    expect(stoppedAt()).toBe(32_600)
   })
 })
 
@@ -308,27 +398,25 @@ describe('monitorAllowed', () => {
   })
 })
 
-describe('batchText', () => {
-  it('names the monitor and points at the output file for lines it left out', () => {
-    expect(batchText('m1', 'errors in  the\napp log', { lines: ['x'], omitted: 0 }, '/o')).toBe('Monitor m1 ("errors in the app log") output:\nx')
-    expect(batchText('m1', 'c', { lines: [], omitted: 1 }, '/o')).toContain('[1 more line not shown; full output: /o]')
-    expect(batchText('m1', 'c', { lines: [], omitted: 3 }, '/o')).toContain('[3 more lines not shown')
+describe('eventText', () => {
+  it('names the monitor ahead of the event', () => {
+    expect(eventText('m1', 'errors in  the\napp log', 'x\ny')).toBe('Monitor m1 ("errors in the app log") output:\nx\ny')
   })
 })
 
 describe('docs/monitor.md', () => {
-  it('states the constants in force', () => {
+  it('states the constants and notices in force', () => {
     const doc = fs.readFileSync(new URL('../docs/monitor.md', import.meta.url), 'utf8')
-    const thousands = (value: number): string => value.toLocaleString('en-US')
     const claims = [
       `defaults to ${DEFAULT_DEADLINE_MS} `,
       `refused under ${MIN_DEADLINE_MS},`,
       `capped at ${MAX_DEADLINE_MS} `,
-      `opens a ${BATCH_WINDOW_MS / 1000}-second window`,
-      `at most one message every ${MIN_INTERVAL_MS / 1000} seconds`,
-      `${FLOOD_BURST} messages at once, one more every ${FLOOD_REFILL_MS / 1000} seconds`,
-      `leave out more than ${thousands(MAX_OMITTED_LINES)} lines`,
-      `cut at ${MAX_LINE_CHARS} characters; a message carries at most ${MAX_BATCH_LINES} lines and ${thousands(MAX_BATCH_CHARS)} characters`,
+      `opens a ${BATCH_WINDOW_MS} ms window`,
+      `cut at ${MAX_LINE_CHARS} characters and an event at ${MAX_EVENT_CHARS.toLocaleString('en-US')}`,
+      `${FLOOD_BURST} events at once and one more every ${FLOOD_REFILL_MS / 1000} seconds`,
+      `more than ${SUPPRESSION_LIMIT_MS / 1000} seconds without a break`,
+      `${(FLOOD_REFILL_MS * 3) / 1000} seconds without an event`,
+      suppressionNotice(0).replace('0', 'N'),
     ]
     for (const claim of claims) expect(doc).toContain(claim)
   })
@@ -474,42 +562,25 @@ describe('monitor tool', () => {
 
   describe('flood protection', () => {
     const stopNotice = (id: string, why: string): string => `Monitor ${id} ("the watch") was stopped: ${why}. Full output: ${shell(id)?.outputFile}`
-    const tooMany = 'it produced too many events. Start it again with a tighter filter, so it prints only the lines worth reacting to'
 
-    it('stops a monitor that keeps sending once its message allowance is spent, with one notice', async () => {
-      const { monitor, sent } = setup({ limits: { floodBurst: 2, floodRefillMs: 60_000 } })
-      const id = idOf(await monitor({ command: 'while true; do echo tick; sleep 0.05; done' }))
+    // The allowance does not come back within the test and the suppression limit is
+    // short, so what is sent does not depend on how fast the host runs the command.
+    it('suppresses a command that prints without pause, then stops it with one notice', async () => {
+      const { monitor, sent } = setup({ limits: { floodBurst: 2, floodRefillMs: 600_000, suppressionLimitMs: 100 } })
+      const id = idOf(await monitor({ command: 'yes line' }))
       await until(() => shell(id)?.finishedAt !== undefined)
-      expect(sent.map((entry) => entry.message.content)).toEqual([expect.stringContaining('output:\ntick'), expect.stringContaining('output:\ntick'), stopNotice(id, tooMany)])
+      const output = expect.stringMatching(new RegExp(String.raw`^Monitor ${id} \("the watch"\) output:\nline\nline\n`))
+      const stopped = expect.stringMatching(new RegExp(String.raw`^Monitor ${id} \("the watch"\) output:\n\[Monitor stopped: too much output \(\d+ events suppressed over \d+s\)\. Restart with a more selective source\.\]$`))
+      expect(sent.map((entry) => entry.message.content)).toEqual([output, output, stopped])
       expect(sent[2]?.options.triggerTurn).toBe(true)
-      expect(shell(id)).toMatchObject({ state: 'killed', stopReason: tooMany })
+      expect(shell(id)).toMatchObject({ state: 'killed', stopReason: 'too much output' })
     })
 
-    // The held window proves the stop does not wait for a timer: a command printing
-    // without pause can keep the event loop on its pipe, and no timer runs meanwhile.
-    it('stops a monitor that leaves out too many lines as the output arrives, without delivering it', async () => {
-      const { monitor, sent } = setup({ limits: { ...HELD, maxOmittedLines: 100 } })
-      const id = idOf(await monitor({ command: 'yes line' }))
+    it('does not send the event a command ends on once its allowance is spent', async () => {
+      const { monitor, sent } = setup({ limits: { ...HELD, floodBurst: 0 } })
+      const id = idOf(await monitor({ command: 'echo late' }))
       await until(() => shell(id)?.finishedAt !== undefined)
-      expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
-    })
-
-    // Held window, as above: on a slow host a first batch can come due before the
-    // output passes the limit, and is then delivered ahead of the notice.
-    it('stops a command that prints without pause at the line limit in force, with one notice', async () => {
-      const { monitor, sent } = setup({ limits: HELD })
-      const id = idOf(await monitor({ command: 'yes line' }))
-      await until(() => shell(id)?.finishedAt !== undefined)
-      expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
-    })
-
-    it('delivers what a finished command left queued, whatever it leaves out', async () => {
-      const { monitor, sent } = setup({ limits: { ...HELD, floodBurst: 2, maxOmittedLines: 100 } })
-      const id = idOf(await monitor({ command: 'seq 1 120' }))
-      await until(() => shell(id)?.finishedAt !== undefined)
-      expect(sent).toHaveLength(1)
-      expect(sent[0]?.message.content).toContain('[70 more lines not shown')
-      expect(sent[0]?.message.content).toContain('ended: the command exited with code 0')
+      expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ("the watch") ended: the command exited with code 0. Full output: ${shell(id)?.outputFile}`])
     })
 
     it('stops a monitor whose output, stderr included, passes the output cap', async () => {

@@ -17,28 +17,30 @@ Claude's Monitor tool as pi's `monitor` tool: it runs a command in the backgroun
 - **Same rules as Bash**: a hook `if` filter written as `Bash(…)` also judges Monitor commands, and `Monitor(…)` judges them alone. In `allowed-tools`, `Monitor(…)` and `Bash(…)` scopes both apply to monitor commands (see [commands](commands.md)). Hook payloads name the tool `Monitor`.
 - The command runs in the shell and environment of the `bash` tool: pi's `shellPath` and `shellCommandPrefix` settings and the `PI_*` session variables.
 
-## Batching and flood protection
+## Events and flood protection
 
-Claude batches and rate-limits Monitor events, and so does pi-code, with different numbers. In pi every message starts a turn or steers the one in progress, so pi-code sends fewer, larger messages and stops a command that prints without pause at once. The Claude column is the behaviour of Claude Code 2.1.325; its tool prompt documents the 200 ms batching and that "monitors that produce too many events are automatically stopped".
+pi-code batches and rate-limits Monitor events as Claude Code 2.1.325 does, with the same numbers. They are the constants at the top of [`extensions/monitor.ts`](../extensions/monitor.ts).
+
+- **Batching**: the first stdout line opens a 200 ms window, and the lines that arrive in it form one event, sent as one message. Lines are trimmed, and blank lines are not events.
+- **Size**: a line is cut at 500 characters and an event at 3,000; a cut is marked `...(truncated)`.
+- **Allowance**: a monitor may send 10 events at once and one more every 2 seconds.
+- **Suppression**: an event that is due while the allowance is spent is not delivered. The next event that is delivered follows a message of its own, `[N events suppressed: output rate too high. Consider using task_stop to restart this monitor with a more selective filter.]`.
+- **Auto-stop**: a monitor suppressed for more than 30 seconds without a break is stopped, with one notice: `[Monitor stopped: too much output (N events suppressed over Ns). Restart with a more selective source.]`. A break is 6 seconds without an event, or the allowance being whole again.
+- **Last event**: what is queued when the command ends, or reaches its deadline, is one more event under the same allowance. It goes out with the end notice, or not at all if the allowance is spent.
+
+A monitor is also stopped, with one notice, once its stdout and stderr together pass 5 GB, the output cap of a background Bash command.
+
+What still differs from Claude Code in how an event reaches the model:
 
 | | Claude Code | pi-code |
 | --- | --- | --- |
-| Batch window | stdout lines within 200 ms form one notification | the first line opens a 1-second window; the lines that arrive in it go out together |
-| Rate | 10 notifications at once, one more every 2 seconds; a notification past that is suppressed and reported later as a count | at most one message every 5 seconds, lines arriving meanwhile wait for the next one; 10 messages at once, one more every 2 seconds, an allowance the 5-second interval never spends |
-| Auto-stop | after 30 seconds of continuous suppression | when one message would leave out more than 1,000 lines; also when a message is due and the allowance is spent, which only a shorter interval could cause |
-| Size | a line is cut at 500 characters, a notification at 3,000 | a line is cut at 500 characters; a message carries at most 50 lines and 4,000 characters |
-
-- Lines past the size caps are counted (`[N more lines not shown; full output: …]`) and stay in the output file. Once a message has left one line out, it leaves out every later line too.
-- A monitor stopped for flooding sends one notice saying that it produced too many events and needs a tighter filter. The delivery that tripped the limit is not sent.
-- A command that keeps printing below that threshold is not stopped: it sends one message of at most 50 lines every 5 seconds until its deadline.
-- A monitor is also stopped, with one notice, once its stdout and stderr together pass 5 GB, the output cap of a background Bash command.
-- Blank lines are not delivered. Whatever is still queued when the command ends, or reaches its deadline, goes out with the end notice.
-
-The pi-code numbers are the constants at the top of [`extensions/monitor.ts`](../extensions/monitor.ts).
+| Notice punctuation | a dash after "suppressed" and after "Monitor stopped" | a colon |
+| Tool named in the suppression notice | `TaskStop` | `task_stop` |
+| Framing of an event | a task notification with the summary `Monitor event: "<description>"` and the event in an `<event>` element | a message that starts `Monitor <id> ("<description>") output:`, the event on the following lines |
+| End of the command | a task notification, `Monitor "<description>" stream ended` | `Monitor <id> ("<description>") ended: the command exited with code N. Full output: <file>` |
 
 ## Divergences
 
 - **No WebSocket source**: Claude's `ws` input is not offered. A command that polls or streams (for example `websocat`, if installed) covers the same ground.
 - **Refused without a UI**: in print and json modes and in subagents no later turn could receive an event, so the tool fails with an error saying so. Claude's 10-minute ceiling under `-p` therefore has no counterpart.
 - **No permission prompt**: pi has no permission flow, so outside an `allowed-tools` scope the command runs as `bash` would.
-- **Batching, rate and stop thresholds** differ from Claude's as the table above shows, and pi-code has no suppression phase: it stops the monitor instead of dropping events and reporting a count.
