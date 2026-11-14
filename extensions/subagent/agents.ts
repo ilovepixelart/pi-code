@@ -129,14 +129,26 @@ function parseSkillsField(raw: unknown): string[] | undefined {
  * does not inherit the parent's skill discovery, so the bodies travel in the prompt.
  * A name that resolves to nothing is reported rather than dropped: a silently missing
  * instruction is worse than a visible gap. */
-export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[]): string {
+export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: ReadonlyArray<{ name: string; filePath: string; plugin: { root: string } }> = []): string {
   if (!skills || skills.length === 0) return prompt
   const sections: string[] = []
   for (const name of skills) {
-    const body = readSkillBody(name, skillDirs)
+    const body = readSkillBody(name, skillDirs) ?? readPluginSkillBody(name, plugins)
     sections.push(body === undefined ? `<skill name="${name}">(skill not found)</skill>` : `<skill name="${name}">\n${body.trim()}\n</skill>`)
   }
   return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
+}
+
+/** Qualified names select a plugin exactly. Bare names remain a fallback for existing
+ * agent configs after personal/project skills; the discovery map already resolves duplicates. */
+function readPluginSkillBody(name: string, plugins: ReadonlyArray<{ name: string; filePath: string; plugin: { root: string } }>): string | undefined {
+  const skill = plugins.find((entry) => entry.name === name || (!name.includes(':') && entry.name.endsWith(`:${name}`)))
+  if (!skill) return undefined
+  try {
+    return readConfined(skill.filePath, fs.realpathSync(skill.plugin.root))
+  } catch {
+    return undefined
+  }
 }
 
 /** A skill name is a single directory or file stem, never a path. The name comes from

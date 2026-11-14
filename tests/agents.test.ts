@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { skillDirs } from '../extensions/skills.ts'
 import { discoverAgents, withPreloadedSkills } from '../extensions/subagent/agents.ts'
-import { agentHooksEnv, unresolvedToolsError } from '../extensions/subagent/child.ts'
+import { agentHooksEnv, agentInvocationArgs, childPromptBody, unresolvedToolsError } from '../extensions/subagent/child.ts'
 
 // The 'both' scope also scans the user's agent dirs; point them at throwaway dirs so
 // an agent in the developer's real ~/.claude/agents or ~/.pi/agent/agents cannot
@@ -25,6 +25,41 @@ beforeEach(() => {
 afterEach(() => {
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+})
+
+describe('plugin skills in child agents', () => {
+  it.each(['tools', 'disallowedTools'])('expands %s: Skill to both child tools', (field) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'reviewer.md'), `---\nname: reviewer\ndescription: reviewer\n${field}: Skill\n---\nReview`)
+    const agent = discoverAgents(cwd, 'project').agents.find((entry) => entry.name === 'reviewer')!
+    const args = agentInvocationArgs(agent)
+    expect(args[args.indexOf(field === 'tools' ? '--tools' : '--exclude-tools') + 1]).toBe('slash_command,plugin_skill')
+  })
+
+  it('recognizes plugin_skill in an explicit child tool list', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(cwd, '.claude', 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: reviewer\ntools: plugin_skill\n---\nReview')
+    const agent = discoverAgents(cwd, 'project').agents.find((entry) => entry.name === 'reviewer')!
+    expect(unresolvedToolsError(agent)).toBeUndefined()
+    expect(agentInvocationArgs(agent)).toContain('plugin_skill')
+  })
+
+  it.each(['kit:deploy', 'deploy'])('preloads the plugin skill %s without adding plugin directories to the pi loader', (name) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploy\n---\nPLUGIN PRELOAD BODY')
+    writeFileSync(join(cwd, '.claude', 'agents', 'reviewer.md'), `---\nname: reviewer\ndescription: reviewer\nskills: [${name}]\n---\nReview`)
+    const agent = discoverAgents(cwd, 'project').agents.find((entry) => entry.name === 'reviewer')!
+    const roots = skillDirs(cwd, hoisted.home, true)
+    expect(roots).not.toContain(join(root, 'skills'))
+    expect(childPromptBody(agent, roots, undefined)).toContain('PLUGIN PRELOAD BODY')
+  })
 })
 
 const agentFile = (name: string, body = 'do things'): string => `---\nname: ${name}\ndescription: ${name} agent\n---\n${body}`

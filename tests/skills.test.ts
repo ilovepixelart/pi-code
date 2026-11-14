@@ -12,7 +12,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => hoisted.home }
 })
 
-const { default: skillsExt, skillDirs } = await import('../extensions/skills.ts')
+const { default: skillsExt, skillDirs, pluginSkills } = await import('../extensions/skills.ts')
 
 const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
 
@@ -57,7 +57,9 @@ describe('skillDirs', () => {
     expect(skillDirs(cwd, home, true)).toEqual([])
   })
 
-  it('includes an enabled plugin skills directory', () => {
+  it('keeps an enabled plugin skills directory out of the loader scan', () => {
+    // pi's loader would name the skill by its directory, dropping the plugin prefix, so
+    // plugin skills are registered as /plugin:name commands instead of contributed here.
     const cwd = tempDir('cs-proj-')
     const home = tempDir('cs-home-')
     const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
@@ -65,7 +67,7 @@ describe('skillDirs', () => {
     mkdirSync(join(home, '.claude'), { recursive: true })
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'skills')])
+    expect(skillDirs(cwd, home, false)).toEqual([])
   })
 
   it('skips a plugin skills directory declared outside the plugin root', () => {
@@ -82,11 +84,11 @@ describe('skillDirs', () => {
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: relative(root, outside) }))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    // The outside path is refused; the plugin's own default skills/ is still scanned,
-    // since a declaration adds to that scan rather than replacing it.
+    // The outside path is refused, and the plugin's own skills are not part of the loader
+    // scan either: a declaration adds to the plugin's own scan (see pluginSkills).
     const dirs = skillDirs(cwd, home, false)
     expect(dirs).not.toContain(outside)
-    expect(dirs).toEqual([join(root, 'skills')])
+    expect(dirs).toEqual([])
   })
 
   it('adds a declared skills directory to the default scan rather than replacing it', () => {
@@ -96,14 +98,17 @@ describe('skillDirs', () => {
     const cwd = tempDir('cs-proj-')
     const home = tempDir('cs-home-')
     const root = join(home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
-    mkdirSync(join(root, 'skills'), { recursive: true })
-    mkdirSync(join(root, 'extra'), { recursive: true })
+    mkdirSync(join(root, 'skills', 'bundled-skill'), { recursive: true })
+    mkdirSync(join(root, 'extra', 'extra-skill'), { recursive: true })
+    writeFileSync(join(root, 'skills', 'bundled-skill', 'SKILL.md'), '---\nname: bundled-skill\ndescription: bundled\n---\nBundled')
+    writeFileSync(join(root, 'extra', 'extra-skill', 'SKILL.md'), '---\nname: extra-skill\ndescription: extra\n---\nExtra')
     mkdirSync(join(root, '.claude-plugin'), { recursive: true })
     mkdirSync(join(home, '.claude'), { recursive: true })
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit', skills: 'extra' }))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
 
-    expect(skillDirs(cwd, home, false)).toEqual([join(root, 'extra'), join(root, 'skills')])
+    expect(skillDirs(cwd, home, false)).toEqual([])
+    expect(pluginSkills(home).map((skill) => skill.name)).toEqual(['kit:extra-skill', 'kit:bundled-skill'])
   })
 
   it('finds project skills at the repository root from a subdirectory session', () => {
@@ -147,6 +152,212 @@ describe('extension wiring', () => {
 
     const untrusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => false })) as { skillPaths: string[] } | undefined
     expect(untrusted).toEqual({ skillPaths: [homeSkills] })
+  })
+
+  it('registers an enabled plugin skill as a /plugin:name command and expands it', async () => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\nargument-hint: "[target]"\n---\nDeploy $ARGUMENTS now.')
+
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<unknown> }>()
+    const sent: string[] = []
+    skillsExt({
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: unknown) => Promise<unknown> }) => commands.set(name, options),
+      registerTool: () => {},
+      sendUserMessage: (text: string) => sent.push(text),
+      exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+    } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] } })
+
+    expect([...commands.keys()]).toEqual(['kit:deploy'])
+    expect(commands.get('kit:deploy')?.description).toContain('[target]')
+    // The menu runs the command handler, not the input pipeline, so the handler has to
+    // expand the skill itself. pi would otherwise deliver the raw "/kit:deploy" text.
+    await commands.get('kit:deploy')?.handler('prod', { cwd, isIdle: () => true, isProjectTrusted: () => true, hasUI: false, waitForIdle: async () => {} })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toContain('<skill name="kit:deploy"')
+    expect(sent[0]).toContain('Deploy prod now.')
+  })
+
+  it('keeps one skill when two plugins register the same name', () => {
+    const home = hoisted.home
+    for (const market of ['market', 'other']) {
+      const root = join(home, '.claude', 'plugins', 'cache', market, 'kit', '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: from ${market}\n---\nFrom ${market}`)
+    }
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+
+    expect(pluginSkills(home).map((skill) => skill.name)).toEqual(['kit:deploy'])
+  })
+
+  it('does not register a plugin skill over a command that already owns its name', async () => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDeploy')
+
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const commands = new Map<string, unknown>()
+    skillsExt({
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      getCommands: () => [{ name: 'kit:deploy', source: 'command' }],
+      registerCommand: (name: string) => commands.set(name, true),
+      registerTool: () => {},
+    } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true })
+
+    expect(commands.has('kit:deploy')).toBe(false)
+  })
+
+  const pluginFixture = (body = '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS') => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    const filePath = join(root, 'skills', 'deploy', 'SKILL.md')
+    const settingsPath = join(hoisted.home, '.claude', 'settings.json')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(settingsPath, JSON.stringify({ enabledPlugins: { kit: true } }))
+    writeFileSync(filePath, body)
+    const ctx = { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true, isIdle: () => true, hasUI: false, waitForIdle: vi.fn(async () => {}), ui: { notify: vi.fn() } }
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>()
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    type Tool = {
+      description: string
+      prepareLoadout: () => { descriptions: { plugin_skill: string } }
+      execute: (id: string, params: { command: string }, signal: undefined, update: undefined, ctx: unknown) => Promise<{ content: Array<{ text: string }> }>
+    }
+    const tools = new Map<string, Tool>()
+    const sendUserMessage = vi.fn()
+    const emit = vi.fn()
+    const exec = vi.fn(async () => ({ stdout: 'SPAN-OUT', stderr: '', code: 0 }))
+    skillsExt({
+      on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, fn),
+      registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, options),
+      registerTool: (tool: Tool & { name: string }) => tools.set(tool.name, tool),
+      sendUserMessage,
+      exec,
+      events: { emit },
+    } as never)
+    const start = (context = ctx) => handlers.get('session_start')?.({}, context)
+    const invoke = (context = ctx, command = '/kit:deploy prod') => tools.get('plugin_skill')!.execute('call', { command }, undefined, undefined, context)
+    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, start, invoke }
+  }
+
+  it.each(['off', 'user-invocable-only'])('refuses a live %s override before expanding a model invocation', async (state) => {
+    const t = pluginFixture()
+    await t.start()
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { 'kit:deploy': state } }))
+    await expect(t.invoke()).rejects.toThrow('skillOverrides')
+    expect(t.exec).not.toHaveBeenCalled()
+  })
+
+  it('rechecks disable-model-invocation on every model call', async () => {
+    const t = pluginFixture()
+    await t.start()
+    writeFileSync(t.filePath, '---\nname: deploy\ndescription: deploys\ndisable-model-invocation: true\n---\nUser only')
+    await expect(t.invoke()).rejects.toThrow('user-only')
+  })
+
+  it('uses the current tool context for file and plugin variable expansion', async () => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n@config.txt\n${CLAUDE_PROJECT_DIR}\n${CLAUDE_PLUGIN_ROOT}\n$ARGUMENTS')
+    const other = tempDir('cs-other-')
+    writeFileSync(join(t.ctx.cwd, 'config.txt'), 'WRONG PROJECT')
+    writeFileSync(join(other, 'config.txt'), 'CURRENT PROJECT')
+    await t.start()
+    const result = await t.invoke({ ...t.ctx, cwd: other }, 'kit:deploy prod')
+    expect(result.content[0].text).toContain('CURRENT PROJECT')
+    expect(result.content[0].text).not.toContain('WRONG PROJECT')
+    expect(result.content[0].text).toContain(other)
+    expect(result.content[0].text).toContain(t.root)
+    expect(result.content[0].text).toContain('prod')
+  })
+
+  it('emits skill hooks and runs a model-invoked fork with the expanded prompt', async () => {
+    const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\ncontext: fork\nagent: reviewer\nhooks:\n  Stop: []\n---\nReview $ARGUMENTS')
+    const runner = vi.fn(async () => 'FORK RESULT')
+    setAgentRunner(runner)
+    try {
+      await t.start()
+      const result = await t.invoke()
+      expect(result.content[0].text).toContain('FORK RESULT')
+      expect(runner).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'Review prod', agent: 'reviewer' }))
+      expect(t.emit).toHaveBeenCalledWith('pi-code:skill-hooks', expect.objectContaining({ skillName: 'kit:deploy' }))
+      expect(t.sendUserMessage).not.toHaveBeenCalled()
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
+  it('keeps model expansion from executing injected shell', async () => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n!`git diff`')
+    await t.start()
+    await t.invoke()
+    expect(t.exec).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the listing across sessions without registering duplicate commands', async () => {
+    const t = pluginFixture()
+    await t.start()
+    const tool = t.tools.get('plugin_skill')!
+    expect(tool.prepareLoadout().descriptions.plugin_skill).toContain('/kit:deploy')
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: false } }))
+    await t.start()
+    expect(tool.prepareLoadout().descriptions.plugin_skill).not.toContain('/kit:deploy')
+    await expect(t.invoke()).rejects.toThrow('not available')
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true } }))
+    await t.start()
+    expect(tool.prepareLoadout().descriptions.plugin_skill).toContain('/kit:deploy')
+    expect(t.commands.size).toBe(1)
+  })
+
+  it('lets a plugin command win a skill name collision before registering either extension', async () => {
+    const t = pluginFixture()
+    mkdirSync(join(t.root, 'commands'))
+    writeFileSync(join(t.root, 'commands', 'deploy.md'), 'Run the command')
+    await t.start()
+    expect(pluginSkills(hoisted.home)).toEqual([])
+    expect(t.commands.has('kit:deploy')).toBe(false)
+  })
+
+  it('does not offer a plugin skill the model can run when skillOverrides turns it off', async () => {
+    const cwd = tempDir('cs-proj-')
+    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
+    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
+    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { 'kit:deploy': 'off' } }))
+    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS now.')
+
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
+    const tools = new Map<string, unknown>()
+    const commands = new Map<string, unknown>()
+    skillsExt({
+      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
+      registerCommand: (name: string) => commands.set(name, true),
+      registerTool: (tool: { name: string }) => tools.set(tool.name, tool),
+    } as never)
+    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true })
+
+    expect(commands.has('kit:deploy')).toBe(false)
+    expect(tools.has('plugin_skill')).toBe(false)
   })
 })
 
@@ -404,6 +615,8 @@ describe('context: fork and skillOverrides', () => {
         skillsExt({
           on: (name: string, fn: never) => handlers.set(name, fn),
           exec: async () => ({ stdout: '', stderr: '', code: 0 }),
+          registerCommand: () => {},
+          registerTool: () => {},
           sendMessage: (message: { content?: string }, options: unknown) => {
             if (sendThrows) throw new Error('This extension ctx is stale after session replacement or reload')
             sent.push({ message, options })

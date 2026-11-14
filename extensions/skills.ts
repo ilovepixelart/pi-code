@@ -7,14 +7,19 @@
  * pi implements the Agent Skills standard, so `SKILL.md` directories work
  * unchanged and register as `/skill:name`.
  *
+ * Plugin skills are the exception. pi's loader names a skill by its directory and
+ * always registers it under the fixed `/skill:` prefix, so handing a plugin's skills
+ * directory over drops Claude's plugin prefix. Those skills are registered here as
+ * `/plugin:name` commands instead, the way plugin commands already are.
+ *
  * Claude documents that a command file and a skill "work the same way", so a
  * SKILL.md body carries the dynamic features command bodies do: `` !`cmd` ``
  * spans, `@file` references, `$ARGUMENTS`/positional substitution and
  * `${CLAUDE_*}` variables. pi's loader delivers the raw text, so this extension
- * intercepts `/skill:name` input for the skills it contributed, expands the body
- * through the shared command pipeline, and hands pi the already-expanded content
- * in pi's own skill-block format (pi emits the input event before its own
- * expansion, and skips text that no longer starts with `/`).
+ * intercepts `/skill:name` input for the skills it contributed and `/plugin:name`
+ * for a plugin's, expands the body through the shared command pipeline, and hands pi
+ * the already-expanded content in pi's own skill-block format (pi emits the input
+ * event before its own expansion, and skips text that no longer starts with `/`).
  *
  * Docs: https://code.claude.com/docs/en/skills.md, https://agentskills.io
  */
@@ -23,12 +28,14 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { expandCommand, shellExecutionDisabled } from './commands.ts'
+import { Type } from 'typebox'
+import { expandCommand, pluginCommands, shellExecutionDisabled, slashCommandBudget, slashCommandToolDescription } from './commands.ts'
 import { runAgent } from './internal/agent-run.ts'
 import { parseCommandFile } from './internal/command-file.ts'
 import { claudeConfigDir } from './internal/config-dir.ts'
 import { parseClaudeFrontmatter } from './internal/frontmatter.ts'
 import { managedSettingsFile } from './internal/managed-settings.ts'
+import { capForContext } from './internal/output-guard.ts'
 import { installedPlugins, pluginComponentPath } from './internal/plugins.ts'
 import { isProjectApprovedSilently } from './internal/project-approval.ts'
 import { ancestorDirs } from './internal/project-root.ts'
@@ -47,7 +54,9 @@ function declaredSkillDirs(declared: unknown): string[] {
 /** Existing `.claude/skills` directories, user first then project. The project
  * directory is included only for approved projects: pi's loader surfaces every skill's
  * name and description to the model, so an untrusted repository would otherwise get
- * text into the prompt without the user ever agreeing to load its config. */
+ * text into the prompt without the user ever agreeing to load its config. Plugin skills
+ * are not here: pi's loader would name them without the plugin prefix, so they are
+ * registered as `/plugin:name` commands instead (see pluginSkills). */
 export function skillDirs(cwd: string, home: string, trusted: boolean): string[] {
   // Claude's precedence: enterprise (the skills directory beside the managed
   // settings file) overrides personal, and personal overrides project; discovery
@@ -58,25 +67,6 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
   // that directory here; personal and project skills are unaffected.
   const enterprise = process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS === '1' ? [] : [path.join(path.dirname(managedSettingsFile()), '.claude', 'skills')]
   const candidates = [...enterprise, path.join(claudeConfigDir(home), 'skills')]
-  // Enabled plugins contribute their skills directories. pi's loader names a
-  // skill by its directory, so a plugin skill registers without Claude's
-  // /plugin: prefix; a rename-free approximation, disclosed in the README.
-  for (const plugin of installedPlugins(home)) {
-    // Claude: "Adds to the default: `skills`. The default `skills/` directory is always
-    // scanned, and directories listed in `skills` are loaded alongside it." Treating the
-    // declaration as a replacement silently dropped every skill in the conventional
-    // location. (The reference's one exception, a marketplace entry whose source resolves
-    // to the marketplace root, is a marketplace shape pi-code does not model.)
-    const extra = declaredSkillDirs(plugin.manifest.skills)
-    const dirs = [...extra, 'skills']
-    candidates.push(...dirs.map((dir) => pluginComponentPath(plugin, String(dir))).filter((dir): dir is string => dir !== undefined))
-    // NOT SUPPORTED: Claude's single-skill layout, "a plugin that ships exactly one skill
-    // can place SKILL.md directly at the plugin root". skillPaths is handed to pi's own
-    // loader, which owns the layout and looks for <dir>/<name>/SKILL.md; adding the plugin
-    // root here does not surface root/SKILL.md and does start scanning every sibling
-    // directory (hooks/, agents/, commands/) for skills. Supporting it needs a loader that
-    // accepts a directory that IS the skill, which is pi's call, not this extension's.
-  }
   // Claude loads skills from every .claude/skills between cwd and the repository
   // root; the list goes nearest-first so findClaudeSkill's first match is the
   // closest definition (pi's loader receives the same order).
@@ -113,6 +103,72 @@ function skillAt(root: string, dirName: string): { name: string; filePath: strin
   return { name, filePath }
 }
 
+export interface PluginSkill {
+  /** Claude's plugin skill name, `plugin:skill`. */
+  name: string
+  filePath: string
+  plugin: { root: string; dataDir: string; userConfig?: Record<string, string> }
+}
+
+/** The skill directories one plugin contributes: the manifest's `skills` entries plus the
+ * default `skills/`. Claude scans both, so a declaration adds to the default rather than
+ * replacing it. A path that resolves outside the plugin root is already dropped. */
+function pluginSkillDirs(plugin: ReturnType<typeof installedPlugins>[number]): string[] {
+  const extra = declaredSkillDirs(plugin.manifest.skills)
+  return [...extra, 'skills'].map((entry) => pluginComponentPath(plugin, String(entry))).filter((entry): entry is string => entry !== undefined && isDirectory(entry))
+}
+
+/** The skills one directory holds, named `plugin:skill`. */
+function skillsIn(dir: string, pluginName: string, pluginInfo: PluginSkill['plugin']): PluginSkill[] {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const found: PluginSkill[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+    const skill = skillAt(dir, entry.name)
+    if (skill) found.push({ name: skill.name.startsWith(`${pluginName}:`) ? skill.name : `${pluginName}:${skill.name}`, filePath: skill.filePath, plugin: pluginInfo })
+  }
+  return found
+}
+
+/** The skills an enabled plugin ships, named `plugin:skill` as Claude registers them.
+ * Registered as commands rather than handed to pi's loader, which can only name a skill
+ * by its directory and always under the fixed `/skill:` prefix. The manifest may point
+ * `skills` somewhere else; the default `skills/` is always scanned alongside it. */
+export function pluginSkills(home: string): PluginSkill[] {
+  // NOT SUPPORTED: Claude's single-skill layout, "a plugin that ships exactly one skill
+  // can place SKILL.md directly at the plugin root". The scan looks for
+  // <dir>/<name>/SKILL.md; the plugin root would also pull in hooks/, agents/ and
+  // commands/ as if they were skills.
+  const plugins = installedPlugins(home)
+  const commandNames = new Set(pluginCommands(plugins).map((command) => command.name))
+  const found = plugins.flatMap((plugin) => {
+    const pluginInfo = { root: plugin.root, dataDir: plugin.dataDir, ...(plugin.userConfig ? { userConfig: plugin.userConfig } : {}) }
+    return pluginSkillDirs(plugin).flatMap((dir) => skillsIn(dir, plugin.name, pluginInfo))
+  })
+  // Two plugins can declare the same name. The listing, the command, and the tool must all
+  // resolve that name to one file; the first one found wins and the rest are reported.
+  const byName = new Map<string, PluginSkill>()
+  for (const skill of found) {
+    // Commands retain their established name even if the skills extension loads first.
+    if (commandNames.has(skill.name)) {
+      console.warn(`pi-code-skills: /${skill.name} is a plugin command; ignoring ${skill.filePath}`)
+      continue
+    }
+    const existing = byName.get(skill.name)
+    if (existing) {
+      console.warn(`pi-code-skills: /${skill.name} from ${skill.filePath} is hidden by ${existing.filePath}`)
+      continue
+    }
+    byName.set(skill.name, skill)
+  }
+  return [...byName.values()]
+}
+
 /** A Claude-contributed skill by the name pi's loader gives it. One directory
  * level, the standard layout. */
 function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
@@ -134,8 +190,91 @@ function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined 
   return undefined
 }
 
+/** A plugin skill the user can type, registered once per process: pi cannot unregister a
+ * command, so a later session keeps the first binding. pi runs the handler instead of the
+ * input pipeline, so the handler expands the body itself and sends that. */
+function registerPluginSkillCommand(pi: ExtensionAPI, skill: PluginSkill, parsed: ReturnType<typeof parseCommandFile>, registered: Set<string>): void {
+  if (registered.has(skill.name)) return
+  if (pi.getCommands?.().some((command) => command.name === skill.name)) {
+    console.warn(`pi-code-skills: /${skill.name} is already registered; leaving that command in place`)
+    registered.add(skill.name)
+    return
+  }
+  registered.add(skill.name)
+  pi.registerCommand(skill.name, {
+    description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
+    handler: async (args, commandCtx) => {
+      const outcome = await expandSkillInvocation(pi, `/${skill.name}${args.trim() ? ` ${args}` : ''}`, commandCtx)
+      if (!outcome || outcome.action === 'handled') return
+      pi.sendUserMessage(outcome.text, commandCtx.isIdle() ? {} : { deliverAs: 'followUp' })
+    },
+  })
+}
+
+/** The model-facing listing of the plugin skills invocable right now. */
+function pluginSkillToolDescription(invocable: Map<string, { description: string; argumentHint?: string }>, contextWindow: number | undefined): string {
+  return slashCommandToolDescription(
+    [...invocable].map(([name, skill]) => ({ name, description: skill.description, argumentHint: skill.argumentHint })),
+    slashCommandBudget(contextWindow),
+  ).replace('Execute a custom slash command', 'Run a skill shipped by an enabled Claude Code plugin. Its name includes the plugin')
+}
+
+/** The model-facing tool for plugin skills, registered once. prepareLoadout refreshes the
+ * description from the session's current listing; one marked disable-model-invocation or
+ * turned off by skillOverrides stays off that listing. */
+function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undefined, invocable: Map<string, { description: string; argumentHint?: string }>): void {
+  pi.registerTool({
+    name: 'plugin_skill',
+    label: 'PluginSkill',
+    description: pluginSkillToolDescription(invocable, contextWindow),
+    parameters: Type.Object({ command: Type.String({ description: 'The plugin skill to run with args, e.g. "/pm-workflow:hustle the change"' }) }),
+    prepareLoadout: () => ({ descriptions: { plugin_skill: pluginSkillToolDescription(invocable, contextWindow) } }),
+    async execute(_toolCallId, params, _signal, _onUpdate, execCtx) {
+      const invocation = params.command.trim().replace(/^\//, '')
+      const name = invocation.split(/\s/, 1)[0]
+      if (!invocable.has(name)) throw new Error(`Unknown plugin skill: /${name || params.command}. It is not available in this session.`)
+      // Both entry points use current settings, hooks and fork behavior. A model call
+      // never runs injected shell and returns fork results through this tool.
+      const outcome = await expandSkillInvocation(pi, `/${invocation}`, execCtx, { allowShell: false, inlineFork: true, modelInvocation: true })
+      if (!outcome || outcome.action === 'handled') throw new Error(`/${name} was not run.`)
+      return { content: [{ type: 'text' as const, text: capForContext(outcome.text) }], details: {} }
+    },
+  })
+}
+
+/** Rebuild the session's plugin-skill listing and register the commands the user can type.
+ * A skill skillOverrides sets to "off" is absent from both. */
+function registerSessionPluginSkills(pi: ExtensionAPI, ctx: ExtensionContext, registered: Set<string>, invocable: Map<string, { description: string; argumentHint?: string }>): void {
+  invocable.clear()
+  const trusted = isProjectApprovedSilently(ctx)
+  for (const skill of pluginSkills(os.homedir())) {
+    const override = skillOverrideFor(skill.name, ctx.cwd, trusted)
+    if (override === 'off') continue
+    let parsed: ReturnType<typeof parseCommandFile>
+    try {
+      parsed = parseCommandFile(fs.readFileSync(skill.filePath, 'utf-8'))
+    } catch (error) {
+      console.warn(`pi-code-skills: ignoring ${skill.filePath}: ${errorMessage(error)}`)
+      continue
+    }
+    if (!parsed.disableModelInvocation && override !== 'user-invocable-only') invocable.set(skill.name, { description: override === 'name-only' ? '' : parsed.description, ...(parsed.argumentHint ? { argumentHint: parsed.argumentHint } : {}) })
+    if (parsed.userInvocable) registerPluginSkillCommand(pi, skill, parsed, registered)
+  }
+}
+
 export default function skillsExtension(pi: ExtensionAPI) {
-  pi.on('session_start', (_event, ctx) => forkResults.attach(pi, sessionHasTurns(ctx)))
+  const registeredPluginSkills = new Set<string>()
+  let pluginSkillToolRegistered = false
+  const invocablePluginSkills = new Map<string, { description: string; argumentHint?: string }>()
+
+  pi.on('session_start', (_event, ctx) => {
+    forkResults.attach(pi, sessionHasTurns(ctx))
+    registerSessionPluginSkills(pi, ctx, registeredPluginSkills, invocablePluginSkills)
+    if (!pluginSkillToolRegistered && invocablePluginSkills.size > 0) {
+      pluginSkillToolRegistered = true
+      registerPluginSkillTool(pi, (ctx as { model?: { contextWindow?: number } }).model?.contextWindow, invocablePluginSkills)
+    }
+  })
   pi.on('agent_start', () => forkResults.markPrompted(pi))
   pi.on('session_shutdown', () => forkResults.detach(pi))
 
@@ -161,7 +300,10 @@ function skillOverrideFor(name: string, cwd: string, trusted: boolean): string |
   let value: string | undefined
   for (const settings of readSettingsChain(claudeSettingsChain(cwd, os.homedir(), trusted))) {
     const overrides = settings.skillOverrides
-    if (isRecord(overrides) && typeof overrides[name] === 'string') value = overrides[name]
+    if (!isRecord(overrides)) continue
+    const bareName = name.slice(name.indexOf(':') + 1)
+    const state = overrides[name] ?? overrides[bareName]
+    if (typeof state === 'string') value = state
   }
   return value
 }
@@ -217,10 +359,6 @@ async function runForkedSkill(name: string, filePath: string, expanded: string, 
   }
 }
 
-/** A `/skill:name args` invocation into its expanded skill block, or undefined to
- * pass the input through to pi untouched. The expanded body is wrapped in pi's
- * skill-block format so downstream behavior (the baseDir note for relative
- * references) matches an untouched invocation. */
 /** Whether pi resolved this skill name to another file: pi loads its own skill directories
  * ahead of the ones this extension adds and the first name wins, so its listing then
  * shows that skill, and the invocation is left to pi's own expansion of it. */
@@ -237,36 +375,75 @@ function shadowedByPi(pi: ExtensionAPI, name: string, filePath: string): boolean
   return real(loaded.sourceInfo.path) !== real(filePath)
 }
 
-/** The skill name and arguments of a `/skill:<name> <args>` input, or undefined. */
+/** The prefix a slash input addresses, or undefined when it addresses no skill. `/skill:`
+ * is pi's own skill prefix; anything else namespaced (`/plugin:skill`) is a plugin skill. */
+function invocationMarker(text: string): string | undefined {
+  if (text.startsWith('/skill:')) return '/skill:'
+  const head = text.slice(1).split(' ')[0]
+  return text.startsWith('/') && head.includes(':') ? '/' : undefined
+}
+
 function parseSkillInvocation(rawText: string): { name: string; args: string } | undefined {
   const text = rawText.trimStart()
-  if (!text.startsWith('/skill:')) return undefined
+  const marker = invocationMarker(text)
+  if (marker === undefined) return undefined
   const space = text.indexOf(' ')
-  const name = (space === -1 ? text.slice(7) : text.slice(7, space)).trim()
-  if (!name) return undefined
+  const name = (space === -1 ? text.slice(marker.length) : text.slice(marker.length, space)).trim()
+  if (!name || (marker !== '/skill:' && !name.includes(':'))) return undefined
   return { name, args: space === -1 ? '' : text.slice(space + 1).trim() }
 }
 
-async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext): Promise<{ action: 'transform'; text: string } | { action: 'handled' } | undefined> {
+/** The skill file and its parsed frontmatter, or a throw when the file cannot be read. */
+function readSkill(filePath: string): { parsed: ReturnType<typeof parseCommandFile>; content: string } {
+  const content = fs.readFileSync(filePath, 'utf-8')
+  return { content, parsed: parseCommandFile(content) }
+}
+
+/** Resolve a plugin skill, or a personal/project skill contributed to pi's loader. */
+function resolveInvokedSkill(name: string, ctx: ExtensionContext, trusted: boolean): { filePath: string; baseDir: string; plugin?: PluginSkill['plugin'] } | undefined {
+  const pluginSkill = name.includes(':') ? pluginSkills(os.homedir()).find((skill) => skill.name === name) : undefined
+  if (pluginSkill) return { filePath: pluginSkill.filePath, baseDir: path.dirname(pluginSkill.filePath), plugin: pluginSkill.plugin }
+  return findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+}
+
+type ExpansionOptions = { allowShell?: boolean; inlineFork?: boolean; modelInvocation?: boolean }
+type ExpansionResult = { action: 'transform'; text: string } | { action: 'handled' } | undefined
+
+/** Validate the current file rather than the metadata captured at session start. */
+function checkModelInvocation(name: string, override: string | undefined, parsed: ReturnType<typeof parseCommandFile>): void {
+  if (override === 'off' || override === 'user-invocable-only') throw new Error(`/${name} is disabled for model invocation by skillOverrides and was not run.`)
+  if (parsed.disableModelInvocation) throw new Error(`/${name} is user-only (disable-model-invocation: true) and was not run. Only the user can invoke it.`)
+}
+
+async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext, options?: ExpansionOptions): Promise<ExpansionResult> {
   const invocation = parseSkillInvocation(rawText)
   if (!invocation) return
   const { name, args } = invocation
   const trusted = isProjectApprovedSilently(ctx)
-  const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+  const found = resolveInvokedSkill(name, ctx, trusted)
   if (!found || shadowedByPi(pi, name, found.filePath)) return
-  const refused = refusedByOverride(name, ctx, trusted)
-  if (refused) return refused
+  const override = skillOverrideFor(name, ctx.cwd, trusted)
+  if (!options?.modelInvocation) {
+    const refused = refusedByOverride(name, ctx, trusted)
+    if (refused) return refused
+  }
   let parsed: ReturnType<typeof parseCommandFile>
   let content: string
   try {
-    content = fs.readFileSync(found.filePath, 'utf-8')
-    parsed = parseCommandFile(content)
+    ;({ parsed, content } = readSkill(found.filePath))
   } catch {
     // Unreadable, or malformed frontmatter: pass through to pi's plain expansion
     // (the loader registered the skill and delivers the raw body), rather than
     // failing the invocation over the dynamic features it cannot have.
     return
   }
+  if (options?.modelInvocation) checkModelInvocation(name, override, parsed)
+  return expandSkillBody(pi, ctx, { name, args, found, parsed, content }, options)
+}
+
+async function expandSkillBody(pi: ExtensionAPI, ctx: ExtensionContext, skill: { name: string; args: string; found: FoundSkill & { plugin?: PluginSkill['plugin'] }; parsed: ReturnType<typeof parseCommandFile>; content: string }, options?: ExpansionOptions): Promise<ExpansionResult> {
+  const { name, args, found, parsed, content } = skill
+  const trusted = isProjectApprovedSilently(ctx)
   // Claude registers hooks a skill's frontmatter declares when the skill is
   // invoked, for the rest of the session; the hooks extension owns running them,
   // so the declaration is announced over the shared bus.
@@ -277,7 +454,9 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   }
   let expanded: string
   try {
-    expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, undefined, { allowShell: !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted) })
+    expanded = await expandCommand(pi, parsed, args, { cwd: ctx.cwd }, found.filePath, found.plugin, {
+      allowShell: options?.allowShell ?? !shellExecutionDisabled(ctx.cwd, os.homedir(), trusted),
+    })
   } catch (error) {
     // A failed injected command aborts the invocation, as it does for a command: pi logs a
     // throwing input handler and continues with the raw text, which would send the body
@@ -287,7 +466,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   }
   if (typeof frontmatter.context === 'string' && frontmatter.context.trim().toLowerCase() === 'fork') {
     const agentName = typeof frontmatter.agent === 'string' ? frontmatter.agent.trim() : undefined
-    if (forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)
+    if (options?.inlineFork || forkWaits(name, frontmatter, ctx)) return runForkedSkill(name, found.filePath, expanded, agentName)
     return startForkedSkill(ctx, { name, filePath: found.filePath, expanded, agentName })
   }
   return { action: 'transform', text: `<skill name="${name}" location="${found.filePath}">\nReferences are relative to ${found.baseDir}.\n\n${expanded}\n</skill>` }

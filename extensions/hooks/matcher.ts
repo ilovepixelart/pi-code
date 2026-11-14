@@ -218,6 +218,7 @@ function matchesToolPattern(piName: string, input: Record<string, unknown> | nul
     case 'subagent':
       return matchesAgentRules(agentNamesIn(input), [pattern])
     case 'slash_command':
+    case 'plugin_skill':
       return matchesSkillRules(str(input?.command), [pattern])
     default: {
       // Normalised as pi's file tools resolve it (~, a leading @, a file:// URL), because

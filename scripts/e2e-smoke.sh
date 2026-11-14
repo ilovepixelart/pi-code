@@ -64,6 +64,14 @@ write(`${agent}/models.json`, { providers: { dead: { api: 'openai-completions', 
 write(`${agent}/settings.json`, { packages: [repo], defaultModel: 'dead-model', defaultProvider: 'dead', defaultThinkingLevel: 'off', extensions: [`${repo}/scripts/lib/wire-probe.ts`] })
 const echo = { type: 'stdio', command: 'node', args: [`${repo}/scripts/lib/mcp-echo-server.mjs`] }
 write(`${home}/.claude.json`, { mcpServers: { smoke: echo, loaded: { ...echo, alwaysLoad: true } } })
+const plugin = `${home}/.claude/plugins/cache/smoke/smoke-kit/1.0.0`
+fs.mkdirSync(`${plugin}/.claude-plugin`, { recursive: true })
+fs.mkdirSync(`${plugin}/skills/deploy`, { recursive: true })
+fs.mkdirSync(`${plugin}/skills/guide`, { recursive: true })
+write(`${plugin}/.claude-plugin/plugin.json`, { name: 'smoke-kit' })
+write(`${home}/.claude/settings.json`, { enabledPlugins: { 'smoke-kit@smoke': true } })
+fs.writeFileSync(`${plugin}/skills/deploy/SKILL.md`, '---\nname: deploy\ndescription: SMOKE USER ONLY DESCRIPTION\ndisable-model-invocation: true\n---\nSMOKE PLUGIN BODY $ARGUMENTS\n${CLAUDE_PLUGIN_ROOT}\n')
+fs.writeFileSync(`${plugin}/skills/guide/SKILL.md`, '---\nname: guide\ndescription: SMOKE MODEL SKILL DESCRIPTION\n---\nGuide the user.\n')
 const { ProjectTrustStore } = await import(pathToFileURL(`${repo}/node_modules/@earendil-works/pi-coding-agent/dist/index.js`).href)
 new ProjectTrustStore(agent).set(process.cwd(), true)
 JS
@@ -87,6 +95,8 @@ if wire_has 'ZANZIBAR'; then ok "smoke: @import chain content on the wire"; else
 if wire_has 'PERSONAL LOCAL NOTE MARKER'; then ok "smoke: CLAUDE.local.md on the wire"; else bad "smoke: local marker missing from payload"; fi
 if wire_has 'Tests must be deterministic'; then ok "smoke: project rule on the wire"; else bad "smoke: project rule missing from payload"; fi
 if wire_has 'available_skills' && wire_has 'greet'; then ok "smoke: skills listing on the wire"; else bad "smoke: skills listing missing from payload"; fi
+if wire_has 'plugin_skill' && wire_has '/smoke-kit:guide'; then ok "smoke: plugin skill listed with its namespace"; else bad "smoke: namespaced plugin skill missing"; fi
+if wire_has 'SMOKE USER ONLY DESCRIPTION'; then bad "smoke: user-only plugin skill offered to model"; else ok "smoke: user-only plugin skill kept out of model listing"; fi
 if [ "$MCP_TOOL" = smoke_echo ]; then
   if wire_has '"smoke_echo"'; then ok "smoke: MCP server tool declared as smoke_echo"; else bad "smoke: MCP tool smoke_echo missing from payload"; fi
 else
@@ -95,6 +105,46 @@ else
   if wire_has '"mcp__loaded__echo"'; then ok "smoke: alwaysLoad MCP tool declared as mcp__loaded__echo"; else bad "smoke: alwaysLoad MCP tool mcp__loaded__echo missing from payload"; fi
 fi
 if grep -q 'builtin:mcp' "$SMOKE/pi-out.log"; then bad "smoke: pi reports pi-code replacing its built-in MCP"; else ok "smoke: no built-in MCP replacement warning"; fi
+
+# A registered plugin command must send the expanded skill, not raw slash input. RPC
+# keeps the session alive while the fire-and-forget command drives its own agent turn;
+# older pi print mode exits as soon as an extension command's handler returns.
+WIRE="$HOMEDIR/wire-plugin.jsonl"
+run_pi node --input-type=module -e '
+import { spawn } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+const packageRoot = join(process.argv[1], "node_modules/@earendil-works/pi-coding-agent")
+const cli = join(packageRoot, JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")).bin.pi)
+const child = spawn(process.execPath, [cli, "--mode", "rpc"], { stdio: ["pipe", "pipe", "inherit"] })
+let buffer = ""
+let finished = false
+const deadline = setTimeout(() => child.kill("SIGTERM"), 120000)
+child.stdout.on("data", (chunk) => {
+  buffer += chunk
+  const lines = buffer.split("\n")
+  buffer = lines.pop()
+  for (const line of lines) {
+    let event
+    try { event = JSON.parse(line) } catch { continue }
+    if (event.type === "agent_end") {
+      finished = true
+      child.kill("SIGTERM")
+    }
+  }
+})
+child.on("error", () => { clearTimeout(deadline); process.exitCode = 1 })
+child.on("exit", () => { clearTimeout(deadline); process.exitCode = finished ? 0 : 1 })
+child.stdin.write(JSON.stringify({ type: "prompt", message: "/smoke-kit:deploy prod" }) + "\n")
+' "$(native "$REPO")" > "$SMOKE/pi-plugin.log" 2>&1
+if wire_has 'SMOKE PLUGIN BODY prod'; then ok "smoke: plugin command expands its body and arguments"; else bad "smoke: plugin command body missing (pi output: $(tail -1 "$SMOKE/pi-plugin.log" 2>/dev/null))"; fi
+if wire_has 'CLAUDE_PLUGIN_ROOT'; then bad "smoke: plugin root variable was not expanded"; else ok "smoke: plugin root variable expanded"; fi
+
+# The explicit skill prefix also works in print mode, where older pi versions return
+# before a registered extension command's fire-and-forget prompt has started.
+WIRE="$HOMEDIR/wire-plugin-print.jsonl"
+run_pi "$PI_BIN" -p "/skill:smoke-kit:deploy staging" > "$SMOKE/pi-plugin-print.log" 2>&1
+if wire_has 'SMOKE PLUGIN BODY staging'; then ok "smoke: qualified skill input expands in print mode"; else bad "smoke: qualified skill input missing in print mode"; fi
 
 # --- A freshly cloned project nobody was asked about, headless: no prompt can approve it ---
 # pi itself still loads its CLAUDE.md, and an import inside the project is only more of
