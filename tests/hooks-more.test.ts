@@ -1398,6 +1398,21 @@ describe('hooks extension tool_result (PostToolUse)', () => {
   }
   const okText = [{ type: 'text', text: 'file.txt' }]
 
+  // Claude: "a PostToolUse hook with [a Bash matcher] doesn't run for Monitor".
+  it('does not run a Bash-matched PostToolUse hook for a monitor result, and runs a Monitor-matched one', async () => {
+    writeSettings(hoisted.home, 'settings.json', {
+      PostToolUse: [
+        { matcher: 'Bash', hooks: [{ command: 'post-bash' }] },
+        { matcher: 'Monitor', hooks: [{ command: 'post-monitor' }] },
+      ],
+    })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tempDir('hooks-proj-') })
+    await ext.toolResult('monitor', { input: { description: 'the watch', command: 'echo hi' }, content: okText })
+    expect(hoisted.calls.map((call) => call.command)).toEqual(['post-monitor'])
+    expect(JSON.parse(hoisted.calls[0].stdin)).toMatchObject({ hook_event_name: 'PostToolUse', tool_name: 'Monitor', tool_input: { description: 'the watch', command: 'echo hi' } })
+  })
+
   // Measured on Claude Code 2.1.295: a PostToolUse continue false stopped the run after
   // the tool had run, with no further model turn and no Stop hook.
   it('stops the run when a PostToolUse hook returns continue false, showing stopReason', async () => {
