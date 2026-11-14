@@ -61,6 +61,26 @@ describe('plugin skills in child agents', () => {
     expect(roots).not.toContain(join(root, 'skills'))
     expect(childPromptBody(agent, roots, undefined)).toContain('PLUGIN PRELOAD BODY')
   })
+
+  // Claude resolves a bare preload name as the exact name, then <agent's own plugin>:<name>,
+  // then the first :name match across plugins.
+  it('preloads a bare skill name from the plugin the agent belongs to', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
+    for (const plugin of ['aaa', 'kit']) {
+      const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', plugin, '1.0.0')
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, 'agents'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: plugin }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: deploy\n---\nBODY FROM ${plugin}`)
+      writeFileSync(join(root, 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: reviewer\nskills: [deploy]\n---\nReview')
+    }
+    const agents = discoverAgents(cwd, 'user').agents
+    for (const plugin of ['aaa', 'kit']) {
+      const agent = agents.find((entry) => entry.name === `${plugin}:reviewer`)!
+      expect(childPromptBody(agent, [], undefined)).toContain(`BODY FROM ${plugin}`)
+    }
+  })
 })
 
 const agentFile = (name: string, body = 'do things'): string => `---\nname: ${name}\ndescription: ${name} agent\n---\n${body}`

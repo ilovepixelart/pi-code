@@ -114,11 +114,11 @@ function parseSkillsField(raw: unknown): string[] | undefined {
  * does not inherit the parent's skill discovery, so the bodies travel in the prompt.
  * A name that resolves to nothing is reported rather than dropped: a silently missing
  * instruction is worse than a visible gap. */
-export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: readonly PreloadablePluginSkill[] = []): string {
+export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: readonly PreloadablePluginSkill[] = [], ownPlugin?: string): string {
   if (!skills || skills.length === 0) return prompt
   const sections: string[] = []
   for (const name of skills) {
-    const body = readSkillBody(name, skillDirs) ?? readPluginSkillBody(name, plugins)
+    const body = readSkillBody(name, skillDirs) ?? readPluginSkillBody(name, plugins, ownPlugin)
     sections.push(body === undefined ? `<skill name="${name}">(skill not found)</skill>` : `<skill name="${name}">\n${body.trim()}\n</skill>`)
   }
   return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
@@ -127,15 +127,16 @@ export function withPreloadedSkills(prompt: string, skills: string[] | undefined
 type PreloadablePluginSkill = { name: string; alias?: string; filePath: string; plugin: { root: string } }
 
 /** Qualified names select a plugin exactly, by the skill's name or its directory alias.
- * Bare names remain a fallback for existing agent configs after personal/project skills;
- * the discovery map already resolves duplicates. */
-function findPreloadablePluginSkill(name: string, plugins: readonly PreloadablePluginSkill[]): PreloadablePluginSkill | undefined {
+ * A bare name follows Claude's order after personal/project skills: the skill of the
+ * plugin the agent itself belongs to, then the first plugin that ships the name. */
+function findPreloadablePluginSkill(name: string, plugins: readonly PreloadablePluginSkill[], ownPlugin: string | undefined): PreloadablePluginSkill | undefined {
   if (name.includes(':')) return findPluginSkill(plugins, name)
-  return plugins.find((entry) => entry.name.endsWith(`:${name}`)) ?? plugins.find((entry) => entry.alias?.endsWith(`:${name}`))
+  const own = ownPlugin === undefined ? undefined : findPluginSkill(plugins, `${ownPlugin}:${name}`)
+  return own ?? plugins.find((entry) => entry.name.endsWith(`:${name}`)) ?? plugins.find((entry) => entry.alias?.endsWith(`:${name}`))
 }
 
-function readPluginSkillBody(name: string, plugins: readonly PreloadablePluginSkill[]): string | undefined {
-  const skill = findPreloadablePluginSkill(name, plugins)
+function readPluginSkillBody(name: string, plugins: readonly PreloadablePluginSkill[], ownPlugin: string | undefined): string | undefined {
+  const skill = findPreloadablePluginSkill(name, plugins, ownPlugin)
   if (!skill) return undefined
   try {
     return readConfined(skill.filePath, fs.realpathSync(skill.plugin.root))

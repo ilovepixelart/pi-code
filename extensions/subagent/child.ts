@@ -121,7 +121,9 @@ export function withMemoryTools(tools: string[] | undefined): string[] | undefin
 /** The child's --append-system-prompt body: the skills-preloaded prompt plus the
  * agent memory section, without a stray separator when either part is empty. */
 export function childPromptBody(agent: AgentConfig, skillRoots: string[], memorySection: string | undefined): string {
-  const prompt = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots, agent.skills?.length ? pluginSkills(os.homedir()) : [])
+  // A plugin agent is named `<plugin>:<agent>`; its bare skill names prefer that plugin.
+  const ownPlugin = agent.source === 'plugin' ? agent.name.slice(0, agent.name.indexOf(':')) : undefined
+  const prompt = withPreloadedSkills(agent.systemPrompt, agent.skills, skillRoots, agent.skills?.length ? pluginSkills(os.homedir()) : [], ownPlugin)
   if (!memorySection) return prompt
   return [prompt, memorySection].filter((part) => part.trim()).join('\n\n')
 }
