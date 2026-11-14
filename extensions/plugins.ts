@@ -14,8 +14,9 @@ import { errorMessage } from './internal/values.ts'
 
 const SOURCE_LABEL: Record<EnablementSource, string> = {
   managed: 'managed settings',
+  flag: '--settings flag',
   pi: 'pi override',
-  claude: 'Claude settings',
+  claude: 'Claude user settings',
   default: 'plugin default',
 }
 

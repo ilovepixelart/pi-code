@@ -533,6 +533,90 @@ describe('pi-only plugin enablement', () => {
     }
   })
 
+  /** Run with a `--settings` snapshot holding the given enabledPlugins. */
+  const withFlag = (entries: Record<string, boolean>, run: () => void): void => {
+    const flag = join(mkdtempSync(join(tmpdir(), 'plugins-flag-')), 'settings.json')
+    writeFileSync(flag, JSON.stringify({ enabledPlugins: entries }))
+    setCliSettingsReader(() => ({ settingsFile: flag, sources: new Set(['user', 'project', 'local']), forwardArgs: [], errors: [] }))
+    try {
+      run()
+    } finally {
+      setCliSettingsReader(undefined)
+    }
+  }
+
+  it('should load a plugin the --settings flag enables when piCode.enabledPlugins disables it', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+
+    withPiSettings({ piCode: { enabledPlugins: { 'formatter@community': false } } }, () => {
+      withFlag({ 'formatter@community': true }, () => {
+        expect(
+          installedPlugins(h, []).map((p) => p.name),
+          'the one-off flag outranks the persisted pi override',
+        ).toEqual(['formatter'])
+        expect(pluginStates(h), 'the flag is named as the deciding source').toMatchObject([{ qualified: 'formatter@community', enabled: true, decidedBy: 'flag' }])
+      })
+    })
+  })
+
+  it('should skip a plugin the --settings flag disables when piCode.enabledPlugins enables it', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+
+    withPiSettings({ piCode: { enabledPlugins: { formatter: true } } }, () => {
+      withFlag({ formatter: false }, () => {
+        expect(installedPlugins(h, []), 'the flag outranks the pi override in both directions').toEqual([])
+      })
+    })
+  })
+
+  it('should keep a managed block when the --settings flag enables the plugin', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const h = home()
+    install(h, 'community', 'blocked', '1.0.0')
+    writeFileSync(join(h, 'managed-settings.json'), JSON.stringify({ enabledPlugins: { blocked: false } }))
+    setManagedSettingsPath(join(h, 'managed-settings.json'))
+
+    try {
+      withFlag({ 'blocked@community': true }, () => {
+        expect(installedPlugins(h, []), 'managed policy outranks the flag').toEqual([])
+        expect(pluginStates(h), 'managed settings are named as the deciding source').toMatchObject([{ qualified: 'blocked@community', enabled: false, decidedBy: 'managed' }])
+      })
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  })
+
+  it('should let the Claude user setting decide over the plugin default when no higher source has an entry', () => {
+    const h = home()
+    install(h, 'community', 'optin', '1.0.0', { defaultEnabled: false })
+    install(h, 'community', 'optout', '1.0.0')
+    enable(h, { 'optin@community': true, 'optout@community': false })
+
+    withPiSettings({}, () => {
+      expect(
+        pluginStates(h).map(({ qualified, enabled, decidedBy }) => ({ qualified, enabled, decidedBy })),
+        'each user entry beats the manifest default',
+      ).toEqual([
+        { qualified: 'optin@community', enabled: true, decidedBy: 'claude' },
+        { qualified: 'optout@community', enabled: false, decidedBy: 'claude' },
+      ])
+    })
+  })
+
+  it('should let the --settings flag decide over the Claude user setting', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    enable(h, { 'formatter@community': true })
+
+    withPiSettings({}, () => {
+      withFlag({ 'formatter@community': false }, () => {
+        expect(pluginStates(h), 'the flag, not the user file, is the deciding source').toMatchObject([{ qualified: 'formatter@community', enabled: false, decidedBy: 'flag', withoutPi: false }])
+      })
+    })
+  })
+
   it('should report each plugin with the setting that decided it and its state without the pi override', () => {
     const h = home()
     install(h, 'community', 'formatter', '1.0.0')

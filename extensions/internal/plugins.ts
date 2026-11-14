@@ -19,6 +19,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { atomicWriteFile } from './atomic-write.ts'
+import { cliSettings } from './cli-settings.ts'
 import { claudeConfigDir } from './config-dir.ts'
 import { readManagedSettings } from './managed-settings.ts'
 import { userSettingsFiles } from './settings-chain.ts'
@@ -163,6 +164,27 @@ function piEnabledMap(): Record<string, boolean> {
   return Object.fromEntries(Object.entries(entries).filter(([, value]) => typeof value === 'boolean')) as Record<string, boolean>
 }
 
+/** The `enabledPlugins` maps that rank below managed settings, one per precedence level. */
+interface EnablementSettings {
+  /** The `--settings` flag's snapshot. */
+  flag: Record<string, boolean>
+  /** pi's own `piCode.enabledPlugins`. */
+  pi: Record<string, boolean>
+  /** The Claude user settings file, plus any extra user-controlled file a caller passes. */
+  claude: Record<string, boolean>
+}
+
+/** `settingsFiles` is the user-level chain, which holds the flag's snapshot when one was
+ * given; the snapshot is read apart because it ranks above pi's key and the rest below it. */
+function enablementSettings(settingsFiles: string[]): EnablementSettings {
+  const flagFile = cliSettings().settingsFile
+  return {
+    flag: flagFile === undefined ? {} : enabledMap([flagFile]),
+    pi: piEnabledMap(),
+    claude: enabledMap(settingsFiles.filter((file) => file !== flagFile)),
+  }
+}
+
 /** Copy one plugin config's `options` into `target`, coercing scalars to strings and
  * ignoring the rest, later keys winning. */
 function mergeOptionValues(target: Record<string, string>, options: object): void {
@@ -266,13 +288,12 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   const fingerprint = pluginFingerprint(cacheDir, [...settingsFiles, piSettingsFile()], index)
   const cached = pluginCache.get(key)
   if (cached?.fingerprint === fingerprint) return cached.plugins
-  const enabled = enabledMap(settingsFiles)
-  const piEnabled = piEnabledMap()
+  const enabled = enablementSettings(settingsFiles)
   const configs = pluginConfigsMap(settingsFiles)
   const plugins: InstalledPlugin[] = []
   for (const marketplace of listDirs(cacheDir)) {
     for (const pluginDir of listPluginDirs(path.join(cacheDir, marketplace))) {
-      const plugin = resolvePlugin(home, cacheDir, marketplace, pluginDir, enabled, piEnabled, configs, index)
+      const plugin = resolvePlugin(home, cacheDir, marketplace, pluginDir, enabled, configs, index)
       if (plugin) plugins.push(plugin)
     }
   }
@@ -298,7 +319,7 @@ function enablementEntry(entries: unknown, qualified: string, directory: string)
 }
 
 /** Which setting decided a plugin's enablement. */
-export type EnablementSource = 'managed' | 'pi' | 'claude' | 'default'
+export type EnablementSource = 'managed' | 'flag' | 'pi' | 'claude' | 'default'
 
 interface Enablement {
   enabled: boolean
@@ -308,27 +329,30 @@ interface Enablement {
 }
 
 /** The plugin's effective enablement per Claude's precedence: a managed
- * enabledPlugins entry force-enables or blocks, then pi's own override, then the user's
+ * enabledPlugins entry force-enables or blocks, then the `--settings` flag (Claude ranks
+ * the command line above every settings file), then pi's own override, then the user's
  * setting, then the manifest's defaultEnabled, which defaults to true ("starts in an
  * enabled state when the user has not set one"). */
-function pluginEnablement(qualified: string, pluginDir: string, enabled: Record<string, boolean>, piEnabled: Record<string, boolean>, manifest: Record<string, unknown>): Enablement {
+function pluginEnablement(qualified: string, pluginDir: string, enabled: EnablementSettings, manifest: Record<string, unknown>): Enablement {
   const managedState = enablementEntry(readManagedSettings().enabledPlugins, qualified, pluginDir)
   if (typeof managedState === 'boolean') return { enabled: managedState, decidedBy: 'managed', withoutPi: managedState }
-  const userState = enabled[qualified] ?? enabled[pluginDir]
+  const flagState = enablementEntry(enabled.flag, qualified, pluginDir)
+  if (typeof flagState === 'boolean') return { enabled: flagState, decidedBy: 'flag', withoutPi: flagState }
+  const userState = enablementEntry(enabled.claude, qualified, pluginDir)
   const withoutPi = typeof userState === 'boolean' ? userState : manifest.defaultEnabled !== false
-  const piState = enablementEntry(piEnabled, qualified, pluginDir)
+  const piState = enablementEntry(enabled.pi, qualified, pluginDir)
   if (typeof piState === 'boolean') return { enabled: piState, decidedBy: 'pi', withoutPi }
   return { enabled: withoutPi, decidedBy: typeof userState === 'boolean' ? 'claude' : 'default', withoutPi }
 }
 
 /** Resolve one cached plugin directory into an enabled InstalledPlugin, or null to skip
  * it: turned off by managed/user settings or defaultEnabled, or no version yet. */
-function resolvePlugin(home: string, cacheDir: string, marketplace: string, pluginDir: string, enabled: Record<string, boolean>, piEnabled: Record<string, boolean>, configs: Record<string, Record<string, string>>, installs: Map<string, string[]> | undefined): InstalledPlugin | null {
+function resolvePlugin(home: string, cacheDir: string, marketplace: string, pluginDir: string, enabled: EnablementSettings, configs: Record<string, Record<string, string>>, installs: Map<string, string[]> | undefined): InstalledPlugin | null {
   const qualified = `${pluginDir}@${marketplace}`
   const root = versionDir(path.join(cacheDir, marketplace, pluginDir), installs?.get(qualified))
   if (!root) return null
   const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
-  if (!pluginEnablement(qualified, pluginDir, enabled, piEnabled, manifest).enabled) return null
+  if (!pluginEnablement(qualified, pluginDir, enabled, manifest).enabled) return null
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
   // Claude: "{id} is the plugin identifier with characters outside a-z, A-Z, 0-9,
   // _, and - replaced by -", one dash per character, underscores kept.
@@ -347,9 +371,7 @@ export interface PluginState extends Enablement {
 /** Every cached plugin with a loadable version, enabled or not, and why. */
 export function pluginStates(home: string): PluginState[] {
   const cacheDir = path.join(claudeConfigDir(home), 'plugins', 'cache')
-  const settingsFiles = userSettingsFiles(home)
-  const enabled = enabledMap(settingsFiles)
-  const piEnabled = piEnabledMap()
+  const enabled = enablementSettings(userSettingsFiles(home))
   const index = readInstallIndex(home)
   const states: PluginState[] = []
   for (const marketplace of listDirs(cacheDir)) {
@@ -359,7 +381,7 @@ export function pluginStates(home: string): PluginState[] {
       if (!root) continue
       const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
       const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
-      states.push({ qualified, directory: pluginDir, name, ...pluginEnablement(qualified, pluginDir, enabled, piEnabled, manifest) })
+      states.push({ qualified, directory: pluginDir, name, ...pluginEnablement(qualified, pluginDir, enabled, manifest) })
     }
   }
   return states
