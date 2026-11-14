@@ -98,7 +98,7 @@ function exitCodeOf(outcome: Outcome): number | undefined {
   return typeof structured?.exit_code === 'number' ? structured.exit_code : undefined
 }
 
-export default function backgroundBashExtension(pi: ExtensionAPI) {
+export default function backgroundBashExtension(pi: ExtensionAPI): void {
   // A background command outlives a session switch, and this instance's pi throws once
   // its session is replaced; notices go to whichever session is current when it ends.
   const notices = sessionMailbox('bash-background')

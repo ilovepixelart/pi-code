@@ -112,10 +112,6 @@ export function stopAllShells(): number {
   return count
 }
 
-export function runningShells(): number {
-  return [...registry().shells.values()].filter((shell) => shell.state === 'running').length
-}
-
 export function allShells(): BackgroundShell[] {
   return [...registry().shells.values()]
 }
@@ -123,7 +119,7 @@ export function allShells(): BackgroundShell[] {
 /** Test seam: the registry is process state, so tests reset it between cases. */
 export function resetShells(): void {
   const state = registry()
-  for (const shell of state.shells.values()) shell.stop?.()
+  for (const id of Array.from(state.shells.keys())) stopShell(id)
   state.shells.clear()
   state.finishSequence = 0
   if (state.outputDir) fs.rmSync(state.outputDir, { recursive: true, force: true })
