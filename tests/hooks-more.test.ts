@@ -737,6 +737,96 @@ describe('loadHooks malformed config shapes', () => {
   })
 })
 
+describe('plugin manifest hooks', () => {
+  /** A plugin root holding each named hooks file, every file registering one SessionStart command named after it. */
+  const pluginWith = (files: string[], hooks: unknown) => {
+    const root = tempDir('hooks-plugin-')
+    for (const file of files) {
+      mkdirSync(join(root, file, '..'), { recursive: true })
+      writeFileSync(join(root, file), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `from-${file}` }] }] } }))
+    }
+    return { name: 'multi', root, dataDir: '/d', manifest: { hooks } }
+  }
+  const commands = (config: Record<string, { hooks: { command: string }[] }[]>): string[] =>
+    Object.values(config)
+      .flatMap((matchers) => matchers.flatMap((matcher) => matcher.hooks.map((hook) => hook.command)))
+      .sort()
+
+  it('should load every listed hooks file and inline object when the manifest declares an array', () => {
+    const plugin = pluginWith(['a.json', 'b.json'], ['./a.json', './b.json', { Stop: [{ hooks: [{ type: 'command', command: 'inline.sh' }] }] }])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'a.json, b.json and the inline Stop entry each register their hook').toEqual(['from-a.json', 'from-b.json', 'inline.sh'])
+  })
+
+  it('should load hooks/hooks.json alongside the declared files when the manifest declares an array', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'extra.json'], ['./extra.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the declared file both register').toEqual(['from-extra.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load hooks/hooks.json alongside the declared file when the manifest declares a single path', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'extra.json'], './extra.json')
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the declared file both register').toEqual(['from-extra.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load hooks/hooks.json alongside the inline object when the manifest declares an object', () => {
+    const plugin = pluginWith(['hooks/hooks.json'], { Stop: [{ hooks: [{ type: 'command', command: 'inline.sh' }] }] })
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file and the inline Stop entry both register').toEqual(['from-hooks/hooks.json', 'inline.sh'])
+  })
+
+  it('should load hooks/hooks.json when the manifest declares an empty array', () => {
+    const plugin = pluginWith(['hooks/hooks.json'], [])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the default file still registers').toEqual(['from-hooks/hooks.json'])
+  })
+
+  it('should load a file once when the manifest lists it twice or names the default file', () => {
+    const plugin = pluginWith(['hooks/hooks.json', 'a.json'], ['./a.json', 'a.json', './hooks/hooks.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'each file registers its hook exactly once').toEqual(['from-a.json', 'from-hooks/hooks.json'])
+  })
+
+  it('should load the remaining entries when a listed file is missing', () => {
+    const plugin = pluginWith(['a.json', 'c.json'], ['./a.json', './missing.json', './c.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the files on both sides of the missing one register').toEqual(['from-a.json', 'from-c.json'])
+  })
+
+  it('should skip and warn about an entry when it is neither a path nor an object', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = pluginWith(['a.json'], [null, 42, true, ['./a.json'], './a.json'])
+    const config = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(commands(config), 'the valid path after the invalid entries still registers').toEqual(['from-a.json'])
+    expect(warn, 'each of the four invalid entries is reported').toHaveBeenCalledTimes(4)
+  })
+})
+
 describe('malformed hook config', () => {
   it('skips a null entry in a plugin manifest instead of throwing out of the load', () => {
     // The pre-pass that drops shell-form user_config references ran before any shape
