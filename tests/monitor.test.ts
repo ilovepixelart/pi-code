@@ -269,6 +269,25 @@ describe('monitor tool', () => {
     await until(() => fs.readFileSync(file, 'utf8').includes('gamma'))
   })
 
+  it('delivers stdout lines only, and writes stderr to the output file', async () => {
+    const { monitor, sent } = setup()
+    // Spelled in two halves, so the command preview in the message cannot match.
+    const id = idOf(await monitor({ command: 'echo visible; printf "%s%s\\n" hid den >&2' }))
+    await until(() => shell(id)?.finishedAt !== undefined)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.message.content).toContain('output:\nvisible\n')
+    expect(sent[0]?.message.content).not.toContain('hidden')
+    const file = shell(id)?.outputFile ?? ''
+    await until(() => ['visible', 'hidden'].every((word) => fs.readFileSync(file, 'utf8').includes(word)))
+  })
+
+  it('sends no output message for a command that writes to stderr alone', async () => {
+    const { monitor, sent } = setup()
+    const id = idOf(await monitor({ command: 'echo quiet >&2' }))
+    await until(() => shell(id)?.finishedAt !== undefined)
+    expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ended: the command exited with code 0. Full output: ${shell(id)?.outputFile}`])
+  })
+
   it('delivers lines while the command is still running', async () => {
     const { monitor, sent } = setup()
     const id = idOf(await monitor({ command: 'echo early; sleep 5' }))

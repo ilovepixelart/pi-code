@@ -8,10 +8,10 @@
  * notice, so it can start the watch again if it's still needed." A watch stops when
  * Claude cancels it (TaskStop, registered here as task_stop) or the session ends.
  *
- * The command runs through pi's local bash operations, with pi's shell path and command
+ * The command runs in the shell pi's bash tool uses, with pi's shell path and command
  * prefix, and is registered in the background-shells registry, so task_stop stops it and
- * /tasks lists it next to background Bash commands. Every byte it prints also goes to an
- * output file, as a background Bash command's does.
+ * /tasks lists it next to background Bash commands. Only its stdout lines are events, as
+ * in Claude; stdout and stderr both go to an output file, as a background Bash command's do.
  *
  * Lines are not delivered one message each: a chatty command would start a turn per
  * line. They are coalesced over a short window, at most one message per interval, and a
@@ -28,15 +28,18 @@
  * that asked; /reload keeps them.
  */
 
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
+import { constants as osConstants } from 'node:os'
 import * as path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
-import { type AgentToolResult, createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type ExtensionAPI, type ExtensionContext, getShellConfig } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
 import { allShells, type BackgroundShell, commandPreview, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { killProcessTree } from './internal/process-tree.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** "5 minutes by default". */
@@ -201,6 +204,43 @@ export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'>
 
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
 
+interface SplitRun {
+  cwd: string
+  shellPath: string | undefined
+  /** Aborting it ends the command's process tree. */
+  signal: AbortSignal
+  onStdout: (data: Buffer) => void
+  onStderr: (data: Buffer) => void
+}
+
+/** Run `command` in the shell pi's bash tool resolves, with stdout and stderr apart:
+ * pi's local bash operations hand both streams to one callback. Resolves with the exit
+ * code once both streams have closed, and rejects for a command that could not start. */
+function execSplit(command: string, run: SplitRun): Promise<number> {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(run.cwd)) throw new Error(`Working directory does not exist: ${run.cwd}`)
+    const shell = getShellConfig(run.shellPath)
+    const fromStdin = shell.commandTransport === 'stdin'
+    // Its own process group off Windows, so the kill reaches what the shell spawned.
+    const child = spawn(shell.shell, fromStdin ? shell.args : [...shell.args, command], { cwd: run.cwd, detached: process.platform !== 'win32', stdio: [fromStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true })
+    if (fromStdin) {
+      child.stdin?.on('error', () => {})
+      child.stdin?.end(command)
+    }
+    const kill = (): void => killProcessTree(child, 'SIGKILL')
+    if (run.signal.aborted) kill()
+    else run.signal.addEventListener('abort', kill, { once: true })
+    child.stdout?.on('data', run.onStdout)
+    child.stderr?.on('data', run.onStderr)
+    child.once('error', reject)
+    child.once('close', (code, signal) => {
+      run.signal.removeEventListener('abort', kill)
+      // A shell ended by a signal has no exit code: the shell convention stands in.
+      resolve(code ?? 128 + (signal ? osConstants.signals[signal] : 0))
+    })
+  })
+}
+
 /** Session-switch reasons that end the session the watches report to. */
 const ENDING_REASONS = new Set(['quit', 'new', 'resume', 'fork'])
 
@@ -236,16 +276,19 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
 
     const { shellPath, commandPrefix } = shellSettings(ctx)
     const resolved = commandPrefix ? `${commandPrefix}\n${command}` : command
-    const run = createLocalBashOperations({ shellPath }).exec(resolved, ctx.cwd, {
+    const run = execSplit(resolved, {
+      cwd: ctx.cwd,
+      shellPath,
       signal: lifetime.signal,
-      onData: (data) => {
+      onStdout: (data) => {
         log.write(data)
         batcher.push(decoder.write(data))
       },
+      onStderr: (data) => log.write(data),
     })
 
     void run.then(
-      ({ exitCode }) => finish(exitCode ?? undefined, undefined),
+      (exitCode) => finish(exitCode, undefined),
       (error: unknown) => finish(undefined, error),
     )
 
