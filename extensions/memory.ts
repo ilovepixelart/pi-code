@@ -242,7 +242,7 @@ type MemoryToolResult = { content: Array<{ type: 'text'; text: string }>; detail
  * also on the memory file: a second nested queue self-deadlocks when a memory name
  * canonicalizes to the same key as the index (e.g. `memory.md` and `MEMORY.md` under a
  * case-insensitive filesystem, since the queue keys on realpath). */
-async function saveMemory(dir: string, indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): Promise<MemoryToolResult> {
+async function saveMemory(dir: string, indexPath: string, storage: MemoryStorage, name: string | undefined, description: string | undefined, content: string | undefined, now: string = new Date().toISOString()): Promise<MemoryToolResult> {
   if (!name || !description || !content) {
     return { content: [{ type: 'text', text: 'save requires name, description, and content.' }], details: {} }
   }
@@ -252,7 +252,7 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
     fs.mkdirSync(dir, { recursive: true })
     // A memory with frontmatter records its write time; one without is left as-is.
     fs.writeFileSync(path.join(dir, `${stem}.md`), stampModified(content, now))
-    const nextIndex = upsertIndexLine(index, name, description, stem)
+    const nextIndex = upsertIndexLine(index, name, description, storage, stem)
     writeIndex(indexPath, nextIndex)
     // Claude measures the index after the write: over a read limit the write still
     // succeeds, but an error tells Claude to rewrite the index (everything past
@@ -358,16 +358,19 @@ export function slugifyName(name: string): string {
  * the entry is recognised by its link target. */
 const ENTRY_LINE = /^(\s*-\s*\[.*?\]\(([^()\s]+)\.md\))(.*)$/
 
-/** The separator before an entry's description, kept when the line is rewritten:
- * Claude writes ` — `, pi writes `: `. */
-const ENTRY_SEPARATOR = /^\s*(?:—|:)[ \t]*/
+/** What a new entry puts between its link and its description: each store's own
+ * format, so a pi save leaves a Claude index in the shape Claude Code writes. */
+const NEW_ENTRY_SEPARATOR: Record<MemoryStorage, string> = { pi: ': ', claude: ' — ' }
+
+/** The separator an existing entry already has (a colon or any dash), kept verbatim
+ * when the line is rewritten. */
+const ENTRY_SEPARATOR = /^\s*[\p{Pd}:]+[ \t]*/u
 
 /** The entry one index line holds, or undefined when the line is not one. */
-function entryOf(line: string): { link: string; target: string; separator: string } | undefined {
+function entryOf(line: string): { link: string; target: string; separator: string | undefined } | undefined {
   const match = ENTRY_LINE.exec(line)
   if (!match) return undefined
-  const separator = ENTRY_SEPARATOR.exec(match[3])
-  return { link: match[1], target: match[2], separator: separator ? separator[0] : ': ' }
+  return { link: match[1], target: match[2], separator: ENTRY_SEPARATOR.exec(match[3])?.[0] }
 }
 
 /** Dashes and underscores are one character in a memory name: Claude Code has
@@ -413,8 +416,9 @@ function memoryStem(dir: string, index: string, name: string): string {
 /** Add or replace this memory's line in the index, keyed by the memory file the
  * line links, so an existing entry keeps its title, its link target and its
  * separator while only its description is replaced. Blank lines and headings are
- * left exactly where they are. */
-export function upsertIndexLine(index: string, name: string, description: string, stem: string = indexedStem(index, name) ?? name): string {
+ * left exactly where they are. Only pi's own index gets a heading: Claude Code
+ * writes its index without one. */
+export function upsertIndexLine(index: string, name: string, description: string, storage: MemoryStorage = 'pi', stem: string = indexedStem(index, name) ?? name): string {
   // One line per memory: a newline in the description would break every later line-based match.
   const flat = description.replace(/\s+/g, ' ').trim()
   const eol = lineEnding(index)
@@ -422,12 +426,12 @@ export function upsertIndexLine(index: string, name: string, description: string
   for (let i = 0; i < lines.length; i++) {
     const entry = entryOf(lines[i])
     if (entry?.target === stem) {
-      lines[i] = `${entry.link}${entry.separator}${flat}`
+      lines[i] = `${entry.link}${entry.separator ?? NEW_ENTRY_SEPARATOR[storage]}${flat}`
       return `${lines.join(eol)}${eol}`
     }
   }
-  if (!lines.find((line) => line.trim() !== '')?.startsWith('#')) lines.unshift('# Memory index')
-  lines.push(`- [${stem}](${stem}.md): ${flat}`)
+  if (storage === 'pi' && !lines.find((line) => line.trim() !== '')?.startsWith('#')) lines.unshift('# Memory index')
+  lines.push(`- [${stem}](${stem}.md)${NEW_ENTRY_SEPARATOR[storage]}${flat}`)
   return `${lines.join(eol)}${eol}`
 }
 
@@ -531,6 +535,7 @@ export function setAutoMemoryEnabledSetting(home: string, value: boolean): { ok:
 
 export default function memoryExtension(pi: ExtensionAPI): void {
   let dir = memoryDir(process.cwd())
+  let storage: MemoryStorage = 'pi'
   let enabled = true
 
   // The index is injected every turn but changes only through the tool or an external
@@ -566,7 +571,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
     const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, os.homedir(), approved))
     enabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
     const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
-    const storage = memoryStorageSetting(settings.autoMemoryStorage)
+    storage = memoryStorageSetting(settings.autoMemoryStorage)
     // Pi-store housekeeping only: in the claude storage mode the pi store is unused.
     if (storage === 'pi') migrateLegacyStore(ctx.cwd)
     dir = enabled ? resolveMemoryDir(ctx.cwd, override, storage) : memoryDir(ctx.cwd)
@@ -600,7 +605,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
   async function saveAction(indexPath: string, name: string | undefined, description: string | undefined, content: string | undefined) {
     try {
       // Awaited here, not returned: the catch must see a queued write's rejection.
-      return await saveMemory(dir, indexPath, name, description, content)
+      return await saveMemory(dir, indexPath, storage, name, description, content)
     } catch (error) {
       return { content: [{ type: 'text' as const, text: `Memory save failed: ${errorMessage(error)}. The index was left untouched.` }], details: {} }
     } finally {

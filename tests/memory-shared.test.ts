@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,19 +10,16 @@ type Handler = (event: unknown, ctx: unknown) => Promise<unknown>
 type Tool = { execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }
 type CommandSpec = { handler: (args: string, ctx: unknown) => Promise<void> }
 
-// A Claude-written store: underscored file names, Chinese link titles, an em-dash
-// description separator, and section headings the index rewrite must not flatten.
+// A store as Claude Code writes it: no top heading, dashed file names (one older
+// underscored one), free-form titles, Claude's separator before each hook, and a
+// section heading the index rewrite must not flatten.
 const CLAUDE_INDEX = [
-  '# Memory Index',
-  '',
-  '## 工作规则与引用',
-  '',
-  '- [跑批须等用户下令](feedback_no_unprompted_bench_runs.md) — 硬约束：真实 LLM 跑批等用户说「跑」',
+  '- [跑批须等用户下令](feedback-no-unprompted-bench-runs.md) — 硬约束：真实 LLM 跑批等用户说「跑」',
   '- [小改动不跑 e2e](feedback_e2e_run_cadence.md) — 改完 marker 决定要不要跑 J6/J7 时',
   '',
   '## 开发环境',
   '',
-  '- [Next 产物污染](project_nextjs_build_artifacts.md) — dev server 异常、并存跑构建、写启动逻辑',
+  '- [Next 产物污染](project-nextjs-build-artifacts.md) — dev server 异常、并存跑构建、写启动逻辑',
   '',
 ].join('\n')
 
@@ -163,10 +160,12 @@ describe('reading and writing a Claude-written store', () => {
     store = claudeStore(cwd)
     mkdirSync(store, { recursive: true })
     writeFileSync(join(store, 'MEMORY.md'), CLAUDE_INDEX)
-    writeFileSync(join(store, 'feedback_no_unprompted_bench_runs.md'), '硬约束正文\n')
+    writeFileSync(join(store, 'feedback-no-unprompted-bench-runs.md'), '硬约束正文\n')
     writeFileSync(join(store, 'feedback_e2e_run_cadence.md'), 'e2e 正文\n')
-    writeFileSync(join(store, 'project_nextjs_build_artifacts.md'), '构建产物正文\n')
+    writeFileSync(join(store, 'project-nextjs-build-artifacts.md'), '构建产物正文\n')
   })
+
+  const index = (): string => readFileSync(join(store, 'MEMORY.md'), 'utf-8')
 
   it('injects the Claude index unchanged, headings included', async () => {
     const { handlers } = wire()
@@ -174,72 +173,67 @@ describe('reading and writing a Claude-written store', () => {
     const injected = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as {
       systemPrompt: string
     }
-    expect(injected.systemPrompt).toContain('## 工作规则与引用')
-    expect(injected.systemPrompt).toContain('- [跑批须等用户下令](feedback_no_unprompted_bench_runs.md) — 硬约束：真实 LLM 跑批等用户说「跑」')
+    expect(injected.systemPrompt).toContain(CLAUDE_INDEX)
   })
 
   it('reads a memory by its dashed name when the file on disk uses underscores', async () => {
     const t = await toolFor(cwd)
-    const read = (await t.execute('1', { action: 'read', name: 'feedback-no-unprompted-bench-runs' })).content[0].text
-    expect(read).toBe('硬约束正文\n')
+    const read = (await t.execute('1', { action: 'read', name: 'feedback-e2e-run-cadence' })).content[0].text
+    expect(read).toBe('e2e 正文\n')
   })
 
-  it('saves over the underscored file and replaces its index line in place, keeping headings and titles', async () => {
+  it('replaces only the description of an existing entry, in place', async () => {
     const t = await toolFor(cwd)
-    const saved = (await t.execute('1', { action: 'save', name: 'feedback_no_unprompted_bench_runs', description: '新的描述', content: '更新后的正文\n' })).content[0].text
+    const saved = (await t.execute('1', { action: 'save', name: 'feedback-e2e-run-cadence', description: '新的描述', content: '更新后的正文\n' })).content[0].text
     expect(saved).toContain('Saved memory')
 
     // The existing file was updated, not duplicated alongside.
-    expect(readFileSync(join(store, 'feedback_no_unprompted_bench_runs.md'), 'utf-8')).toBe('更新后的正文\n')
-    expect(existsSync(join(store, 'feedback-no-unprompted-bench-runs.md'))).toBe(false)
-
-    const index = readFileSync(join(store, 'MEMORY.md'), 'utf-8')
-    expect(index).toContain('## 工作规则与引用')
-    expect(index).toContain('## 开发环境')
-    // The Chinese title survives the update; only the description is replaced.
-    expect(index).toContain('[跑批须等用户下令](feedback_no_unprompted_bench_runs.md) — 新的描述')
-    expect(index.match(/feedback_no_unprompted_bench_runs\.md/g)).toHaveLength(1)
-    // The other entries are untouched.
-    expect(index).toContain('[小改动不跑 e2e](feedback_e2e_run_cadence.md)')
+    expect(readFileSync(join(store, 'feedback_e2e_run_cadence.md'), 'utf-8')).toContain('更新后的正文\n')
+    expect(existsSync(join(store, 'feedback-e2e-run-cadence.md'))).toBe(false)
+    expect(index()).toBe(CLAUDE_INDEX.replace('改完 marker 决定要不要跑 J6/J7 时', '新的描述'))
   })
 
-  it('deletes the underscored file and its index line while keeping the rest of the index', async () => {
+  it('keeps whatever separator an existing entry uses', () => {
+    expect(upsertIndexLine('- [Deploy steps](deploy.md) - old\n', 'deploy', 'new', 'claude')).toBe('- [Deploy steps](deploy.md) - new\n')
+    expect(upsertIndexLine('- [Deploy steps](deploy.md): old\n', 'deploy', 'new', 'claude')).toBe('- [Deploy steps](deploy.md): new\n')
+    expect(upsertIndexLine('- [Deploy steps](deploy.md) — old\n', 'deploy', 'new', 'pi')).toBe('- [Deploy steps](deploy.md) — new\n')
+  })
+
+  it('deletes a memory and its index line while keeping the rest of the index', async () => {
     const t = await toolFor(cwd)
-    const deleted = (await t.execute('1', { action: 'delete', name: 'feedback-no-unprompted-bench-runs' })).content[0].text
+    const deleted = (await t.execute('1', { action: 'delete', name: 'feedback-e2e-run-cadence' })).content[0].text
     expect(deleted).toContain('Deleted')
 
-    expect(existsSync(join(store, 'feedback_no_unprompted_bench_runs.md'))).toBe(false)
-    const index = readFileSync(join(store, 'MEMORY.md'), 'utf-8')
-    expect(index).not.toContain('feedback_no_unprompted_bench_runs.md')
-    expect(index).toContain('## 工作规则与引用')
-    expect(index).toContain('[小改动不跑 e2e](feedback_e2e_run_cadence.md)')
-    expect(index).toContain('[Next 产物污染](project_nextjs_build_artifacts.md)')
+    expect(existsSync(join(store, 'feedback_e2e_run_cadence.md'))).toBe(false)
+    expect(index()).toBe(CLAUDE_INDEX.replace(/^.*feedback_e2e_run_cadence.*\n/m, ''))
   })
 
-  it('appends a new memory without reordering the existing index', async () => {
+  it('appends a new memory in the entry format Claude writes, adding no heading', async () => {
     const t = await toolFor(cwd)
     await t.execute('1', { action: 'save', name: 'new-lesson', description: 'fresh', content: 'body\n' })
-    const index = readFileSync(join(store, 'MEMORY.md'), 'utf-8')
-    expect(index).toContain('## 工作规则与引用')
-    expect(index).toContain('- [new-lesson](new-lesson.md): fresh')
-    expect(index.indexOf('feedback_no_unprompted_bench_runs.md')).toBeLessThan(index.indexOf('new-lesson.md'))
+    expect(index()).toBe(`${CLAUDE_INDEX}- [new-lesson](new-lesson.md) — fresh\n`)
+  })
+
+  it('starts a new Claude index without a heading', async () => {
+    rmSync(join(store, 'MEMORY.md'))
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'first', description: 'the first one', content: 'body\n' })
+    expect(index()).toBe('- [first](first.md) — the first one\n')
   })
 
   it('counts an existing underscored entry as an edit, not index growth', () => {
-    expect(indexWouldOverflow(CLAUDE_INDEX, 'feedback-no-unprompted-bench-runs', 'updated description')).toBe(false)
+    expect(indexWouldOverflow(CLAUDE_INDEX, 'feedback-e2e-run-cadence', 'updated description')).toBe(false)
   })
 
   it('replaces a matching index line through upsertIndexLine without touching a line that merely mentions it', () => {
-    const index = `${CLAUDE_INDEX}- [notes](notes.md): see [跑批须等用户下令](feedback_no_unprompted_bench_runs.md) for context\n`
-    const updated = upsertIndexLine(index, 'feedback-no-unprompted-bench-runs', 'rewritten')
-    expect(updated).toContain('- [notes](notes.md): see')
-    expect(updated.match(/feedback_no_unprompted_bench_runs\.md/g)).toHaveLength(2)
+    const mention = '- [notes](notes.md): see [小改动不跑 e2e](feedback_e2e_run_cadence.md) for context\n'
+    const updated = upsertIndexLine(`${CLAUDE_INDEX}${mention}`, 'feedback-e2e-run-cadence', 'rewritten')
+    expect(updated).toContain(mention)
+    expect(updated).toContain('- [小改动不跑 e2e](feedback_e2e_run_cadence.md) — rewritten\n')
   })
 
   it('caps a Claude index for the prompt exactly as it caps a pi one', () => {
-    const capped = capIndexForPrompt(CLAUDE_INDEX)
-    expect(capped).toContain('## 工作规则与引用')
-    expect(capped).toContain('跑批须等用户下令')
+    expect(capIndexForPrompt(CLAUDE_INDEX)).toBe(CLAUDE_INDEX)
   })
 })
 
