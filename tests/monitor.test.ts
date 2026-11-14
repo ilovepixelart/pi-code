@@ -130,6 +130,14 @@ describe('createLineBatcher', () => {
     expect(batches).toEqual([{ lines: ['abcde…', 'xyz'], omitted: 1 }])
   })
 
+  it('omits every line after the first one that did not fit', () => {
+    vi.useFakeTimers()
+    const { batches, batcher } = harness({ maxChars: 10 })
+    batcher.push('aaaa\nbbbbbbbb\ncc\n')
+    vi.advanceTimersByTime(100)
+    expect(batches).toEqual([{ lines: ['aaaa'], omitted: 2 }])
+  })
+
   it('skips blank lines and strips a carriage return', () => {
     vi.useFakeTimers()
     const { batches, batcher } = harness()

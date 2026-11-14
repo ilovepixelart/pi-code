@@ -103,7 +103,8 @@ export function createLineBatcher(options: BatcherOptions): LineBatcher {
   const queue = (raw: string): void => {
     const line = cut(raw.replace(/\r$/, ''), maxLineChars)
     if (line.trim() === '') return
-    if (lines.length >= maxLines || chars + line.length > maxChars) {
+    // Once one line is left out, so is every later one: the trailer counts the tail.
+    if (omitted > 0 || lines.length >= maxLines || chars + line.length > maxChars) {
       omitted++
       return
     }
