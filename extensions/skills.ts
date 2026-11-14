@@ -494,8 +494,8 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const trusted = isProjectApprovedSilently(ctx)
   const found = resolveInvokedSkill(invocation.name, ctx, trusted)
   if (!found || shadowedByPi(pi, invocation.name, found.filePath)) return
-  const ambiguous = bareFormRefusal(invocation.name, found, ctx)
-  if (ambiguous) return ambiguous
+  const bareRefusal = bareFormRefusal(invocation.name, found, ctx)
+  if (bareRefusal) return bareRefusal
   const { name } = found
   // skillOverrides covers personal and project skills only.
   const refused = found.plugin ? undefined : refusedByOverride(name, ctx, trusted)
