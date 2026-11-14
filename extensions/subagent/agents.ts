@@ -17,6 +17,7 @@ import { installedPlugins, pluginComponentPath } from '../internal/plugins.ts'
 import { ancestorDirs, findNearestDir, sameLocation } from '../internal/project-root.ts'
 import { errorMessage } from '../internal/values.ts'
 import { warnOnce } from '../internal/warn-once.ts'
+import { findPluginSkill } from '../skills.ts'
 
 /**
  * `tools:` may be a comma-separated string (the Claude Code format) or a YAML block
@@ -113,7 +114,7 @@ function parseSkillsField(raw: unknown): string[] | undefined {
  * does not inherit the parent's skill discovery, so the bodies travel in the prompt.
  * A name that resolves to nothing is reported rather than dropped: a silently missing
  * instruction is worse than a visible gap. */
-export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: ReadonlyArray<{ name: string; filePath: string; plugin: { root: string } }> = []): string {
+export function withPreloadedSkills(prompt: string, skills: string[] | undefined, skillDirs: string[], plugins: readonly PreloadablePluginSkill[] = []): string {
   if (!skills || skills.length === 0) return prompt
   const sections: string[] = []
   for (const name of skills) {
@@ -123,10 +124,18 @@ export function withPreloadedSkills(prompt: string, skills: string[] | undefined
   return `${prompt}\n\n## Preloaded skills\n\n${sections.join('\n\n')}`
 }
 
-/** Qualified names select a plugin exactly. Bare names remain a fallback for existing
- * agent configs after personal/project skills; the discovery map already resolves duplicates. */
-function readPluginSkillBody(name: string, plugins: ReadonlyArray<{ name: string; filePath: string; plugin: { root: string } }>): string | undefined {
-  const skill = plugins.find((entry) => entry.name === name || (!name.includes(':') && entry.name.endsWith(`:${name}`)))
+type PreloadablePluginSkill = { name: string; alias?: string; filePath: string; plugin: { root: string } }
+
+/** Qualified names select a plugin exactly, by the skill's name or its directory alias.
+ * Bare names remain a fallback for existing agent configs after personal/project skills;
+ * the discovery map already resolves duplicates. */
+function findPreloadablePluginSkill(name: string, plugins: readonly PreloadablePluginSkill[]): PreloadablePluginSkill | undefined {
+  if (name.includes(':')) return findPluginSkill(plugins, name)
+  return plugins.find((entry) => entry.name.endsWith(`:${name}`)) ?? plugins.find((entry) => entry.alias?.endsWith(`:${name}`))
+}
+
+function readPluginSkillBody(name: string, plugins: readonly PreloadablePluginSkill[]): string | undefined {
+  const skill = findPreloadablePluginSkill(name, plugins)
   if (!skill) return undefined
   try {
     return readConfined(skill.filePath, fs.realpathSync(skill.plugin.root))

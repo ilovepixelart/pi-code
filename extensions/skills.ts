@@ -107,6 +107,9 @@ function skillAt(root: string, dirName: string): { name: string; filePath: strin
 export interface PluginSkill {
   /** Claude's plugin skill name, `plugin:skill`. */
   name: string
+  /** `plugin:<directory>`, Claude's internal name for the skill, when the frontmatter
+   * `name` differs from the directory. Resolves on every lookup path, listed nowhere. */
+  alias?: string
   filePath: string
   plugin: { root: string; dataDir: string; userConfig?: Record<string, string> }
 }
@@ -131,9 +134,18 @@ function skillsIn(dir: string, pluginName: string, pluginInfo: PluginSkill['plug
   for (const entry of entries) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
     const skill = skillAt(dir, entry.name)
-    if (skill) found.push({ name: skill.name.startsWith(`${pluginName}:`) ? skill.name : `${pluginName}:${skill.name}`, filePath: skill.filePath, plugin: pluginInfo })
+    if (!skill) continue
+    const name = skill.name.startsWith(`${pluginName}:`) ? skill.name : `${pluginName}:${skill.name}`
+    const alias = `${pluginName}:${entry.name}`
+    found.push({ name, ...(alias === name ? {} : { alias }), filePath: skill.filePath, plugin: pluginInfo })
   }
   return found
+}
+
+/** The plugin skill a qualified name addresses. A skill's own name wins over another
+ * skill's directory alias. */
+export function findPluginSkill<T extends { name: string; alias?: string }>(skills: readonly T[], name: string): T | undefined {
+  return skills.find((skill) => skill.name === name) ?? skills.find((skill) => skill.alias === name)
 }
 
 /** The skills an enabled plugin ships, named `plugin:skill` as Claude registers them.
@@ -212,8 +224,21 @@ function registerPluginSkillCommand(pi: ExtensionAPI, skill: PluginSkill, parsed
   })
 }
 
+/** The plugin skills the model can run in this session, by name. */
+type InvocablePluginSkills = Map<string, { description: string; argumentHint?: string; alias?: string }>
+
+/** The listed name a model-typed name addresses: itself, or the skill whose directory
+ * alias it is. */
+function invocableName(invocable: InvocablePluginSkills, typed: string): string | undefined {
+  if (invocable.has(typed)) return typed
+  for (const [name, skill] of invocable) {
+    if (skill.alias === typed) return name
+  }
+  return undefined
+}
+
 /** The model-facing listing of the plugin skills invocable right now. */
-function pluginSkillToolDescription(invocable: Map<string, { description: string; argumentHint?: string }>, contextWindow: number | undefined): string {
+function pluginSkillToolDescription(invocable: InvocablePluginSkills, contextWindow: number | undefined): string {
   return slashCommandToolDescription(
     [...invocable].map(([name, skill]) => ({ name, description: skill.description, argumentHint: skill.argumentHint })),
     slashCommandBudget(contextWindow),
@@ -223,7 +248,7 @@ function pluginSkillToolDescription(invocable: Map<string, { description: string
 /** The model-facing tool for plugin skills, registered once. prepareLoadout refreshes the
  * description from the session's current listing; one marked disable-model-invocation
  * stays off that listing. */
-function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undefined, invocable: Map<string, { description: string; argumentHint?: string }>): void {
+function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undefined, invocable: InvocablePluginSkills): void {
   pi.registerTool({
     name: 'plugin_skill',
     label: 'PluginSkill',
@@ -232,11 +257,12 @@ function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undef
     prepareLoadout: () => ({ descriptions: { plugin_skill: pluginSkillToolDescription(invocable, contextWindow) } }),
     async execute(_toolCallId, params, _signal, _onUpdate, execCtx) {
       const invocation = params.command.trim().replace(/^\//, '')
-      const name = invocation.split(/\s/, 1)[0]
-      if (!invocable.has(name)) throw new Error(`Unknown plugin skill: /${name || params.command}. It is not available in this session.`)
+      const typed = invocation.split(/\s/, 1)[0]
+      const name = invocableName(invocable, typed)
+      if (name === undefined) throw new Error(`Unknown plugin skill: /${typed || params.command}. It is not available in this session.`)
       // Both entry points use current settings, hooks and fork behavior. A model call
       // never runs injected shell and returns fork results through this tool.
-      const outcome = await expandSkillInvocation(pi, `/${invocation}`, execCtx, { allowShell: false, inlineFork: true, modelInvocation: true })
+      const outcome = await expandSkillInvocation(pi, `/${name}${invocation.slice(typed.length)}`, execCtx, { allowShell: false, inlineFork: true, modelInvocation: true })
       if (!outcome || outcome.action === 'handled') throw new Error(`/${name} was not run.`)
       return { content: [{ type: 'text' as const, text: capForContext(outcome.text) }], details: {} }
     },
@@ -246,7 +272,7 @@ function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undef
 /** Rebuild the session's plugin-skill listing and register the commands the user can type.
  * Claude: "Plugin skills are not affected by skillOverrides. Manage those through /plugin
  * instead." */
-function registerSessionPluginSkills(pi: ExtensionAPI, registered: Set<string>, invocable: Map<string, { description: string; argumentHint?: string }>): void {
+function registerSessionPluginSkills(pi: ExtensionAPI, registered: Set<string>, invocable: InvocablePluginSkills): void {
   invocable.clear()
   for (const skill of pluginSkills(os.homedir())) {
     let parsed: ReturnType<typeof parseCommandFile>
@@ -256,7 +282,7 @@ function registerSessionPluginSkills(pi: ExtensionAPI, registered: Set<string>, 
       console.warn(`pi-code-skills: ignoring ${skill.filePath}: ${errorMessage(error)}`)
       continue
     }
-    if (!parsed.disableModelInvocation) invocable.set(skill.name, { description: parsed.description, ...(parsed.argumentHint ? { argumentHint: parsed.argumentHint } : {}) })
+    if (!parsed.disableModelInvocation) invocable.set(skill.name, { description: parsed.description, ...(parsed.argumentHint ? { argumentHint: parsed.argumentHint } : {}), ...(skill.alias ? { alias: skill.alias } : {}) })
     if (parsed.userInvocable) registerPluginSkillCommand(pi, skill, parsed, registered)
   }
 }
@@ -264,7 +290,7 @@ function registerSessionPluginSkills(pi: ExtensionAPI, registered: Set<string>, 
 export default function skillsExtension(pi: ExtensionAPI) {
   const registeredPluginSkills = new Set<string>()
   let pluginSkillToolRegistered = false
-  const invocablePluginSkills = new Map<string, { description: string; argumentHint?: string }>()
+  const invocablePluginSkills: InvocablePluginSkills = new Map()
 
   pi.on('session_start', (_event, ctx) => {
     forkResults.attach(pi, sessionHasTurns(ctx))
@@ -396,11 +422,15 @@ function readSkill(filePath: string): { parsed: ReturnType<typeof parseCommandFi
   return { content, parsed: parseCommandFile(content) }
 }
 
-/** Resolve a plugin skill, or a personal/project skill contributed to pi's loader. */
-function resolveInvokedSkill(name: string, ctx: ExtensionContext, trusted: boolean): { filePath: string; baseDir: string; plugin?: PluginSkill['plugin'] } | undefined {
-  const pluginSkill = name.includes(':') ? pluginSkills(os.homedir()).find((skill) => skill.name === name) : undefined
-  if (pluginSkill) return { filePath: pluginSkill.filePath, baseDir: path.dirname(pluginSkill.filePath), plugin: pluginSkill.plugin }
-  return findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+type ResolvedSkill = FoundSkill & { name: string; plugin?: PluginSkill['plugin'] }
+
+/** Resolve a plugin skill, or a personal/project skill contributed to pi's loader. The
+ * returned name is the skill's own, whichever spelling addressed it. */
+function resolveInvokedSkill(name: string, ctx: ExtensionContext, trusted: boolean): ResolvedSkill | undefined {
+  const pluginSkill = name.includes(':') ? findPluginSkill(pluginSkills(os.homedir()), name) : undefined
+  if (pluginSkill) return { name: pluginSkill.name, filePath: pluginSkill.filePath, baseDir: path.dirname(pluginSkill.filePath), plugin: pluginSkill.plugin }
+  const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+  return found && { name, ...found }
 }
 
 type ExpansionOptions = { allowShell?: boolean; inlineFork?: boolean; modelInvocation?: boolean }
@@ -428,10 +458,11 @@ function refusedForUser(name: string, ctx: ExtensionContext): { action: 'handled
 async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext, options?: ExpansionOptions): Promise<ExpansionResult> {
   const invocation = parseSkillInvocation(rawText)
   if (!invocation) return
-  const { name, args } = invocation
+  const { args } = invocation
   const trusted = isProjectApprovedSilently(ctx)
-  const found = resolveInvokedSkill(name, ctx, trusted)
-  if (!found || shadowedByPi(pi, name, found.filePath)) return
+  const found = resolveInvokedSkill(invocation.name, ctx, trusted)
+  if (!found || shadowedByPi(pi, invocation.name, found.filePath)) return
+  const { name } = found
   // skillOverrides covers personal and project skills only.
   const refused = found.plugin ? undefined : refusedByOverride(name, ctx, trusted)
   if (refused) return refused
@@ -450,7 +481,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   return expandSkillBody(pi, ctx, { name, args, found, parsed, content }, options)
 }
 
-async function expandSkillBody(pi: ExtensionAPI, ctx: ExtensionContext, skill: { name: string; args: string; found: FoundSkill & { plugin?: PluginSkill['plugin'] }; parsed: ReturnType<typeof parseCommandFile>; content: string }, options?: ExpansionOptions): Promise<ExpansionResult> {
+async function expandSkillBody(pi: ExtensionAPI, ctx: ExtensionContext, skill: { name: string; args: string; found: ResolvedSkill; parsed: ReturnType<typeof parseCommandFile>; content: string }, options?: ExpansionOptions): Promise<ExpansionResult> {
   const { name, args, found, parsed, content } = skill
   const trusted = isProjectApprovedSilently(ctx)
   // Claude registers hooks a skill's frontmatter declares when the skill is

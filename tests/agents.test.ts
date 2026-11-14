@@ -46,14 +46,15 @@ describe('plugin skills in child agents', () => {
     expect(agentInvocationArgs(agent)).toContain('plugin_skill')
   })
 
-  it.each(['kit:deploy', 'deploy'])('preloads the plugin skill %s without adding plugin directories to the pi loader', (name) => {
+  // kit:ship and ship are the directory spellings, Claude's internal name for the skill.
+  it.each(['kit:deploy', 'deploy', 'kit:ship', 'ship'])('preloads the plugin skill %s without adding plugin directories to the pi loader', (name) => {
     const cwd = mkdtempSync(join(tmpdir(), 'agents-'))
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
     mkdirSync(join(root, '.claude-plugin'), { recursive: true })
-    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, 'skills', 'ship'), { recursive: true })
     mkdirSync(join(cwd, '.claude', 'agents'), { recursive: true })
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
-    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploy\n---\nPLUGIN PRELOAD BODY')
+    writeFileSync(join(root, 'skills', 'ship', 'SKILL.md'), '---\nname: deploy\ndescription: deploy\n---\nPLUGIN PRELOAD BODY')
     writeFileSync(join(cwd, '.claude', 'agents', 'reviewer.md'), `---\nname: reviewer\ndescription: reviewer\nskills: [${name}]\n---\nReview`)
     const agent = discoverAgents(cwd, 'project').agents.find((entry) => entry.name === 'reviewer')!
     const roots = skillDirs(cwd, hoisted.home, true)

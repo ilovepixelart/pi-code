@@ -246,12 +246,12 @@ describe('extension wiring', () => {
     expect(commands.has('kit:deploy')).toBe(false)
   })
 
-  const pluginFixture = (body = '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS') => {
+  const pluginFixture = (body = '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS', dir = 'deploy') => {
     const cwd = tempDir('cs-proj-')
     const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
-    const filePath = join(root, 'skills', 'deploy', 'SKILL.md')
+    const filePath = join(root, 'skills', dir, 'SKILL.md')
     const settingsPath = join(hoisted.home, '.claude', 'settings.json')
-    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+    mkdirSync(join(root, 'skills', dir), { recursive: true })
     mkdirSync(join(root, '.claude-plugin'), { recursive: true })
     writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
     writeFileSync(settingsPath, JSON.stringify({ enabledPlugins: { kit: true } }))
@@ -318,6 +318,36 @@ describe('extension wiring', () => {
     expect(t.exec).not.toHaveBeenCalled()
     // The model path is the one such a skill exists for.
     expect((await t.invoke()).content[0].text).toContain('Deploy prod')
+  })
+
+  // Claude names a plugin skill `plugin:<directory>` internally and shows the frontmatter
+  // name; both spellings have to reach the same skill, listed once.
+  it.each(['/kit:ship prod', '/skill:kit:ship prod'])('accepts the directory name as an alias in typed %s', async (text) => {
+    const t = pluginFixture(undefined, 'ship')
+    await t.start()
+    expect([...t.commands.keys()]).toEqual(['kit:deploy'])
+    const outcome = await t.input(text)
+    expect(outcome?.text).toContain('<skill name="kit:deploy"')
+    expect(outcome?.text).toContain('Deploy prod')
+  })
+
+  it('accepts the directory name as an alias in the plugin_skill tool without listing it', async () => {
+    const t = pluginFixture(undefined, 'ship')
+    await t.start()
+    const tool = t.tools.get('plugin_skill')!
+    expect(tool.description).toContain('/kit:deploy')
+    expect(tool.description).not.toContain('/kit:ship')
+    expect((await t.invoke(t.ctx, '/kit:ship prod')).content[0].text).toContain('<skill name="kit:deploy"')
+  })
+
+  it('prefers a frontmatter name over the directory alias of another skill', async () => {
+    const t = pluginFixture('---\nname: release\ndescription: releases\n---\nRELEASE BODY')
+    mkdirSync(join(t.root, 'skills', 'other'))
+    writeFileSync(join(t.root, 'skills', 'other', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDEPLOY BODY')
+    await t.start()
+    expect((await t.input('/kit:deploy'))?.text).toContain('DEPLOY BODY')
+    expect((await t.invoke(t.ctx, '/kit:deploy')).content[0].text).toContain('DEPLOY BODY')
+    expect((await t.input('/kit:other'))?.text).toContain('DEPLOY BODY')
   })
 
   it('rechecks disable-model-invocation on every model call', async () => {
