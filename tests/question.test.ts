@@ -1269,6 +1269,23 @@ describe('question batch submission', () => {
     expect(tabBar, 'Far tabs should be dropped to fit').not.toContain('Alpha')
   })
 
+  it('should keep the active tab visible when wide-character headers exceed the width', () => {
+    const { overlay } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', header: '一番目の見出しです', options: OPTIONS },
+        { question: 'Second?', header: '二番目の見出しです', options: OPTIONS },
+        { question: 'Third?', header: '三番目の見出しです', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.right)
+    overlay.handleInput(RAW.right)
+    const tabBar = overlay.render(40)[1]
+
+    expect(tabBar, 'The active tab should be shown in full').toContain(' ☐ 三番目の見出しです ')
+    expect(visibleWidth(tabBar), 'The tab bar should fit the terminal width').toBeLessThanOrEqual(40)
+  })
+
   it('should mark an unanswered question as skipped when submitting a partial form', async () => {
     const tool = setup()
     const { overlay, result } = openOverlayWith(tool, {

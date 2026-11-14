@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
+import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { readManagedSettings } from './internal/managed-settings.ts'
 import { readUserSetting } from './internal/settings-chain.ts'
@@ -841,7 +841,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function renderTabs(width: number, saved: Array<Answer | undefined>): string {
         const tabs = specs.map((spec, index) => ` ${saved[index] ? '☒' : '☐'} ${spec.header ?? `Q${index + 1}`} `)
         tabs.push(' ✔ Submit ')
-        const widths = tabs.map((tab) => tab.length)
+        const widths = tabs.map((tab) => visibleWidth(tab))
         const arrows = widths[active] + 4 <= width
         const [first, last] = tabWindow(widths, active, arrows ? width - 4 : width)
         const shown = tabs.slice(first, last + 1).map((tab, offset) => (first + offset === active ? theme.bg('selectedBg', theme.fg('text', tab)) : theme.fg('text', tab)))
