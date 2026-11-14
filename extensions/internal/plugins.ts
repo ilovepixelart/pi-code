@@ -415,7 +415,7 @@ export function setPiPluginEnabled(state: Pick<PluginState, 'qualified' | 'direc
   if ((typeof bare === 'boolean' ? bare : state.withoutPi) !== wanted) entries[state.qualified] = wanted
   parsed.piCode = { ...piCode, enabledPlugins: entries }
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  // shortcut: no lock shared with pi's own settings writer (not exported); a /settings save landing in the same instant can lose one of the two writes.
+  // No lock is shared with pi's own settings writer, so a pi write that lands between the read above and this rename is lost.
   atomicWriteFile(file, `${JSON.stringify(parsed, null, 2)}\n`)
 }
 
