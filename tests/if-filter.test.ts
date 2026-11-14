@@ -151,6 +151,9 @@ describe('passesIfFilter, tool specifiers beyond Bash and the file tools', () =>
   it('runs a Skill-scoped hook on the documented exact and prefix forms', () => {
     expect(passesIfFilter(hookIf('Skill(review-pr *)'), target('slash_command', { command: '/review-pr 12' }, 'Skill'))).toBe(true)
     expect(passesIfFilter(hookIf('Skill(review-pr *)'), target('slash_command', { command: '/deploy' }, 'Skill'))).toBe(false)
+    // Namespaced plugin skills run through plugin_skill, which reports as Skill too.
+    expect(passesIfFilter(hookIf('Skill(kit:deploy *)'), target('plugin_skill', { command: '/kit:deploy prod' }, 'Skill'))).toBe(true)
+    expect(passesIfFilter(hookIf('Skill(kit:deploy)'), target('plugin_skill', { command: '/kit:other' }, 'Skill'))).toBe(false)
   })
 
   it('still matches a scoped rule written under the pi tool name', () => {

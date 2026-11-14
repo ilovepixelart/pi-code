@@ -468,6 +468,42 @@ describe('extension wiring', () => {
     }
   })
 
+  it('returns a model-invoked fork through the tool in an interactive session', async () => {
+    // With a UI and no background: false a typed fork runs in the background; the tool
+    // has no later channel for the result, so it must wait for it.
+    const { setAgentRunner } = await import('../extensions/internal/agent-run.ts')
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\ncontext: fork\n---\nReview $ARGUMENTS')
+    setAgentRunner(vi.fn(async () => 'FORK RESULT'))
+    try {
+      await t.start()
+      const result = await t.invoke({ ...t.ctx, hasUI: true })
+      expect(result.content[0].text).toContain('FORK RESULT')
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    } finally {
+      setAgentRunner(undefined)
+    }
+  })
+
+  it.each([
+    [true, {}],
+    [false, { deliverAs: 'followUp' }],
+  ])('sends the typed command when the agent is idle (%s) with delivery %j', async (idle, delivery) => {
+    const t = pluginFixture()
+    await t.start()
+    await t.commands.get('kit:deploy')?.handler('prod', { ...t.ctx, isIdle: () => idle })
+    expect(t.sendUserMessage).toHaveBeenCalledTimes(1)
+    expect(t.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining('Deploy prod'), delivery)
+  })
+
+  it('expands the explicit /skill:plugin:name form', async () => {
+    const t = pluginFixture()
+    await t.start()
+    const outcome = await t.input('/skill:kit:deploy prod')
+    expect(outcome?.action).toBe('transform')
+    expect(outcome?.text).toContain('<skill name="kit:deploy"')
+    expect(outcome?.text).toContain('Deploy prod')
+  })
+
   it('keeps model expansion from executing injected shell', async () => {
     const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n!`git diff`')
     await t.start()
