@@ -4,7 +4,7 @@ import * as os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
-import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, registerShell, resetShells, settleShell, shellCompletionText, shellOutputDir, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
+import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, markBackground, registerShell, resetShells, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean; structuredContent?: { exit_code?: number } }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (update: unknown) => void, ctx?: unknown) => Promise<ToolResult>
@@ -18,6 +18,7 @@ interface Harness {
   sent: Sent[]
   emit: (event: string, payload?: Record<string, unknown>) => void
   ctx: Record<string, unknown>
+  footer: () => string | undefined
 }
 
 const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness => {
@@ -30,8 +31,10 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness =
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
   backgroundBashExtension(pi as never)
+  const statuses = new Map<string, string | undefined>()
   const ctx = {
     cwd: os.tmpdir(),
+    ui: { setStatus: (key: string, value: string | undefined) => statuses.set(key, value), theme: { fg: (_color: string, value: string) => value } },
     hasUI: options.hasUI ?? true,
     isProjectTrusted: () => false,
     sessionManager: {
@@ -56,6 +59,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness =
     sent,
     emit,
     ctx,
+    footer: () => statuses.get('background-shells'),
   }
 }
 
@@ -188,7 +192,7 @@ describe('background shell registry', () => {
 
   it('formats a listing and completion notices', () => {
     expect(shellsStatusText([])).toBe('')
-    const base = { id: 'b1', command: 'npm   run\n dev', outputFile: '/tmp/b1.output' }
+    const base = { id: 'b1', command: 'npm   run\n dev', outputFile: '/tmp/b1.output', background: true }
     expect(shellsStatusText([{ ...base, state: 'running' }])).toBe('b1 shell: running - npm run dev\n  output: /tmp/b1.output')
     expect(shellsStatusText([{ ...base, state: 'killed' }])).toContain('stopped')
     expect(shellsStatusText([{ ...base, state: 'failed', exitCode: 1 }])).toContain('failed (exit code 1)')
@@ -370,6 +374,65 @@ describe('bash tool', () => {
     h.emit('session_shutdown', { reason: 'quit' })
     await until(() => allShells()[0]?.state === 'killed')
     expect(h.sent).toHaveLength(0)
+  })
+})
+
+describe('footer status', () => {
+  it('words the count of running background commands', () => {
+    expect(shellsFooterText(0)).toBeUndefined()
+    expect(shellsFooterText(1)).toBe('⏵ 1 background shell')
+    expect(shellsFooterText(3)).toBe('⏵ 3 background shells')
+  })
+
+  it('counts a background command while it runs and clears when it finishes', async () => {
+    const h = setup()
+    expect(h.footer()).toBeUndefined()
+    await h.bash('t1', { command: 'sleep 0.3', run_in_background: true })
+    expect(h.footer()).toBe('⏵ 1 background shell')
+    await until(() => h.sent.length > 0)
+    expect(h.footer()).toBeUndefined()
+  })
+
+  it('leaves a foreground command out until it moves to the background', async () => {
+    process.env.BASH_DEFAULT_TIMEOUT_MS = '200'
+    const h = setup()
+    const seen: Array<string | undefined> = []
+    setShellsListener(() => seen.push(shellsFooterText(runningShells())))
+    const running = h.bash('t1', { command: 'echo a; sleep 0.5' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(allShells()).toHaveLength(0)
+    // A leftover command from another test may settle meanwhile; only a count matters here.
+    expect(seen.filter(Boolean)).toEqual([])
+    await running
+    expect(seen.filter(Boolean)).toEqual(['⏵ 1 background shell'])
+    h.emit('session_start')
+    expect(h.footer()).toBe('⏵ 1 background shell')
+    await until(() => h.sent.length > 0)
+  })
+
+  it('updates when a command is stopped, and shows commands kept across a session switch', async () => {
+    const h = setup()
+    const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
+    h.emit('session_shutdown', { reason: 'new' })
+    const next = setup()
+    expect(next.footer()).toBe('⏵ 1 background shell')
+    await next.stop('t2', { task_id: id })
+    expect(next.footer()).toBeUndefined()
+  })
+
+  it('survives a listener from a replaced session throwing', () => {
+    setShellsListener(() => {
+      throw new Error('stale session')
+    })
+    const shell = registerShell({ id: 'b0000000a', command: 'x', outputFile: `${shellOutputDir()}/x`, background: false })
+    expect(() => markBackground(shell)).not.toThrow()
+    setShellsListener(undefined)
+  })
+
+  it('skips the footer in a session without a UI', async () => {
+    const h = setup({ hasUI: false })
+    h.emit('session_start')
+    expect(h.footer()).toBeUndefined()
   })
 })
 

@@ -4,9 +4,10 @@ Claude's background commands on pi's `bash` tool. Source: [`extensions/backgroun
 
 - `run_in_background: true` starts a command as a background task and returns at once with its ID and the file its output is written to.
 - A foreground command that reaches its timeout is moved to the background instead of stopped, unless it starts with `sleep`. The result says so: `Command did not complete within its 120s timeout and was moved to the background (ID: …)`.
-- When a background command finishes, a message reaches the session with its exit status and output file, and starts a turn. The model reads the output with the `read` tool.
+- When a background command finishes, a message reaches the session with its exit status and output file, and starts a turn, so an idle session wakes up to handle it. During a turn the message is steered in before the next model call. The model reads the output with the `read` tool.
 - `task_stop` (Claude's `TaskStop`, formerly `KillShell`) stops a running command by ID. A stopped command sends no completion message.
 - `/tasks` lists background shell commands after background subagent runs.
+- The footer shows how many background commands are running (`⏵ 2 background shells`), and clears when none are. A foreground command is not counted until it moves to the background.
 
 ## Aligned with Claude
 

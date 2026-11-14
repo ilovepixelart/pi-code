@@ -30,7 +30,7 @@ import * as path from 'node:path'
 import { type AgentToolResult, type BashOperations, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
-import { type BackgroundShell, forgetShell, registerShell, settleShell, shellCompletionText, shellOutputDir, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** BASH_DEFAULT_TIMEOUT_MS out of the box: two minutes. */
@@ -147,7 +147,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
         }),
     }
     const tool = createBashToolDefinition(ctx.cwd, { operations, shellPath, commandPrefix })
-    const shell = registerShell({ id, command: params.command, outputFile, stop: () => lifetime.abort() })
+    const shell = registerShell({ id, command: params.command, outputFile, stop: () => lifetime.abort(), background: backgrounded })
     // Updates stop with the tool call: the call has returned once the command is in the background.
     const guardedUpdate = onUpdate && ((update: ToolResult) => !backgrounded && onUpdate(update))
 
@@ -180,6 +180,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
       return outcome.result
     }
     backgrounded = true
+    markBackground(shell)
     return text(`Command did not complete within its ${formatSeconds(limitMs)} timeout and was moved to the background (ID: ${id}). ${where}. You will be notified when it completes; use task_stop to stop it.`)
   }
 
@@ -222,10 +223,23 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     },
   })
 
-  pi.on('session_start', (_event, ctx) => notices.attach(pi, sessionHasTurns(ctx)))
+  // The footer counts running background commands, as Claude's footer shows background tasks.
+  const showFooter = (ctx: ExtensionContext): void => {
+    if (!ctx.hasUI) return
+    const status = shellsFooterText(runningShells())
+    ctx.ui.setStatus('background-shells', status === undefined ? undefined : ctx.ui.theme.fg('accent', status))
+  }
+
+  pi.on('session_start', (_event, ctx) => {
+    notices.attach(pi, sessionHasTurns(ctx))
+    setShellsListener(() => showFooter(ctx))
+    // Commands that kept running across a session switch show from the start.
+    showFooter(ctx)
+  })
   pi.on('agent_start', () => notices.markPrompted(pi))
   pi.on('session_shutdown', (event) => {
     notices.detach(pi)
+    setShellsListener(undefined)
     // On quit nothing is left to read a command's output: stop them all. A session
     // switch or /reload keeps them running; their notices go to the next session.
     if (event.reason === 'quit') stopAllShells()

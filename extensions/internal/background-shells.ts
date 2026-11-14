@@ -29,6 +29,10 @@ export interface BackgroundShell {
   stop?: () => void
   /** Monotonic finish order, so eviction drops the earliest-finished commands. */
   finishedAt?: number
+  /** False while a bash command is still in the foreground: it is registered from the
+   * start so its output reaches the file, but it is not a background task until it moves,
+   * so /tasks and the footer leave it out. */
+  background: boolean
 }
 
 /** Finished commands kept for /tasks; older ones are evicted (their output files stay
@@ -46,6 +50,21 @@ interface Registry {
 }
 
 const slot = sharedSlot<Registry>('background-shells')
+/** Called whenever the set of background commands changes, so the footer can follow it.
+ * Shared like the registry: the instance of the current session registers it. */
+const listenerSlot = sharedSlot<() => void>('background-shells.listener')
+
+export function setShellsListener(listener: (() => void) | undefined): void {
+  listenerSlot.set(listener)
+}
+
+function changed(): void {
+  try {
+    listenerSlot.get()?.()
+  } catch {
+    // A listener from a replaced session throws; the next session_start registers anew.
+  }
+}
 const registry = (): Registry => {
   const existing = slot.get()
   if (existing) return existing
@@ -63,10 +82,17 @@ export function shellOutputDir(): string {
   return state.outputDir
 }
 
-export function registerShell(shell: Pick<BackgroundShell, 'id' | 'command' | 'outputFile' | 'stop'>): BackgroundShell {
-  const record: BackgroundShell = { ...shell, state: 'running' }
+export function registerShell(shell: Pick<BackgroundShell, 'id' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {
+  const record: BackgroundShell = { ...shell, state: 'running', background: shell.background ?? true }
   registry().shells.set(record.id, record)
+  if (record.background) changed()
   return record
+}
+
+/** A foreground command has moved to the background. */
+export function markBackground(shell: BackgroundShell): void {
+  shell.background = true
+  changed()
 }
 
 /** Record how a command ended. A command stopped on request stays `killed`: its
@@ -80,6 +106,7 @@ export function settleShell(shell: BackgroundShell, exitCode: number | undefined
   const finished = [...state.shells.values()].filter((entry) => entry.state !== 'running')
   finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
   for (const stale of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_SHELLS))) state.shells.delete(stale.id)
+  if (shell.background) changed()
 }
 
 /** Drop a command that finished in the foreground: it never became a background task. */
@@ -96,6 +123,7 @@ export function stopShell(id: string): 'stopped' | 'not-running' | 'unknown' {
   shell.state = 'killed'
   shell.stop = undefined
   stop()
+  if (shell.background) changed()
   return 'stopped'
 }
 
@@ -112,8 +140,19 @@ export function stopAllShells(): number {
   return count
 }
 
+/** Background commands, live and finished; a command still in the foreground is not one. */
 export function allShells(): BackgroundShell[] {
-  return [...registry().shells.values()]
+  return [...registry().shells.values()].filter((shell) => shell.background)
+}
+
+export function runningShells(): number {
+  return allShells().filter((shell) => shell.state === 'running').length
+}
+
+/** The footer status: how many background commands are running, or undefined for none. */
+export function shellsFooterText(running: number): string | undefined {
+  if (running === 0) return undefined
+  return `⏵ ${running} background shell${running === 1 ? '' : 's'}`
 }
 
 /** Test seam: the registry is process state, so tests reset it between cases. */
