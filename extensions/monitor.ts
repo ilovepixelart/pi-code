@@ -195,12 +195,16 @@ const schema = Type.Object({
 
 type ToolResult = AgentToolResult<unknown>
 
+/** What a test may shorten; pi runs with the constants above. */
+export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'>
+
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
 
 /** Session-switch reasons that end the session the watches report to. */
 const ENDING_REASONS = new Set(['quit', 'new', 'resume', 'fork'])
 
-export default function monitorExtension(pi: ExtensionAPI) {
+/** `limits` is a test seam; pi passes only `pi`. */
+export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits = {}) {
   // Events go to whichever session is current: after /reload this instance's pi throws.
   const events = sessionMailbox('monitor')
 
@@ -219,7 +223,7 @@ export default function monitorExtension(pi: ExtensionAPI) {
 
     const lifetime = new AbortController()
     const shell = registerShell({ id, kind: 'monitor', command, outputFile, stop: () => lifetime.abort() })
-    const batcher = createLineBatcher({ emit: (batch) => send(batchText(id, command, batch, outputFile)) })
+    const batcher = createLineBatcher({ ...limits, emit: (batch) => send(batchText(id, command, batch, outputFile)) })
     const decoder = new StringDecoder('utf8')
 
     let reachedDeadline = false

@@ -4,8 +4,8 @@ import * as os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension from '../extensions/background-bash.ts'
-import { allShells, registerShell, resetShells, shellsStatusText } from '../extensions/internal/background-shells.ts'
-import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, MAX_DEADLINE_MS, monitorAllowed } from '../extensions/monitor.ts'
+import { allShells, registerShell, resetShells, settleShell, shellsStatusText } from '../extensions/internal/background-shells.ts'
+import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, MAX_DEADLINE_MS, type MonitorLimits, monitorAllowed } from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }> }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
@@ -14,7 +14,7 @@ type Sent = { message: { customType: string; content: string; display: boolean }
 
 /** Both extensions on one stubbed pi, as the pack loads them: task_stop is the bash
  * extension's, and the registry it stops through is shared. */
-const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string } = {}) => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits } = {}) => {
   const tools = new Map<string, { name: string; execute: Execute; description: string }>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
@@ -23,7 +23,8 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string } = 
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
-  monitorExtension(pi as never)
+  // The real window and interval are a second and five; the batcher's own tests cover them.
+  monitorExtension(pi as never, { windowMs: 10, minIntervalMs: 20, ...options.limits })
   backgroundBashExtension(pi as never)
   const statuses = new Map<string, string | undefined>()
   const ctx = {
@@ -66,6 +67,13 @@ const until = async (condition: () => boolean, timeoutMs = 8000): Promise<void> 
   }
 }
 const shell = (id: string) => allShells().find((entry) => entry.id === id)
+
+// A stopped monitor is killed asynchronously: wait for it, so no process outlives the file.
+const stopAndWait = async (): Promise<void> => {
+  const live = allShells().filter((entry) => entry.stop !== undefined)
+  resetShells()
+  await until(() => live.every((entry) => entry.finishedAt !== undefined))
+}
 
 beforeEach(() => resetShells())
 afterEach(() => {
@@ -208,6 +216,8 @@ describe('/tasks listing', () => {
 })
 
 describe('monitor tool', () => {
+  afterEach(stopAndWait)
+
   it('is named Monitor in Claude vocabulary and mentions task_stop', () => {
     const { tool } = setup()
     expect(tool('monitor').description).toContain('task_stop')
@@ -272,8 +282,8 @@ describe('monitor tool', () => {
     const { monitor, stop, sent } = setup()
     const id = idOf(await monitor({ command: 'echo hi; sleep 30' }))
     expect(textOf(await stop(id))).toContain('Stopped')
-    await until(() => shell(id)?.stop === undefined && shell(id)?.finishedAt !== undefined)
-    await new Promise((resolve) => setTimeout(resolve, 1200))
+    // Settling drains the batcher, so nothing is left that could still send.
+    await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent).toEqual([])
     expect(shell(id)?.state).toBe('killed')
   })
@@ -311,6 +321,8 @@ describe('monitor tool', () => {
     expect(other.state).toBe('running')
     await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent).toEqual([])
+    // No process stands behind this entry, so nothing else would settle it.
+    settleShell(other, 0)
   })
 
   it('keeps monitors across /reload and stops everything on quit', async () => {
