@@ -411,6 +411,20 @@ function checkModelInvocation(name: string, parsed: ReturnType<typeof parseComma
   if (parsed.disableModelInvocation) throw new Error(`/${name} is user-only (disable-model-invocation: true) and was not run. Only the user can invoke it.`)
 }
 
+/** A notice for the user in any mode: the UI when there is one, stderr otherwise. */
+function notice(ctx: ExtensionContext, message: string, level: 'info' | 'warning'): void {
+  if (ctx.hasUI) ctx.ui.notify(message, level)
+  else console.warn(message)
+}
+
+/** Claude's `user-invocable: false` for a plugin skill the user typed. No command is
+ * registered for it, so the typed text reaches the input pipeline, which must refuse it
+ * rather than expand a body only the model may load. */
+function refusedForUser(name: string, ctx: ExtensionContext): { action: 'handled' } {
+  notice(ctx, `/${name} is model-only (user-invocable: false) and was not run.`, 'info')
+  return { action: 'handled' }
+}
+
 async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext, options?: ExpansionOptions): Promise<ExpansionResult> {
   const invocation = parseSkillInvocation(rawText)
   if (!invocation) return
@@ -432,6 +446,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
     return
   }
   if (options?.modelInvocation) checkModelInvocation(name, parsed)
+  else if (found.plugin && !parsed.userInvocable) return refusedForUser(name, ctx)
   return expandSkillBody(pi, ctx, { name, args, found, parsed, content }, options)
 }
 

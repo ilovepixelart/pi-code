@@ -309,6 +309,17 @@ describe('extension wiring', () => {
     expect(t.ctx.ui.notify).not.toHaveBeenCalled()
   })
 
+  it.each(['/kit:deploy prod', '/skill:kit:deploy prod'])('refuses typed %s for a plugin skill marked user-invocable: false', async (text) => {
+    const t = pluginFixture('---\nname: deploy\ndescription: deploys\nuser-invocable: false\n---\nDeploy $ARGUMENTS !`git diff`')
+    await t.start()
+    expect(t.commands.has('kit:deploy')).toBe(false)
+    expect(await t.input(text, { ...t.ctx, hasUI: true })).toEqual({ action: 'handled' })
+    expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('user-invocable: false'), 'info')
+    expect(t.exec).not.toHaveBeenCalled()
+    // The model path is the one such a skill exists for.
+    expect((await t.invoke()).content[0].text).toContain('Deploy prod')
+  })
+
   it('rechecks disable-model-invocation on every model call', async () => {
     const t = pluginFixture()
     await t.start()
