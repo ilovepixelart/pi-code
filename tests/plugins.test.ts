@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -722,19 +723,23 @@ describe('/claude-plugins command', () => {
   type Component = { handleInput: (data: string) => void; render: (width: number) => string[] }
   type Factory = (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => Component
 
+  /** The list as last rendered by runPlugin, after every key, without styling. */
+  let screen = ''
+
   /** Run /claude-plugins against `h`, typing `keys` into the list; resolves with the notices shown. */
-  const runPlugin = async (h: string, keys: string[]): Promise<string[]> => {
+  const runPlugin = async (h: string, keys: string[], mode = 'tui'): Promise<string[]> => {
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
     pluginsExtension({ registerCommand: (name: string, spec: never) => commands.set(name, spec) } as never)
     const notices: string[] = []
     const ctx = {
-      mode: 'tui',
+      mode,
       ui: {
         notify: (message: string) => notices.push(message),
         custom: (factory: Factory) =>
           new Promise((resolve) => {
             const component = factory({ requestRender: () => {} }, {}, {}, resolve)
             for (const key of keys) component.handleInput(key)
+            screen = stripVTControlCharacters(component.render(80).join('\n'))
           }),
       },
     }
@@ -774,6 +779,79 @@ describe('/claude-plugins command', () => {
     const notices = await runPlugin(h, [' ', ' ', '\x1b'])
 
     expect(notices, 'nothing differs from when the list opened').toEqual([])
+  })
+
+  /** A fresh pi settings.json holding `content`; returns its path. */
+  const piSettings = (content: string): string => {
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? ''
+    mkdirSync(agentDir, { recursive: true })
+    const file = join(agentDir, 'settings.json')
+    writeFileSync(file, content)
+    return file
+  }
+
+  it('should list every plugin with its state and deciding source when the session has no TUI', async () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    install(h, 'community', 'linter', '1.0.0')
+    enable(h, { 'linter@community': true })
+    piSettings(JSON.stringify({ piCode: { enabledPlugins: { 'linter@community': false } } }))
+
+    const notices = await runPlugin(h, [], 'print')
+
+    expect(notices, 'one notice, one line per plugin, and no list is opened').toEqual(['● formatter@community — on (plugin default)\n○ linter@community — off (pi override)'])
+  })
+
+  it('should say no plugins are installed when the cache is empty', async () => {
+    const notices = await runPlugin(home(), [' '])
+
+    expect(notices, 'the notice replaces the list').toEqual(['No Claude plugins installed. Install them with Claude Code’s /plugin.'])
+  })
+
+  it('should put the row back and show the error when pi settings.json cannot be rewritten', async () => {
+    initTheme()
+    const h = home()
+    install(h, 'ponytail', 'ponytail', '1.0.0')
+    const file = piSettings('{ broken')
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const notices = await runPlugin(h, [' ', '\x1b'])
+
+    expect(notices, 'the failed write is reported and no /reload is asked for').toEqual([expect.stringMatching(/^Could not update pi settings: .+/)])
+    expect(screen, 'the row shows the state that is still in effect').toMatch(/ponytail@ponytail\s+on\b/)
+    expect(readFileSync(file, 'utf-8'), 'the unparseable file is left as it was').toBe('{ broken')
+  })
+
+  it('should name the pi override as the source after a toggle', async () => {
+    initTheme()
+    const h = home()
+    install(h, 'ponytail', 'ponytail', '1.0.0')
+    piSettings('{}')
+
+    await runPlugin(h, [' ', '\x1b'])
+
+    expect(screen, 'the row shows the new state').toMatch(/ponytail@ponytail\s+off\b/)
+    expect(screen, 'the description follows the write').toContain('Currently from pi override')
+  })
+
+  it('should not toggle a plugin that managed settings decide', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    initTheme()
+    const h = home()
+    install(h, 'community', 'forced', '1.0.0')
+    writeFileSync(join(h, 'managed-settings.json'), JSON.stringify({ enabledPlugins: { 'forced@community': true } }))
+    setManagedSettingsPath(join(h, 'managed-settings.json'))
+    const file = piSettings('{}')
+
+    try {
+      const notices = await runPlugin(h, [' ', '\r', '\x1b'])
+
+      expect(notices, 'nothing changed, so nothing is announced').toEqual([])
+      expect(screen, 'the row keeps its state and says who set it').toMatch(/forced@community\s+on\b[\s\S]*Set by managed settings/)
+      expect(readFileSync(file, 'utf-8'), 'no pi entry is written').toBe('{}')
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
   })
 })
 

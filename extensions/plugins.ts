@@ -7,7 +7,7 @@
  */
 
 import * as os from 'node:os'
-import { type ExtensionAPI, getSettingsListTheme } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionCommandContext, getSettingsListTheme } from '@earendil-works/pi-coding-agent'
 import { type SettingItem, SettingsList } from '@earendil-works/pi-tui'
 import { type EnablementSource, type PluginState, pluginStates, setPiPluginEnabled } from './internal/plugins.ts'
 import { errorMessage } from './internal/values.ts'
@@ -33,6 +33,45 @@ function settingItem(state: PluginState): SettingItem {
   return { id: state.qualified, label: state.qualified, currentValue: value, values: ['on', 'off'], description: `Currently from ${SOURCE_LABEL[state.decidedBy]}` }
 }
 
+/** Save one toggle through pi's settings. A failed write puts the row back and says why. */
+function saveToggle(ctx: ExtensionCommandContext, list: SettingsList, items: SettingItem[], state: PluginState, value: string): void {
+  try {
+    setPiPluginEnabled(state, value === 'on')
+  } catch (error) {
+    list.updateValue(state.qualified, value === 'on' ? 'off' : 'on')
+    ctx.ui.notify(`Could not update pi settings: ${errorMessage(error)}`, 'error')
+    return
+  }
+  const fresh = pluginStates(os.homedir()).find((candidate) => candidate.qualified === state.qualified)
+  const item = items.find((candidate) => candidate.id === state.qualified)
+  if (fresh && item) item.description = settingItem(fresh).description
+}
+
+/** Show the plugins as a settings list; resolves when it is closed. */
+async function showPluginList(ctx: ExtensionCommandContext, states: PluginState[]): Promise<void> {
+  const items = states.map(settingItem)
+  await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+    const list = new SettingsList(
+      items,
+      Math.min(states.length, MAX_VISIBLE),
+      getSettingsListTheme(),
+      (id, value) => {
+        const state = states.find((candidate) => candidate.qualified === id)
+        if (state) saveToggle(ctx, list, items, state, value)
+      },
+      () => done(),
+    )
+    return {
+      render: (width: number) => list.render(width),
+      invalidate: () => list.invalidate(),
+      handleInput: (data: string) => {
+        list.handleInput(data)
+        tui.requestRender()
+      },
+    }
+  })
+}
+
 export default function pluginsExtension(pi: ExtensionAPI) {
   pi.registerCommand('claude-plugins', {
     description: 'Turn installed Claude plugins on or off in pi only',
@@ -47,37 +86,7 @@ export default function pluginsExtension(pi: ExtensionAPI) {
         return
       }
       const enabledAtOpen = new Map(states.map((state) => [state.qualified, state.enabled]))
-      const items = states.map(settingItem)
-      await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
-        const list = new SettingsList(
-          items,
-          Math.min(states.length, MAX_VISIBLE),
-          getSettingsListTheme(),
-          (id, value) => {
-            const state = states.find((candidate) => candidate.qualified === id)
-            if (!state) return
-            try {
-              setPiPluginEnabled(state, value === 'on')
-            } catch (error) {
-              list.updateValue(id, value === 'on' ? 'off' : 'on')
-              ctx.ui.notify(`Could not update pi settings: ${errorMessage(error)}`, 'error')
-              return
-            }
-            const fresh = pluginStates(os.homedir()).find((candidate) => candidate.qualified === id)
-            const item = items.find((candidate) => candidate.id === id)
-            if (fresh && item) item.description = settingItem(fresh).description
-          },
-          () => done(),
-        )
-        return {
-          render: (width: number) => list.render(width),
-          invalidate: () => list.invalidate(),
-          handleInput: (data: string) => {
-            list.handleInput(data)
-            tui.requestRender()
-          },
-        }
-      })
+      await showPluginList(ctx, states)
       const changed = pluginStates(os.homedir()).some((state) => enabledAtOpen.get(state.qualified) !== state.enabled)
       // A reload aborts running subagents and background work, so it stays the user's call.
       if (changed) ctx.ui.notify('Plugin changes saved. Run /reload to apply them.', 'info')
