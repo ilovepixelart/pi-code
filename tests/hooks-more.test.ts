@@ -879,11 +879,107 @@ describe('hooks extension session_start', () => {
     expect(options.env?.PATH).toBe(process.env.PATH)
   })
 
-  it('points CLAUDE_PROJECT_DIR at the worktree a session started in, not the main checkout', async () => {
-    // Claude: "the project root where the session started". repoRoot resolves a worktree to
-    // its main checkout, so `cd "$CLAUDE_PROJECT_DIR" && npm run format` acted on the user's
-    // main checkout from inside an isolated tree.
+  it('should set CLAUDE_PROJECT_DIR to the session cwd when the session starts in a repo subdirectory', async () => {
+    // Claude 2.1.322 passes the launch directory, not the repo root.
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub })
+    await ext.toolCall('bash', {})
+
+    const options = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the subdirectory the session started in').toBe(sub)
+  })
+
+  // Claude keeps settings.local.json in the cwd on Windows, so a repo-root or main-checkout file never loads there.
+  it.skipIf(process.platform === 'win32')('should give a repo-root settings.local.json hook the repo as CLAUDE_PROJECT_DIR when the session starts in a subdirectory', async () => {
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', homeConfig)
+    writeSettings(repo, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"' }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    const local = recordFor('"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"').options as { env?: Record<string, string> }
+    const user = recordFor('home-pre').options as { env?: Record<string, string> }
+    expect(local.env?.CLAUDE_PROJECT_DIR, 'the local settings hook gets the folder holding its .claude').toBe(repo)
+    expect(user.env?.CLAUDE_PROJECT_DIR, 'the user settings hook gets the session cwd').toBe(sub)
+  })
+
+  const scriptHook = '"$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh"'
+  const trustedStart = { isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } }
+
+  it.skipIf(process.platform === 'win32')('should point a local settings hook at the worktree, not the main checkout, when the session starts at the worktree root', async () => {
+    // The worktree's settings.local.json lives in the main checkout, where `cd "$CLAUDE_PROJECT_DIR"` must not land.
     const { main, tree } = makeWorktree(tempDir('hooks-wt-'))
+    writeSettings(main, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: tree, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: tree })
+
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the worktree root').toBe(tree)
+  })
+
+  it.skipIf(process.platform === 'win32')('should point a local settings hook at the worktree root when the session starts in a worktree subdirectory', async () => {
+    const { main, tree } = makeWorktree(tempDir('hooks-wt-'))
+    const sub = join(tree, 'src')
+    mkdirSync(sub)
+    writeSettings(main, 'settings.local.json', { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the worktree root').toBe(tree)
+  })
+
+  it.skipIf(process.platform === 'win32')('should run a handler declared in user and local settings once with the local projectDir when the session starts in a subdirectory', async () => {
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    const config = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: scriptHook }] }] }
+    writeSettings(hoisted.home, 'settings.json', config)
+    writeSettings(repo, 'settings.local.json', config)
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub, ...trustedStart })
+    await ext.toolCall('bash', {}, 't1', { cwd: sub })
+
+    expect(commandsRun(), 'the identical handler runs once').toEqual([scriptHook])
+    const options = recordFor(scriptHook).options as { env?: Record<string, string> }
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'the run gets the local file folder').toBe(repo)
+  })
+
+  it('should anchor a /-rooted if path at the session cwd when the session starts in a repo subdirectory', async () => {
+    // Claude 2.1.322 runs an `Edit(/src/**)` hook for <cwd>/src, not <repo>/src.
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeSettings(hoisted.home, 'settings.json', { PreToolUse: [{ hooks: [{ command: 'src-guard', if: 'Edit(/src/**)' }] }] })
+
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: sub })
+    await ext.toolCall('edit', { path: join(sub, 'src', 'a.ts') }, 't1', { cwd: sub })
+    expect(commandsRun(), 'a file under the subdirectory src/ matches /src/**').toEqual(['src-guard'])
+    await ext.toolCall('edit', { path: join(repo, 'src', 'a.ts') }, 't2', { cwd: sub })
+    expect(commandsRun(), 'a file under the repo root src/ does not match /src/**').toEqual(['src-guard'])
+  })
+
+  it('should set CLAUDE_PROJECT_DIR to the session cwd when the session starts inside a worktree subdirectory', async () => {
+    const { tree } = makeWorktree(tempDir('hooks-wt-'))
     mkdirSync(join(tree, 'src'))
     writeSettings(hoisted.home, 'settings.json', homeConfig)
 
@@ -892,8 +988,7 @@ describe('hooks extension session_start', () => {
     await ext.toolCall('bash', {})
 
     const options = recordFor('home-pre').options as { env?: Record<string, string> }
-    expect(options.env?.CLAUDE_PROJECT_DIR).toBe(tree)
-    expect(options.env?.CLAUDE_PROJECT_DIR).not.toBe(main)
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the cwd the session started in').toBe(join(tree, 'src'))
   })
 
   it('exports CLAUDE_CODE_SESSION_ID and CLAUDE_PID to hook commands', async () => {

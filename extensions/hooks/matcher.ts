@@ -128,7 +128,7 @@ function withCommand(raw: HookCommand): HookCommand {
 
 function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {
   const result: HookCommand[] = []
-  const seen = new Set<string>()
+  const seen = new Map<string, number>()
   for (const entry of matchers ?? []) {
     if (!applies(entry)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
@@ -141,8 +141,13 @@ function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: H
       // args, an `if` filter, an mcp_tool input) are different handlers: `if` is applied
       // after this, so collapsing two filters left the other tool call with no guard.
       const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
-      if (seen.has(key)) continue
-      seen.add(key)
+      const kept = seen.get(key)
+      // The project or local copy's projectDir is the one its script path was written for.
+      if (kept !== undefined) {
+        if (hook.projectDir !== undefined && result[kept].projectDir === undefined) result[kept] = hook
+        continue
+      }
+      seen.set(key, result.length)
       result.push(hook)
     }
   }

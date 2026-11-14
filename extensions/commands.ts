@@ -206,7 +206,7 @@ function commandVars(ctx: { cwd: string }, filePath: string, plugin?: CommandPlu
     // low|medium|high|xhigh|max, and an unset one stays literal in the body.
     CLAUDE_EFFORT: claudeEffortLevel(varCtx.thinkingLevel),
     CLAUDE_SKILL_DIR: path.dirname(filePath),
-    CLAUDE_PROJECT_DIR: checkoutRoot(ctx.cwd),
+    CLAUDE_PROJECT_DIR: ctx.cwd,
     CLAUDE_PLUGIN_ROOT: plugin?.root,
     CLAUDE_PLUGIN_DATA: plugin?.dataDir,
   }
@@ -228,7 +228,6 @@ interface SpanRunner {
  * from running.
  */
 export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, args: string, ctx: { cwd: string }, filePath: string, plugin?: CommandPlugin, options?: { allowShell?: boolean }): Promise<string> {
-  const projectRoot = checkoutRoot(ctx.cwd)
   const vars = commandVars(ctx, filePath, plugin)
   const { text: withArgs, consumed } = substituteArgsDetailed(parsed.body, args, parsed.argumentNames ?? [])
   // `${user_config.KEY}` is a plugin-command variable only; leave it literal in an
@@ -243,7 +242,7 @@ export async function expandCommand(runner: SpanRunner, parsed: ParsedCommand, a
           // project-scoped script. pi.exec takes no env, so it is set in the script.
           // stderr merges into stdout, as the Bash tool runs these for Claude. The
           // resolver is passed by its imported binding so tests can stub the lookup.
-          const run = spanExec(parsed.shell, projectRoot, script, resolvePowershellBinary)
+          const run = spanExec(parsed.shell, ctx.cwd, script, resolvePowershellBinary)
           const result = await runner.exec(run.command, run.args, { cwd: ctx.cwd, timeout: BASH_TIMEOUT_MS })
           // pwsh cannot merge a native command's stderr in-script (spanExec sets
           // mergeStreams), so it is appended here; the sh script merges via 2>&1.

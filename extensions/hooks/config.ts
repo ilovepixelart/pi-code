@@ -38,6 +38,8 @@ export interface HookCommand {
    * subprocesses", so a script can read them instead of relying on inline substitution. */
   pluginRoot?: string
   pluginDataDir?: string
+  /** CLAUDE_PROJECT_DIR for a hook from a project or local settings file; unset hooks get the session cwd. */
+  projectDir?: string
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
   headers?: Record<string, string>

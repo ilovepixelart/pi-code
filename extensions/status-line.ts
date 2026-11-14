@@ -38,7 +38,7 @@ import { readManagedSettings } from './internal/managed-settings.ts'
 import { PACKAGE_VERSION } from './internal/package-version.ts'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from './internal/plan-mode-state.ts'
 import { approvalRecheck, isProjectApprovedSilently } from './internal/project-approval.ts'
-import { checkoutRoot, gitRoot } from './internal/project-root.ts'
+import { gitRoot } from './internal/project-root.ts'
 import { readSettingsChain } from './internal/settings-chain.ts'
 import { watchSettingsFiles } from './internal/settings-watch.ts'
 import { readActiveStyleName, settingsFiles } from './output-styles.ts'
@@ -289,13 +289,12 @@ export default function statusLine(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       // Claude sends its CLI version; pi-code's own version is the honest analogue.
       version: PACKAGE_VERSION,
-      // project_dir is the repository, not the directory the session started in: a
-      // script labelling the project showed whichever subdirectory it was launched
-      // from. git_worktree names a linked worktree and is absent in a main checkout, as
+      // Claude documents project_dir as the directory it was launched in, even inside a
+      // repository. git_worktree names a linked worktree and is absent in a main checkout, as
       // Claude sends it. added_dirs comes from the --add-dir flag pi-code registers.
       workspace: {
         current_dir: ctx.cwd,
-        project_dir: checkoutRoot(ctx.cwd),
+        project_dir: ctx.cwd,
         ...(worktreeName === undefined ? {} : { git_worktree: worktreeName }),
         added_dirs: addedDirs(),
       },

@@ -2894,15 +2894,16 @@ describe('mcp stdio session context', () => {
     expect(pluggedEnv.CLAUDE_PLUGIN_ROOT).toBe('/plug/root')
   })
 
-  it('sets CLAUDE_PROJECT_DIR to the worktree the session started in', async () => {
-    // Claude: "the project root where the session started". repoRoot named the main checkout.
+  it('should set CLAUDE_PROJECT_DIR to the launch directory when the session starts in a worktree subdirectory', async () => {
     const { main, tree } = makeWorktree(mkdtempSync(join(tmpdir(), 'mcp-wt-')))
     tempDirs.push(main, tree)
+    const sub = join(tree, 'src')
+    mkdirSync(sub)
     withTools([{ name: 'go' }])
-    await setupStarted({ user: { srv: { command: 'x' } }, cwd: tree })
+    await setupStarted({ user: { srv: { command: 'x' } }, cwd: sub })
 
     const env = hoisted.transports[0].options.env as Record<string, string>
-    expect(env.CLAUDE_PROJECT_DIR).toBe(tree)
+    expect(env.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the subdirectory the session started in').toBe(sub)
   })
 
   it('declares the roots capability and answers roots/list with the session launch directory', async () => {
