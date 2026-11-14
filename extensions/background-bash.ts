@@ -130,6 +130,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     const log = fs.createWriteStream(outputFile, { mode: 0o600 })
     // A full disk or a removed directory must not take pi down from a stream event.
     log.on('error', () => {})
+    const closed = new Promise<void>((resolve) => log.once('close', () => resolve()))
 
     // The process gets its own abort signal: the tool call's ends with the call, and a
     // command moved to the background must survive it.
@@ -186,6 +187,9 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     // A command that finished in the same tick as the deadline is still a foreground result.
     if (first !== 'timeout' || shell.state !== 'running') {
       const outcome = first === 'timeout' ? await settled : first
+      // The stream creates the file when it opens, which can be after the command has
+      // ended: removing it before the stream has closed would leave it behind.
+      await closed
       forgetShell(shell)
       if ('error' in outcome) throw outcome.error
       return outcome.result

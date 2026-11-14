@@ -285,6 +285,17 @@ describe('bash tool', () => {
     await expect(h.bash('t1', { command: 'echo never' }, controller.signal)).rejects.toThrow()
   })
 
+  it.each(['echo quick', 'true'])('leaves no output file behind a call that never reached the background: %s', async (command) => {
+    const h = setup()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(h.bash('t1', { command }, controller.signal)).rejects.toThrow()
+    await h.bash('t2', { command })
+    // A stream still opening when its file was removed would create it now.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(fs.readdirSync(shellOutputDir())).toEqual([])
+  })
+
   it('starts a run_in_background command and notifies when it completes', async () => {
     const h = setup()
     const result = await h.bash('t1', { command: 'sleep 0.2; echo finished', run_in_background: true })
