@@ -34,12 +34,17 @@ export const INDEX_FILE = 'MEMORY.md'
 /** Claude loads the first 200 lines or 25KB of the memory index at startup. */
 export const INDEX_MAX_LINES = 200
 
-/** The index's lines: the text after a final newline is not a line of its own, and the
- * index is always written with one. */
+/** The index's lines, without their line break (LF or CRLF): the text after a final
+ * newline is not a line of its own, and the index is always written with one. */
 function indexLines(text: string): string[] {
-  const lines = text.split('\n')
+  const lines = text.split(/\r?\n/)
   if (lines.at(-1) === '') lines.pop()
   return lines
+}
+
+/** The line break an index is rewritten with: the one it already uses. */
+function lineEnding(index: string): string {
+  return index.includes('\r\n') ? '\r\n' : '\n'
 }
 export const INDEX_MAX_BYTES = 25_000
 
@@ -209,7 +214,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
   // refusing it would strand a user whose index is already at the bound with no way
   // to revise their way back under it. An over-long description is bounded anyway,
   // since the injected index is capped at read time.
-  const isUpdate = index.split('\n').some((line) => linkedStem(line, name) !== undefined)
+  const isUpdate = linkedStem(index, name) !== undefined
   if (isUpdate) return false
   // Only the loaded content counts: frontmatter and comments are stripped first.
   const next = stripNonLoaded(upsertIndexLine(index, name, description))
@@ -365,19 +370,20 @@ function nameVariants(name: string): string[] {
 
 /** One index entry line: the link it starts with names the memory, so only that
  * link identifies the entry. A link appearing later in a description is a
- * mention, not the entry. */
-const ENTRY_LINE = /^\s*-\s*\[([^\]]*)\]\(([^)\s]+)\.md\)(.*)$/
+ * mention, not the entry. The title is free text and may itself hold brackets, so
+ * the entry is recognised by its link target. */
+const ENTRY_LINE = /^(\s*-\s*\[.*?\]\(([^()\s]+)\.md\))(.*)$/
 
 /** The separator before an entry's description, kept when the line is rewritten:
  * Claude writes ` — `, pi writes `: `. */
 const ENTRY_SEPARATOR = /^\s*(?:—|:)[ \t]*/
 
 /** The entry one index line holds, or undefined when the line is not one. */
-function entryOf(line: string): { title: string; target: string; separator: string } | undefined {
+function entryOf(line: string): { link: string; target: string; separator: string } | undefined {
   const match = ENTRY_LINE.exec(line)
   if (!match) return undefined
   const separator = ENTRY_SEPARATOR.exec(match[3])
-  return { title: match[1], target: match[2], separator: separator ? separator[0] : ': ' }
+  return { link: match[1], target: match[2], separator: separator ? separator[0] : ': ' }
 }
 
 /** A memory file name that cannot escape the store: a single plain segment,
@@ -390,7 +396,7 @@ function safeStem(stem: string): boolean {
 /** The memory file an index entry links for `name`, when one links a variant of
  * it: the underscored spelling a Claude-written entry uses. */
 function linkedStem(index: string, name: string): string | undefined {
-  for (const line of index.split('\n')) {
+  for (const line of indexLines(index)) {
     const entry = entryOf(line)
     if (entry && nameVariants(name).includes(entry.target) && safeStem(entry.target)) return entry.target
   }
@@ -416,17 +422,18 @@ function saveStem(dir: string, index: string, name: string): string {
 export function upsertIndexLine(index: string, name: string, description: string, stem: string = name): string {
   // One line per memory: a newline in the description would break every later line-based match.
   const flat = description.replace(/\s+/g, ' ').trim()
+  const eol = lineEnding(index)
   const lines = indexLines(index)
   for (let i = 0; i < lines.length; i++) {
     const entry = entryOf(lines[i])
     if (entry && nameVariants(name).includes(entry.target)) {
-      lines[i] = `- [${entry.title}](${entry.target}.md)${entry.separator}${flat}`
-      return `${lines.join('\n')}\n`
+      lines[i] = `${entry.link}${entry.separator}${flat}`
+      return `${lines.join(eol)}${eol}`
     }
   }
-  if (lines.length === 0 || !lines[0].startsWith('#')) lines.unshift('# Memory index')
+  if (!lines.find((line) => line.trim() !== '')?.startsWith('#')) lines.unshift('# Memory index')
   lines.push(`- [${stem}](${stem}.md): ${flat}`)
-  return `${lines.join('\n')}\n`
+  return `${lines.join(eol)}${eol}`
 }
 
 export function removeIndexLine(index: string, name: string): string {
@@ -435,7 +442,8 @@ export function removeIndexLine(index: string, name: string): string {
     const entry = entryOf(line)
     return !(entry !== undefined && variants.includes(entry.target))
   })
-  return lines.length > 0 ? `${lines.join('\n')}\n` : ''
+  const eol = lineEnding(index)
+  return lines.length > 0 ? `${lines.join(eol)}${eol}` : ''
 }
 
 const MemoryParams = Type.Object({

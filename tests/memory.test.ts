@@ -153,6 +153,24 @@ describe('memory helpers', () => {
     expect(remaining).not.toContain('- [build](build.md)')
   })
 
+  it('recognises the entries of a CRLF index and keeps its line ending', () => {
+    const index = '# Memory index\r\n- [a](a.md): one\r\n- [b](b.md): two\r\n'
+    expect(upsertIndexLine(index, 'a', 'uno')).toBe('# Memory index\r\n- [a](a.md): uno\r\n- [b](b.md): two\r\n')
+    expect(upsertIndexLine(index, 'c', 'three')).toBe(`${index}- [c](c.md): three\r\n`)
+    expect(removeIndexLine(index, 'a')).toBe('# Memory index\r\n- [b](b.md): two\r\n')
+  })
+
+  it('recognises an entry whose title contains a closing bracket', () => {
+    const index = '# Memory index\n- [Fix [WIP] thing](wip-thing.md): old\n'
+    expect(upsertIndexLine(index, 'wip-thing', 'new')).toBe('# Memory index\n- [Fix [WIP] thing](wip-thing.md): new\n')
+    expect(removeIndexLine(index, 'wip-thing')).toBe('# Memory index\n')
+  })
+
+  it('adds no second heading to an index that starts with a blank line', () => {
+    const index = '\n# Memory index\n- [a](a.md): one\n'
+    expect(upsertIndexLine(index, 'b', 'two')).toBe(`${index}- [b](b.md): two\n`)
+  })
+
   it('flattens a multi-line description into one index line', () => {
     // A newline in the description would break every later line-based match.
     expect(upsertIndexLine('', 'a', 'line one\nline two')).toBe('# Memory index\n- [a](a.md): line one line two\n')
