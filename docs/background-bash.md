@@ -15,7 +15,8 @@ Claude's background commands on pi's `bash` tool. Source: [`extensions/backgroun
 - **`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`** turns background commands off: the tool has no `run_in_background` parameter, a call that passes it anyway fails, and a command still running at its timeout is stopped. The default timeout still applies.
 - **A command outlives a session switch**: across `/new`, `/resume`, `/fork` and `/reload` it keeps running and its completion message goes to the session current when it finishes, or to the next session start when none is. In a session that has not had a turn yet, the message is recorded for the next prompt instead of starting one, as background subagent results are.
 - **Quitting pi stops every background command** and removes their output files.
-- The output, truncation, renderer and exit-code reporting are pi's own: the built-in bash tool still runs each command, through its operations seam, with pi's `shellPath` and `shellCommandPrefix` settings.
+- **Output cap**: a background command whose output file passes 5 GB is stopped, and its completion message says so.
+- The output, truncation, renderer and exit-code reporting are pi's own: the built-in bash tool still runs each command, through its operations seam, with pi's `shellPath` and `shellCommandPrefix` settings. A background command's output goes to its output file only; the copy pi keeps of a foreground command's truncated output is removed if the command then moves to the background.
 
 ## Divergences
 
@@ -23,4 +24,3 @@ Claude's background commands on pi's `bash` tool. Source: [`extensions/backgroun
 - **A session without a UI** (print and json modes, subagents) has background commands off, exactly as with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: it ends with its last turn, so no later turn could receive a completion message. Claude runs background commands under `-p`, with a time limit.
 - **No time limit on background commands**, as in an interactive Claude session. Claude's limits for unattended sessions (30 minutes by default, 10 minutes for a `-p` run whose prompt is passed as text) do not apply, since unattended runs do not background here.
 - **No Ctrl+B** to move a running command to the background.
-- **No output cap**: Claude kills a command whose output passes 5 GB.

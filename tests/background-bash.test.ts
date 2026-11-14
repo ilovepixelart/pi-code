@@ -22,7 +22,7 @@ interface Harness {
   footer: () => string | undefined
 }
 
-const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number } = {}): Harness => {
   const tools = new Map<string, { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> }; promptGuidelines?: string[] }>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
@@ -31,7 +31,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness =
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
-  backgroundBashExtension(pi as never)
+  backgroundBashExtension(pi as never, { maxOutputBytes: options.maxOutputBytes })
   const statuses = new Map<string, string | undefined>()
   const ctx = {
     cwd: os.tmpdir(),
@@ -439,6 +439,74 @@ describe('bash tool', () => {
     await h.bash('t1', { command: 'echo hi', run_in_background: true })
     await until(() => h.sent.length > 0)
     expect(h.sent[0]?.options.triggerTurn).toBe(true)
+  })
+
+  describe('output', () => {
+    const CAP = 4096
+    // pi's built-in tool saves the full text of output it truncates to a file of its own.
+    const builtinCopies = (): string[] => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('pi-bash-'))
+    const sizeOf = (file: string | undefined): number => fs.statSync(file ?? '').size
+    // Endless output at a rate that keeps the files small while the cap takes effect.
+    const CHATTER = 'while true; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done'
+
+    beforeEach(() => {
+      for (const name of builtinCopies()) fs.rmSync(`${os.tmpdir()}/${name}`)
+    })
+
+    it('stops a background command whose output passes the cap, and says so', async () => {
+      const h = setup({ maxOutputBytes: CAP })
+      const id = idOf(await h.bash('t1', { command: CHATTER, run_in_background: true }))
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain(`Background command ${id}`)
+      expect(h.sent[0]?.message.content).toContain('was stopped: its output passed the 4.0KB limit')
+      const [shell] = allShells()
+      expect(shell?.state).toBe('killed')
+      // Nothing is written past the chunk that crossed the cap; a pipe chunk is at most 64 KB.
+      expect(sizeOf(shell?.outputFile)).toBeGreaterThan(CAP)
+      expect(sizeOf(shell?.outputFile)).toBeLessThanOrEqual(CAP + 65536)
+    })
+
+    it('applies the cap once a command has moved to the background', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '200'
+      const h = setup({ maxOutputBytes: CAP })
+      const result = await h.bash('t1', { command: CHATTER })
+      expect(textOf(result)).toContain('moved to the background')
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain('its output passed the 4.0KB limit')
+      await until(() => builtinCopies().length === 0)
+    })
+
+    it('leaves a command under the cap alone', async () => {
+      const h = setup({ maxOutputBytes: CAP })
+      await h.bash('t1', { command: 'echo small', run_in_background: true })
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain('completed (exit code 0)')
+    })
+
+    it('keeps one copy of a background command output', async () => {
+      const h = setup()
+      await h.bash('t1', { command: 'seq 1 20000', run_in_background: true })
+      await until(() => h.sent.length > 0)
+      expect(fs.readFileSync(allShells()[0]?.outputFile ?? '', 'utf8')).toContain('\n20000\n')
+      expect(builtinCopies()).toEqual([])
+    })
+
+    it('removes the built-in copy of a command that moved to the background', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '300'
+      const h = setup()
+      const result = await h.bash('t1', { command: 'seq 1 20000; sleep 0.6; seq 1 20000' })
+      expect(textOf(result)).toContain('moved to the background')
+      await until(() => h.sent.length > 0)
+      await until(() => builtinCopies().length === 0)
+      expect(sizeOf(allShells()[0]?.outputFile)).toBe(2 * 108894)
+    })
+
+    it('keeps the built-in copy a foreground result points at', async () => {
+      const h = setup()
+      const result = await h.bash('t1', { command: 'seq 1 20000' })
+      expect(builtinCopies()).toHaveLength(1)
+      expect(textOf(result)).toContain(builtinCopies()[0])
+    })
   })
 
   it('stops every background command when pi quits', async () => {

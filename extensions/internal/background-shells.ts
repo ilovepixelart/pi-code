@@ -27,6 +27,8 @@ export interface BackgroundShell {
   exitCode?: number
   /** Ends the command's process tree; cleared once the command settles. */
   stop?: () => void
+  /** Why pi itself stopped the command; unset when the model or the user did. */
+  stopReason?: string
   /** Monotonic finish order, so eviction drops the earliest-finished commands. */
   finishedAt?: number
   /** False while a bash command is still in the foreground: it is registered from the
@@ -118,12 +120,13 @@ export function forgetShell(shell: BackgroundShell): void {
   fs.rmSync(shell.outputFile, { force: true })
 }
 
-export function stopShell(id: string): 'stopped' | 'not-running' | 'unknown' {
+export function stopShell(id: string, reason?: string): 'stopped' | 'not-running' | 'unknown' {
   const shell = registry().shells.get(id.trim())
   if (!shell) return 'unknown'
   if (shell.state !== 'running' || !shell.stop) return 'not-running'
   const stop = shell.stop
   shell.state = 'killed'
+  shell.stopReason = reason
   shell.stop = undefined
   stop()
   if (shell.background) changed()
@@ -187,7 +190,8 @@ export function shellsStatusText(shells: ReadonlyArray<BackgroundShell>): string
 }
 
 /** What the model is told when a background command finishes. */
-export function shellCompletionText(shell: Pick<BackgroundShell, 'id' | 'command' | 'state' | 'exitCode' | 'outputFile'>): string {
-  const how = shell.state === 'completed' ? 'completed (exit code 0)' : shell.state === 'killed' ? 'was stopped' : `failed (exit code ${shell.exitCode ?? '?'})`
+export function shellCompletionText(shell: Pick<BackgroundShell, 'id' | 'command' | 'state' | 'exitCode' | 'outputFile' | 'stopReason'>): string {
+  const stopped = shell.stopReason ? `was stopped: ${shell.stopReason}` : 'was stopped'
+  const how = shell.state === 'completed' ? 'completed (exit code 0)' : shell.state === 'killed' ? stopped : `failed (exit code ${shell.exitCode ?? '?'})`
   return `Background command ${shell.id} ("${commandPreview(shell.command)}") ${how}. Output: ${shell.outputFile}`
 }

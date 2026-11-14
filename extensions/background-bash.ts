@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
 import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
@@ -37,6 +37,8 @@ import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 const DEFAULT_TIMEOUT_MS = 120_000
 /** BASH_MAX_TIMEOUT_MS out of the box: ten minutes. */
 const MAX_TIMEOUT_MS = 600_000
+/** Claude stops a background command whose output passes 5 GB. */
+const MAX_OUTPUT_BYTES = 5 * 1024 ** 3
 
 const positiveMs = (raw: string | undefined): number | undefined => {
   const value = Number(raw)
@@ -109,7 +111,35 @@ function exitCodeOf(outcome: Outcome): number | undefined {
   return typeof structured?.exit_code === 'number' ? structured.exit_code : undefined
 }
 
-export default function backgroundBashExtension(pi: ExtensionAPI): void {
+/** A command's output file. `closed` settles once the stream has let go of it. */
+function openOutputFile(id: string): { outputFile: string; log: fs.WriteStream; closed: Promise<void> } {
+  const outputFile = path.join(shellOutputDir(), `${id}.output`)
+  const log = fs.createWriteStream(outputFile, { mode: 0o600 })
+  // A full disk or a removed directory must not take pi down from a stream event.
+  log.on('error', () => {})
+  const closed = new Promise<void>((resolve) => log.once('close', () => resolve()))
+  return { outputFile, log, closed }
+}
+
+/** The outcome of a run that settles within `limitMs`, or undefined once that has passed. */
+async function settledWithin(settled: Promise<Outcome>, limitMs: number): Promise<Outcome | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), limitMs)
+  })
+  const first = await Promise.race([settled, deadline])
+  clearTimeout(timer)
+  return first
+}
+
+function foregroundResult(outcome: Outcome): ToolResult {
+  if ('error' in outcome) throw outcome.error
+  return outcome.result
+}
+
+/** `limits.maxOutputBytes` is a test seam; pi passes only `pi`. */
+export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxOutputBytes?: number } = {}): void {
+  const maxOutputBytes = limits.maxOutputBytes ?? MAX_OUTPUT_BYTES
   // A background command outlives a session switch, and this instance's pi throws once
   // its session is replaced; notices go to whichever session is current when it ends.
   const notices = sessionMailbox('bash-background')
@@ -126,11 +156,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
    * `background` is set, otherwise once `limitMs` passes without it finishing. */
   async function runTask(toolCallId: string, params: BashParams, limitMs: number, signal: AbortSignal | undefined, onUpdate: ((update: ToolResult) => void) | undefined, ctx: ExtensionToolContext): Promise<ToolResult> {
     const id = `b${randomUUID().replace(/-/g, '').slice(0, 8)}`
-    const outputFile = path.join(shellOutputDir(), `${id}.output`)
-    const log = fs.createWriteStream(outputFile, { mode: 0o600 })
-    // A full disk or a removed directory must not take pi down from a stream event.
-    log.on('error', () => {})
-    const closed = new Promise<void>((resolve) => log.once('close', () => resolve()))
+    const { outputFile, log, closed } = openOutputFile(id)
 
     // The process gets its own abort signal: the tool call's ends with the call, and a
     // command moved to the background must survive it.
@@ -142,28 +168,36 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     if (signal?.aborted) lifetime.abort()
     else signal?.addEventListener('abort', forwardAbort, { once: true })
 
+    const shell = registerShell({ id, command: params.command, outputFile, stop: () => lifetime.abort(), background: backgrounded })
+    let written = 0
+    /** Every chunk goes to the output file. The built-in tool's accumulator gets it only
+     * while the call is waiting on the result: once the command is in the background
+     * nothing reads that copy, and past its truncation limit it is a second file. */
+    const onData = (data: Buffer, toBuiltin: (data: Buffer) => void): void => {
+      if (shell.state !== 'running') return
+      written += data.length
+      log.write(data)
+      if (!backgrounded) toBuiltin(data)
+      else if (written > maxOutputBytes) stopShell(id, `its output passed the ${formatSize(maxOutputBytes)} limit`)
+    }
+
     const { shellPath, commandPrefix } = shellSettings(ctx)
     const local = createLocalBashOperations({ shellPath })
     // The limit is enforced here, by moving to the background, so the built-in timeout
     // that would kill the command is not passed on.
     const operations: BashOperations = {
-      exec: (command, cwd, options) =>
-        local.exec(command, cwd, {
-          ...options,
-          timeout: undefined,
-          signal: lifetime.signal,
-          onData: (data) => {
-            log.write(data)
-            options.onData(data)
-          },
-        }),
+      exec: (command, cwd, options) => local.exec(command, cwd, { ...options, timeout: undefined, signal: lifetime.signal, onData: (data) => onData(data, options.onData) }),
     }
     const tool = createBashToolDefinition(ctx.cwd, { operations, shellPath, commandPrefix })
-    const shell = registerShell({ id, command: params.command, outputFile, stop: () => lifetime.abort(), background: backgrounded })
+    /** The file the built-in tool saved the full output to, if it truncated any. */
+    let builtinCopy: string | undefined
     // Updates stop with the tool call: the call has returned once the command is in the background.
-    const guardedUpdate = onUpdate && ((update: ToolResult) => !backgrounded && onUpdate(update))
+    const update = (partial: ToolResult): void => {
+      builtinCopy = partial.details?.fullOutputPath ?? builtinCopy
+      if (!backgrounded) onUpdate?.(partial)
+    }
 
-    const settled: Promise<Outcome> = tool.execute(toolCallId, { command: params.command }, lifetime.signal, guardedUpdate as never, ctx).then(
+    const settled: Promise<Outcome> = tool.execute(toolCallId, { command: params.command }, lifetime.signal, update as never, ctx).then(
       (result) => ({ result: result as ToolResult }),
       (error: unknown) => ({ error }),
     )
@@ -171,28 +205,24 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
       signal?.removeEventListener('abort', forwardAbort)
       log.end()
       settleShell(shell, exitCodeOf(outcome))
+      if (!backgrounded) return
+      // The model was pointed at the output file, never at the built-in tool's copy.
+      if (builtinCopy) fs.rm(builtinCopy, { force: true }, () => {})
       // Stopped through task_stop: the model asked for it and needs no notice.
-      if (backgrounded && shell.state !== 'killed') notify(shell)
+      if (shell.state !== 'killed' || shell.stopReason) notify(shell)
     })
 
     const where = `Output is being written to: ${outputFile}`
     if (backgrounded) return text(`Command running in background with ID: ${id}. ${where}. You will be notified when it completes; use task_stop to stop it.`)
 
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const deadline = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), limitMs)
-    })
-    const first = await Promise.race([settled, deadline])
-    clearTimeout(timer)
+    const outcome = await settledWithin(settled, limitMs)
     // A command that finished in the same tick as the deadline is still a foreground result.
-    if (first !== 'timeout' || shell.state !== 'running') {
-      const outcome = first === 'timeout' ? await settled : first
+    if (outcome !== undefined || shell.state !== 'running') {
       // The stream creates the file when it opens, which can be after the command has
       // ended: removing it before the stream has closed would leave it behind.
       await closed
       forgetShell(shell)
-      if ('error' in outcome) throw outcome.error
-      return outcome.result
+      return foregroundResult(outcome ?? (await settled))
     }
     backgrounded = true
     markBackground(shell)
