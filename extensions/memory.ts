@@ -2,9 +2,12 @@
  * Memory Extension
  *
  * Claude Code style persistent memory, per project. Memories live as markdown
- * files under ~/.pi/agent/memory/<project-slug>/ with a MEMORY.md index whose
- * content is injected into the system prompt each session. The agent manages
- * memories through the memory tool (save / read / delete / list).
+ * files in a per-project store with a MEMORY.md index whose content is injected
+ * into the system prompt each session. The default store is pi's own, under
+ * ~/.pi/agent/memory/<project-slug>/; `autoMemoryStorage: "claude"` selects the
+ * store Claude Code itself keeps at <claude config>/projects/<project>/memory/,
+ * read and written in place so both tools share one set of memories. The agent
+ * manages memories through the memory tool (save / read / delete / list).
  */
 
 import { spawn } from 'node:child_process'
@@ -76,14 +79,43 @@ export function memoryDir(cwd: string): string {
   return path.join(getAgentDir(), 'memory', projectSlug(memoryProject(cwd)))
 }
 
+/** Which per-project store auto memory uses: pi's own, or the one Claude Code
+ * keeps. The claude store is read and written in place, so both tools share one
+ * set of memories. */
+export type MemoryStorage = 'pi' | 'claude'
+
+/** The directory name Claude Code gives a project: every character outside the
+ * ASCII alphanumerics becomes one dash, with no folding and no digest, so
+ * /Users/alex/code/ai-gk is -Users-alex-code-ai-gk and a CJK segment such as
+ * 26宁波事业考点强化 becomes 26-------- (verified against directories Claude
+ * Code itself creates). */
+export function claudeProjectSlug(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-')
+}
+
+/** The Claude Code memory store for the project rooted at `cwd`: <claude
+ * config>/projects/<project slug>/memory, keyed on the repository root like
+ * pi's own store, so subdirectory sessions and every worktree share one
+ * directory, as Claude's docs state they do. */
+export function claudeMemoryDir(cwd: string, home: string = os.homedir()): string {
+  return path.join(claudeConfigDir(home), 'projects', claudeProjectSlug(memoryProject(cwd)), 'memory')
+}
+
+/** The `autoMemoryStorage` setting: 'claude' selects Claude Code's per-project
+ * store; anything else — absent or mistyped — keeps pi's own, so a typo cannot
+ * silently strand an existing store. */
+function memoryStorageSetting(setting: unknown): MemoryStorage {
+  return typeof setting === 'string' && setting.trim().toLowerCase() === 'claude' ? 'claude' : 'pi'
+}
+
 /** The store location, honoring an `autoMemoryDirectory` override. Claude requires
  * it to be absolute or start with `~/`; a relative value is ignored, falling back
- * to the default per-project directory. */
-export function resolveMemoryDir(cwd: string, override?: string): string {
+ * to the per-project directory the storage mode selects. */
+export function resolveMemoryDir(cwd: string, override?: string, storage: MemoryStorage = 'pi'): string {
   const trimmed = override?.trim()
   if (trimmed?.startsWith('~/')) return path.join(os.homedir(), trimmed.slice(2))
   if (trimmed && path.isAbsolute(trimmed)) return trimmed
-  return memoryDir(cwd)
+  return storage === 'claude' ? claudeMemoryDir(cwd) : memoryDir(cwd)
 }
 
 /** Whether auto memory runs: on by default, off when `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
@@ -177,7 +209,7 @@ export function indexWouldOverflow(index: string, name: string, description: str
   // refusing it would strand a user whose index is already at the bound with no way
   // to revise their way back under it. An over-long description is bounded anyway,
   // since the injected index is capped at read time.
-  const isUpdate = index.split('\n').some((entry) => entry.startsWith(entryPrefix(name)))
+  const isUpdate = index.split('\n').some((line) => linkedStem(line, name) !== undefined)
   if (isUpdate) return false
   // Only the loaded content counts: frontmatter and comments are stripped first.
   const next = stripNonLoaded(upsertIndexLine(index, name, description))
@@ -211,10 +243,11 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   }
   return withFileMutationQueue(indexPath, async (): Promise<MemoryToolResult> => /* NOSONAR typescript:S7503 - withFileMutationQueue takes a Promise-returning function */ {
     const index = readIndex(dir)
+    const stem = saveStem(dir, index, name)
     fs.mkdirSync(dir, { recursive: true })
     // A memory with frontmatter records its write time; one without is left as-is.
-    fs.writeFileSync(path.join(dir, `${name}.md`), stampModified(content, now))
-    const nextIndex = upsertIndexLine(index, name, description)
+    fs.writeFileSync(path.join(dir, `${stem}.md`), stampModified(content, now))
+    const nextIndex = upsertIndexLine(index, name, description, stem)
     writeIndex(indexPath, nextIndex)
     // Claude measures the index after the write: over a read limit the write still
     // succeeds, but an error tells Claude to rewrite the index (everything past
@@ -238,19 +271,23 @@ async function saveMemory(dir: string, indexPath: string, name: string | undefin
   })
 }
 
-/** The read action: a memory's body, capped for context, or a not-found message. */
+/** The read action: a memory's body, capped for context, or a not-found message.
+ * The file may be spelled with underscores where the name has dashes. */
 function readMemory(dir: string, name: string): MemoryToolResult {
-  try {
-    const body = fs.readFileSync(path.join(dir, `${name}.md`), 'utf-8')
-    return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
-  } catch (error) {
-    // Only a missing file is "no such memory"; anything else (a directory in its place, a
-    // permission problem) sends the model hunting for a name that is actually there.
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${errorMessage(error)}` }], details: {} }
+  for (const stem of nameVariants(name)) {
+    try {
+      const body = fs.readFileSync(path.join(dir, `${stem}.md`), 'utf-8')
+      return { content: [{ type: 'text', text: capForContext(body) }], details: {} }
+    } catch (error) {
+      // Only a missing file moves on to the next spelling: a directory in its place
+      // or a permission problem is a different situation, and saying "no such memory"
+      // would send the model hunting for a name that is actually there.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { content: [{ type: 'text', text: `Memory ${name} could not be read: ${errorMessage(error)}` }], details: {} }
+      }
     }
-    return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
   }
+  return { content: [{ type: 'text', text: `No memory named ${name}.` }], details: {} }
 }
 
 /** The delete action: remove a memory's index line and then its file, queued on the index
@@ -266,7 +303,10 @@ async function deleteMemory(dir: string, indexPath: string, name: string): Promi
       if (remaining) writeIndex(indexPath, remaining)
       else fs.rmSync(indexPath, { force: true })
       try {
-        fs.rmSync(path.join(dir, `${name}.md`), { force: true })
+        // Every spelling of the memory goes: the index's link target when it used a
+        // different one, then both dash/underscore variants.
+        const stems = [...new Set([linkedStem(index, name), ...nameVariants(name)].filter((s): s is string => s !== undefined))]
+        for (const stem of stems) fs.rmSync(path.join(dir, `${stem}.md`), { force: true })
       } catch (error) {
         // Out of the index, so it is gone from every surface the user sees; saying the
         // delete failed would be false, and silence would leave the stray file unexplained.
@@ -315,20 +355,86 @@ export function slugifyName(name: string): string {
 
 /** The exact key prefix of a memory's index line; matching on a substring would also
  * hit another entry whose description merely mentions this memory. */
-const entryPrefix = (name: string): string => `- [${name}](${name}.md):`
+/** A dashed memory name's file-name variants. Claude Code names memory files
+ * with underscores where pi uses dashes (`feedback_e2e_run_cadence.md` vs
+ * `feedback-e2e-run-cadence.md`); both spellings name the same memory. */
+function nameVariants(name: string): string[] {
+  const underscored = name.replaceAll('-', '_')
+  return underscored === name ? [name] : [name, underscored]
+}
 
-/** Add or replace this memory's line in the index, keyed by its markdown link target. */
-export function upsertIndexLine(index: string, name: string, description: string): string {
-  // One line per memory: a newline in the description would break line-based matching.
-  const line = `${entryPrefix(name)} ${description.replace(/\s+/g, ' ').trim()}`
-  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.startsWith(entryPrefix(name)))
+/** One index entry line: the link it starts with names the memory, so only that
+ * link identifies the entry. A link appearing later in a description is a
+ * mention, not the entry. */
+const ENTRY_LINE = /^\s*-\s*\[([^\]]*)\]\(([^)\s]+)\.md\)(.*)$/
+
+/** The separator before an entry's description, kept when the line is rewritten:
+ * Claude writes ` — `, pi writes `: `. */
+const ENTRY_SEPARATOR = /^\s*(?:—|:)[ \t]*/
+
+/** The entry one index line holds, or undefined when the line is not one. */
+function entryOf(line: string): { title: string; target: string; separator: string } | undefined {
+  const match = ENTRY_LINE.exec(line)
+  if (!match) return undefined
+  const separator = ENTRY_SEPARATOR.exec(match[3])
+  return { title: match[1], target: match[2], separator: separator ? separator[0] : ': ' }
+}
+
+/** A memory file name that cannot escape the store: a single plain segment,
+ * never the index file itself. Index link targets are user-controlled, so a
+ * save or delete must never follow one such as ../../x out of the store. */
+function safeStem(stem: string): boolean {
+  return stem !== '' && !stem.startsWith('.') && stem.toLowerCase() !== 'memory' && path.basename(stem) === stem
+}
+
+/** The memory file an index entry links for `name`, when one links a variant of
+ * it: the underscored spelling a Claude-written entry uses. */
+function linkedStem(index: string, name: string): string | undefined {
+  for (const line of index.split('\n')) {
+    const entry = entryOf(line)
+    if (entry && nameVariants(name).includes(entry.target) && safeStem(entry.target)) return entry.target
+  }
+  return undefined
+}
+
+/** The file name a save writes for `name`: the entry already in the index when
+ * one links a variant of the name (keeping Claude's underscored spelling), else
+ * the variant already on disk, else the dashed name. */
+function saveStem(dir: string, index: string, name: string): string {
+  const linked = linkedStem(index, name)
+  if (linked !== undefined) return linked
+  for (const stem of nameVariants(name)) {
+    if (fs.existsSync(path.join(dir, `${stem}.md`))) return stem
+  }
+  return name
+}
+
+/** Add or replace this memory's line in the index, keyed by the memory file the
+ * line links, so a Claude-written entry keeps its title, its underscored link
+ * target, and its ` — ` separator while only its description is replaced. Blank
+ * lines and headings are left exactly where they are. */
+export function upsertIndexLine(index: string, name: string, description: string, stem: string = name): string {
+  // One line per memory: a newline in the description would break every later line-based match.
+  const flat = description.replace(/\s+/g, ' ').trim()
+  const lines = indexLines(index)
+  for (let i = 0; i < lines.length; i++) {
+    const entry = entryOf(lines[i])
+    if (entry && nameVariants(name).includes(entry.target)) {
+      lines[i] = `- [${entry.title}](${entry.target}.md)${entry.separator}${flat}`
+      return `${lines.join('\n')}\n`
+    }
+  }
   if (lines.length === 0 || !lines[0].startsWith('#')) lines.unshift('# Memory index')
-  lines.push(line)
+  lines.push(`- [${stem}](${stem}.md): ${flat}`)
   return `${lines.join('\n')}\n`
 }
 
 export function removeIndexLine(index: string, name: string): string {
-  const lines = index.split('\n').filter((l) => l.trim().length > 0 && !l.startsWith(entryPrefix(name)))
+  const variants = nameVariants(name)
+  const lines = indexLines(index).filter((line) => {
+    const entry = entryOf(line)
+    return !(entry !== undefined && variants.includes(entry.target))
+  })
   return lines.length > 0 ? `${lines.join('\n')}\n` : ''
 }
 
@@ -373,16 +479,18 @@ export function memorySettingsFiles(cwd: string, home: string, approved: boolean
   return claudeSettingsChain(cwd, home, approved)
 }
 
-/** Merge the two memory settings across the chain, later files winning per key;
+/** Merge the memory settings across the chain, later files winning per key;
  * managed policy settings win over every file, per Claude's settings precedence. */
-export function readMemorySettings(files: string[], managed: Record<string, unknown> = readManagedSettings()): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
-  const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } = {}
+export function readMemorySettings(files: string[], managed: Record<string, unknown> = readManagedSettings()): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown; autoMemoryStorage?: unknown } {
+  const merged: { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown; autoMemoryStorage?: unknown } = {}
   for (const settings of readSettingsChain(files)) {
     if ('autoMemoryEnabled' in settings) merged.autoMemoryEnabled = settings.autoMemoryEnabled
     if ('autoMemoryDirectory' in settings) merged.autoMemoryDirectory = settings.autoMemoryDirectory
+    if ('autoMemoryStorage' in settings) merged.autoMemoryStorage = settings.autoMemoryStorage
   }
   if ('autoMemoryEnabled' in managed) merged.autoMemoryEnabled = managed.autoMemoryEnabled
   if ('autoMemoryDirectory' in managed) merged.autoMemoryDirectory = managed.autoMemoryDirectory
+  if ('autoMemoryStorage' in managed) merged.autoMemoryStorage = managed.autoMemoryStorage
   return merged
 }
 
@@ -455,12 +563,14 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
   pi.on('session_start', (_event, ctx) => {
     if (inSubagent()) return
-    migrateLegacyStore(ctx.cwd)
     const approved = isProjectApprovedSilently(ctx)
     const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, os.homedir(), approved))
     enabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
     const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
-    dir = enabled ? resolveMemoryDir(ctx.cwd, override) : memoryDir(ctx.cwd)
+    const storage = memoryStorageSetting(settings.autoMemoryStorage)
+    // Pi-store housekeeping only: in the claude storage mode the pi store is unused.
+    if (storage === 'pi') migrateLegacyStore(ctx.cwd)
+    dir = enabled ? resolveMemoryDir(ctx.cwd, override, storage) : memoryDir(ctx.cwd)
     indexCache = null
     if (!enabled) return
     const count = readIndexQuietly(dir)
@@ -581,7 +691,7 @@ function showMemoryLocations(ctx: ExtensionCommandContext, home: string): void {
   const settings = readMemorySettings(memorySettingsFiles(ctx.cwd, home, approved))
   const isEnabled = autoMemoryEnabled(settings.autoMemoryEnabled, process.env)
   const override = typeof settings.autoMemoryDirectory === 'string' ? settings.autoMemoryDirectory : undefined
-  const store = resolveMemoryDir(ctx.cwd, override)
+  const store = resolveMemoryDir(ctx.cwd, override, memoryStorageSetting(settings.autoMemoryStorage))
   const lines = ['Memory', `  Auto memory: ${isEnabled ? 'on' : 'off'}`, `  Store:       ${store}`, `  Index:       ${path.join(store, INDEX_FILE)}`, ...memoryFiles(ctx.cwd, home).map(({ label, file }) => `  ${label}: ${file}`), 'Edit one with /memory edit. Toggle with /memory on or /memory off.']
   ctx.ui.notify(lines.join('\n'), 'info')
 }
