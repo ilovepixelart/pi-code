@@ -28,6 +28,8 @@ export interface ParsedCommand {
   allowedTools?: string[]
   /** Claude `Bash(...)` specifiers, present only when every bash grant is scoped. */
   bashRules?: string[]
+  /** The `Bash(...)` and `Monitor(...)` specifiers that judge a monitor command. */
+  monitorRules?: string[]
   /** Claude `WebFetch(domain:...)` specifiers, on the same unscoped-wins rule. */
   domainRules?: string[]
   /** Claude `Agent(...)`/`Task(...)` agent names, on the same unscoped-wins rule. */
@@ -114,6 +116,10 @@ export interface ToolGrants {
   /** Claude `Bash(...)` specifiers, present only when every bash grant is scoped:
    * an unscoped `Bash` entry is the wider grant and wins over its scoped siblings. */
   bashRules?: string[]
+  /** The specifiers a monitor command must match: Claude applies Bash permission rules
+   * to Monitor, so these are the `Bash(...)` scopes and the `Monitor(...)` scopes
+   * together. Absent when bash is unscoped, or when monitor is and bash has no scope. */
+  monitorRules?: string[]
   /** Claude `WebFetch(domain:host)` specifiers, same unscoped-wins rule as bash.
    * Dropping them granted unrestricted web_fetch to a command that asked for one host. */
   domainRules?: string[]
@@ -138,9 +144,9 @@ const PATH_RULE_TOOLS: Record<string, Array<PathRuleTool>> = {
 }
 
 /** pi tools whose Claude specifier is a scalar argument scope rather than a path
- * rule: `Bash(cmd)`, `WebFetch(domain:host)` and `Agent(AgentName)`. One list, so a
- * tool cannot be granted a scope here and quietly miss the unscoped-wins rule. */
-const ARG_RULE_TOOLS = ['bash', 'web_fetch', 'subagent', 'slash_command'] as const
+ * rule: `Bash(cmd)`, `Monitor(cmd)`, `WebFetch(domain:host)` and `Agent(AgentName)`. One
+ * list, so a tool cannot be granted a scope here and quietly miss the unscoped-wins rule. */
+const ARG_RULE_TOOLS = ['bash', 'monitor', 'web_fetch', 'subagent', 'slash_command'] as const
 type ArgRuleTool = (typeof ARG_RULE_TOOLS)[number]
 
 const isArgRuleTool = (name: string): name is ArgRuleTool => (ARG_RULE_TOOLS as readonly string[]).includes(name)
@@ -156,13 +162,23 @@ interface GrantAccumulator {
 }
 
 function createGrantAccumulator(): GrantAccumulator {
-  return { tools: [], scopedEntries: [], argScopes: { bash: [], web_fetch: [], subagent: [], slash_command: [] }, argUnscoped: new Set(), pathScopes: { read: [], edit: [], write: [] }, pathUnscoped: new Set() }
+  return { tools: [], scopedEntries: [], argScopes: { bash: [], monitor: [], web_fetch: [], subagent: [], slash_command: [] }, argUnscoped: new Set(), pathScopes: { read: [], edit: [], write: [] }, pathUnscoped: new Set() }
 }
 
 /** The scopes for one argument-ruled tool, or undefined when it has none or when an
  * unscoped grant for it makes it wide. The wider grant wins, as it does for bash. */
 function argRules(acc: GrantAccumulator, tool: ArgRuleTool): string[] | undefined {
   return !acc.argUnscoped.has(tool) && acc.argScopes[tool].length > 0 ? acc.argScopes[tool] : undefined
+}
+
+/** The scopes a monitor command must match. A `Bash(...)` scope judges it too, and an
+ * unscoped `Monitor` does not lift that: a scoped bash would otherwise be escapable
+ * through the monitor tool, which runs the same commands. */
+function monitorRules(acc: GrantAccumulator): string[] | undefined {
+  if (acc.argUnscoped.has('bash')) return undefined
+  if (acc.argUnscoped.has('monitor') && acc.argScopes.bash.length === 0) return undefined
+  const rules = [...acc.argScopes.bash, ...acc.argScopes.monitor]
+  return rules.length > 0 ? rules : undefined
 }
 
 /** Coerce a raw grant value to its string entries: a YAML list stays a list, a
@@ -236,6 +252,7 @@ export function parseToolGrants(raw: unknown): ToolGrants | undefined {
     tools: acc.tools,
     scopedEntries: acc.scopedEntries,
     bashRules: argRules(acc, 'bash'),
+    monitorRules: monitorRules(acc),
     domainRules: argRules(acc, 'web_fetch'),
     agentRules: argRules(acc, 'subagent'),
     skillRules: argRules(acc, 'slash_command'),
@@ -301,6 +318,7 @@ export function parseCommandFile(content: string): ParsedCommand {
     argumentHint: hint(frontmatter['argument-hint']) || undefined,
     allowedTools: grants?.tools,
     bashRules: grants?.bashRules,
+    monitorRules: grants?.monitorRules,
     domainRules: grants?.domainRules,
     agentRules: grants?.agentRules,
     skillRules: grants?.skillRules,

@@ -1014,6 +1014,47 @@ describe('allowed-tools argument scopes', () => {
     expect(blocked?.reason).toContain('review-pr *')
   })
 
+  describe('Monitor scopes', () => {
+    const tools = ['bash', 'read', 'monitor']
+    const monitorCall = async (allowedTools: string, command: string): Promise<{ block?: boolean; reason?: string } | undefined> => {
+      const cwd = tempDir()
+      writeCommand(cwd, 'watch.md', `---\nallowed-tools: ${allowedTools}\n---\nWatch it.`)
+      const s = setup(cwd, true, tools)
+      await s.handlers.get('session_start')?.({}, s.ctx)
+      await s.commands.get('watch')?.handler('', s.ctx)
+      expect(s.activeTools()).toContain('monitor')
+      return (await s.handlers.get('tool_call')?.({ toolName: 'monitor', input: { description: 'the watch', command } }, s.ctx)) as { block?: boolean; reason?: string } | undefined
+    }
+
+    it('holds a monitor command to its Monitor scope', async () => {
+      expect(await monitorCall('Bash(git *), Monitor(tail *)', 'tail -f x')).toBeUndefined()
+      const blocked = await monitorCall('Bash(git *), Monitor(tail *)', 'rm -rf x')
+      expect(blocked?.block).toBe(true)
+      expect(blocked?.reason).toBe('allowed-tools: monitor is scoped for this command.\nAllowed: git *, tail *\nCommand: rm -rf x')
+    })
+
+    it('judges every segment of a compound monitor command, as for bash', async () => {
+      expect((await monitorCall('Monitor(tail *)', 'tail -f x; rm -rf x'))?.block).toBe(true)
+    })
+
+    it('applies a Bash scope to a monitor command, as Claude applies Bash rules to Monitor', async () => {
+      expect(await monitorCall('Bash(git *), Monitor(tail *)', 'git log --oneline')).toBeUndefined()
+    })
+
+    it('does not let an unscoped Monitor grant escape a scoped Bash', async () => {
+      expect(await monitorCall('Bash(git *), Monitor', 'git status')).toBeUndefined()
+      const blocked = await monitorCall('Bash(git *), Monitor', 'rm -rf x')
+      expect(blocked?.block).toBe(true)
+      expect(blocked?.reason).toContain('Allowed: git *')
+    })
+
+    it('leaves monitor unscoped under an unscoped Bash, or an unscoped Monitor with no Bash scope', async () => {
+      expect(await monitorCall('Bash, Monitor(tail *)', 'make watch')).toBeUndefined()
+      expect(await monitorCall('Read, Monitor', 'make watch')).toBeUndefined()
+      expect(await monitorCall('Monitor, Monitor(tail *)', 'make watch')).toBeUndefined()
+    })
+  })
+
   it('leaves other granted tools alone while a bash scope is enforced', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'stage.md', '---\nallowed-tools: Bash(git add:*), Read\n---\nStage it.')
