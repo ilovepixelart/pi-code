@@ -297,11 +297,9 @@ export function installedPlugins(home: string, extraSettingsFiles: string[] = []
   const enabled = enablementSettings(settingsFiles)
   const configs = pluginConfigsMap(settingsFiles)
   const plugins: InstalledPlugin[] = []
-  for (const marketplace of listDirs(cacheDir)) {
-    for (const pluginDir of listPluginDirs(path.join(cacheDir, marketplace))) {
-      const plugin = resolvePlugin(home, cacheDir, marketplace, pluginDir, enabled, configs, index)
-      if (plugin) plugins.push(plugin)
-    }
+  for (const cached of cachedPlugins(cacheDir, index)) {
+    const plugin = resolvePlugin(home, cached, enabled, configs)
+    if (plugin) plugins.push(plugin)
   }
   pluginCache.set(key, { fingerprint, plugins })
   return plugins
@@ -351,15 +349,35 @@ function pluginEnablement(qualified: string, pluginDir: string, enabled: Enablem
   return { enabled: withoutPi, decidedBy: typeof userState === 'boolean' ? 'claude' : 'default', withoutPi }
 }
 
-/** Resolve one cached plugin directory into an enabled InstalledPlugin, or null to skip
- * it: turned off by managed/user settings or defaultEnabled, or no version yet. */
-function resolvePlugin(home: string, cacheDir: string, marketplace: string, pluginDir: string, enabled: EnablementSettings, configs: Record<string, Record<string, string>>, installs: Map<string, string[]> | undefined): InstalledPlugin | null {
-  const qualified = `${pluginDir}@${marketplace}`
-  const root = versionDir(path.join(cacheDir, marketplace, pluginDir), installs?.get(qualified))
-  if (!root) return null
-  const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
+/** One cached plugin's loadable version and manifest. */
+interface CachedPlugin {
+  qualified: string
+  directory: string
+  root: string
+  manifest: Record<string, unknown>
+  name: string
+}
+
+/** Every cached plugin that has a version to load, whatever its enablement. */
+function cachedPlugins(cacheDir: string, installs: Map<string, string[]> | undefined): CachedPlugin[] {
+  const found: CachedPlugin[] = []
+  for (const marketplace of listDirs(cacheDir)) {
+    for (const directory of listPluginDirs(path.join(cacheDir, marketplace))) {
+      const qualified = `${directory}@${marketplace}`
+      const root = versionDir(path.join(cacheDir, marketplace, directory), installs?.get(qualified))
+      if (!root) continue
+      const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
+      const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : directory
+      found.push({ qualified, directory, root, manifest, name })
+    }
+  }
+  return found
+}
+
+/** Turn one cached plugin into an InstalledPlugin, or null to skip it: turned off by
+ * managed/user settings or defaultEnabled. */
+function resolvePlugin(home: string, { qualified, directory: pluginDir, root, manifest, name }: CachedPlugin, enabled: EnablementSettings, configs: Record<string, Record<string, string>>): InstalledPlugin | null {
   if (!pluginEnablement(qualified, pluginDir, enabled, manifest).enabled) return null
-  const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
   // Claude: "{id} is the plugin identifier with characters outside a-z, A-Z, 0-9,
   // _, and - replaced by -", one dash per character, underscores kept.
   const id = qualified.replace(/[^A-Za-z0-9_-]/g, '-')
@@ -378,19 +396,7 @@ export interface PluginState extends Enablement {
 export function pluginStates(home: string): PluginState[] {
   const cacheDir = path.join(claudeConfigDir(home), 'plugins', 'cache')
   const enabled = enablementSettings(userSettingsFiles(home))
-  const index = readInstallIndex(home)
-  const states: PluginState[] = []
-  for (const marketplace of listDirs(cacheDir)) {
-    for (const pluginDir of listPluginDirs(path.join(cacheDir, marketplace))) {
-      const qualified = `${pluginDir}@${marketplace}`
-      const root = versionDir(path.join(cacheDir, marketplace, pluginDir), index?.get(qualified))
-      if (!root) continue
-      const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'))
-      const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : pluginDir
-      states.push({ qualified, directory: pluginDir, name, ...pluginEnablement(qualified, pluginDir, enabled, manifest) })
-    }
-  }
-  return states
+  return cachedPlugins(cacheDir, readInstallIndex(home)).map(({ qualified, directory, name, manifest }) => ({ qualified, directory, name, ...pluginEnablement(qualified, directory, enabled, manifest) }))
 }
 
 /** Make `piCode.enabledPlugins` in pi's settings.json give the plugin the wanted state,
