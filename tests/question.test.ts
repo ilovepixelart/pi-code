@@ -1072,7 +1072,7 @@ describe('question batch submission', () => {
     ])
   })
 
-  it('should keep the confirmed multi-select answer when checkboxes change without Enter', async () => {
+  it('should submit what is checked when a confirmed multi-select answer is changed without Enter', async () => {
     const { overlay, result } = openOverlayWith(setup(), {
       questions: [
         { question: 'First?', options: OPTIONS, multiSelect: true },
@@ -1083,15 +1083,18 @@ describe('question batch submission', () => {
     overlay.handleInput(RAW.space)
     overlay.handleInput(RAW.enter)
     overlay.handleInput(RAW.left)
-    overlay.handleInput(RAW.space)
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.space)
+    const question = overlay.render(120).join('\n')
     overlay.handleInput(RAW.right)
     overlay.handleInput(RAW.right)
+    const review = overlay.render(120).join('\n')
     overlay.handleInput(RAW.enter)
     const submitted = await result
 
-    expect(submitted.content[0].text, 'The confirmed checkboxes should win over unconfirmed edits').toContain('First?\nUser selected: Alpha\n')
+    expect(question, 'Both options should be shown as checked').toContain('[x] Alpha\n     first one\n❯ 2. [x] Beta')
+    expect(review, 'The review should list what is checked').toContain('→ Alpha, Beta')
+    expect(submitted.content[0].text, 'The submitted answer should be what the screen showed as checked').toContain('First?\nUser selected: Alpha, Beta\n')
   })
 
   it('should leave a multi-select question unanswered and advance when Enter is pressed with nothing checked', async () => {
@@ -1834,7 +1837,7 @@ describe('question batch lifecycle', () => {
     }
   })
 
-  it('should keep the confirmed multi-select answer over unconfirmed checkbox edits when the form times out', async () => {
+  it('should report what is checked when a confirmed multi-select answer changes before the form times out', async () => {
     vi.useFakeTimers()
     const dir = mkdtempSync(join(tmpdir(), 'q-multi-timeout-'))
     const settings = join(dir, 'managed-settings.json')
@@ -1857,7 +1860,7 @@ describe('question batch lifecycle', () => {
       vi.advanceTimersByTime(60_000)
       const submitted = await result
 
-      expect(submitted.content[0].text, 'The confirmed checkboxes should win on timeout').toContain('First?\nUser selected: Alpha\n')
+      expect(submitted.content[0].text, 'A confirmed question should report what is checked on timeout').toContain('First?\nUser selected: Beta\n')
     } finally {
       setManagedSettingsPath(undefined)
       rmSync(dir, { recursive: true, force: true })

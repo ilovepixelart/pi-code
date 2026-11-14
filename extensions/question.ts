@@ -671,9 +671,14 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function abort(): void {
         finish(null)
       }
+      /** A confirmed multi-select with nothing left checked is unanswered. */
+      function confirmedAnswer(state: QuestionState): Answer | undefined {
+        return state.mode === 'multi' && !state.checked.some(Boolean) ? undefined : state.confirmed
+      }
       /** The confirmed answer, else whatever is checked. */
       function draftAnswer(state: QuestionState): Answer | undefined {
-        if (state.confirmed) return state.confirmed
+        const confirmed = confirmedAnswer(state)
+        if (confirmed) return confirmed
         return state.mode === 'multi' && state.checked.some(Boolean) ? multiAnswer(state.checked) : undefined
       }
       function answers(): Array<Answer | undefined> {
@@ -681,7 +686,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       /** The confirmed answer, else only the checked options. */
       function timeoutAnswer(state: QuestionState): Outcome {
-        if (state.confirmed) return state.confirmed
+        const confirmed = confirmedAnswer(state)
+        if (confirmed) return confirmed
         return state.mode === 'multi' ? { kind: 'timedOut', selected: multiAnswer(state.checked) } : { kind: 'timedOut' }
       }
       /** Confirms an answer that matches the question's mode. */
@@ -781,6 +787,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const row = state.rows[state.cursor]
         if (state.mode !== 'multi' || row.kind !== 'option') return
         state.checked[row.index] = !state.checked[row.index]
+        // A confirmed answer follows every toggle, so what is checked is what is submitted.
+        if (state.confirmed) state.confirmed = multiAnswer(state.checked)
       }
       function handleTypingInput(state: QuestionState, data: string): void {
         if (matchesKey(data, Key.escape)) {
