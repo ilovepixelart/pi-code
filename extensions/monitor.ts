@@ -47,6 +47,8 @@ import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 export const DEFAULT_DEADLINE_MS = 5 * 60_000
 /** "at most 30 minutes". */
 export const MAX_DEADLINE_MS = 30 * 60_000
+/** Claude's schema takes no `timeout_ms` under one second. */
+export const MIN_DEADLINE_MS = 1_000
 
 /** How long lines gather after the first one before they are delivered. */
 export const BATCH_WINDOW_MS = 1_000
@@ -163,9 +165,9 @@ export function createLineBatcher(options: BatcherOptions): LineBatcher {
 }
 
 /** The deadline a watch gets: the default when none is asked for, capped at the maximum. */
-export function deadlineMs(requested: number | undefined): number {
+export function deadlineMs(requested: number | undefined, minMs: number = MIN_DEADLINE_MS): number {
   if (requested === undefined) return DEFAULT_DEADLINE_MS
-  if (!Number.isFinite(requested) || requested <= 0) throw new Error(`timeout_ms must be a positive number of milliseconds, at most ${MAX_DEADLINE_MS}`)
+  if (!Number.isFinite(requested) || requested < minMs) throw new Error(`timeout_ms must be a number of milliseconds, at least ${minMs} (a value over ${MAX_DEADLINE_MS} is capped)`)
   return Math.min(Math.floor(requested), MAX_DEADLINE_MS)
 }
 
@@ -179,28 +181,38 @@ const formatDuration = (ms: number): string => {
   return `${Math.round(ms / 100) / 10}-second`
 }
 
+/** How a notice names its watch: the ID task_stop takes and the model's own description. */
+const label = (id: string, description: string): string => `Monitor ${id} ("${commandPreview(description)}")`
+
 /** The one notice a watch sends when it ends on its own or at its deadline. */
-function endNotice(end: { id: string; outputFile: string; limitMs: number; reachedDeadline: boolean; exitCode: number | undefined; error: unknown }): string {
-  if (end.reachedDeadline) return `Monitor ${end.id} reached its ${formatDuration(end.limitMs)} deadline and stopped. Start it again if you still need it.`
-  if (end.error !== undefined) return `Monitor ${end.id} could not run: ${end.error instanceof Error ? end.error.message : String(end.error)}`
-  return `Monitor ${end.id} ended: the command exited with code ${end.exitCode ?? '?'}. Full output: ${end.outputFile}`
+function endNotice(end: { label: string; outputFile: string; limitMs: number; reachedDeadline: boolean; exitCode: number | undefined; error: unknown }): string {
+  if (end.reachedDeadline) return `${end.label} reached its ${formatDuration(end.limitMs)} deadline and stopped. Start it again if you still need it.`
+  if (end.error !== undefined) return `${end.label} could not run: ${end.error instanceof Error ? end.error.message : String(end.error)}`
+  return `${end.label} ended: the command exited with code ${end.exitCode ?? '?'}. Full output: ${end.outputFile}`
 }
 
-export function batchText(id: string, command: string, batch: Batch, outputFile: string): string {
-  const head = `Monitor ${id} ("${commandPreview(command)}") output:`
+export function batchText(id: string, description: string, batch: Batch, outputFile: string): string {
+  const head = `${label(id, description)} output:`
   const more = batch.omitted > 0 ? [`[${batch.omitted} more line${batch.omitted === 1 ? '' : 's'} not shown; full output: ${outputFile}]`] : []
   return [head, ...batch.lines, ...more].join('\n')
 }
 
 const schema = Type.Object({
+  description: Type.String({ description: 'Short description of what you are watching. It names the watch in every message it sends and in /tasks.' }),
   command: Type.String({ description: 'Shell command to watch. Each line it prints is delivered to you as an event; write it so it prints only the lines worth reacting to (for example tail -F with grep --line-buffered, or a polling loop that prints on change).' }),
-  timeout_ms: Type.Optional(Type.Number({ description: `Deadline in milliseconds (default ${DEFAULT_DEADLINE_MS}, maximum ${MAX_DEADLINE_MS}). At the deadline the watch ends and you get one notice.` })),
+  timeout_ms: Type.Optional(Type.Number({ minimum: MIN_DEADLINE_MS, description: `Deadline in milliseconds (default ${DEFAULT_DEADLINE_MS}, minimum ${MIN_DEADLINE_MS}, maximum ${MAX_DEADLINE_MS}). At the deadline the watch ends and you get one notice.` })),
 })
 
 type ToolResult = AgentToolResult<unknown>
 
 /** What a test may shorten; pi runs with the constants above. */
-export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'>
+export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'> & { minDeadlineMs?: number }
+
+interface Watch {
+  description: string
+  command: string
+  limitMs: number
+}
 
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
 
@@ -256,7 +268,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     })
   }
 
-  function start(command: string, limitMs: number, ctx: ExtensionToolContext): BackgroundShell {
+  function start({ description, command, limitMs }: Watch, ctx: ExtensionToolContext): BackgroundShell {
     const id = `m${randomUUID().replace(/-/g, '').slice(0, 8)}`
     const outputFile = path.join(shellOutputDir(), `${id}.output`)
     const log = fs.createWriteStream(outputFile, { mode: 0o600 })
@@ -264,8 +276,8 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     log.on('error', () => {})
 
     const lifetime = new AbortController()
-    const shell = registerShell({ id, kind: 'monitor', command, outputFile, stop: () => lifetime.abort() })
-    const batcher = createLineBatcher({ ...limits, emit: (batch) => send(batchText(id, command, batch, outputFile)) })
+    const shell = registerShell({ id, kind: 'monitor', description, command, outputFile, stop: () => lifetime.abort() })
+    const batcher = createLineBatcher({ ...limits, emit: (batch) => send(batchText(id, description, batch, outputFile)) })
     const decoder = new StringDecoder('utf8')
 
     let reachedDeadline = false
@@ -310,8 +322,8 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
       settleShell(shell, exitCode)
       // Stopped through task_stop or the session ending: nothing is waiting for it.
       if (stoppedOnRequest) return
-      const lines = rest ? [batchText(id, command, rest, outputFile)] : []
-      send([...lines, endNotice({ id, outputFile, limitMs, reachedDeadline, exitCode, error })].join('\n'))
+      const lines = rest ? [batchText(id, description, rest, outputFile)] : []
+      send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, exitCode, error })].join('\n'))
     }
 
     return shell
@@ -328,8 +340,9 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
       const refusal = monitorAllowed(ctx)
       if (refusal) throw new Error(refusal)
       if (params.command.trim() === '') throw new Error('command must not be empty')
-      const limitMs = deadlineMs(params.timeout_ms)
-      const shell = start(params.command, limitMs, ctx)
+      if ((params.description ?? '').trim() === '') throw new Error('description must not be empty')
+      const limitMs = deadlineMs(params.timeout_ms, limits.minDeadlineMs)
+      const shell = start({ description: params.description, command: params.command, limitMs }, ctx)
       return text(`Monitor started with ID: ${shell.id}. Each line the command prints is delivered to you as it arrives, in batches. It stops at its ${formatDuration(limitMs)} deadline; use task_stop to stop it sooner. Full output is written to: ${shell.outputFile}`)
     },
   })

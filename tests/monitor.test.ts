@@ -5,26 +5,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension from '../extensions/background-bash.ts'
 import { allShells, registerShell, resetShells, settleShell, shellsStatusText } from '../extensions/internal/background-shells.ts'
-import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, MAX_DEADLINE_MS, type MonitorLimits, monitorAllowed } from '../extensions/monitor.ts'
+import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, MAX_DEADLINE_MS, MIN_DEADLINE_MS, type MonitorLimits, monitorAllowed } from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }> }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
+type Tool = { name: string; execute: Execute; description: string; parameters: { required?: string[]; properties: Record<string, unknown> } }
 type Handler = (event: Record<string, unknown>, ctx: unknown) => void
 type Sent = { message: { customType: string; content: string; display: boolean }; options: { triggerTurn?: boolean } }
 
 /** Both extensions on one stubbed pi, as the pack loads them: task_stop is the bash
  * extension's, and the registry it stops through is shared. */
 const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits } = {}) => {
-  const tools = new Map<string, { name: string; execute: Execute; description: string }>()
+  const tools = new Map<string, Tool>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
   const pi = {
-    registerTool: (tool: { name: string; execute: Execute; description: string }) => tools.set(tool.name, tool),
+    registerTool: (tool: Tool) => tools.set(tool.name, tool),
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
   // The real window and interval are a second and five; the batcher's own tests cover them.
-  monitorExtension(pi as never, { windowMs: 10, minIntervalMs: 20, ...options.limits })
+  monitorExtension(pi as never, { windowMs: 10, minIntervalMs: 20, minDeadlineMs: 100, ...options.limits })
   backgroundBashExtension(pi as never)
   const statuses = new Map<string, string | undefined>()
   const ctx = {
@@ -48,7 +49,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     return tool
   }
   return {
-    monitor: (params: Record<string, unknown>) => get('monitor').execute('call-1', params, undefined, undefined, ctx),
+    monitor: (params: Record<string, unknown>) => get('monitor').execute('call-1', { description: 'the watch', ...params }, undefined, undefined, ctx),
     stop: (task_id: string) => get('task_stop').execute('call-2', { task_id }, undefined, undefined, ctx),
     tool: get,
     sent,
@@ -196,8 +197,10 @@ describe('deadlineMs', () => {
     expect(deadlineMs(10 * MAX_DEADLINE_MS)).toBe(1_800_000)
   })
 
-  it('rejects a deadline that is not a positive number', () => {
-    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => deadlineMs(bad)).toThrow(/timeout_ms/)
+  it('rejects a deadline that is not a number, or is under one second', () => {
+    expect(MIN_DEADLINE_MS).toBe(1000)
+    for (const bad of [0, -1, 999, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => deadlineMs(bad)).toThrow(/timeout_ms must be a number of milliseconds, at least 1000/)
+    expect(deadlineMs(1000)).toBe(1000)
   })
 })
 
@@ -210,7 +213,7 @@ describe('monitorAllowed', () => {
 
 describe('batchText', () => {
   it('names the monitor and points at the output file for lines it left out', () => {
-    expect(batchText('m1', 'tail -F log', { lines: ['x'], omitted: 0 }, '/o')).toBe('Monitor m1 ("tail -F log") output:\nx')
+    expect(batchText('m1', 'errors in  the\napp log', { lines: ['x'], omitted: 0 }, '/o')).toBe('Monitor m1 ("errors in the app log") output:\nx')
     expect(batchText('m1', 'c', { lines: [], omitted: 1 }, '/o')).toContain('[1 more line not shown; full output: /o]')
     expect(batchText('m1', 'c', { lines: [], omitted: 3 }, '/o')).toContain('[3 more lines not shown')
   })
@@ -218,8 +221,8 @@ describe('batchText', () => {
 
 describe('/tasks listing', () => {
   it('labels a monitor as one', () => {
-    const entry = registerShell({ id: 'm00000001', kind: 'monitor', command: 'tail -F x', outputFile: '/o' })
-    expect(shellsStatusText([entry])).toContain('m00000001 monitor: running - tail -F x')
+    const entry = registerShell({ id: 'm00000001', kind: 'monitor', description: 'app errors', command: 'tail -F x', outputFile: '/o' })
+    expect(shellsStatusText([entry])).toContain('m00000001 monitor: running - app errors: tail -F x')
   })
 })
 
@@ -246,10 +249,33 @@ describe('monitor tool', () => {
     expect(sent[0]?.message.content).toContain(`Monitor ${id} (`)
   })
 
-  it('refuses an empty command and a bad deadline', async () => {
+  it('refuses an empty command, an empty description and a bad deadline', async () => {
     const { monitor } = setup()
-    await expect(monitor({ command: '  ' })).rejects.toThrow(/empty/)
+    await expect(monitor({ command: '  ' })).rejects.toThrow(/command must not be empty/)
+    await expect(monitor({ command: 'echo hi', description: ' ' })).rejects.toThrow(/description must not be empty/)
+    await expect(monitor({ command: 'echo hi', description: undefined })).rejects.toThrow(/description must not be empty/)
     await expect(monitor({ command: 'echo hi', timeout_ms: -5 })).rejects.toThrow(/timeout_ms/)
+    expect(allShells()).toEqual([])
+  })
+
+  it('requires a description and sets the least timeout_ms in its schema', () => {
+    const { tool } = setup()
+    const parameters = tool('monitor').parameters
+    expect(parameters.required).toEqual(['description', 'command'])
+    expect(parameters.properties.timeout_ms).toMatchObject({ minimum: 1000 })
+    // A longer request is capped, not refused, so the schema names no maximum.
+    expect(parameters.properties.timeout_ms).not.toHaveProperty('maximum')
+  })
+
+  it('refuses a deadline under one second', async () => {
+    const { monitor } = setup({ limits: { minDeadlineMs: undefined } })
+    await expect(monitor({ command: 'echo hi', timeout_ms: 300 })).rejects.toThrow(/at least 1000/)
+  })
+
+  it('lists the description in the registry entry /tasks reads', async () => {
+    const { monitor } = setup()
+    const id = idOf(await monitor({ command: 'sleep 30', description: 'deploy status' }))
+    expect(shell(id)).toMatchObject({ description: 'deploy status', command: 'sleep 30' })
   })
 
   it('delivers the lines and one end notice when the command exits, and writes the output file', async () => {
@@ -262,9 +288,8 @@ describe('monitor tool', () => {
     expect(sent).toHaveLength(1)
     const [{ message, options }] = sent
     expect(message.customType).toBe('monitor')
-    expect(message.content).toContain(`Monitor ${id} ("printf`)
-    expect(message.content).toContain('alpha\nbeta\ngamma')
-    expect(message.content).toContain(`Monitor ${id} ended: the command exited with code 3`)
+    expect(message.content).toContain(`Monitor ${id} ("the watch") output:\nalpha\nbeta\ngamma\n`)
+    expect(message.content).toContain(`Monitor ${id} ("the watch") ended: the command exited with code 3`)
     expect(options.triggerTurn).toBe(true)
     expect(shell(id)).toMatchObject({ state: 'failed', exitCode: 3 })
     const file = shell(id)?.outputFile ?? ''
@@ -273,7 +298,6 @@ describe('monitor tool', () => {
 
   it('delivers stdout lines only, and writes stderr to the output file', async () => {
     const { monitor, sent } = setup()
-    // Spelled in two halves, so the command preview in the message cannot match.
     const id = idOf(await monitor({ command: 'echo visible; printf "%s%s\\n" hid den >&2' }))
     await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent).toHaveLength(1)
@@ -287,7 +311,7 @@ describe('monitor tool', () => {
     const { monitor, sent } = setup()
     const id = idOf(await monitor({ command: 'echo quiet >&2' }))
     await until(() => shell(id)?.finishedAt !== undefined)
-    expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ended: the command exited with code 0. Full output: ${shell(id)?.outputFile}`])
+    expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ("the watch") ended: the command exited with code 0. Full output: ${shell(id)?.outputFile}`])
   })
 
   it('runs the command with the session variables the bash tool sets', async () => {
@@ -301,7 +325,7 @@ describe('monitor tool', () => {
     const { monitor, sent } = setup()
     const id = idOf(await monitor({ command: 'echo early; sleep 5' }))
     await until(() => sent.length > 0)
-    expect(sent[0]?.message.content).toBe(`Monitor ${id} ("echo early; sleep 5") output:\nearly`)
+    expect(sent[0]?.message.content).toBe(`Monitor ${id} ("the watch") output:\nearly`)
     expect(shell(id)?.state).toBe('running')
   })
 
@@ -310,7 +334,7 @@ describe('monitor tool', () => {
     const id = idOf(await monitor({ command: 'sleep 30', timeout_ms: 300 }))
     await until(() => sent.length > 0)
     expect(sent).toHaveLength(1)
-    expect(sent[0]?.message.content).toBe(`Monitor ${id} reached its 0.3-second deadline and stopped. Start it again if you still need it.`)
+    expect(sent[0]?.message.content).toBe(`Monitor ${id} ("the watch") reached its 0.3-second deadline and stopped. Start it again if you still need it.`)
     expect(shell(id)?.state).toBe('killed')
   })
 
@@ -337,7 +361,7 @@ describe('monitor tool', () => {
     const { monitor, sent } = setup({ cwd: `${os.tmpdir()}/no-such-dir-${Date.now()}` })
     const id = idOf(await monitor({ command: 'echo never' }))
     await until(() => sent.length > 0)
-    expect(sent[0]?.message.content).toMatch(new RegExp(`^Monitor ${id} could not run: Working directory does not exist`))
+    expect(sent[0]?.message.content).toMatch(new RegExp(String.raw`^Monitor ${id} \("the watch"\) could not run: Working directory does not exist`))
     expect(shell(id)?.state).toBe('failed')
   })
 

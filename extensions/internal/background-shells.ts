@@ -28,6 +28,8 @@ export interface BackgroundShell {
   id: string
   /** Absent for a background Bash command. */
   kind?: ShellKind
+  /** What a monitor watches, in the model's words. */
+  description?: string
   command: string
   /** Every byte the command wrote to stdout and stderr, for the model to read. */
   outputFile: string
@@ -103,7 +105,7 @@ export function shellSettings(ctx: Pick<ExtensionContext, 'cwd' | 'isProjectTrus
   }
 }
 
-export function registerShell(shell: Pick<BackgroundShell, 'id' | 'kind' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {
+export function registerShell(shell: Pick<BackgroundShell, 'id' | 'kind' | 'description' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {
   const record: BackgroundShell = { ...shell, state: 'running', background: shell.background ?? true }
   registry().shells.set(record.id, record)
   if (record.background) changed()
@@ -205,7 +207,8 @@ function stateLabel(shell: Pick<BackgroundShell, 'state' | 'exitCode'>): string 
 /** The /tasks section for shells; empty when there are none, so /tasks can omit it. */
 export function shellsStatusText(shells: ReadonlyArray<BackgroundShell>): string {
   if (shells.length === 0) return ''
-  return shells.map((shell) => `${shell.id} ${shell.kind ?? 'shell'}: ${stateLabel(shell)} - ${commandPreview(shell.command)}\n  output: ${shell.outputFile}`).join('\n')
+  const what = (shell: BackgroundShell): string => (shell.description ? `${commandPreview(shell.description)}: ` : '') + commandPreview(shell.command)
+  return shells.map((shell) => `${shell.id} ${shell.kind ?? 'shell'}: ${stateLabel(shell)} - ${what(shell)}\n  output: ${shell.outputFile}`).join('\n')
 }
 
 /** What the model is told when a background command finishes. */
