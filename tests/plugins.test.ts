@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Counts file reads so the cache tests can assert a repeat call re-reads nothing.
 // The builtin namespace is not spyable, so the module is wrapped instead, like os.
@@ -744,6 +744,17 @@ describe('pi-only plugin enablement', () => {
 describe('/claude-plugins command', () => {
   type Component = { handleInput: (data: string) => void; render: (width: number) => string[] }
   type Factory = (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => Component
+
+  // The command writes pi's settings.json, which every later test in the file would read.
+  let savedAgentDir: string | undefined
+  beforeEach(() => {
+    savedAgentDir = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'plugins-agentdir-'))
+  })
+  afterEach(() => {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir
+  })
 
   /** The list as last rendered by runPlugin, after every key, without styling. */
   let screen = ''
