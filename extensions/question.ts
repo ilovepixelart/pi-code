@@ -815,7 +815,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const next = matchesKey(data, Key.tab) || matchesKey(data, Key.right)
         const previous = matchesKey(data, Key.shift('tab')) || matchesKey(data, Key.left)
         if (!next && !previous) return false
-        navigate((active + (previous ? specs.length : 1)) % (specs.length + 1))
+        navigate(previous ? Math.max(0, active - 1) : Math.min(specs.length, active + 1))
         return true
       }
       function chooseReviewOption(): void {

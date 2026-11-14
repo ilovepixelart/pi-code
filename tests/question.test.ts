@@ -1013,6 +1013,26 @@ describe('question tab navigation', () => {
     expect(rendered, 'Right should navigate without choosing the focused option').toContain('Second?')
   })
 
+  it('should stop at the first question and at Submit when navigating past either end', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput('\x1b[Z')
+    overlay.handleInput(RAW.left)
+    const atStart = overlay.render(120).join('\n')
+    for (const key of [RAW.right, RAW.right, RAW.right, RAW.tab]) overlay.handleInput(key)
+    const atEnd = overlay.render(120).join('\n')
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(atStart, 'Shift+Tab and Left on the first question should stay there').toContain('First?')
+    expect(atEnd, 'Right and Tab on Submit should stay there').toContain('Ready to submit your answers?')
+  })
+
   it('should restore option focus when returning to an unanswered question', async () => {
     const { overlay, result } = openOverlayWith(setup(), {
       questions: [
@@ -1062,7 +1082,8 @@ describe('question batch submission', () => {
       ],
     })
 
-    overlay.handleInput(RAW.left)
+    overlay.handleInput(RAW.right)
+    overlay.handleInput(RAW.right)
     overlay.handleInput(RAW.enter)
     const submitted = await result
 
