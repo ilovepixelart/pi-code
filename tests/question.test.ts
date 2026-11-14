@@ -1512,8 +1512,11 @@ describe('question batch lifecycle', () => {
     if (!overlay) throw new Error('Expected the overlay factory to initialize')
     overlay.handleInput(RAW.right)
 
-    expect(offers, 'A failed overlay should not open another remote offer').toHaveLength(1)
-    expect(offers[0].signal.aborted, 'Failure should withdraw the initialized remote offer').toBe(true)
+    expect(offers, 'A failed overlay should not open another remote offer').toHaveLength(2)
+    expect(
+      offers.map((offer) => offer.signal.aborted),
+      'Failure should withdraw every remote offer',
+    ).toEqual([true, true])
   })
 
   it('should preserve remote checkbox identities when different selections have the same joined labels', async () => {
@@ -1583,13 +1586,80 @@ describe('question batch lifecycle', () => {
 
     expect(
       offers.map((offer) => offer.question),
-      'Each question should be offered once, on its first visit',
+      'Each question should be offered once',
     ).toEqual(['First?', 'Second?'])
     expect(live, 'Unanswered questions should keep their offers live while another tab has focus').toEqual([false, false])
     expect(
       offers.every((offer) => offer.signal.aborted),
       'Closing the form should abort every offer',
     ).toBe(true)
+  })
+
+  it('should offer every question with a shared batch id when the form opens', async () => {
+    const offers: RemoteQuestionOffer[] = []
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      offers.push(offer)
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+        { question: 'Third?', options: OPTIONS },
+      ],
+    })
+    const atOpen = offers.map((offer) => offer.question)
+
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.right)
+    const accepted = replies[2]?.({ action: 'answer', indices: [2] })
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(atOpen, 'Every question should be offered before any key is pressed').toEqual(['First?', 'Second?', 'Third?'])
+    expect(
+      offers.map((offer) => offer.batch),
+      'Each offer should name its batch, its 1-based position and the total',
+    ).toEqual([1, 2, 3].map((index) => ({ id: offers[0].batch?.id, index, total: 3 })))
+    expect(offers[0].batch?.id, 'The batch id should be a non-empty string').toEqual(expect.stringMatching(/./))
+    expect(accepted, 'A question never visited should still accept its remote reply').toBe(true)
+    expect(submitted.details?.questions, 'The remote answer to the unvisited question should be submitted').toMatchObject([{ skipped: true }, { skipped: true }, { answer: 'Beta' }])
+  })
+
+  it('should keep a reply to an earlier question when it arrives while a later question is offered', async () => {
+    let firstReply: ReturnType<RemoteQuestionOffer['claim']>
+    let accepted: boolean | undefined
+    const tool = setupRemote((offer) => {
+      const reply = offer.claim()
+      if (offer.question === 'First?') firstReply = reply
+      else accepted = firstReply?.({ action: 'answer', indices: [2] })
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(accepted, 'The reply should be accepted while the batch is still being offered').toBe(true)
+    expect(submitted.details?.questions, 'An accepted reply should not be lost before the form opens').toMatchObject([{ answer: 'Beta' }, { answer: 'Alpha' }])
+  })
+
+  it('should leave the batch fields off the offer when the call asks one question', async () => {
+    const offers: RemoteQuestionOffer[] = []
+    const tool = setupRemote((offer) => {
+      offers.push(offer)
+    })
+    const { overlay, result } = openOverlayWith(tool, { question: 'Pick one', options: OPTIONS })
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(offers, 'A lone question should be offered once').toHaveLength(1)
+    expect('batch' in offers[0], 'A lone question should keep the offer shape it had before batches').toBe(false)
   })
 
   it('should save a remote answer to a question that does not have focus', async () => {

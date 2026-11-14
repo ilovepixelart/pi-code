@@ -79,6 +79,9 @@ export interface RemoteQuestionOffer {
   options: OptionWithDesc[]
   multiSelect: boolean
   allowFreeText: boolean
+  /** Only when the call asks several questions, whose offers are live together:
+   * `id` is shared by the call's offers, `index` is 1-based, `total` is their count. */
+  batch?: { id: string; index: number; total: number }
   signal: AbortSignal
   /** Must be called during event emission; only one listener receives a settle handle. */
   claim: () => ((outcome: RemoteQuestionOutcome) => boolean) | undefined
@@ -397,7 +400,7 @@ function remoteAnswer(outcome: RemoteQuestionOutcome, options: OptionWithDesc[],
 }
 
 /** Undefined when nobody claims synchronously, so the overlay opens with no async gap. */
-function offerRemoteQuestion(params: QuestionSpec, ctx: ExtensionContext, events: ExtensionAPI['events'] | undefined, signal: AbortSignal | undefined): RemoteOffer | undefined {
+function offerRemoteQuestion(params: QuestionSpec, ctx: ExtensionContext, events: ExtensionAPI['events'] | undefined, signal: AbortSignal | undefined, batch?: RemoteQuestionOffer['batch']): RemoteOffer | undefined {
   if (!events) return undefined
   if (signal?.aborted) return { kind: 'settled', value: null }
 
@@ -427,6 +430,7 @@ function offerRemoteQuestion(params: QuestionSpec, ctx: ExtensionContext, events
     options: params.options.map(({ label, description }) => ({ label, ...(description === undefined ? {} : { description }) })),
     multiSelect,
     allowFreeText: !multiSelect,
+    ...(batch ? { batch } : {}),
     signal: controller.signal,
     claim: () => {
       if (claimed || controller.signal.aborted) return undefined
@@ -465,6 +469,8 @@ function offerRemoteQuestion(params: QuestionSpec, ctx: ExtensionContext, events
       attach: (answer, touch) => {
         deliver = answer
         touchOverlay = touch
+        // A reply accepted before the form opened, while a later question was being offered.
+        if (early) answer(early.value)
       },
       close,
     },
@@ -592,24 +598,25 @@ const IDLE_TICK_MS = 250
  */
 export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext, timeoutMs?: number, events?: ExtensionAPI['events'], signal?: AbortSignal): Promise<FormResult | null> {
   const saved: Array<Answer | undefined> = specs.map(() => undefined)
-  let active = 0
-  let initialRemote: RemoteQuestion | undefined
-  // Questions answered remotely during emission need no terminal.
-  for (; active < specs.length; active++) {
-    if (signal?.aborted) return null
-    const offer = offerRemoteQuestion(specs[active], ctx, events, signal)
-    if (offer?.kind !== 'settled') {
-      initialRemote = offer?.remote
-      break
-    }
-    if (offer.value === null) return null
-    saved[active] = offer.value
-  }
-  if (active === specs.length) return { kind: 'submit', answers: saved }
-
   const lone = specs.length === 1
-  let dispose = () => initialRemote?.close()
+  const batchId = lone ? undefined : randomUUID()
+  // One offer per question, made before the form opens and live until that question is settled.
+  const remotes: Array<RemoteQuestion | undefined> = specs.map(() => undefined)
+  let dispose = () => {
+    for (const remote of remotes) remote?.close()
+  }
   try {
+    for (const [index, spec] of specs.entries()) {
+      if (signal?.aborted) return null
+      const offer = offerRemoteQuestion(spec, ctx, events, signal, batchId === undefined ? undefined : { id: batchId, index: index + 1, total: specs.length })
+      if (offer?.kind === 'claimed') remotes[index] = offer.remote
+      else if (offer?.value === null) return null
+      else saved[index] = offer?.value
+    }
+    // Questions answered remotely during emission need no terminal.
+    if (saved.every(Boolean)) return { kind: 'submit', answers: saved }
+    let active = saved.indexOf(undefined)
+
     return await ctx.ui.custom<FormResult | null>((tui, theme, _kb, done) => {
       const editorTheme: EditorTheme = {
         borderColor: (s) => theme.fg('accent', s),
@@ -638,9 +645,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         if (value) restoreRemoteAnswer(index, value)
       })
       let reviewIndex = 0
-      // One offer per question, live until that question is settled, whichever tab has focus.
-      const remotes = specs.map((_, index) => (index === active ? initialRemote : undefined))
-      const offered = specs.map((_, index) => index <= active)
       let finished = false
       let deadline = 0
       let countdown: number | undefined
@@ -717,20 +721,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         else if (index === active) navigate(active + 1)
         else refresh()
       }
-      function attachRemote(index: number): void {
-        remotes[index]?.attach((value) => receive(index, value), resetIdleTimer)
-      }
       function navigate(index: number): void {
         active = index
         refresh()
-        if (active === specs.length || offered[active]) return
-        offered[active] = true
-        const offer = offerRemoteQuestion(specs[active], ctx, events, signal)
-        if (offer?.kind === 'settled') receive(active, offer.value)
-        else {
-          remotes[active] = offer?.remote
-          attachRemote(active)
-        }
       }
       function commit(value: Answer): void {
         confirm(states[active], value)
@@ -740,7 +733,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       signal?.addEventListener('abort', abort, { once: true })
       if (signal?.aborted) abort()
-      attachRemote(active)
+      remotes.forEach((remote, index) => {
+        remote?.attach((value) => receive(index, value), resetIdleTimer)
+      })
       function idleTick(): void {
         const remaining = deadline - Date.now()
         if (remaining <= 0) {
