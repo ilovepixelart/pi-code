@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import memoryExtension, { capIndexForPrompt, claudeMemoryDir, claudeProjectSlug, indexWouldOverflow, readMemorySettings, resolveMemoryDir, upsertIndexLine } from '../extensions/memory.ts'
 
@@ -26,6 +26,44 @@ const CLAUDE_INDEX = [
   '',
 ].join('\n')
 
+let home: string
+
+// tests/setup.ts rolls process.env back after every test.
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'mem-home-'))
+  process.env.HOME = home
+  process.env.USERPROFILE = home // os.homedir() reads USERPROFILE on Windows
+})
+
+const userSettings = (settings: Record<string, unknown>): void => {
+  mkdirSync(join(home, '.claude'), { recursive: true })
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(settings))
+}
+
+const claudeStore = (cwd: string): string => join(home, '.claude', 'projects', claudeProjectSlug(cwd), 'memory')
+
+function wire() {
+  const handlers = new Map<string, Handler>()
+  let tool: Tool | undefined
+  memoryExtension({
+    on: (name: string, fn: Handler) => handlers.set(name, fn),
+    registerTool: (t: Tool) => {
+      tool = t
+    },
+    registerCommand: () => {},
+  } as never)
+  if (!tool) throw new Error('memory tool not registered')
+  return { handlers, tool }
+}
+
+const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
+
+const toolFor = async (cwd: string): Promise<Tool> => {
+  const wired = wire()
+  await start(wired.handlers, cwd)
+  return wired.tool
+}
+
 /** The Claude project slug, verified against directories Claude Code itself creates:
  * every character outside [a-zA-Z0-9] becomes one dash, with no folding and no digest. */
 describe('claudeProjectSlug', () => {
@@ -43,47 +81,6 @@ describe('claudeProjectSlug', () => {
 })
 
 describe('claude memory storage', () => {
-  let home: string
-  let savedHome: string | undefined
-  let savedProfile: string | undefined
-
-  beforeEach(() => {
-    savedHome = process.env.HOME
-    savedProfile = process.env.USERPROFILE
-    home = mkdtempSync(join(tmpdir(), 'mem-home-'))
-    process.env.HOME = home
-    process.env.USERPROFILE = home // os.homedir() reads USERPROFILE on Windows
-  })
-  afterEach(() => {
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
-    if (savedProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = savedProfile
-  })
-
-  const userSettings = (settings: Record<string, unknown>): void => {
-    mkdirSync(join(home, '.claude'), { recursive: true })
-    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(settings))
-  }
-
-  const claudeStore = (cwd: string): string => join(home, '.claude', 'projects', claudeProjectSlug(cwd), 'memory')
-
-  function wire() {
-    const handlers = new Map<string, Handler>()
-    let tool: Tool | undefined
-    memoryExtension({
-      on: (name: string, fn: Handler) => handlers.set(name, fn),
-      registerTool: (t: Tool) => {
-        tool = t
-      },
-      registerCommand: () => {},
-    } as never)
-    if (!tool) throw new Error('memory tool not registered')
-    return { handlers, tool }
-  }
-
-  const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
-
   it('places the store under the Claude projects directory, keyed on the repository root', () => {
     const repo = mkdtempSync(join(tmpdir(), 'mem-repo-'))
     mkdirSync(join(repo, '.git'))
@@ -157,65 +154,23 @@ describe('claude memory storage', () => {
 })
 
 describe('reading and writing a Claude-written store', () => {
-  let home: string
-  let savedHome: string | undefined
-  let savedProfile: string | undefined
   let cwd: string
   let store: string
 
   beforeEach(() => {
-    savedHome = process.env.HOME
-    savedProfile = process.env.USERPROFILE
-    home = mkdtempSync(join(tmpdir(), 'mem-home-'))
-    process.env.HOME = home
-    process.env.USERPROFILE = home
     cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
     userSettings({ autoMemoryStorage: 'claude' })
-    store = claudeStoreOf(cwd)
+    store = claudeStore(cwd)
     mkdirSync(store, { recursive: true })
     writeFileSync(join(store, 'MEMORY.md'), CLAUDE_INDEX)
     writeFileSync(join(store, 'feedback_no_unprompted_bench_runs.md'), '硬约束正文\n')
     writeFileSync(join(store, 'feedback_e2e_run_cadence.md'), 'e2e 正文\n')
     writeFileSync(join(store, 'project_nextjs_build_artifacts.md'), '构建产物正文\n')
   })
-  afterEach(() => {
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
-    if (savedProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = savedProfile
-  })
-
-  const userSettings = (settings: Record<string, unknown>): void => {
-    mkdirSync(join(home, '.claude'), { recursive: true })
-    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(settings))
-  }
-  const claudeStoreOf = (dir: string): string => join(home, '.claude', 'projects', claudeProjectSlug(dir), 'memory')
-
-  function wire() {
-    const handlers = new Map<string, Handler>()
-    let tool: Tool | undefined
-    memoryExtension({
-      on: (name: string, fn: Handler) => handlers.set(name, fn),
-      registerTool: (t: Tool) => {
-        tool = t
-      },
-      registerCommand: () => {},
-    } as never)
-    if (!tool) throw new Error('memory tool not registered')
-    return { handlers, tool }
-  }
-
-  const start = async (handlers: Map<string, Handler>) => handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
-
-  const tool = async (): Promise<Tool> => {
-    const wired = wire()
-    await start(wired.handlers)
-    return wired.tool
-  }
 
   it('injects the Claude index unchanged, headings included', async () => {
     const { handlers } = wire()
-    await start(handlers)
+    await start(handlers, cwd)
     const injected = (await handlers.get('before_agent_start')?.({ systemPrompt: 'BASE' }, {})) as {
       systemPrompt: string
     }
@@ -224,13 +179,13 @@ describe('reading and writing a Claude-written store', () => {
   })
 
   it('reads a memory by its dashed name when the file on disk uses underscores', async () => {
-    const t = await tool()
+    const t = await toolFor(cwd)
     const read = (await t.execute('1', { action: 'read', name: 'feedback-no-unprompted-bench-runs' })).content[0].text
     expect(read).toBe('硬约束正文\n')
   })
 
   it('saves over the underscored file and replaces its index line in place, keeping headings and titles', async () => {
-    const t = await tool()
+    const t = await toolFor(cwd)
     const saved = (await t.execute('1', { action: 'save', name: 'feedback_no_unprompted_bench_runs', description: '新的描述', content: '更新后的正文\n' })).content[0].text
     expect(saved).toContain('Saved memory')
 
@@ -249,7 +204,7 @@ describe('reading and writing a Claude-written store', () => {
   })
 
   it('deletes the underscored file and its index line while keeping the rest of the index', async () => {
-    const t = await tool()
+    const t = await toolFor(cwd)
     const deleted = (await t.execute('1', { action: 'delete', name: 'feedback-no-unprompted-bench-runs' })).content[0].text
     expect(deleted).toContain('Deleted')
 
@@ -262,7 +217,7 @@ describe('reading and writing a Claude-written store', () => {
   })
 
   it('appends a new memory without reordering the existing index', async () => {
-    const t = await tool()
+    const t = await toolFor(cwd)
     await t.execute('1', { action: 'save', name: 'new-lesson', description: 'fresh', content: 'body\n' })
     const index = readFileSync(join(store, 'MEMORY.md'), 'utf-8')
     expect(index).toContain('## 工作规则与引用')
