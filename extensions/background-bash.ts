@@ -30,15 +30,13 @@ import * as path from 'node:path'
 import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
-import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { type BackgroundShell, forgetShell, MAX_OUTPUT_BYTES, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** BASH_DEFAULT_TIMEOUT_MS out of the box: two minutes. */
 const DEFAULT_TIMEOUT_MS = 120_000
 /** BASH_MAX_TIMEOUT_MS out of the box: ten minutes. */
 const MAX_TIMEOUT_MS = 600_000
-/** Claude stops a background command whose output passes 5 GB. */
-const MAX_OUTPUT_BYTES = 5 * 1024 ** 3
 
 const positiveMs = (raw: string | undefined): number | undefined => {
   const value = Number(raw)

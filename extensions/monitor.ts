@@ -16,7 +16,10 @@
  * Lines are not delivered one message each: a chatty command would start a turn per
  * line. They are coalesced over a short window, at most one message per interval, and a
  * message carries a bounded number of lines and characters; the rest are counted and the
- * message points at the output file. Blank lines are not events.
+ * message points at the output file. Blank lines are not events. A monitor that keeps
+ * sending past its message allowance, or whose delivery leaves out too many lines, is
+ * stopped with one notice, as Claude stops "monitors that produce too many events"; so
+ * is one whose output passes the cap a background Bash command has.
  *
  * Deviations: the `ws` (WebSocket) source is not offered; a polling command covers the
  * same ground. Claude's 10-minute ceiling under `-p` has no counterpart, because a
@@ -36,10 +39,10 @@ import { constants as osConstants } from 'node:os'
 import * as path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
-import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, getShellConfig } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, getShellConfig } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { allShells, type BackgroundShell, commandPreview, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { allShells, type BackgroundShell, commandPreview, MAX_OUTPUT_BYTES, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { killProcessTree } from './internal/process-tree.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
@@ -59,6 +62,35 @@ export const MAX_BATCH_LINES = 50
 export const MAX_BATCH_CHARS = 4_000
 /** One line longer than this is cut. */
 export const MAX_LINE_CHARS = 500
+
+/** Messages one monitor may send at once before it counts as flooding; Claude's bucket
+ * also holds 10. */
+export const FLOOD_BURST = 10
+/** How long until a monitor may send one more message. Claude refills every 2 seconds;
+ * a message costs a turn here, so the allowance comes back more slowly. */
+export const FLOOD_REFILL_MS = 30_000
+/** Lines one delivery may leave out before the command counts as unfiltered output. */
+export const MAX_OMITTED_LINES = 1_000
+
+const TOO_MANY_EVENTS = 'it produced too many events. Start it again with a tighter filter, so it prints only the lines worth reacting to'
+
+/** `capacity` uses at once, then one more every `refillMs`, never more than `capacity`. */
+export function tokenBucket(capacity: number, refillMs: number, now: () => number = Date.now): { tryConsume: () => boolean } {
+  let tokens = capacity
+  let refilledAt = now()
+  return {
+    tryConsume() {
+      const gained = Math.floor((now() - refilledAt) / refillMs)
+      if (gained > 0) {
+        tokens = Math.min(capacity, tokens + gained)
+        refilledAt += gained * refillMs
+      }
+      if (tokens === 0) return false
+      tokens--
+      return true
+    },
+  }
+}
 
 export interface Batch {
   lines: string[]
@@ -184,8 +216,9 @@ const formatDuration = (ms: number): string => {
 /** How a notice names its watch: the ID task_stop takes and the model's own description. */
 const label = (id: string, description: string): string => `Monitor ${id} ("${commandPreview(description)}")`
 
-/** The one notice a watch sends when it ends on its own or at its deadline. */
-function endNotice(end: { label: string; outputFile: string; limitMs: number; reachedDeadline: boolean; exitCode: number | undefined; error: unknown }): string {
+/** The one notice a watch sends when it ends on its own, at its deadline, or because pi stopped it. */
+function endNotice(end: { label: string; outputFile: string; limitMs: number; reachedDeadline: boolean; stopReason: string | undefined; exitCode: number | undefined; error: unknown }): string {
+  if (end.stopReason) return `${end.label} was stopped: ${end.stopReason}. Full output: ${end.outputFile}`
   if (end.reachedDeadline) return `${end.label} reached its ${formatDuration(end.limitMs)} deadline and stopped. Start it again if you still need it.`
   if (end.error !== undefined) return `${end.label} could not run: ${end.error instanceof Error ? end.error.message : String(end.error)}`
   return `${end.label} ended: the command exited with code ${end.exitCode ?? '?'}. Full output: ${end.outputFile}`
@@ -206,7 +239,7 @@ const schema = Type.Object({
 type ToolResult = AgentToolResult<unknown>
 
 /** What a test may shorten; pi runs with the constants above. */
-export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'> & { minDeadlineMs?: number }
+export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'> & { minDeadlineMs?: number; floodBurst?: number; floodRefillMs?: number; maxOmittedLines?: number; maxOutputBytes?: number }
 
 interface Watch {
   description: string
@@ -246,6 +279,15 @@ function execSplit(command: string, run: SplitRun): Promise<number> {
     child.stdout?.on('data', run.onStdout)
     child.stderr?.on('data', run.onStderr)
     child.once('error', reject)
+    // A process the shell forked while the kill was landing survives it and holds the
+    // pipes open, so 'close' would never come: once the stopped shell is gone, end
+    // whatever is left of its group and let go of the pipes.
+    child.once('exit', () => {
+      if (!run.signal.aborted) return
+      kill()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+    })
     child.once('close', (code, signal) => {
       run.signal.removeEventListener('abort', kill)
       // A shell ended by a signal has no exit code: the shell convention stands in.
@@ -259,6 +301,8 @@ const ENDING_REASONS = new Set(['quit', 'new', 'resume', 'fork'])
 
 /** `limits` is a test seam; pi passes only `pi`. */
 export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits = {}) {
+  const maxOmittedLines = limits.maxOmittedLines ?? MAX_OMITTED_LINES
+  const maxOutputBytes = limits.maxOutputBytes ?? MAX_OUTPUT_BYTES
   // Events go to whichever session is current: after /reload this instance's pi throws.
   const events = sessionMailbox('monitor')
 
@@ -277,8 +321,22 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
 
     const lifetime = new AbortController()
     const shell = registerShell({ id, kind: 'monitor', description, command, outputFile, stop: () => lifetime.abort() })
-    const batcher = createLineBatcher({ ...limits, emit: (batch) => send(batchText(id, description, batch, outputFile)) })
+    const allowance = tokenBucket(limits.floodBurst ?? FLOOD_BURST, limits.floodRefillMs ?? FLOOD_REFILL_MS)
+    // A delivery that would flood the session is not sent: the stop notice stands in for it.
+    const deliver = (batch: Batch): void => {
+      if (batch.omitted > maxOmittedLines || !allowance.tryConsume()) stopShell(id, TOO_MANY_EVENTS)
+      else send(batchText(id, description, batch, outputFile))
+    }
+    const batcher = createLineBatcher({ ...limits, emit: deliver })
     const decoder = new StringDecoder('utf8')
+    let written = 0
+    /** Both streams go to the output file, under the cap a background Bash command has. */
+    const record = (data: Buffer): void => {
+      if (shell.state !== 'running') return
+      written += data.length
+      log.write(data)
+      if (written > maxOutputBytes) stopShell(id, `its output passed the ${formatSize(maxOutputBytes)} limit`)
+    }
 
     let reachedDeadline = false
     const deadline = setTimeout(() => {
@@ -300,10 +358,10 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
           env,
           signal: lifetime.signal,
           onStdout: (data) => {
-            log.write(data)
-            batcher.push(decoder.write(data))
+            record(data)
+            if (shell.state === 'running') batcher.push(decoder.write(data))
           },
-          onStderr: (data) => log.write(data),
+          onStderr: record,
         })
         return { exitCode }
       },
@@ -318,12 +376,14 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
       log.end()
       batcher.push(decoder.end())
       const rest = batcher.drain()
-      const stoppedOnRequest = shell.state === 'killed' && !reachedDeadline
+      const { stopReason } = shell
+      const stoppedOnRequest = shell.state === 'killed' && !reachedDeadline && stopReason === undefined
       settleShell(shell, exitCode)
       // Stopped through task_stop or the session ending: nothing is waiting for it.
       if (stoppedOnRequest) return
-      const lines = rest ? [batchText(id, description, rest, outputFile)] : []
-      send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, exitCode, error })].join('\n'))
+      // What a flooding command left queued is the flood itself.
+      const lines = rest && stopReason === undefined ? [batchText(id, description, rest, outputFile)] : []
+      send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, stopReason, exitCode, error })].join('\n'))
     }
 
     return shell
@@ -332,7 +392,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
   pi.registerTool({
     name: 'monitor',
     label: 'monitor',
-    description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Lines are delivered in batches (at most one message every ${MIN_INTERVAL_MS / 1000} seconds). The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
+    description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Only stdout lines are events; stderr goes to the output file. Lines are delivered in batches (at most one message every ${MIN_INTERVAL_MS / 1000} seconds), and a monitor that produces too many events is stopped automatically, so filter the command down to the lines worth reacting to. The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
     promptSnippet: 'Watch a background command and react to each line it prints',
     promptGuidelines: ['Use monitor to watch logs, CI or PR status, or file changes instead of polling with sleep; make the command print only lines worth reacting to. Stop a monitor with task_stop once it is no longer needed.'],
     parameters: schema,

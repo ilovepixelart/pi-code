@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension from '../extensions/background-bash.ts'
 import { allShells, registerShell, resetShells, settleShell, shellsStatusText } from '../extensions/internal/background-shells.ts'
-import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, MAX_DEADLINE_MS, MIN_DEADLINE_MS, type MonitorLimits, monitorAllowed } from '../extensions/monitor.ts'
+import monitorExtension, { type Batch, batchText, createLineBatcher, DEFAULT_DEADLINE_MS, deadlineMs, FLOOD_BURST, FLOOD_REFILL_MS, MAX_DEADLINE_MS, MAX_OMITTED_LINES, MIN_DEADLINE_MS, type MonitorLimits, monitorAllowed, tokenBucket } from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }> }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<ToolResult>
@@ -189,6 +189,24 @@ describe('createLineBatcher', () => {
   })
 })
 
+describe('tokenBucket', () => {
+  it('allows the burst, then one more per refill interval, never past the burst', () => {
+    let now = 0
+    const bucket = tokenBucket(2, 1000, () => now)
+    expect([bucket.tryConsume(), bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, true, false])
+    now = 999
+    expect(bucket.tryConsume()).toBe(false)
+    now = 1000
+    expect([bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, false])
+    now = 60_000
+    expect([bucket.tryConsume(), bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, true, false])
+  })
+
+  it('has the documented flood constants', () => {
+    expect([FLOOD_BURST, FLOOD_REFILL_MS, MAX_OMITTED_LINES]).toEqual([10, 30_000, 1000])
+  })
+})
+
 describe('deadlineMs', () => {
   it('defaults to five minutes and caps at thirty', () => {
     expect(deadlineMs(undefined)).toBe(DEFAULT_DEADLINE_MS)
@@ -346,6 +364,44 @@ describe('monitor tool', () => {
     await until(() => shell(id)?.finishedAt !== undefined)
     expect(sent).toEqual([])
     expect(shell(id)?.state).toBe('killed')
+  })
+
+  describe('flood protection', () => {
+    const stopNotice = (id: string, why: string): string => `Monitor ${id} ("the watch") was stopped: ${why}. Full output: ${shell(id)?.outputFile}`
+    const tooMany = 'it produced too many events. Start it again with a tighter filter, so it prints only the lines worth reacting to'
+
+    it('stops a monitor that keeps sending once its message allowance is spent, with one notice', async () => {
+      const { monitor, sent } = setup({ limits: { floodBurst: 2, floodRefillMs: 60_000 } })
+      const id = idOf(await monitor({ command: 'while true; do echo tick; sleep 0.05; done' }))
+      await until(() => shell(id)?.finishedAt !== undefined)
+      expect(sent.map((entry) => entry.message.content)).toEqual([`Monitor ${id} ("the watch") output:\ntick`, expect.stringContaining('output:\ntick'), stopNotice(id, tooMany)])
+      expect(sent[2]?.options.triggerTurn).toBe(true)
+      expect(shell(id)).toMatchObject({ state: 'killed', stopReason: tooMany })
+    })
+
+    it('stops a monitor whose delivery leaves out too many lines, without delivering it', async () => {
+      const { monitor, sent } = setup({ limits: { maxOmittedLines: 100 } })
+      const id = idOf(await monitor({ command: 'yes line' }))
+      await until(() => shell(id)?.finishedAt !== undefined)
+      expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
+    })
+
+    it('delivers what a finished command left queued, whatever it leaves out', async () => {
+      const { monitor, sent } = setup({ limits: { floodBurst: 2, maxOmittedLines: 100 } })
+      const id = idOf(await monitor({ command: 'seq 1 120' }))
+      await until(() => shell(id)?.finishedAt !== undefined)
+      expect(sent).toHaveLength(1)
+      expect(sent[0]?.message.content).toContain('[70 more lines not shown')
+      expect(sent[0]?.message.content).toContain('ended: the command exited with code 0')
+    })
+
+    it('stops a monitor whose output, stderr included, passes the output cap', async () => {
+      const { monitor, sent } = setup({ limits: { maxOutputBytes: 1000 } })
+      const id = idOf(await monitor({ command: 'printf "%2000s" x >&2; sleep 30' }))
+      await until(() => shell(id)?.finishedAt !== undefined)
+      expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, 'its output passed the 1000B limit')])
+      expect(shell(id)?.state).toBe('killed')
+    })
   })
 
   it('counts a running monitor in the footer until it is stopped', async () => {

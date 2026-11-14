@@ -51,6 +51,9 @@ export interface BackgroundShell {
  * removed with them. */
 export const MAX_FINISHED_SHELLS = 20
 
+/** Claude stops a background command whose output passes 5 GB. */
+export const MAX_OUTPUT_BYTES = 5 * 1024 ** 3
+
 /** Characters of a command shown in a listing or notification. */
 const COMMAND_PREVIEW_CHARS = 80
 
