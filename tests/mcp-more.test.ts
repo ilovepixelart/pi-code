@@ -1246,6 +1246,28 @@ describe('plugin mcp servers', () => {
     const aliasEvent = harness.emitted.find((entry) => entry.channel === 'pi-code:mcp-tools')
     expect(aliasEvent?.data).toEqual([{ pi: 'db_query', claude: 'mcp__plugin_toolbox_db__query' }])
   })
+
+  it('should substitute ${CLAUDE_PROJECT_DIR} in a plugin server config with the session cwd when the session starts in a repo subdirectory', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'mcp-repo-'))
+    tempDirs.push(repo)
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    const harness = await setup({ cwd: sub })
+    const root = join(harness.home, '.claude', 'plugins', 'cache', 'market', 'toolbox', '1.0.0')
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'toolbox' }))
+    writeFileSync(join(root, '.mcp.json'), JSON.stringify({ mcpServers: { db: { command: 'server', args: ['--root', '${CLAUDE_PROJECT_DIR}'] } } }))
+    mkdirSync(join(harness.home, '.claude'), { recursive: true })
+    writeFileSync(join(harness.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { toolbox: true } }))
+    withTools([{ name: 'query' }])
+
+    await harness.sessionStart()
+
+    const options = hoisted.transports[0].options as { args: string[]; env: Record<string, string> }
+    expect(options.args, 'the placeholder expands to the subdirectory the session started in').toEqual(['--root', sub])
+    expect(options.env.CLAUDE_PROJECT_DIR, 'the server environment names the same directory').toBe(sub)
+  })
 })
 
 describe('mcp tool registration', () => {
@@ -2894,15 +2916,16 @@ describe('mcp stdio session context', () => {
     expect(pluggedEnv.CLAUDE_PLUGIN_ROOT).toBe('/plug/root')
   })
 
-  it('sets CLAUDE_PROJECT_DIR to the worktree the session started in', async () => {
-    // Claude: "the project root where the session started". repoRoot named the main checkout.
+  it('should set CLAUDE_PROJECT_DIR to the launch directory when the session starts in a worktree subdirectory', async () => {
     const { main, tree } = makeWorktree(mkdtempSync(join(tmpdir(), 'mcp-wt-')))
     tempDirs.push(main, tree)
+    const sub = join(tree, 'src')
+    mkdirSync(sub)
     withTools([{ name: 'go' }])
-    await setupStarted({ user: { srv: { command: 'x' } }, cwd: tree })
+    await setupStarted({ user: { srv: { command: 'x' } }, cwd: sub })
 
     const env = hoisted.transports[0].options.env as Record<string, string>
-    expect(env.CLAUDE_PROJECT_DIR).toBe(tree)
+    expect(env.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the subdirectory the session started in').toBe(sub)
   })
 
   it('declares the roots capability and answers roots/list with the session launch directory', async () => {

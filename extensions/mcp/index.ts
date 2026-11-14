@@ -44,7 +44,6 @@ import { setMcpToolCaller } from '../internal/mcp-call.ts'
 import { capForContext } from '../internal/output-guard.ts'
 import { installedPlugins } from '../internal/plugins.ts'
 import { isProjectApproved, isProjectApprovedSilently } from '../internal/project-approval.ts'
-import { checkoutRoot } from '../internal/project-root.ts'
 import { claudeSettingsChain } from '../internal/settings-chain.ts'
 import { errorMessage } from '../internal/values.ts'
 import { claudeProjectConfigPaths, claudeUserConfigPaths, disabledServerNames, flagScopeServers, loadConfigFrom, loadPluginServers, loadUserScope, localScopeServerNames, projectConfigPaths, type ServerConfig, userConfigPaths, warnOnTypelessUrl } from './config.ts'
@@ -123,7 +122,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
   // the transport kind, and a declared per-server timeout governs the wall budget.
   const serverConfigs = new Map<string, ServerConfig>()
   // The session's directories, set at session_start before any connect: the launch
-  // directory answers roots/list, the project root feeds CLAUDE_PROJECT_DIR.
+  // directory answers roots/list and feeds CLAUDE_PROJECT_DIR.
   let sessionDirs: SessionDirs | undefined
   // Shutdown closes clients while they are still in the map; the onclose handlers
   // must not schedule reconnects for that deliberate teardown.
@@ -645,7 +644,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
     // Plugin servers merge under the user scope (plugins are user-installed). Their keys
     // are plugin:<plugin>:<server>, so a plugin server never shares a name with the user's. A server toggled off
     // in ~/.claude.json's per-project disabledMcpServers list never connects.
-    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), checkoutRoot(ctx.cwd))
+    const pluginServers = loadPluginServers(installedPlugins(os.homedir()), ctx.cwd)
     const disabled = disabledServerNames(os.homedir(), ctx.cwd)
     const merged = Object.fromEntries(Object.entries({ ...pluginServers, ...loadUserScope(os.homedir(), ctx.cwd, nativeActive ? claudeUserConfigPaths(os.homedir()) : userConfigPaths(os.homedir())) }).filter(([name]) => !disabled.has(name) && !flagNames.has(name)))
     return applyServerPolicy(merged, policy)
@@ -765,9 +764,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
     // the shutdown had already dropped their clients.
     shuttingDown = false
     projectConnected = false
-    // Claude answers roots/list with the session's launch directory and exports the
-    // project root as CLAUDE_PROJECT_DIR to stdio servers; both derive from ctx.cwd.
-    sessionDirs = { projectDir: checkoutRoot(ctx.cwd), launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
+    // Claude answers roots/list with the session's launch directory and exports the same
+    // directory as CLAUDE_PROJECT_DIR to stdio servers, even from a repo subdirectory.
+    sessionDirs = { projectDir: ctx.cwd, launchDir: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId?.() }
     const managed = loadManagedMcpServers()
     nativeActive = native && piMcpRunning(pi.getCommands()) && nativeMode(pi, managed, mcpAllowDeny(claudeSettingsChain(ctx.cwd, os.homedir(), true)))
     waitedForNative = false

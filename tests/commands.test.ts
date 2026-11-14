@@ -256,6 +256,20 @@ describe('commands extension', () => {
     expect(outside?.block).toBe(true)
   })
 
+  it('should expose the launch directory as CLAUDE_PROJECT_DIR when the session starts in a repo subdirectory', async () => {
+    const repo = tempDir()
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    writeCommand(sub, 'ctx.md', 'root: ${CLAUDE_PROJECT_DIR}\nhere: !`pwd`')
+    const s = setup(sub)
+    await s.handlers.get('session_start')?.({}, s.ctx)
+    await s.commands.get('ctx')?.handler('', s.ctx)
+
+    expect(s.execCalls[0].shell, 'the span exports the subdirectory').toContain(`export CLAUDE_PROJECT_DIR='${sub}'`)
+    expect(s.sent[0], 'the body substitutes the subdirectory').toContain(`root: ${sub}`)
+  })
+
   it('exposes CLAUDE_PROJECT_DIR to a bash span, as hooks do', async () => {
     const cwd = tempDir()
     writeCommand(cwd, 'ctx.md', 'here: !`pwd`')
