@@ -89,21 +89,48 @@ export function memoryDir(cwd: string): string {
  * set of memories. */
 export type MemoryStorage = 'pi' | 'claude'
 
+/** Claude Code cuts a project directory name at this length and appends a hash. */
+const CLAUDE_SLUG_MAX = 200
+
+/** Claude Code's string hash: 31 * hash + code unit, wrapped to 32 bits. */
+function claudePathHash(text: string): number {
+  let hash = 0
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0
+  return hash
+}
+
 /** The directory name Claude Code gives a project: every character outside the
- * ASCII alphanumerics becomes one dash, with no folding and no digest, so
- * /Users/alex/code/ai-gk is -Users-alex-code-ai-gk and a CJK segment such as
- * 26宁波事业考点强化 becomes 26-------- (verified against directories Claude
- * Code itself creates). */
+ * ASCII alphanumerics becomes one dash, so /home/dev/code/ai-gk is
+ * -home-dev-code-ai-gk and a CJK segment such as 26宁波事业考点强化 becomes
+ * 26-------- (verified against directories Claude Code itself creates). A name
+ * longer than 200 characters is cut there and gets a base-36 hash of the path. */
 export function claudeProjectSlug(cwd: string): string {
-  return cwd.replace(/[^a-zA-Z0-9]/g, '-')
+  const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-')
+  if (slug.length <= CLAUDE_SLUG_MAX) return slug
+  return `${slug.slice(0, CLAUDE_SLUG_MAX)}-${Math.abs(claudePathHash(cwd)).toString(36)}`
+}
+
+/** `CLAUDE_CODE_PROJECT_DIR_NAME`, which replaces the project slug. Claude Code reads
+ * it only when `CLAUDE_CONFIG_DIR` is set, and only as one plain segment that is not
+ * a Windows device name. */
+function claudeProjectDirName(): string | undefined {
+  const name = process.env.CLAUDE_CODE_PROJECT_DIR_NAME
+  if (!process.env.CLAUDE_CONFIG_DIR || !name) return undefined
+  return /^[A-Za-z0-9_-]{1,64}$/.test(name) && !/^(?:con|prn|aux|nul|com\d|lpt\d)$/i.test(name) ? name : undefined
 }
 
 /** The Claude Code memory store for the project rooted at `cwd`: <claude
  * config>/projects/<project slug>/memory, keyed on the repository root like
  * pi's own store, so subdirectory sessions and every worktree share one
- * directory, as Claude's docs state they do. */
+ * directory, as Claude's docs state they do. `CLAUDE_CODE_REMOTE_MEMORY_DIR`
+ * replaces the config directory as the root. Claude normalises the project path
+ * and the result to NFC. */
 export function claudeMemoryDir(cwd: string, home: string = os.homedir()): string {
-  return path.join(claudeConfigDir(home), 'projects', claudeProjectSlug(memoryProject(cwd)), 'memory')
+  const config = claudeConfigDir(home)
+  const root = process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR || config
+  const slug = claudeProjectSlug(memoryProject(cwd).normalize('NFC'))
+  const project = root === config ? (claudeProjectDirName() ?? slug) : slug
+  return path.join(root, 'projects', project, 'memory').normalize('NFC')
 }
 
 /** The `autoMemoryStorage` setting: 'claude' selects Claude Code's per-project

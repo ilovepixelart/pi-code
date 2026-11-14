@@ -62,7 +62,7 @@ const toolFor = async (cwd: string): Promise<Tool> => {
 }
 
 /** The Claude project slug, verified against directories Claude Code itself creates:
- * every character outside [a-zA-Z0-9] becomes one dash, with no folding and no digest. */
+ * every character outside [a-zA-Z0-9] becomes one dash. */
 describe('claudeProjectSlug', () => {
   it('encodes an ordinary path as its dashed form', () => {
     expect(claudeProjectSlug('/Users/tttinkl/code/ai-gk')).toBe('-Users-tttinkl-code-ai-gk')
@@ -75,6 +75,17 @@ describe('claudeProjectSlug', () => {
     // Spaces and underscores become dashes too, as paths such as "my projects/demo_app" show.
     expect(claudeProjectSlug('/tmp/my projects/demo_app')).toBe('-tmp-my-projects-demo-app')
   })
+
+  it('cuts a slug longer than 200 characters and appends a hash of the path', () => {
+    // Expected values come from running the slug and hash functions as they appear in
+    // the Claude Code 2.1.325 bundle on these paths.
+    const ascii = `/srv/${'deep-directory/'.repeat(14)}project`
+    expect(claudeProjectSlug(ascii)).toBe(`-srv-${'deep-directory-'.repeat(13)}-w3jbji`)
+    // The hash covers the path, not its dashed form: the characters the slug drops still count.
+    const wide = `/srv/${'深い/'.repeat(80)}café`
+    expect(claudeProjectSlug(wide)).toBe(`-srv${'-'.repeat(196)}-m5guxk`)
+    expect(claudeProjectSlug(`/${'a'.repeat(199)}`)).toBe(`-${'a'.repeat(199)}`)
+  })
 })
 
 describe('claude memory storage', () => {
@@ -86,6 +97,35 @@ describe('claude memory storage', () => {
     expect(claudeMemoryDir(repo)).toBe(claudeStore(repo))
     // Subdirectory sessions share the repository store, as Claude's docs state.
     expect(claudeMemoryDir(sub)).toBe(claudeMemoryDir(repo))
+  })
+
+  it('normalises the project path to NFC before deriving the slug', () => {
+    const composed = claudeMemoryDir('/srv/caf\u00e9')
+    expect(composed).toBe(join(home, '.claude', 'projects', '-srv-caf-', 'memory'))
+    expect(claudeMemoryDir('/srv/cafe\u0301')).toBe(composed)
+  })
+
+  it('roots the store at CLAUDE_CODE_REMOTE_MEMORY_DIR when it is set', () => {
+    const remote = mkdtempSync(join(tmpdir(), 'mem-remote-'))
+    process.env.CLAUDE_CODE_REMOTE_MEMORY_DIR = remote
+    process.env.CLAUDE_CONFIG_DIR = join(home, 'config')
+    process.env.CLAUDE_CODE_PROJECT_DIR_NAME = 'shared'
+    expect(claudeMemoryDir('/srv/app')).toBe(join(remote, 'projects', '-srv-app', 'memory'))
+  })
+
+  it('uses CLAUDE_CODE_PROJECT_DIR_NAME as the project directory only next to CLAUDE_CONFIG_DIR', () => {
+    process.env.CLAUDE_CODE_PROJECT_DIR_NAME = 'shared'
+    expect(claudeMemoryDir('/srv/app')).toBe(join(home, '.claude', 'projects', '-srv-app', 'memory'))
+
+    const config = join(home, 'config')
+    process.env.CLAUDE_CONFIG_DIR = config
+    expect(claudeMemoryDir('/srv/app')).toBe(join(config, 'projects', 'shared', 'memory'))
+
+    // Claude accepts one plain segment of at most 64 characters that is not a Windows device name.
+    for (const refused of ['../up', 'a/b', 'CON', 'lpt1', 'x'.repeat(65)]) {
+      process.env.CLAUDE_CODE_PROJECT_DIR_NAME = refused
+      expect(claudeMemoryDir('/srv/app')).toBe(join(config, 'projects', '-srv-app', 'memory'))
+    }
   })
 
   it('merges autoMemoryStorage through the settings chain like the other memory settings', () => {
