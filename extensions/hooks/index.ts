@@ -95,6 +95,7 @@
  */
 
 import * as os from 'node:os'
+import * as path from 'node:path'
 import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager, type ToolResultEvent, type UserBashEventResult } from '@earendil-works/pi-coding-agent'
 import { runningBackgroundAgents } from '../internal/background-agents.ts'
 import { claudeEffortLevel } from '../internal/effort.ts'
@@ -106,6 +107,7 @@ import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.
 import { installedPlugins, managedForceEnabled } from '../internal/plugins.ts'
 import { approvalRecheck, isProjectApproved } from '../internal/project-approval.ts'
 import { checkoutRoot } from '../internal/project-root.ts'
+import { claudeSettingsSources } from '../internal/settings-chain.ts'
 import { watchSettingsFiles } from '../internal/settings-watch.ts'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.ts'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
@@ -359,7 +361,14 @@ export default function hooksExtension(pi: ExtensionAPI) {
     if (hook.type === 'prompt') return runPromptHook(hook, merged, resolveHookModel(ctx, hook.model), ms, ctx.modelRegistry)
     if (hook.type === 'agent') return runAgentHook(hook, merged, ms, (ctx.model as { id?: string } | undefined)?.id)
     if (hook.type === 'mcp_tool') return runMcpToolHook(hook, merged, ms)
-    return runHookCommand(hook.command, merged, ms, { projectDir, args: hook.args, onChild, shell: hook.shell, plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined, sessionId: merged.session_id as string | undefined })
+    return runHookCommand(hook.command, merged, ms, {
+      projectDir: hook.projectDir ?? projectDir,
+      args: hook.args,
+      onChild,
+      shell: hook.shell,
+      plugin: hook.pluginRoot !== undefined && hook.pluginDataDir !== undefined ? { root: hook.pluginRoot, dataDir: hook.pluginDataDir } : undefined,
+      sessionId: merged.session_id as string | undefined,
+    })
   }
   /** A runner bound to the firing context, filling the common fields into each
    * payload and dispatching on the entry's type. A background hook (see
@@ -522,6 +531,23 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return
     }
     mergeNonManagedHooks(files)
+    stampSettingsProjectDirs(cwd, trusted)
+  }
+
+  /** A project or local settings hook gets the checkout folder holding its `.claude` as
+   * CLAUDE_PROJECT_DIR, so `$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh` in the repo root's
+   * settings.local.json still resolves from a subdirectory session. Claude passes the
+   * cwd there and the script is not found. A worktree's local file lives in the main
+   * checkout, and its hooks must still act on the worktree the session is in. */
+  function stampSettingsProjectDirs(cwd: string, trusted: boolean): void {
+    const projectFiles = new Set(claudeSettingsSources(cwd, os.homedir(), trusted).flatMap((source) => (source.scope === 'project' || source.scope === 'local' ? [source.file] : [])))
+    for (const matcher of Object.values(config).flat()) {
+      const file = hookSources.get(matcher)
+      if (file === undefined || !projectFiles.has(file)) continue
+      const dir = path.dirname(path.dirname(file))
+      const projectDir = path.resolve(dir) === path.resolve(cwd) ? cwd : checkoutRoot(cwd)
+      for (const hook of matcher.hooks ?? []) hook.projectDir = projectDir
+    }
   }
 
   /** Merge the non-managed hook sources into the managed config resolveConfig loaded:
@@ -555,10 +581,9 @@ export default function hooksExtension(pi: ExtensionAPI) {
     registeredSkillHooks.length = 0
     spentOnce.clear()
     const trusted = await isProjectApproved(ctx)
-    // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
-    // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
-    // subdirectory session too.
-    projectDir = checkoutRoot(ctx.cwd)
+    // Claude passes the launch directory as CLAUDE_PROJECT_DIR, and anchors `/`-rooted
+    // `if` paths there, even from a repo subdirectory.
+    projectDir = ctx.cwd
     resolveConfig(ctx.cwd, trusted)
     // Claude picks up direct settings edits mid-session via a file watcher. The reload
     // closes over the cwd value, never ctx: the poll has no awaiter, and every getter of

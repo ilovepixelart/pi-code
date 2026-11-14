@@ -17,8 +17,8 @@ import * as path from 'node:path'
  * in an ordinary clone.
  *
  * Only `.git`: a package.json marker would make every package of a monorepo its own
- * project (its own memory directory, settings.local.json, CLAUDE_PROJECT_DIR and trust
- * decision), and a repository can add a package.json wherever it likes, so a marker it
+ * project (its own memory directory, settings.local.json and trust decision), and a
+ * repository can add a package.json wherever it likes, so a marker it
  * controls is a marker it can move. Claude's project is the repository. */
 export const ROOT_MARKERS = ['.git']
 
@@ -29,11 +29,12 @@ export function repoRoot(from: string): string | undefined {
   return mainCheckout(root)
 }
 
-/** The root of the checkout a session runs in, or `from` itself outside one. Claude's
- * `CLAUDE_PROJECT_DIR` is "the project root where the session started", and `/`-rooted path
- * rules anchor there. In a worktree that is the worktree, not the main checkout repoRoot
- * resolves to: right for shared state (settings.local.json, auto memory), wrong here, where
- * a hook script or a rule anchor must land in the tree the session is editing. */
+/** The root of the checkout a session runs in, or `from` itself outside one. `/`-rooted
+ * `allowed-tools` path rules anchor there, and a hook from the repository's
+ * settings.local.json gets it as CLAUDE_PROJECT_DIR. In a worktree that is the worktree, not
+ * the main checkout repoRoot resolves to: right for shared state (settings.local.json, auto
+ * memory), wrong here, where a hook script or a rule anchor must land in the tree the session
+ * is editing. */
 export function checkoutRoot(from: string): string {
   return gitRoot(from) ?? from
 }
