@@ -96,8 +96,10 @@ const shell = (id: string) => allShells().find((entry) => entry.id === id)
 const HELD: MonitorLimits = { windowMs: 60_000 }
 
 // A stopped monitor is killed asynchronously: wait for it, so no process outlives the file.
+// Every unsettled entry counts, not only the running ones: one that pi or the test has
+// already stopped is still on its way out.
 const stopAndWait = async (): Promise<void> => {
-  const live = allShells().filter((entry) => entry.stop !== undefined)
+  const live = allShells().filter((entry) => entry.finishedAt === undefined)
   resetShells()
   await until(() => live.every((entry) => entry.finishedAt !== undefined))
 }
@@ -451,7 +453,9 @@ describe('monitor tool', () => {
     const id = idOf(await monitor({ command: 'sleep 30' }))
     await stop(id)
     await until(() => shell(id)?.finishedAt !== undefined)
-    expect(kills.mock.calls.filter(([pid, signal]) => pid < 0 && signal === 'SIGKILL')).toHaveLength(2)
+    const groups = kills.mock.calls.filter(([pid, signal]) => pid < 0 && signal === 'SIGKILL').map(([pid]) => pid)
+    // Counted for this shell's own group, the first one killed after the spy was set.
+    expect(groups.filter((pid) => pid === groups[0])).toHaveLength(2)
   })
 
   it('counts a running monitor in the footer until it is stopped', async () => {
