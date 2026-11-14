@@ -63,13 +63,15 @@ export function backgroundAllowed(ctx: Pick<ExtensionContext, 'hasUI'>, env: Nod
 
 const formatSeconds = (ms: number): string => `${Math.round(ms / 100) / 10}s`
 
-const bashSchema = Type.Object({
-  command: Type.String({ description: 'Shell command to execute' }),
-  timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds (optional). With no timeout, a command still running after 120 seconds moves to the background.' })),
-  run_in_background: Type.Optional(Type.Boolean({ description: 'Run the command in the background and continue working; you are notified when it finishes.' })),
-})
+/** `defaultMs` is the timeout in force when the model passes none. */
+const bashSchema = (defaultMs: number) =>
+  Type.Object({
+    command: Type.String({ description: 'Shell command to execute' }),
+    timeout: Type.Optional(Type.Number({ description: `Timeout in seconds (optional). With no timeout, a command still running after ${defaultMs / 1000} seconds moves to the background.` })),
+    run_in_background: Type.Optional(Type.Boolean({ description: 'Run the command in the background and continue working; you are notified when it finishes.' })),
+  })
 
-type BashParams = Static<typeof bashSchema>
+type BashParams = Static<ReturnType<typeof bashSchema>>
 
 const stopSchema = Type.Object({
   task_id: Type.String({ description: 'The ID of the background command to stop' }),
@@ -190,7 +192,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     description: `${builtin.description} Set run_in_background to start a long-running command (a dev server, a watcher, a long build) and keep working; a command that reaches its timeout also moves to the background instead of stopping, except one starting with sleep. Background output is written to a file you read with the read tool, and a message arrives when the command finishes.`,
     promptSnippet: builtin.promptSnippet,
     promptGuidelines: [...(builtin.promptGuidelines ?? []), 'Use bash run_in_background for commands that keep running, then read the output file it reports; do not poll with sleep. Stop a background command with task_stop.'],
-    parameters: bashSchema,
+    parameters: bashSchema(foregroundLimitMs(undefined)),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const { run_in_background, ...input } = params
       const native = (): Promise<ToolResult> => {

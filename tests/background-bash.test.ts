@@ -229,6 +229,13 @@ describe('bash tool', () => {
     expect(bash.promptGuidelines?.join('\n')).toContain('task_stop')
   })
 
+  it('states the default timeout in force, not a fixed one', () => {
+    process.env.BASH_DEFAULT_TIMEOUT_MS = '30000'
+    const timeout = setup().tool('bash').parameters.properties.timeout as { description: string }
+    expect(timeout.description).toContain('after 30 seconds')
+    expect(timeout.description).not.toContain('120')
+  })
+
   it('returns a quick command in the foreground, untracked', async () => {
     const h = setup()
     const result = await h.bash('t1', { command: 'echo hello' })
