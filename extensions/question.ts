@@ -153,7 +153,7 @@ type Outcome = Answer | TimedOut
 type FormResult = { kind: 'submit'; answers: Array<Answer | undefined> } | { kind: 'timeout'; answers: Outcome[] }
 
 /** A question is answered exactly when `confirmed` is set. */
-type QuestionState = { rows: Row[]; cursor: number; typing: boolean; draft: Editor; remotelyAnswered: boolean } & ({ mode: 'single'; confirmed?: SingleAnswer } | { mode: 'multi'; checked: boolean[]; confirmed?: MultiAnswer })
+type QuestionState = { rows: Row[]; cursor: number; typing: boolean; draft: Editor } & ({ mode: 'single'; confirmed?: SingleAnswer } | { mode: 'multi'; checked: boolean[]; confirmed?: MultiAnswer })
 
 function multiAnswer(checked: boolean[]): MultiAnswer {
   return { kind: 'multi', indices: checked.flatMap((on, index) => (on ? [index] : [])) }
@@ -623,7 +623,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       const states = specs.map((spec): QuestionState => {
         const draft = new Editor(tui, editorTheme)
-        const common = { rows: questionRows(spec), cursor: 0, typing: false, draft, remotelyAnswered: false }
+        const common = { rows: questionRows(spec), cursor: 0, typing: false, draft }
         const state: QuestionState = spec.multiSelect ? { ...common, mode: 'multi', checked: spec.options.map(() => false) } : { ...common, mode: 'single' }
         draft.onSubmit = (value) => {
           const text = value.trim()
@@ -689,7 +689,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function restoreRemoteAnswer(index: number, value: Answer): void {
         const state = states[index]
         confirm(state, value)
-        state.remotelyAnswered = true
         state.typing = false
         state.draft.setText('')
         switch (value.kind) {
@@ -714,7 +713,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
           return
         }
         restoreRemoteAnswer(index, value)
-        if (states.every((state) => state.remotelyAnswered)) finish({ kind: 'submit', answers: answers() })
+        if (answers().every(Boolean)) finish({ kind: 'submit', answers: answers() })
         else if (index === active) navigate(active + 1)
         else refresh()
       }
@@ -735,7 +734,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       function commit(value: Answer): void {
         confirm(states[active], value)
-        states[active].remotelyAnswered = false
         remotes[active]?.close()
         if (lone) finish({ kind: 'submit', answers: [value] })
         else navigate(active + 1)
@@ -771,7 +769,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
           if (state.checked.some(Boolean) || lone) commit(multiAnswer(state.checked))
           else {
             state.confirmed = undefined
-            state.remotelyAnswered = false
             navigate(active + 1)
           }
           return
@@ -789,14 +786,12 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const row = state.rows[state.cursor]
         if (state.mode !== 'multi' || row.kind !== 'option') return
         state.checked[row.index] = !state.checked[row.index]
-        state.remotelyAnswered = false
       }
       function handleTypingInput(state: QuestionState, data: string): void {
         if (matchesKey(data, Key.escape)) {
           state.typing = false
           state.draft.setText('')
         } else if (!matchesKey(data, Key.tab) && !matchesKey(data, Key.shift('tab'))) {
-          state.remotelyAnswered = false
           state.draft.handleInput(data)
         }
         refresh()

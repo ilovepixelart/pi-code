@@ -1621,6 +1621,26 @@ describe('question batch lifecycle', () => {
     expect(submitted.content[0].text, 'The model should get the remote answer for the unfocused question').toBe('First?\nUser selected: 2. Beta\n\nSecond?\nUser selected: 1. Alpha')
   })
 
+  it('should submit the form when a remote answer completes a batch the local user started', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.enter)
+    const accepted = replies[1]?.({ action: 'answer', indices: [2] })
+    const submitted = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+
+    expect(accepted, 'The second question should accept its remote reply').toBe(true)
+    expect(submitted?.content[0].text, 'A local and a remote answer together should complete the call').toBe('First?\nUser selected: 1. Alpha\n\nSecond?\nUser selected: 2. Beta')
+  })
+
   it('should focus the free-text row when a remote custom answer arrives before the overlay opens', async () => {
     const tool = setupRemote((offer) => {
       const reply = offer.claim()
