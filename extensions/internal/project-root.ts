@@ -29,10 +29,12 @@ export function repoRoot(from: string): string | undefined {
   return mainCheckout(root)
 }
 
-/** The root of the checkout a session runs in, or `from` itself outside one. `/`-rooted path
- * rules anchor there. In a worktree that is the worktree, not the main checkout repoRoot
- * resolves to: right for shared state (settings.local.json, auto memory), wrong here, where
- * a rule anchor must land in the tree the session is editing. */
+/** The root of the checkout a session runs in, or `from` itself outside one. `/`-rooted
+ * `allowed-tools` path rules anchor there, and a hook from the repository's
+ * settings.local.json gets it as CLAUDE_PROJECT_DIR. In a worktree that is the worktree, not
+ * the main checkout repoRoot resolves to: right for shared state (settings.local.json, auto
+ * memory), wrong here, where a hook script or a rule anchor must land in the tree the session
+ * is editing. */
 export function checkoutRoot(from: string): string {
   return gitRoot(from) ?? from
 }
