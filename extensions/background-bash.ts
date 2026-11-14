@@ -85,7 +85,8 @@ const foregroundSchema = (defaultMs: number) =>
 type BashParams = Static<ReturnType<typeof bashSchema>>
 
 const stopSchema = Type.Object({
-  task_id: Type.String({ description: 'The ID of the background command to stop' }),
+  task_id: Type.Optional(Type.String({ description: 'The ID of the background command to stop' })),
+  shell_id: Type.Optional(Type.String({ description: 'Deprecated: use task_id' })),
 })
 
 type ToolResult = AgentToolResult<BashToolDetails | undefined>
@@ -268,7 +269,9 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
     description: 'Stop a running background bash command by its ID.',
     promptSnippet: 'Stop a background bash command',
     parameters: stopSchema,
-    async execute(_toolCallId, { task_id }) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
+    async execute(_toolCallId, params) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
+      const task_id = params.task_id ?? params.shell_id
+      if (task_id === undefined) throw new Error('task_id is required')
       const outcome = stopShell(task_id)
       if (outcome === 'unknown') throw new Error(`No background command with ID ${task_id}`)
       if (outcome === 'not-running') return text(`Background command ${task_id} is not running.`)

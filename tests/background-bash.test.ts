@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
 import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, markBackground, registerShell, resetShells, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
+import { CLAUDE_TOOL_MAP, claudeToolName } from '../extensions/internal/claude-tool-names.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean; structuredContent?: { exit_code?: number } }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (update: unknown) => void, ctx?: unknown) => Promise<ToolResult>
@@ -590,6 +591,25 @@ describe('task_stop tool', () => {
     expect(allShells()[0]?.state).toBe('killed')
     expect(h.sent).toHaveLength(0)
     expect(textOf(await h.stop('t3', { task_id: id }))).toContain('is not running')
+  })
+
+  it("takes the id as shell_id, Claude's deprecated name for it", async () => {
+    const h = setup()
+    const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
+    expect(textOf(await h.stop('t2', { shell_id: id }))).toBe(`Stopped background command ${id}.`)
+    expect(Object.keys(h.tool('task_stop').parameters.properties)).toEqual(['task_id', 'shell_id'])
+  })
+
+  it('prefers task_id and rejects a call with neither', async () => {
+    const h = setup()
+    const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
+    expect(textOf(await h.stop('t2', { task_id: id, shell_id: 'b00000000' }))).toBe(`Stopped background command ${id}.`)
+    await expect(h.stop('t3', {})).rejects.toThrow('task_id is required')
+  })
+
+  it("answers to Claude's names for the tool", () => {
+    for (const name of ['taskstop', 'killshell', 'killbash']) expect(CLAUDE_TOOL_MAP[name], name).toBe('task_stop')
+    expect(claudeToolName('task_stop')).toBe('TaskStop')
   })
 
   it('rejects an unknown id', async () => {
