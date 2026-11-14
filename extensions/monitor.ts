@@ -21,7 +21,8 @@
  * Deviations: the `ws` (WebSocket) source is not offered; a polling command covers the
  * same ground. Claude's 10-minute ceiling under `-p` has no counterpart, because a
  * session without a UI (print and json modes, subagents), where no later turn could
- * receive an event, refuses the tool, as does CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1.
+ * receive an event, refuses the tool. CLAUDE_CODE_DISABLE_BACKGROUND_TASKS does not
+ * turn it off (env-vars: "MCP tasks and the Monitor tool still run in the background").
  * Claude's permission prompt has no pi counterpart; a hook `if` filter written for
  * `Bash(...)` covers Monitor commands, as Claude's Bash rules do. A session switch
  * (/new, /resume, /fork) ends the watches, since their events belong to the session
@@ -168,8 +169,7 @@ export function deadlineMs(requested: number | undefined): number {
   return Math.min(Math.floor(requested), MAX_DEADLINE_MS)
 }
 
-export function monitorAllowed(ctx: Pick<ExtensionContext, 'hasUI'>, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  if (env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === '1') return 'Monitor is unavailable: background tasks are disabled (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1).'
+export function monitorAllowed(ctx: Pick<ExtensionContext, 'hasUI'>): string | undefined {
   if (!ctx.hasUI) return 'Monitor is unavailable in a session without a UI (print or json mode, or a subagent): no later turn could receive its events. Run the command with bash instead.'
   return undefined
 }

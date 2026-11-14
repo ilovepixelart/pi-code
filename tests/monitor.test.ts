@@ -202,13 +202,9 @@ describe('deadlineMs', () => {
 })
 
 describe('monitorAllowed', () => {
-  it('allows a UI session', () => {
-    expect(monitorAllowed({ hasUI: true }, {})).toBeUndefined()
-  })
-
-  it('refuses with background tasks disabled, or without a UI', () => {
-    expect(monitorAllowed({ hasUI: true }, { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' })).toMatch(/CLAUDE_CODE_DISABLE_BACKGROUND_TASKS/)
-    expect(monitorAllowed({ hasUI: false }, {})).toMatch(/without a UI/)
+  it('allows a UI session and refuses one without a UI', () => {
+    expect(monitorAllowed({ hasUI: true })).toBeUndefined()
+    expect(monitorAllowed({ hasUI: false })).toMatch(/without a UI/)
   })
 })
 
@@ -242,10 +238,12 @@ describe('monitor tool', () => {
     expect(allShells()).toEqual([])
   })
 
-  it('refuses with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1', async () => {
+  it('still runs with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, as in Claude', async () => {
     vi.stubEnv('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', '1')
-    const { monitor } = setup()
-    await expect(monitor({ command: 'echo hi' })).rejects.toThrow(/disabled/)
+    const { monitor, sent } = setup()
+    const id = idOf(await monitor({ command: 'echo hi' }))
+    await until(() => sent.length > 0)
+    expect(sent[0]?.message.content).toContain(`Monitor ${id} (`)
   })
 
   it('refuses an empty command and a bad deadline', async () => {
