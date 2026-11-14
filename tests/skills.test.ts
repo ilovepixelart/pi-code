@@ -290,12 +290,23 @@ describe('extension wiring', () => {
     expect((await t.input(`/kit:deploy${separator}prod`))?.text).toContain('Deploy prod')
   })
 
-  it.each(['off', 'user-invocable-only'])('refuses a live %s override before expanding a model invocation', async (state) => {
+  // Claude: "Plugin skills are not affected by skillOverrides. Manage those through
+  // /plugin instead." A key written for a personal skill of the same bare name must not
+  // reach a plugin's skill either.
+  it.each([
+    ['kit:deploy', 'off'],
+    ['kit:deploy', 'user-invocable-only'],
+    ['kit:deploy', 'name-only'],
+    ['deploy', 'off'],
+  ])('leaves a plugin skill untouched by skillOverrides %s: %s', async (key, state) => {
     const t = pluginFixture()
+    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { [key]: state } }))
     await t.start()
-    writeFileSync(t.settingsPath, JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { 'kit:deploy': state } }))
-    await expect(t.invoke()).rejects.toThrow('skillOverrides')
-    expect(t.exec).not.toHaveBeenCalled()
+    expect(t.commands.has('kit:deploy')).toBe(true)
+    expect(t.tools.get('plugin_skill')?.description).toContain('/kit:deploy - deploys')
+    expect((await t.invoke()).content[0].text).toContain('Deploy prod')
+    expect((await t.input('/kit:deploy prod'))?.text).toContain('Deploy prod')
+    expect(t.ctx.ui.notify).not.toHaveBeenCalled()
   })
 
   it('rechecks disable-model-invocation on every model call', async () => {
@@ -365,30 +376,6 @@ describe('extension wiring', () => {
     await t.start()
     expect(pluginSkills(hoisted.home)).toEqual([])
     expect(t.commands.has('kit:deploy')).toBe(false)
-  })
-
-  it('does not offer a plugin skill the model can run when skillOverrides turns it off', async () => {
-    const cwd = tempDir('cs-proj-')
-    const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', 'kit', '1.0.0')
-    mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
-    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
-    mkdirSync(join(hoisted.home, '.claude'), { recursive: true })
-    writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'kit' }))
-    writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true }, skillOverrides: { 'kit:deploy': 'off' } }))
-    writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: deploys\n---\nDeploy $ARGUMENTS now.')
-
-    const handlers = new Map<string, (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>>()
-    const tools = new Map<string, unknown>()
-    const commands = new Map<string, unknown>()
-    skillsExt({
-      on: (name: string, fn: (event: Record<string, unknown>, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn),
-      registerCommand: (name: string) => commands.set(name, true),
-      registerTool: (tool: { name: string }) => tools.set(tool.name, tool),
-    } as never)
-    await handlers.get('session_start')?.({ reason: 'startup' }, { cwd, sessionManager: { getBranch: () => [] }, isProjectTrusted: () => true })
-
-    expect(commands.has('kit:deploy')).toBe(false)
-    expect(tools.has('plugin_skill')).toBe(false)
   })
 })
 

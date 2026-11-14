@@ -221,8 +221,8 @@ function pluginSkillToolDescription(invocable: Map<string, { description: string
 }
 
 /** The model-facing tool for plugin skills, registered once. prepareLoadout refreshes the
- * description from the session's current listing; one marked disable-model-invocation or
- * turned off by skillOverrides stays off that listing. */
+ * description from the session's current listing; one marked disable-model-invocation
+ * stays off that listing. */
 function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undefined, invocable: Map<string, { description: string; argumentHint?: string }>): void {
   pi.registerTool({
     name: 'plugin_skill',
@@ -244,13 +244,11 @@ function registerPluginSkillTool(pi: ExtensionAPI, contextWindow: number | undef
 }
 
 /** Rebuild the session's plugin-skill listing and register the commands the user can type.
- * A skill skillOverrides sets to "off" is absent from both. */
-function registerSessionPluginSkills(pi: ExtensionAPI, ctx: ExtensionContext, registered: Set<string>, invocable: Map<string, { description: string; argumentHint?: string }>): void {
+ * Claude: "Plugin skills are not affected by skillOverrides. Manage those through /plugin
+ * instead." */
+function registerSessionPluginSkills(pi: ExtensionAPI, registered: Set<string>, invocable: Map<string, { description: string; argumentHint?: string }>): void {
   invocable.clear()
-  const trusted = isProjectApprovedSilently(ctx)
   for (const skill of pluginSkills(os.homedir())) {
-    const override = skillOverrideFor(skill.name, ctx.cwd, trusted)
-    if (override === 'off') continue
     let parsed: ReturnType<typeof parseCommandFile>
     try {
       parsed = parseCommandFile(fs.readFileSync(skill.filePath, 'utf-8'))
@@ -258,7 +256,7 @@ function registerSessionPluginSkills(pi: ExtensionAPI, ctx: ExtensionContext, re
       console.warn(`pi-code-skills: ignoring ${skill.filePath}: ${errorMessage(error)}`)
       continue
     }
-    if (!parsed.disableModelInvocation && override !== 'user-invocable-only') invocable.set(skill.name, { description: override === 'name-only' ? '' : parsed.description, ...(parsed.argumentHint ? { argumentHint: parsed.argumentHint } : {}) })
+    if (!parsed.disableModelInvocation) invocable.set(skill.name, { description: parsed.description, ...(parsed.argumentHint ? { argumentHint: parsed.argumentHint } : {}) })
     if (parsed.userInvocable) registerPluginSkillCommand(pi, skill, parsed, registered)
   }
 }
@@ -270,7 +268,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', (_event, ctx) => {
     forkResults.attach(pi, sessionHasTurns(ctx))
-    registerSessionPluginSkills(pi, ctx, registeredPluginSkills, invocablePluginSkills)
+    registerSessionPluginSkills(pi, registeredPluginSkills, invocablePluginSkills)
     if (!pluginSkillToolRegistered && invocablePluginSkills.size > 0) {
       pluginSkillToolRegistered = true
       registerPluginSkillTool(pi, (ctx as { model?: { contextWindow?: number } }).model?.contextWindow, invocablePluginSkills)
@@ -301,10 +299,7 @@ function skillOverrideFor(name: string, cwd: string, trusted: boolean): string |
   let value: string | undefined
   for (const settings of readSettingsChain(claudeSettingsChain(cwd, os.homedir(), trusted))) {
     const overrides = settings.skillOverrides
-    if (!isRecord(overrides)) continue
-    const bareName = name.slice(name.indexOf(':') + 1)
-    const state = overrides[name] ?? overrides[bareName]
-    if (typeof state === 'string') value = state
+    if (isRecord(overrides) && typeof overrides[name] === 'string') value = overrides[name]
   }
   return value
 }
@@ -412,8 +407,7 @@ type ExpansionOptions = { allowShell?: boolean; inlineFork?: boolean; modelInvoc
 type ExpansionResult = { action: 'transform'; text: string } | { action: 'handled' } | undefined
 
 /** Validate the current file rather than the metadata captured at session start. */
-function checkModelInvocation(name: string, override: string | undefined, parsed: ReturnType<typeof parseCommandFile>): void {
-  if (override === 'off' || override === 'user-invocable-only') throw new Error(`/${name} is disabled for model invocation by skillOverrides and was not run.`)
+function checkModelInvocation(name: string, parsed: ReturnType<typeof parseCommandFile>): void {
   if (parsed.disableModelInvocation) throw new Error(`/${name} is user-only (disable-model-invocation: true) and was not run. Only the user can invoke it.`)
 }
 
@@ -424,11 +418,9 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const trusted = isProjectApprovedSilently(ctx)
   const found = resolveInvokedSkill(name, ctx, trusted)
   if (!found || shadowedByPi(pi, name, found.filePath)) return
-  const override = skillOverrideFor(name, ctx.cwd, trusted)
-  if (!options?.modelInvocation) {
-    const refused = refusedByOverride(name, ctx, trusted)
-    if (refused) return refused
-  }
+  // skillOverrides covers personal and project skills only.
+  const refused = found.plugin ? undefined : refusedByOverride(name, ctx, trusted)
+  if (refused) return refused
   let parsed: ReturnType<typeof parseCommandFile>
   let content: string
   try {
@@ -439,7 +431,7 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
     // failing the invocation over the dynamic features it cannot have.
     return
   }
-  if (options?.modelInvocation) checkModelInvocation(name, override, parsed)
+  if (options?.modelInvocation) checkModelInvocation(name, parsed)
   return expandSkillBody(pi, ctx, { name, args, found, parsed, content }, options)
 }
 
