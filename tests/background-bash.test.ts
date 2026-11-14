@@ -1,10 +1,12 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 
+import { createBashToolDefinition } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
 import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, markBackground, registerShell, resetShells, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
+import { CLAUDE_TOOL_MAP, claudeToolName } from '../extensions/internal/claude-tool-names.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean; structuredContent?: { exit_code?: number } }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (update: unknown) => void, ctx?: unknown) => Promise<ToolResult>
@@ -21,7 +23,7 @@ interface Harness {
   footer: () => string | undefined
 }
 
-const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number } = {}): Harness => {
   const tools = new Map<string, { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> }; promptGuidelines?: string[] }>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
@@ -30,7 +32,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean } = {}): Harness =
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
   }
-  backgroundBashExtension(pi as never)
+  backgroundBashExtension(pi as never, { maxOutputBytes: options.maxOutputBytes })
   const statuses = new Map<string, string | undefined>()
   const ctx = {
     cwd: os.tmpdir(),
@@ -75,6 +77,14 @@ const until = async (condition: () => boolean, timeoutMs = 5000): Promise<void> 
     if (Date.now() > deadline) throw new Error('condition not met in time')
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+}
+
+// For the suites that run real commands. A stopped shell is killed asynchronously: wait
+// for it, so no process outlives the file.
+const stopAndWait = async (): Promise<void> => {
+  const live = allShells().filter((shell) => shell.stop !== undefined)
+  resetShells()
+  await until(() => live.every((shell) => shell.finishedAt !== undefined))
 }
 
 beforeEach(() => resetShells())
@@ -165,6 +175,12 @@ describe('background shell registry', () => {
     expect(ids).not.toContain(shells[1]?.id)
   })
 
+  it('removes the output file of an evicted command, and no other', () => {
+    const shells = Array.from({ length: MAX_FINISHED_SHELLS + 1 }, (_, i) => fakeShell(`b${String(i).padStart(8, '0')}`))
+    for (const shell of shells) settleShell(shell, 0)
+    expect(shells.map((shell) => fs.existsSync(shell.outputFile))).toEqual([false, ...shells.slice(1).map(() => true)])
+  })
+
   it('forgets a foreground command and its output file', () => {
     const shell = fakeShell('b00000005')
     forgetShell(shell)
@@ -211,6 +227,8 @@ describe('background shell registry', () => {
 })
 
 describe('bash tool', () => {
+  afterEach(stopAndWait)
+
   it('extends the built-in schema and prompt with background guidance', () => {
     const h = setup()
     const bash = h.tool('bash')
@@ -219,10 +237,27 @@ describe('bash tool', () => {
     expect(bash.promptGuidelines?.join('\n')).toContain('task_stop')
   })
 
+  it.each([{ hasUI: true }, { hasUI: false }])('keeps what the built-in definition carries and the override does not replace (hasUI: $hasUI)', (options) => {
+    const replaced = new Set(['description', 'promptGuidelines', 'parameters', 'execute'])
+    const bash = setup(options).tool('bash') as unknown as Record<string, unknown>
+    const kept = Object.entries(createBashToolDefinition(os.tmpdir())).filter(([key]) => !replaced.has(key))
+    expect(kept.map(([key]) => key)).toEqual(expect.arrayContaining(['outputSchema', 'constrainedSampling', 'promptSnippet']))
+    for (const [key, value] of kept) expect(JSON.stringify(bash[key]), key).toBe(JSON.stringify(value))
+    for (const [key, value] of kept) expect(typeof bash[key], key).toBe(typeof value)
+  })
+
+  it('states the default timeout in force, not a fixed one', () => {
+    process.env.BASH_DEFAULT_TIMEOUT_MS = '30000'
+    const timeout = setup().tool('bash').parameters.properties.timeout as { description: string }
+    expect(timeout.description).toContain('after 30 seconds')
+    expect(timeout.description).not.toContain('120')
+  })
+
   it('returns a quick command in the foreground, untracked', async () => {
     const h = setup()
     const result = await h.bash('t1', { command: 'echo hello' })
-    expect(textOf(result).trim()).toBe('hello')
+    // The shell's own stderr (a Git Bash startup warning) may precede the output.
+    expect(textOf(result)).toContain('hello')
     expect(result.structuredContent?.exit_code).toBe(0)
     expect(allShells()).toHaveLength(0)
   })
@@ -255,6 +290,17 @@ describe('bash tool', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(h.bash('t1', { command: 'echo never' }, controller.signal)).rejects.toThrow()
+  })
+
+  it.each(['echo quick', 'true'])('leaves no output file behind a call that never reached the background: %s', async (command) => {
+    const h = setup()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(h.bash('t1', { command }, controller.signal)).rejects.toThrow()
+    await h.bash('t2', { command })
+    // A stream still opening when its file was removed would create it now.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(fs.readdirSync(shellOutputDir())).toEqual([])
   })
 
   it('starts a run_in_background command and notifies when it completes', async () => {
@@ -328,19 +374,47 @@ describe('bash tool', () => {
     await expect(h.bash('t1', { command: 'echo x', timeout: -1 })).rejects.toThrow('Invalid timeout')
   })
 
-  it('runs as pi bash does with background tasks disabled', async () => {
-    process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1'
-    process.env.BASH_DEFAULT_TIMEOUT_MS = '50'
-    const h = setup()
-    const result = await h.bash('t1', { command: 'sleep 0.2; echo done', run_in_background: true })
-    expect(textOf(result).trim()).toBe('done')
-    expect(allShells()).toHaveLength(0)
-  })
+  describe.each([
+    ['with background tasks disabled', { env: '1' }],
+    ['in a session without a UI', { hasUI: false }],
+  ])('%s', (_name, { env, hasUI }: { env?: string; hasUI?: boolean }) => {
+    const off = (): Harness => {
+      if (env) process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = env
+      return setup({ hasUI })
+    }
 
-  it('runs as pi bash does in a session without a UI', async () => {
-    const h = setup({ hasUI: false })
-    const result = await h.bash('t1', { command: 'echo headless', run_in_background: true })
-    expect(textOf(result).trim()).toBe('headless')
+    it('does not offer run_in_background or mention background commands', () => {
+      const bash = off().tool('bash')
+      expect(Object.keys(bash.parameters.properties)).toEqual(['command', 'timeout'])
+      expect(JSON.stringify([bash.description, bash.parameters, bash.promptGuidelines])).not.toMatch(/background|task_stop/)
+      expect((bash.parameters.properties.timeout as { description: string }).description).toContain('stopped after 120 seconds')
+    })
+
+    it('rejects run_in_background instead of blocking on the command', async () => {
+      const h = off()
+      await expect(h.bash('t1', { command: 'sleep 2', run_in_background: true })).rejects.toThrow('Background commands are not available')
+      expect(allShells()).toHaveLength(0)
+    })
+
+    it('stops a command at the default timeout', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '100'
+      const h = off()
+      await expect(h.bash('t1', { command: 'echo early; sleep 2' })).rejects.toThrow('timed out after 0.1 seconds')
+      expect(allShells()).toHaveLength(0)
+    })
+
+    it('caps a requested timeout', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '100'
+      process.env.BASH_MAX_TIMEOUT_MS = '200'
+      const h = off()
+      await expect(h.bash('t1', { command: 'echo early; sleep 2', timeout: 60 })).rejects.toThrow('timed out after 0.2 seconds')
+    })
+
+    it('runs a quick command', async () => {
+      const result = await off().bash('t1', { command: 'echo quick' })
+      expect(textOf(result)).toContain('quick')
+      expect(result.structuredContent?.exit_code).toBe(0)
+    })
   })
 
   it('records the notice without a turn before the session has had one', async () => {
@@ -368,6 +442,85 @@ describe('bash tool', () => {
     expect(h.sent[0]?.options.triggerTurn).toBe(true)
   })
 
+  describe('output', () => {
+    const CAP = 4096
+    // pi's built-in tool saves the full text of output it truncates to a file of its own.
+    const builtinCopies = (): string[] => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('pi-bash-'))
+    const sizeOf = (file: string | undefined): number => fs.statSync(file ?? '').size
+    // Endless output at a rate that keeps the files small while the cap takes effect.
+    const CHATTER = 'while true; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done'
+
+    beforeEach(() => {
+      for (const name of builtinCopies()) fs.rmSync(`${os.tmpdir()}/${name}`)
+    })
+
+    it('stops a background command whose output passes the cap, and says so', async () => {
+      const h = setup({ maxOutputBytes: CAP })
+      const id = idOf(await h.bash('t1', { command: CHATTER, run_in_background: true }))
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain(`Background command ${id}`)
+      expect(h.sent[0]?.message.content).toContain('was stopped: its output passed the 4.0KB limit')
+      const [shell] = allShells()
+      expect(shell?.state).toBe('killed')
+      // Nothing is written past the chunk that crossed the cap; a pipe chunk is at most 64 KB.
+      expect(sizeOf(shell?.outputFile)).toBeGreaterThan(CAP)
+      expect(sizeOf(shell?.outputFile)).toBeLessThanOrEqual(CAP + 65536)
+    })
+
+    it('applies the cap once a command has moved to the background', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '200'
+      const h = setup({ maxOutputBytes: CAP })
+      const result = await h.bash('t1', { command: CHATTER })
+      expect(textOf(result)).toContain('moved to the background')
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain('its output passed the 4.0KB limit')
+      await until(() => builtinCopies().length === 0)
+    })
+
+    it('leaves a command under the cap alone', async () => {
+      const h = setup({ maxOutputBytes: CAP })
+      await h.bash('t1', { command: 'echo small', run_in_background: true })
+      await until(() => h.sent.length > 0)
+      expect(h.sent[0]?.message.content).toContain('completed (exit code 0)')
+    })
+
+    it('keeps one copy of a background command output', async () => {
+      const h = setup()
+      await h.bash('t1', { command: 'seq 1 20000', run_in_background: true })
+      await until(() => h.sent.length > 0)
+      expect(fs.readFileSync(allShells()[0]?.outputFile ?? '', 'utf8')).toContain('\n20000\n')
+      expect(builtinCopies()).toEqual([])
+    })
+
+    it('removes the built-in copy of a command that moved to the background', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '300'
+      const h = setup()
+      const result = await h.bash('t1', { command: 'seq 1 20000; sleep 0.6; seq 1 20000' })
+      expect(textOf(result)).toContain('moved to the background')
+      await until(() => h.sent.length > 0)
+      await until(() => builtinCopies().length === 0)
+      expect(sizeOf(allShells()[0]?.outputFile)).toBe(2 * 108894)
+    })
+
+    // Windows may keep listing a removed file until the stream writing it has closed.
+    it.skipIf(process.platform === 'win32')('removes the built-in copy at quit, without waiting for the command to end', async () => {
+      process.env.BASH_DEFAULT_TIMEOUT_MS = '300'
+      const h = setup()
+      const updates: unknown[] = []
+      await h.bash('t1', { command: 'seq 1 20000; sleep 10' }, undefined, (update) => updates.push(update))
+      expect(builtinCopies()).toHaveLength(1)
+      h.emit('session_shutdown', { reason: 'quit' })
+      expect(builtinCopies()).toEqual([])
+    })
+
+    it('keeps the built-in copy a foreground result points at', async () => {
+      const h = setup()
+      const result = await h.bash('t1', { command: 'seq 1 20000' })
+      expect(builtinCopies()).toHaveLength(1)
+      expect(textOf(result)).toContain(builtinCopies()[0])
+    })
+  })
+
   it('stops every background command when pi quits', async () => {
     const h = setup()
     await h.bash('t1', { command: 'sleep 10', run_in_background: true })
@@ -378,6 +531,8 @@ describe('bash tool', () => {
 })
 
 describe('footer status', () => {
+  afterEach(stopAndWait)
+
   it('words the count of running background commands', () => {
     expect(shellsFooterText(0)).toBeUndefined()
     expect(shellsFooterText(1)).toBe('⏵ 1 background shell')
@@ -437,6 +592,8 @@ describe('footer status', () => {
 })
 
 describe('task_stop tool', () => {
+  afterEach(stopAndWait)
+
   it('stops a running background command without a notice', async () => {
     const h = setup()
     const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
@@ -445,6 +602,25 @@ describe('task_stop tool', () => {
     expect(allShells()[0]?.state).toBe('killed')
     expect(h.sent).toHaveLength(0)
     expect(textOf(await h.stop('t3', { task_id: id }))).toContain('is not running')
+  })
+
+  it("takes the id as shell_id, Claude's deprecated name for it", async () => {
+    const h = setup()
+    const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
+    expect(textOf(await h.stop('t2', { shell_id: id }))).toBe(`Stopped background command ${id}.`)
+    expect(Object.keys(h.tool('task_stop').parameters.properties)).toEqual(['task_id', 'shell_id'])
+  })
+
+  it('prefers task_id and rejects a call with neither', async () => {
+    const h = setup()
+    const id = idOf(await h.bash('t1', { command: 'sleep 10', run_in_background: true }))
+    expect(textOf(await h.stop('t2', { task_id: id, shell_id: 'b00000000' }))).toBe(`Stopped background command ${id}.`)
+    await expect(h.stop('t3', {})).rejects.toThrow('task_id is required')
+  })
+
+  it("answers to Claude's names for the tool", () => {
+    for (const name of ['taskstop', 'killshell', 'killbash']) expect(CLAUDE_TOOL_MAP[name], name).toBe('task_stop')
+    expect(claudeToolName('task_stop')).toBe('TaskStop')
   })
 
   it('rejects an unknown id', async () => {

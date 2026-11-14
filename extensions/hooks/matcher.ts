@@ -126,24 +126,32 @@ function withCommand(raw: HookCommand): HookCommand {
   return raw
 }
 
+/** Claude runs a handler defined in more than one settings file once; a plugin's or
+ * skill's copy of the same handler stays separate. Handlers that share a command but
+ * differ in what they run or when (http headers, exec-form args, an `if` filter, an
+ * mcp_tool input) are different handlers: `if` is applied after this, so collapsing two
+ * filters left the other tool call with no guard. */
+function keepOnce(result: HookCommand[], seen: Map<string, number>, hook: HookCommand): void {
+  const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
+  const kept = seen.get(key)
+  if (kept === undefined) {
+    seen.set(key, result.length)
+    result.push(hook)
+    return
+  }
+  // The project or local copy's projectDir is the one its script path was written for.
+  if (hook.projectDir !== undefined && result[kept].projectDir === undefined) result[kept] = hook
+}
+
 function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {
   const result: HookCommand[] = []
-  const seen = new Set<string>()
+  const seen = new Map<string, number>()
   for (const entry of matchers ?? []) {
     if (!applies(entry)) continue
     for (const raw of (entry.hooks ?? []).filter(isRunnableHook)) {
       // A once-hook that already ran successfully is removed, as Claude documents.
       if (raw.spent === true) continue
-      const hook = withCommand(raw)
-      // Claude runs a handler defined in more than one settings file once; a
-      // plugin's or skill's copy of the same handler stays separate. Handlers that
-      // share a command but differ in what they run or when (http headers, exec-form
-      // args, an `if` filter, an mcp_tool input) are different handlers: `if` is applied
-      // after this, so collapsing two filters left the other tool call with no guard.
-      const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      result.push(hook)
+      keepOnce(result, seen, withCommand(raw))
     }
   }
   return result
@@ -222,6 +230,7 @@ function matchesToolPattern(piName: string, input: Record<string, unknown> | nul
     case 'subagent':
       return matchesAgentRules(agentNamesIn(input), [pattern])
     case 'slash_command':
+    case 'plugin_skill':
       return matchesSkillRules(str(input?.command), [pattern])
     default: {
       // Normalised as pi's file tools resolve it (~, a leading @, a file:// URL), because
