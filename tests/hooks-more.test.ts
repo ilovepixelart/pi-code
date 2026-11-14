@@ -737,6 +737,21 @@ describe('loadHooks malformed config shapes', () => {
   })
 })
 
+describe('plugin manifest hooks', () => {
+  it('should load every listed hooks file and inline object when the manifest declares an array', () => {
+    const root = tempDir('hooks-plugin-')
+    writeFileSync(join(root, 'a.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'from-a.sh' }] }] } }))
+    writeFileSync(join(root, 'b.json'), JSON.stringify({ hooks: {} }))
+    const plugin = { name: 'multi', root, dataDir: '/d', manifest: { hooks: ['./a.json', './b.json', { Stop: [{ hooks: [{ type: 'command', command: 'inline.sh' }] }] }] } }
+    const config: Record<string, unknown[]> = {}
+
+    loadPluginHooks(config as never, [plugin] as never)
+
+    expect(JSON.stringify(config.SessionStart), 'the listed file a.json registers its SessionStart hook').toContain('from-a.sh')
+    expect(JSON.stringify(config.Stop), 'the inline array entry registers its Stop hook').toContain('inline.sh')
+  })
+})
+
 describe('malformed hook config', () => {
   it('skips a null entry in a plugin manifest instead of throwing out of the load', () => {
     // The pre-pass that drops shell-form user_config references ran before any shape
