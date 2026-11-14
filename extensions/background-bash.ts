@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { type AgentToolResult, type BashOperations, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
 import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
@@ -86,7 +86,7 @@ const stopSchema = Type.Object({
   task_id: Type.String({ description: 'The ID of the background command to stop' }),
 })
 
-type ToolResult = AgentToolResult<unknown>
+type ToolResult = AgentToolResult<BashToolDetails | undefined>
 type Outcome = { result: ToolResult } | { error: unknown }
 
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
@@ -201,12 +201,12 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
   const registerBash = (background: boolean): void => {
     const defaultMs = foregroundLimitMs(undefined)
     pi.registerTool({
-      name: 'bash',
-      label: 'bash',
+      // Everything the built-in definition carries (output schema, constrained sampling,
+      // renderers) stays, except what is replaced below.
+      ...builtin,
       description: background
         ? `${builtin.description} Set run_in_background to start a long-running command (a dev server, a watcher, a long build) and keep working; a command that reaches its timeout also moves to the background instead of stopping, except one starting with sleep. Background output is written to a file you read with the read tool, and a message arrives when the command finishes.`
         : `${builtin.description} A command still running at its timeout is stopped.`,
-      promptSnippet: builtin.promptSnippet,
       promptGuidelines: background ? [...(builtin.promptGuidelines ?? []), 'Use bash run_in_background for commands that keep running, then read the output file it reports; do not poll with sleep. Stop a background command with task_stop.'] : builtin.promptGuidelines,
       parameters: (background ? bashSchema(defaultMs) : foregroundSchema(defaultMs)) as ReturnType<typeof bashSchema>,
       async execute(toolCallId, params, signal, onUpdate, ctx) {

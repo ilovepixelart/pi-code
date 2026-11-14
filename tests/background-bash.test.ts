@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 
+import { createBashToolDefinition } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
@@ -227,6 +228,15 @@ describe('bash tool', () => {
     expect(Object.keys(bash.parameters.properties)).toEqual(['command', 'timeout', 'run_in_background'])
     expect(bash.description).toContain('run_in_background')
     expect(bash.promptGuidelines?.join('\n')).toContain('task_stop')
+  })
+
+  it.each([{ hasUI: true }, { hasUI: false }])('keeps what the built-in definition carries and the override does not replace (hasUI: $hasUI)', (options) => {
+    const replaced = new Set(['description', 'promptGuidelines', 'parameters', 'execute'])
+    const bash = setup(options).tool('bash') as unknown as Record<string, unknown>
+    const kept = Object.entries(createBashToolDefinition(os.tmpdir())).filter(([key]) => !replaced.has(key))
+    expect(kept.map(([key]) => key)).toEqual(expect.arrayContaining(['outputSchema', 'constrainedSampling', 'promptSnippet']))
+    for (const [key, value] of kept) expect(JSON.stringify(bash[key]), key).toBe(JSON.stringify(value))
+    for (const [key, value] of kept) expect(typeof bash[key], key).toBe(typeof value)
   })
 
   it('states the default timeout in force, not a fixed one', () => {
