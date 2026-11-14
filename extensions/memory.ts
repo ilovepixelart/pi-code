@@ -134,20 +134,30 @@ export function autoMemoryEnabled(setting: unknown, env: NodeJS.ProcessEnv): boo
   return setting !== false
 }
 
+/** The frontmatter lines with the `modified:` field set. An existing field is
+ * replaced where it stands, top-level or nested, so the key that holds it is never
+ * left empty; a new one goes inside the `metadata:` block Claude Code keeps it in
+ * when the file has one, else at the top level. */
+function stampedLines(lines: string[], iso: string): string[] {
+  const existing = /^(\s*)modified\s*:.*$/
+  if (lines.some((line) => existing.test(line))) return lines.map((line) => line.replace(existing, (_match, indent: string) => `${indent}modified: ${iso}`))
+  const metadata = lines.findIndex((line) => /^metadata:\s*(#.*)?$/.test(line))
+  if (metadata === -1) return [...lines, `modified: ${iso}`]
+  let end = metadata + 1
+  while (end < lines.length && /^\s+\S/.test(lines[end])) end++
+  const indent = /^\s+/.exec(lines[metadata + 1] ?? '')?.[0] ?? '  '
+  return [...lines.slice(0, end), `${indent}modified: ${iso}`, ...lines.slice(end)]
+}
+
 /** Set or replace the ISO 8601 `modified:` field inside a memory's YAML frontmatter.
  * Files without frontmatter are returned untouched: Claude never adds frontmatter to
  * a file that has none. */
 export function stampModified(content: string, iso: string): string {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
   if (!match) return content
-  const inner = match[1]
-  const rest = content.slice(match[0].length)
-  const withoutModified = inner
-    .split('\n')
-    .filter((line) => !/^\s*modified\s*:/.test(line))
-    .join('\n')
-  const body = withoutModified.length > 0 ? `${withoutModified}\n` : ''
-  return `---\n${body}modified: ${iso}\n---${rest}`
+  const eol = lineEnding(match[0])
+  const lines = match[1] === '' ? [] : match[1].split(/\r?\n/)
+  return `---${eol}${stampedLines(lines, iso).join(eol)}${eol}---${content.slice(match[0].length)}`
 }
 
 /** Length of the line break `text` starts with: CRLF, LF, or none. */

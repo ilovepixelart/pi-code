@@ -194,6 +194,26 @@ describe('stampModified', () => {
     expect(out.match(/modified:/g)).toHaveLength(1)
   })
 
+  it("updates Claude's nested metadata.modified in place", () => {
+    const stale = '---\nname: x\nmetadata:\n  type: feedback\n  modified: 2020-01-01T00:00:00.000Z\n---\nbody'
+    expect(stampModified(stale, iso)).toBe(`---\nname: x\nmetadata:\n  type: feedback\n  modified: ${iso}\n---\nbody`)
+  })
+
+  it('never leaves an empty metadata key behind', () => {
+    const only = '---\nname: x\nmetadata:\n  modified: 2020-01-01T00:00:00.000Z\n---\nbody'
+    expect(stampModified(only, iso)).toBe(`---\nname: x\nmetadata:\n  modified: ${iso}\n---\nbody`)
+  })
+
+  it('adds the timestamp inside a metadata block that has none', () => {
+    const fresh = '---\nname: x\nmetadata:\n    type: feedback\ndescription: d\n---\nbody'
+    expect(stampModified(fresh, iso)).toBe(`---\nname: x\nmetadata:\n    type: feedback\n    modified: ${iso}\ndescription: d\n---\nbody`)
+    expect(stampModified('---\nmetadata:\nname: x\n---\nbody', iso)).toBe(`---\nmetadata:\n  modified: ${iso}\nname: x\n---\nbody`)
+  })
+
+  it('keeps CRLF frontmatter CRLF', () => {
+    expect(stampModified('---\r\nname: x\r\n---\r\nbody', iso)).toBe(`---\r\nname: x\r\nmodified: ${iso}\r\n---\r\nbody`)
+  })
+
   it('never adds frontmatter to a file that has none', () => {
     expect(stampModified('plain body, no frontmatter', iso)).toBe('plain body, no frontmatter')
   })
