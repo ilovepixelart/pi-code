@@ -494,8 +494,10 @@ describe('monitor tool', () => {
       expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
     })
 
-    it('stops a command that prints without pause under the limits in force, with one notice', async () => {
-      const { monitor, sent } = setup()
+    // Held window, as above: on a slow host a first batch can come due before the
+    // output passes the limit, and is then delivered ahead of the notice.
+    it('stops a command that prints without pause at the line limit in force, with one notice', async () => {
+      const { monitor, sent } = setup({ limits: HELD })
       const id = idOf(await monitor({ command: 'yes line' }))
       await until(() => shell(id)?.finishedAt !== undefined)
       expect(sent.map((entry) => entry.message.content)).toEqual([stopNotice(id, tooMany)])
