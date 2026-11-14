@@ -13,6 +13,7 @@ vi.mock('node:os', async (importOriginal) => {
 })
 
 const { default: skillsExt, skillDirs, pluginSkills } = await import('../extensions/skills.ts')
+const { sharedSlot } = await import('../extensions/internal/shared-slot.ts')
 
 const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
 
@@ -268,8 +269,10 @@ describe('extension wiring', () => {
     const sendUserMessage = vi.fn()
     const emit = vi.fn()
     const exec = vi.fn(async () => ({ stdout: 'SPAN-OUT', stderr: '', code: 0 }))
+    const piCommands: Array<{ name: string; source: string; sourceInfo: { path: string } }> = []
     skillsExt({
       on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, fn),
+      getCommands: () => piCommands,
       registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, options),
       registerTool: (tool: Tool & { name: string }) => tools.set(tool.name, tool),
       sendUserMessage,
@@ -279,7 +282,7 @@ describe('extension wiring', () => {
     const start = (context = ctx) => handlers.get('session_start')?.({}, context)
     const invoke = (context = ctx, command = '/kit:deploy prod') => tools.get('plugin_skill')!.execute('call', { command }, undefined, undefined, context)
     const input = (text: string, context = ctx) => handlers.get('input')?.({ text, source: 'interactive' }, context) as Promise<{ action: string; text?: string } | undefined>
-    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, start, invoke, input }
+    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, piCommands, start, invoke, input }
   }
 
   it.each(['\n', '\t', ' '])('splits the name from the arguments on any whitespace (%j)', async (separator) => {
@@ -348,6 +351,83 @@ describe('extension wiring', () => {
     expect((await t.input('/kit:deploy'))?.text).toContain('DEPLOY BODY')
     expect((await t.invoke(t.ctx, '/kit:deploy')).content[0].text).toContain('DEPLOY BODY')
     expect((await t.input('/kit:other'))?.text).toContain('DEPLOY BODY')
+  })
+
+  describe('the bare /skill:name form of a plugin skill', () => {
+    // The notice is once per process; each test starts with nothing reported.
+    beforeEach(() => sharedSlot<Set<string>>('warned-once').set(undefined))
+
+    const secondPlugin = (name: string) => {
+      const root = join(hoisted.home, '.claude', 'plugins', 'cache', 'market', name, '1.0.0')
+      mkdirSync(join(root, 'skills', 'deploy'), { recursive: true })
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name }))
+      writeFileSync(join(root, 'skills', 'deploy', 'SKILL.md'), `---\nname: deploy\ndescription: deploys\n---\nFROM ${name}`)
+      writeFileSync(join(hoisted.home, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { kit: true, [name]: true } }))
+    }
+
+    it('still resolves to the one plugin skill of that name, with one deprecation notice', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const ui = { ...t.ctx, hasUI: true }
+      const first = await t.input('/skill:deploy prod', ui)
+      expect(first?.text).toContain('<skill name="kit:deploy"')
+      expect(first?.text).toContain('Deploy prod')
+      expect((await t.input('/skill:deploy again', ui))?.text).toContain('Deploy again')
+      expect(t.ctx.ui.notify).toHaveBeenCalledTimes(1)
+      expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/\/skill:deploy is deprecated.*\/kit:deploy/), 'warning')
+    })
+
+    it('prints the deprecation to stderr when there is no UI', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        expect((await t.input('/skill:deploy prod'))?.text).toContain('Deploy prod')
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Use /kit:deploy instead'))
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it('does not warn for the qualified forms', async () => {
+      const t = pluginFixture()
+      await t.start()
+      const ui = { ...t.ctx, hasUI: true }
+      await t.input('/skill:kit:deploy prod', ui)
+      await t.input('/kit:deploy prod', ui)
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('leaves a personal skill of that name in charge', async () => {
+      const t = pluginFixture()
+      mkdirSync(join(hoisted.home, '.claude', 'skills', 'deploy'), { recursive: true })
+      writeFileSync(join(hoisted.home, '.claude', 'skills', 'deploy', 'SKILL.md'), '---\nname: deploy\ndescription: mine\n---\nPERSONAL BODY')
+      await t.start()
+      const outcome = await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })
+      expect(outcome?.text).toContain('PERSONAL BODY')
+      expect(outcome?.text).toContain('<skill name="deploy"')
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('leaves a skill pi loaded under that name to pi', async () => {
+      const t = pluginFixture()
+      t.piCommands.push({ name: 'skill:deploy', source: 'skill', sourceInfo: { path: join(tempDir('cs-pi-'), 'SKILL.md') } })
+      await t.start()
+      expect(await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })).toBeUndefined()
+      expect(t.ctx.ui.notify).not.toHaveBeenCalled()
+    })
+
+    it('names the qualified skills instead of guessing when several plugins ship the name', async () => {
+      const t = pluginFixture()
+      secondPlugin('aaa')
+      await t.start()
+      expect(await t.input('/skill:deploy prod', { ...t.ctx, hasUI: true })).toEqual({ action: 'handled' })
+      expect(t.ctx.ui.notify).toHaveBeenCalledTimes(1)
+      const [message] = t.ctx.ui.notify.mock.calls[0]
+      expect(message).toContain('/aaa:deploy')
+      expect(message).toContain('/kit:deploy')
+    })
   })
 
   it('rechecks disable-model-invocation on every model call', async () => {

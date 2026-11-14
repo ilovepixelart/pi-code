@@ -422,15 +422,35 @@ function readSkill(filePath: string): { parsed: ReturnType<typeof parseCommandFi
   return { content, parsed: parseCommandFile(content) }
 }
 
-type ResolvedSkill = FoundSkill & { name: string; plugin?: PluginSkill['plugin'] }
+type ResolvedSkill = FoundSkill & {
+  name: string
+  plugin?: PluginSkill['plugin']
+  /** Every plugin skill a bare name addresses, when there is more than one. */
+  ambiguous?: string[]
+}
+
+const resolvedPluginSkill = (skill: PluginSkill): ResolvedSkill => ({ name: skill.name, filePath: skill.filePath, baseDir: path.dirname(skill.filePath), plugin: skill.plugin })
+
+/** DEPRECATED form, removed in the next major: a bare `/skill:name` for a plugin skill,
+ * which is how pi's loader registered plugin skills before they kept their namespace.
+ * Several plugins can ship the name; the first is returned with all of them listed, for
+ * the caller to refuse rather than guess. */
+function resolveBarePluginSkill(bare: string): ResolvedSkill | undefined {
+  const unqualified = (name: string | undefined): string | undefined => name?.slice(name.indexOf(':') + 1)
+  const matches = pluginSkills(os.homedir()).filter((skill) => unqualified(skill.name) === bare || unqualified(skill.alias) === bare)
+  if (matches.length === 0) return undefined
+  return { ...resolvedPluginSkill(matches[0]), ...(matches.length > 1 ? { ambiguous: matches.map((skill) => skill.name) } : {}) }
+}
 
 /** Resolve a plugin skill, or a personal/project skill contributed to pi's loader. The
  * returned name is the skill's own, whichever spelling addressed it. */
 function resolveInvokedSkill(name: string, ctx: ExtensionContext, trusted: boolean): ResolvedSkill | undefined {
-  const pluginSkill = name.includes(':') ? findPluginSkill(pluginSkills(os.homedir()), name) : undefined
-  if (pluginSkill) return { name: pluginSkill.name, filePath: pluginSkill.filePath, baseDir: path.dirname(pluginSkill.filePath), plugin: pluginSkill.plugin }
+  const qualified = name.includes(':')
+  const pluginSkill = qualified ? findPluginSkill(pluginSkills(os.homedir()), name) : undefined
+  if (pluginSkill) return resolvedPluginSkill(pluginSkill)
   const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
-  return found && { name, ...found }
+  if (found) return { name, ...found }
+  return qualified ? undefined : resolveBarePluginSkill(name)
 }
 
 type ExpansionOptions = { allowShell?: boolean; inlineFork?: boolean; modelInvocation?: boolean }
@@ -455,6 +475,18 @@ function refusedForUser(name: string, ctx: ExtensionContext): { action: 'handled
   return { action: 'handled' }
 }
 
+/** The bare `/skill:name` form of a plugin skill: refused when several plugins ship the
+ * name, otherwise allowed with a deprecation notice shown once per process and name. */
+function bareFormRefusal(typed: string, found: ResolvedSkill, ctx: ExtensionContext): { action: 'handled' } | undefined {
+  if (!found.plugin || typed.includes(':')) return undefined
+  if (found.ambiguous) {
+    notice(ctx, `/skill:${typed} matches more than one plugin skill and was not run. Use a qualified name: ${found.ambiguous.map((name) => `/${name}`).join(', ')}.`, 'warning')
+    return { action: 'handled' }
+  }
+  warnOnce(`/skill:${typed} is deprecated for plugin skills and will be removed in the next major version. Use /${found.name} instead.`, (message) => notice(ctx, message, 'warning'))
+  return undefined
+}
+
 async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: ExtensionContext, options?: ExpansionOptions): Promise<ExpansionResult> {
   const invocation = parseSkillInvocation(rawText)
   if (!invocation) return
@@ -462,6 +494,8 @@ async function expandSkillInvocation(pi: ExtensionAPI, rawText: string, ctx: Ext
   const trusted = isProjectApprovedSilently(ctx)
   const found = resolveInvokedSkill(invocation.name, ctx, trusted)
   if (!found || shadowedByPi(pi, invocation.name, found.filePath)) return
+  const ambiguous = bareFormRefusal(invocation.name, found, ctx)
+  if (ambiguous) return ambiguous
   const { name } = found
   // skillOverrides covers personal and project skills only.
   const refused = found.plugin ? undefined : refusedByOverride(name, ctx, trusted)

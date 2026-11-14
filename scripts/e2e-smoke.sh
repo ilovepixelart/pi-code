@@ -146,6 +146,12 @@ WIRE="$HOMEDIR/wire-plugin-print.jsonl"
 run_pi "$PI_BIN" -p "/skill:smoke-kit:deploy staging" > "$SMOKE/pi-plugin-print.log" 2>&1
 if wire_has 'SMOKE PLUGIN BODY staging'; then ok "smoke: qualified skill input expands in print mode"; else bad "smoke: qualified skill input missing in print mode"; fi
 
+# The form plugin skills had before they kept their namespace still runs, with a notice.
+WIRE="$HOMEDIR/wire-plugin-bare.jsonl"
+run_pi "$PI_BIN" -p "/skill:deploy legacy" > "$SMOKE/pi-plugin-bare.log" 2>&1
+if wire_has 'SMOKE PLUGIN BODY legacy'; then ok "smoke: deprecated bare skill input still expands"; else bad "smoke: deprecated bare skill input missing"; fi
+if grep -q 'Use /smoke-kit:deploy instead' "$SMOKE/pi-plugin-bare.log"; then ok "smoke: bare skill input names its replacement"; else bad "smoke: no deprecation notice for bare skill input"; fi
+
 # --- A freshly cloned project nobody was asked about, headless: no prompt can approve it ---
 # pi itself still loads its CLAUDE.md, and an import inside the project is only more of
 # what the repository ships; everything else project-scoped stays out.
