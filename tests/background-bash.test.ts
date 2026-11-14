@@ -1,12 +1,14 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
+import * as path from 'node:path'
 
-import { createBashToolDefinition } from '@earendil-works/pi-coding-agent'
+import { type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, createBashToolDefinition, SessionManager } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
 import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, markBackground, registerShell, resetShells, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
 import { CLAUDE_TOOL_MAP, claudeToolName } from '../extensions/internal/claude-tool-names.ts'
+import monitorExtension from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean; structuredContent?: { exit_code?: number } }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (update: unknown) => void, ctx?: unknown) => Promise<ToolResult>
@@ -627,5 +629,64 @@ describe('task_stop tool', () => {
   it('rejects an unknown id', async () => {
     const h = setup()
     await expect(h.stop('t1', { task_id: 'b12345678' })).rejects.toThrow('No background command with ID b12345678')
+  })
+})
+
+// Against a real pi session: which tools a session starts with is decided by pi from what
+// is registered when, and a stubbed pi cannot say what that comes to.
+describe('tool selection', () => {
+  type SessionOptions = { tools?: string[]; noTools?: 'all' | 'builtin'; defaultTools?: string[] }
+
+  const start = async (options: SessionOptions = {}) => {
+    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-cwd-')))
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-agent-'))
+    if (options.defaultTools) fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultTools: options.defaultTools }))
+    const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+      const services = await createAgentSessionServices({ cwd, agentDir, resourceLoaderOptions: { noExtensions: true, extensionFactories: [(pi) => backgroundBashExtension(pi), (pi) => monitorExtension(pi)] } })
+      return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, tools: options.tools, noTools: options.noTools })), services, diagnostics: services.diagnostics }
+    }
+    const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) })
+    await runtime.session.bindExtensions({})
+    return runtime
+  }
+  const hasBash = (runtime: Awaited<ReturnType<typeof start>>): boolean => runtime.session.getActiveToolNames().includes('bash')
+
+  it('offers its bash in a default session', async () => {
+    const runtime = await start()
+    try {
+      expect(hasBash(runtime)).toBe(true)
+      expect(runtime.session.getToolDefinition('bash')?.description).toContain('A command still running at its timeout is stopped.')
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it.each<[string, SessionOptions]>([
+    ['the defaultTools setting leaves bash out', { defaultTools: ['read'] }],
+    ['built-in tools are off', { noTools: 'builtin' }],
+    ['--tools removes bash', { tools: ['-bash'] }],
+  ])('offers no bash where %s', async (_name, options) => {
+    const runtime = await start(options)
+    try {
+      expect(hasBash(runtime)).toBe(false)
+      await runtime.session.reload()
+      expect(hasBash(runtime)).toBe(false)
+      await runtime.newSession()
+      await runtime.session.bindExtensions({})
+      expect(hasBash(runtime)).toBe(false)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('keeps bash off across /reload once the session turned it off', async () => {
+    const runtime = await start()
+    try {
+      runtime.session.setActiveToolsByName(runtime.session.getActiveToolNames().filter((name) => name !== 'bash'))
+      await runtime.session.reload()
+      expect(hasBash(runtime)).toBe(false)
+    } finally {
+      await runtime.dispose()
+    }
   })
 })
