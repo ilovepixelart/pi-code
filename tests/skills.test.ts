@@ -504,6 +504,24 @@ describe('extension wiring', () => {
     expect(outcome?.text).toContain('Deploy prod')
   })
 
+  it('treats a plugin skill with unparseable frontmatter as pi treats a personal one', async () => {
+    // pi's loader skips a skill whose frontmatter it cannot parse, so /skill:name for
+    // a personal skill passes through as typed. The plugin path matches: no command,
+    // no listing, and the input is left alone rather than failing.
+    const t = pluginFixture('---\nname: [broken yaml\n---\nRough body')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await t.start()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(t.filePath))
+      expect(t.commands.size).toBe(0)
+      expect(t.tools.has('plugin_skill')).toBe(false)
+      await expect(t.input('/kit:deploy prod')).resolves.toBeUndefined()
+      await expect(t.input('/skill:deploy prod')).resolves.toBeUndefined()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('keeps model expansion from executing injected shell', async () => {
     const t = pluginFixture('---\nname: deploy\ndescription: deploys\n---\n!`git diff`')
     await t.start()
