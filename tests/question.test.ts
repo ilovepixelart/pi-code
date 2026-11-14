@@ -681,6 +681,69 @@ describe('question renderResult', () => {
 })
 
 describe('question overlay', () => {
+  it('should wrap the full question when it exceeds the available width', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'Which deployment target should we use?', options: OPTIONS })
+
+    const out = overlay.render(20)
+
+    expect(out.slice(1, 4), 'The full question should wrap with one-space indentation').toEqual([' Which deployment', ' target should we', ' use?'])
+  })
+
+  it('should wrap the full description when it exceeds the available width', () => {
+    const { overlay } = openOverlay(setup(), [{ label: 'Alpha', description: 'Deploy to the production cluster' }, { label: 'Beta' }])
+
+    const out = overlay.render(20)
+    const start = out.findIndex((line) => line.endsWith(' 1. Alpha')) + 1
+
+    expect(out.slice(start, start + 3), 'The full description should wrap with five-space indentation').toEqual(['     Deploy to the', '     production', '     cluster'])
+  })
+
+  it('should preserve explicit line breaks when the question and description span paragraphs', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'First line\nSecond line', options: [{ label: 'Alpha', description: 'One line\nAnother line' }, { label: 'Beta' }] })
+
+    const out = overlay.render(60)
+
+    expect(out.slice(1, 3), 'Question line breaks should produce indented rows').toEqual([' First line', ' Second line'])
+    expect(out.slice(5, 7), 'Description line breaks should produce indented rows').toEqual(['     One line', '     Another line'])
+  })
+
+  it('should color each wrapped row separately when the theme applies colors', () => {
+    let overlay: Overlay | undefined
+    const colorTheme = { fg: (_color: string, s: string) => `\x1b[31m${s}\x1b[39m`, bold: (s: string) => s }
+    const ctx = { hasUI: true, mode: 'tui', ui: { custom: (factory: CustomFactory) => new Promise((resolve) => (overlay = factory(fakeTui(), colorTheme, {}, resolve))) } }
+    void setup().execute('call-1', { question: 'Which deployment target should we use?', options: [{ label: 'Alpha', description: 'Deploy to the production cluster' }, { label: 'Beta' }] }, undefined, undefined, ctx)
+    if (!overlay) throw new Error('ui.custom factory was never invoked')
+
+    const out = overlay.render(30)
+
+    expect(out.slice(1, 3), 'Each question row should open and close its own color').toEqual([' \x1b[31mWhich deployment target\x1b[39m', ' \x1b[31mshould we use?\x1b[39m'])
+    expect(
+      out.filter((line) => line.startsWith('     \x1b[31m')),
+      'Each description row should open and close its own color',
+    ).toEqual(['     \x1b[31mDeploy to the production\x1b[39m', '     \x1b[31mcluster\x1b[39m'])
+  })
+
+  it('should keep every row within the width when the width is smaller than the description indent', () => {
+    const { overlay } = openOverlay(setup(), [{ label: 'Alpha', description: 'Deploy now' }, { label: 'Beta' }])
+
+    const out = overlay.render(4)
+
+    expect(
+      out.filter((line) => line.replaceAll('\x1b[0m', '').length > 4),
+      'No row should exceed the terminal width',
+    ).toEqual([])
+    expect(out, 'The description should still render, one column per row').toContain('   D')
+  })
+
+  it('should drop trailing newlines when the question and description end with one', () => {
+    const { overlay } = openOverlayWith(setup(), { question: 'Q?\n', options: [{ label: 'Alpha', description: 'D\n' }, { label: 'Beta' }] })
+
+    const out = overlay.render(60)
+
+    expect(out.slice(1, 3), 'The question should be followed directly by the blank separator').toEqual([' Q?', ''])
+    expect(out[out.findIndex((line) => line.endsWith(' 1. Alpha')) + 2], 'The description should be followed directly by the next option').toContain('2. Beta')
+  })
+
   it('renders the question, the numbered options with descriptions, and the navigation hint', () => {
     const { overlay } = openOverlay(setup())
     const out = overlay.render(60)
