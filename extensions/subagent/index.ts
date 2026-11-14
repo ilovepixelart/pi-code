@@ -23,6 +23,7 @@ import { type ExtensionAPI, getMarkdownTheme } from '@earendil-works/pi-coding-a
 import { Text } from '@earendil-works/pi-tui'
 import { setAgentRunner } from '../internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../internal/background-agents.ts'
+import { allShells, shellsStatusText } from '../internal/background-shells.ts'
 import { isMcpToolAliases, MCP_TOOLS_CHANNEL } from '../internal/mcp-alias.ts'
 import { isProjectApprovedSilently } from '../internal/project-approval.ts'
 import { addPromptSection } from '../internal/prompt-options.ts'
@@ -338,9 +339,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
   // Claude's /tasks: background-run status at a glance, returning immediately without
   // interrupting the agent; the only other way to see these is to ask the model.
   pi.registerCommand('tasks', {
-    description: 'Show background subagent runs',
+    description: 'Show background subagent runs and shell commands',
     handler: async (_args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
-      ctx.ui.notify(tasksStatusText(allBackgroundRuns()), 'info')
+      // Claude's /tasks shows "running shells and subagents" together; the shells come
+      // from the background-bash extension's registry.
+      const shells = shellsStatusText(allShells())
+      const runs = tasksStatusText(allBackgroundRuns())
+      ctx.ui.notify(shells ? `${runs}\n\nBackground shells:\n${shells}` : runs, 'info')
     },
   })
 

@@ -23,6 +23,12 @@ describe('claudeToolInput', () => {
     expect(claudeToolInput('bash', { command: 'ls', timeout: 30 }, '/proj')).toEqual({ command: 'ls', timeout: 30000 })
   })
 
+  it('reports run_in_background on a bash call that sets it, as Claude does', () => {
+    expect(claudeToolInput('bash', { command: 'npm run dev', run_in_background: true }, '/proj')).toEqual({ command: 'npm run dev', run_in_background: true })
+    expect(claudeToolInput('bash', { command: 'ls', run_in_background: false }, '/proj')).toEqual({ command: 'ls', run_in_background: false })
+    expect(claudeToolInput('bash', { command: 'ls' }, '/proj')).toEqual({ command: 'ls' })
+  })
+
   it('makes file paths absolute, expanding ~, as Claude documents', () => {
     expect(claudeToolInput('write', { path: 'src/a.ts', content: 'x' }, '/proj')).toEqual({ file_path: path.resolve('/proj', 'src/a.ts'), content: 'x' })
     expect(claudeToolInput('read', { path: '~/notes.md' }, '/proj')).toEqual({ file_path: path.join(os.homedir(), 'notes.md') })
@@ -53,6 +59,8 @@ describe('claudeToolInput', () => {
 describe('piToolInput', () => {
   it('converts a Claude rewrite back to the pi shape', () => {
     expect(piToolInput('bash', { command: 'ls', timeout: 30000 })).toEqual({ command: 'ls', timeout: 30 })
+    expect(piToolInput('bash', { command: 'ls', run_in_background: true })).toEqual({ command: 'ls', run_in_background: true })
+    expect(piToolInput('bash', { command: 'ls', run_in_background: 'yes' })).toEqual({ command: 'ls' })
     expect(piToolInput('edit', { file_path: '/p/a.ts', old_string: 'x', new_string: 'z' })).toEqual({ path: '/p/a.ts', edits: [{ oldText: 'x', newText: 'z' }] })
     expect(piToolInput('write', { file_path: '/p/a.ts', content: 'c' })).toEqual({ path: '/p/a.ts', content: 'c' })
   })
