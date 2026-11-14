@@ -278,8 +278,17 @@ describe('extension wiring', () => {
     } as never)
     const start = (context = ctx) => handlers.get('session_start')?.({}, context)
     const invoke = (context = ctx, command = '/kit:deploy prod') => tools.get('plugin_skill')!.execute('call', { command }, undefined, undefined, context)
-    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, start, invoke }
+    const input = (text: string, context = ctx) => handlers.get('input')?.({ text, source: 'interactive' }, context) as Promise<{ action: string; text?: string } | undefined>
+    return { ctx, root, filePath, settingsPath, handlers, commands, tools, sendUserMessage, emit, exec, start, invoke, input }
   }
+
+  it.each(['\n', '\t', ' '])('splits the name from the arguments on any whitespace (%j)', async (separator) => {
+    const t = pluginFixture()
+    await t.start()
+    const result = await t.invoke(t.ctx, `/kit:deploy${separator}prod`)
+    expect(result.content[0].text).toContain('Deploy prod')
+    expect((await t.input(`/kit:deploy${separator}prod`))?.text).toContain('Deploy prod')
+  })
 
   it.each(['off', 'user-invocable-only'])('refuses a live %s override before expanding a model invocation', async (state) => {
     const t = pluginFixture()

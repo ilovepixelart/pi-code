@@ -380,7 +380,7 @@ function shadowedByPi(pi: ExtensionAPI, name: string, filePath: string): boolean
  * is pi's own skill prefix; anything else namespaced (`/plugin:skill`) is a plugin skill. */
 function invocationMarker(text: string): string | undefined {
   if (text.startsWith('/skill:')) return '/skill:'
-  const head = text.slice(1).split(' ')[0]
+  const head = text.slice(1).split(/\s/, 1)[0]
   return text.startsWith('/') && head.includes(':') ? '/' : undefined
 }
 
@@ -388,7 +388,8 @@ function parseSkillInvocation(rawText: string): { name: string; args: string } |
   const text = rawText.trimStart()
   const marker = invocationMarker(text)
   if (marker === undefined) return undefined
-  const space = text.indexOf(' ')
+  // Any whitespace ends the name, as it does for the plugin_skill tool's own split.
+  const space = text.search(/\s/)
   const name = (space === -1 ? text.slice(marker.length) : text.slice(marker.length, space)).trim()
   if (!name || (marker !== '/skill:' && !name.includes(':'))) return undefined
   return { name, args: space === -1 ? '' : text.slice(space + 1).trim() }
