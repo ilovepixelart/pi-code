@@ -16,6 +16,14 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync }
 })
 
+// os.homedir() reads USERPROFILE on Windows and HOME elsewhere, so the command tests
+// replace the function rather than either variable.
+const osHoisted = vi.hoisted(() => ({ home: '' }))
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => osHoisted.home || actual.homedir() }
+})
+
 import { initTheme } from '@earendil-works/pi-coding-agent'
 
 import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
@@ -488,7 +496,8 @@ describe('pi-only plugin enablement', () => {
     try {
       run()
     } finally {
-      process.env.PI_CODING_AGENT_DIR = saved
+      if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = saved
     }
   }
 
@@ -598,7 +607,8 @@ describe('pi-only plugin enablement', () => {
 
       expect(JSON.parse(readFileSync(piFile(), 'utf-8')), 'the directory and file are created').toEqual({ piCode: { enabledPlugins: { 'ponytail@ponytail': false } } })
     } finally {
-      process.env.PI_CODING_AGENT_DIR = saved
+      if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = saved
     }
   })
 
@@ -644,13 +654,11 @@ describe('/claude-plugins command', () => {
           }),
       },
     }
-    const savedHome = process.env.HOME
-    process.env.HOME = h
-    process.env.USERPROFILE = h // os.homedir() reads USERPROFILE on Windows; global setup restores it
+    osHoisted.home = h
     try {
       await commands.get('claude-plugins')?.handler('', ctx)
     } finally {
-      process.env.HOME = savedHome
+      osHoisted.home = ''
     }
     return notices
   }
