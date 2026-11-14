@@ -241,8 +241,12 @@ if capture_all | grep -qE 'Rules loaded: |Output style: |MCP: '; then ok "boot: 
 if wait_file "$FX/.e2e-session-start" 10; then ok "hooks: SessionStart hook ran"; else bad "hooks: SessionStart marker missing"; fi
 if capture | grep -q '○ ready'; then ok "statusline: ready segment"; else bad "statusline: no ready segment"; fi
 
+# Under pi's native MCP (pi >= 0.99) /mcp is pi's dialog, which stays open until
+# Escape has backed out of every level; anything typed meanwhile goes to it.
 send "/mcp" Enter
-if wait_for 'e2e: connected \(1 tools\)' 15; then ok "mcp: /mcp lists the fixture server"; else bad "mcp: /mcp listing wrong"; fi
+if wait_for 'e2e: connected \(1 tools\)|connected · 1 tool' 15; then ok "mcp: /mcp lists the fixture server"; else bad "mcp: /mcp listing wrong"; fi
+NATIVE_MCP=0
+for _ in 1 2 3; do capture | grep -qE 'escape/ctrl\+c (back|close)' || break; NATIVE_MCP=1; send Escape; sleep 1; done
 
 send "/output-style" Enter
 if wait_for 'Pirate' 15; then ok "output-style: picker opens"; send Escape; else bad "output-style: picker missing"; fi
@@ -319,8 +323,9 @@ else
   bad "memory: no memory file for $SLUG"
 fi
 
-type_prompt "Use the web_fetch tool on https://example.com and quote the page heading."
-if wait_for 'Example Domain' 200; then ok "web: web_fetch returned real page text"; else bad "web: no Example Domain"; fi
+# A commit-pinned URL serves the same bytes forever; a live site's wording does not.
+type_prompt "Use the web_fetch tool on https://raw.githubusercontent.com/ilovepixelart/pi-code/e4ec5d2d11f83ed35eed0bfebf5a351e71f47e29/LICENSE and quote its copyright lines."
+if wait_for 'Copyright \(c\) 2026 ilovepixelart' 200; then ok "web: web_fetch returned real page text"; else bad "web: pinned LICENSE text missing"; fi
 
 type_prompt "Use the question tool to ask me to choose between alpha and beta. Then just acknowledge my choice."
 if wait_for 'Enter to select' 200; then
@@ -393,8 +398,13 @@ if ((subagent_done == 0)); then ok "subagent: child pi ran and reported back"; e
 # extension exposes the greet prompt as /mcp__e2e__greet, whose returned message is sent
 # as a user message and drives the marker turn (the marker rides in on that message, so
 # it appears only when the prompt was actually fetched).
-type_prompt "/mcp__e2e__greet"
-if wait_for 'GREET_PROMPT_MARKER' 200; then ok "mcp-prompts: prompt command drove a turn"; else bad "mcp-prompts: no GREET_PROMPT_MARKER"; fi
+# Under pi's native MCP, pi connects the server and has no prompt commands (docs/mcp.md).
+if [ "$NATIVE_MCP" = 1 ]; then
+  say "skip mcp-prompts: pi's native MCP has no prompt commands"
+else
+  type_prompt "/mcp__e2e__greet"
+  if wait_for 'GREET_PROMPT_MARKER' 200; then ok "mcp-prompts: prompt command drove a turn"; else bad "mcp-prompts: no GREET_PROMPT_MARKER"; fi
+fi
 
 # The resources capability registers the global list_mcp_resources / read_mcp_resource
 # tools; the marker only surfaces if the model lists then reads the fixture resource.
