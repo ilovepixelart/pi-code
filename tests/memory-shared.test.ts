@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import memoryExtension, { capIndexForPrompt, claudeMemoryDir, claudeProjectSlug, indexWouldOverflow, readMemorySettings, resolveMemoryDir, upsertIndexLine } from '../extensions/memory.ts'
+import { makeWorktree } from './worktree-fixture.ts'
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown>
 type Tool = { execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }
@@ -97,6 +98,39 @@ describe('claude memory storage', () => {
     expect(claudeMemoryDir(repo)).toBe(claudeStore(repo))
     // Subdirectory sessions share the repository store, as Claude's docs state.
     expect(claudeMemoryDir(sub)).toBe(claudeMemoryDir(repo))
+  })
+
+  it('shares the main checkout store from a linked worktree', () => {
+    const { main, tree } = makeWorktree(mkdtempSync(join(tmpdir(), 'mem-wt-')))
+    const sub = join(tree, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    expect(claudeMemoryDir(tree)).toBe(claudeStore(main))
+    expect(claudeMemoryDir(sub)).toBe(claudeStore(main))
+  })
+
+  it('follows CLAUDE_CONFIG_DIR for both the setting and the store', async () => {
+    const config = join(home, 'relocated')
+    process.env.CLAUDE_CONFIG_DIR = config
+    mkdirSync(config, { recursive: true })
+    writeFileSync(join(config, 'settings.json'), JSON.stringify({ autoMemoryStorage: 'claude' }))
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
+
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'note', description: 'a note', content: 'body' })
+
+    expect(existsSync(join(config, 'projects', claudeProjectSlug(cwd), 'memory', 'note.md'))).toBe(true)
+    expect(existsSync(join(home, '.claude'))).toBe(false)
+  })
+
+  it.each(['claud', 'Claude Code', true, 1])('keeps the pi store for the unrecognised autoMemoryStorage value %j', async (value) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'mem-proj-'))
+    userSettings({ autoMemoryStorage: value })
+
+    const t = await toolFor(cwd)
+    await t.execute('1', { action: 'save', name: 'note', description: 'a note', content: 'body' })
+
+    expect(readFileSync(join(resolveMemoryDir(cwd), 'note.md'), 'utf-8')).toBe('body')
+    expect(existsSync(claudeStore(cwd))).toBe(false)
   })
 
   it('normalises the project path to NFC before deriving the slug', () => {
@@ -347,6 +381,18 @@ describe('resolving a name to one memory file', () => {
 
     await t.execute('3', { action: 'delete', name: 'foo-bar-baz' })
     expect(existsSync(join(store, 'foo-bar_baz.md'))).toBe(false)
+  })
+
+  it('updates and deletes an entry of a CRLF index, keeping its line ending', async () => {
+    writeFileSync(join(store, 'MEMORY.md'), '# Memory index\r\n- [a](a.md): one\r\n- [b](b.md): two\r\n')
+    const t = await toolFor(cwd)
+
+    await t.execute('1', { action: 'save', name: 'a', description: 'uno', content: 'body\n' })
+    expect(index()).toBe('# Memory index\r\n- [a](a.md): uno\r\n- [b](b.md): two\r\n')
+
+    await t.execute('2', { action: 'delete', name: 'a' })
+    expect(index()).toBe('# Memory index\r\n- [b](b.md): two\r\n')
+    expect(existsSync(join(store, 'a.md'))).toBe(false)
   })
 
   it('adds no frontmatter in the pi store', async () => {
