@@ -44,7 +44,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, getShellConfig } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { allShells, type BackgroundShell, commandPreview, MAX_OUTPUT_BYTES, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { allShells, type BackgroundShell, commandPreview, dropWithoutBash, MAX_OUTPUT_BYTES, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { killProcessTree } from './internal/process-tree.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
@@ -423,7 +423,10 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     },
   })
 
-  pi.on('session_start', (_event, ctx) => events.attach(pi, sessionHasTurns(ctx)))
+  pi.on('session_start', (_event, ctx) => {
+    dropWithoutBash(pi, 'monitor')
+    events.attach(pi, sessionHasTurns(ctx))
+  })
   pi.on('agent_start', () => events.markPrompted(pi))
   pi.on('session_shutdown', (event) => {
     events.detach(pi)

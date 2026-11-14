@@ -23,16 +23,22 @@ interface Harness {
   emit: (event: string, payload?: Record<string, unknown>) => void
   ctx: Record<string, unknown>
   footer: () => string | undefined
+  active: () => string[]
 }
 
-const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number } = {}): Harness => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number; active?: string[] } = {}): Harness => {
   const tools = new Map<string, { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> }; promptGuidelines?: string[] }>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
+  let active = options.active ?? ['read', 'bash', 'task_stop']
   const pi = {
     registerTool: (tool: { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> } }) => tools.set(tool.name, tool),
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => {
+      active = names
+    },
   }
   backgroundBashExtension(pi as never, { maxOutputBytes: options.maxOutputBytes })
   const statuses = new Map<string, string | undefined>()
@@ -64,6 +70,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: 
     emit,
     ctx,
     footer: () => statuses.get('background-shells'),
+    active: () => active,
   }
 }
 
@@ -630,11 +637,20 @@ describe('task_stop tool', () => {
     const h = setup()
     await expect(h.stop('t1', { task_id: 'b12345678' })).rejects.toThrow('No background command with ID b12345678')
   })
+
+  it('leaves a session that starts without bash, and no other', () => {
+    expect(setup({ active: ['read', 'task_stop', 'todo'] }).active()).toEqual(['read', 'todo'])
+    expect(setup({ active: ['read', 'bash', 'task_stop'] }).active()).toEqual(['read', 'bash', 'task_stop'])
+    expect(setup({ active: ['read'] }).active()).toEqual(['read'])
+  })
 })
 
 // Against a real pi session: which tools a session starts with is decided by pi from what
 // is registered when, and a stubbed pi cannot say what that comes to.
 describe('tool selection', () => {
+  const SHELL_TOOLS = ['bash', 'task_stop', 'monitor']
+  // Every pi mode binds something, and pi starts the session again after /reload only then.
+  const BINDINGS = { shutdownHandler: () => {} }
   type SessionOptions = { tools?: string[]; noTools?: 'all' | 'builtin'; defaultTools?: string[] }
 
   const start = async (options: SessionOptions = {}) => {
@@ -646,15 +662,15 @@ describe('tool selection', () => {
       return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, tools: options.tools, noTools: options.noTools })), services, diagnostics: services.diagnostics }
     }
     const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) })
-    await runtime.session.bindExtensions({})
+    await runtime.session.bindExtensions(BINDINGS)
     return runtime
   }
-  const hasBash = (runtime: Awaited<ReturnType<typeof start>>): boolean => runtime.session.getActiveToolNames().includes('bash')
+  const shellTools = (runtime: Awaited<ReturnType<typeof start>>): string[] => runtime.session.getActiveToolNames().filter((name) => SHELL_TOOLS.includes(name))
 
-  it('offers its bash in a default session', async () => {
+  it('offers its bash, task_stop and monitor in a default session', async () => {
     const runtime = await start()
     try {
-      expect(hasBash(runtime)).toBe(true)
+      expect(shellTools(runtime)).toEqual(SHELL_TOOLS)
       expect(runtime.session.getToolDefinition('bash')?.description).toContain('A command still running at its timeout is stopped.')
     } finally {
       await runtime.dispose()
@@ -665,15 +681,15 @@ describe('tool selection', () => {
     ['the defaultTools setting leaves bash out', { defaultTools: ['read'] }],
     ['built-in tools are off', { noTools: 'builtin' }],
     ['--tools removes bash', { tools: ['-bash'] }],
-  ])('offers no bash where %s', async (_name, options) => {
+  ])('offers no shell tool where %s', async (_name, options) => {
     const runtime = await start(options)
     try {
-      expect(hasBash(runtime)).toBe(false)
+      expect(shellTools(runtime)).toEqual([])
       await runtime.session.reload()
-      expect(hasBash(runtime)).toBe(false)
+      expect(shellTools(runtime)).toEqual([])
       await runtime.newSession()
-      await runtime.session.bindExtensions({})
-      expect(hasBash(runtime)).toBe(false)
+      await runtime.session.bindExtensions(BINDINGS)
+      expect(shellTools(runtime)).toEqual([])
     } finally {
       await runtime.dispose()
     }
@@ -684,7 +700,7 @@ describe('tool selection', () => {
     try {
       runtime.session.setActiveToolsByName(runtime.session.getActiveToolNames().filter((name) => name !== 'bash'))
       await runtime.session.reload()
-      expect(hasBash(runtime)).toBe(false)
+      expect(shellTools(runtime)).toEqual([])
     } finally {
       await runtime.dispose()
     }

@@ -15,7 +15,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { type ExtensionContext, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionContext, SettingsManager } from '@earendil-works/pi-coding-agent'
 
 import { sharedSlot } from './shared-slot.ts'
 
@@ -106,6 +106,14 @@ export function shellSettings(ctx: Pick<ExtensionContext, 'cwd' | 'isProjectTrus
   } catch {
     return {}
   }
+}
+
+/** Claude offers its tools that run shell commands only where Bash is offered. Called at
+ * session start, when the session's tool selection is in force: later, `bash` can be
+ * away for one run (plan mode, a command's allowed-tools) that restores the set itself. */
+export function dropWithoutBash(pi: Pick<ExtensionAPI, 'getActiveTools' | 'setActiveTools'>, tool: string): void {
+  const active = pi.getActiveTools()
+  if (active.includes(tool) && !active.includes('bash')) pi.setActiveTools(active.filter((name) => name !== tool))
 }
 
 export function registerShell(shell: Pick<BackgroundShell, 'id' | 'kind' | 'description' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {

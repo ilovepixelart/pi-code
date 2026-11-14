@@ -34,14 +34,19 @@ type Sent = { message: { customType: string; content: string; display: boolean }
 
 /** Both extensions on one stubbed pi, as the pack loads them: task_stop is the bash
  * extension's, and the registry it stops through is shared. */
-const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits } = {}) => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits; active?: string[] } = {}) => {
   const tools = new Map<string, Tool>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
+  let active = options.active ?? ['read', 'bash', 'task_stop', 'monitor']
   const pi = {
     registerTool: (tool: Tool) => tools.set(tool.name, tool),
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => {
+      active = names
+    },
   }
   // The real window and interval are a second and five; the batcher's own tests cover them.
   monitorExtension(pi as never, { windowMs: 10, minIntervalMs: 20, minDeadlineMs: 100, ...options.limits })
@@ -74,6 +79,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     sent,
     emit,
     footer: () => statuses.get('background-shells'),
+    active: () => active,
   }
 }
 
@@ -513,5 +519,10 @@ describe('monitor tool', () => {
     expect(shell(id)?.state).toBe('running')
     emit('session_shutdown', { reason: 'quit' })
     expect(shell(id)?.state).toBe('killed')
+  })
+
+  it('leaves a session that starts without bash, and no other', () => {
+    expect(setup({ active: ['read', 'monitor', 'task_stop', 'todo'] }).active()).toEqual(['read', 'todo'])
+    expect(setup({ active: ['read', 'bash', 'monitor'] }).active()).toEqual(['read', 'bash', 'monitor'])
   })
 })
