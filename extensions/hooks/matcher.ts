@@ -126,8 +126,10 @@ function withCommand(raw: HookCommand): HookCommand {
   return raw
 }
 
-/** Claude runs a handler defined in more than one settings file once; a plugin's or
- * skill's copy of the same handler stays separate. Handlers that share a command but
+/** Claude runs a handler defined in more than one settings file once, as the copy from
+ * the highest-precedence source (user < project < local < `--settings` < managed) with
+ * all of that copy's fields: a repository's `async` copy must not unblock a managed or
+ * flag guard. A plugin's or skill's copy of the same handler stays separate. Handlers that share a command but
  * differ in what they run or when (http headers, exec-form args, an `if` filter, an
  * mcp_tool input) are different handlers: `if` is applied after this, so collapsing two
  * filters left the other tool call with no guard. */
@@ -139,8 +141,8 @@ function keepOnce(result: HookCommand[], seen: Map<string, number>, hook: HookCo
     result.push(hook)
     return
   }
-  // The project or local copy's projectDir is the one its script path was written for.
-  if (hook.projectDir !== undefined && result[kept].projectDir === undefined) result[kept] = hook
+  // Replaced in place: the handler keeps the position of its first occurrence.
+  if ((hook.sourceRank ?? 0) > (result[kept].sourceRank ?? 0)) result[kept] = hook
 }
 
 function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {

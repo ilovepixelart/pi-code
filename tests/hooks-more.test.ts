@@ -1,7 +1,7 @@
 import type { EventEmitter as Emitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,6 +11,7 @@ import { loadPluginHooks } from '../extensions/hooks/config.ts'
 import hooksExtension, { type HookRunner, interpretHookResult, isBackgroundHook, loadHooks, matchingCommands, runHookCommand, runPreToolUse, runPromptHook, runUserPromptSubmit, sessionEndTimeoutMs, timeoutMs } from '../extensions/hooks/index.ts'
 import { setAgentRunner } from '../extensions/internal/agent-run.ts'
 import { setBackgroundAgentCounter } from '../extensions/internal/background-agents.ts'
+import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
 import { setManagedSettingsPath } from '../extensions/internal/managed-settings.ts'
 import { setMcpToolCaller } from '../extensions/internal/mcp-call.ts'
 import { setCompleteBackend } from '../extensions/internal/model-complete.ts'
@@ -616,6 +617,22 @@ describe('matchingCommands edge shapes', () => {
       { matcher: '*', hooks: [{ command: 'guard.sh' }, { command: 'other.sh' }] },
     ]
     expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh' }, { command: 'other.sh' }])
+  })
+
+  it('runs the copy from the higher-ranked source with all its fields, at the position of the first copy', () => {
+    const entries = [
+      { matcher: 'Bash', hooks: [{ command: 'guard.sh', timeout: 5, sourceRank: 1 }, { command: 'other.sh' }] },
+      { matcher: '*', hooks: [{ command: 'guard.sh', timeout: 9, async: true, sourceRank: 2 }] },
+    ]
+    expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh', timeout: 9, async: true, sourceRank: 2 }, { command: 'other.sh' }])
+  })
+
+  it('keeps the copy from the higher-ranked source when a lower-ranked copy follows it', () => {
+    const entries = [
+      { matcher: 'Bash', hooks: [{ command: 'guard.sh', timeout: 5, sourceRank: Number.POSITIVE_INFINITY }] },
+      { matcher: '*', hooks: [{ command: 'guard.sh', async: true, projectDir: '/repo', sourceRank: 2 }] },
+    ]
+    expect(matchingCommands(entries, 'bash')).toEqual([{ command: 'guard.sh', timeout: 5, sourceRank: Number.POSITIVE_INFINITY }])
   })
 
   it('keeps handlers that share a command but differ in args, if or input: they are not the same handler', () => {
@@ -3062,6 +3079,85 @@ describe('hooks extension dedup scope', () => {
 
     expect(commandsRun()).toEqual(['shared-format.sh', 'shared-format.sh'])
   })
+})
+
+describe('hooks extension dedup precedence', () => {
+  // Measured on Claude Code 2.1.325: among settings copies of one handler, the copy from
+  // the highest-precedence source runs, with its own async: user < project < local <
+  // --settings < managed.
+  const guard = 'dedup-guard.sh'
+  const trustedStart = { isProjectTrusted: () => true, hasUI: true, ui: { confirm: async () => true } }
+  type Source = 'user' | 'project' | 'local' | 'flag' | 'managed'
+
+  afterEach(() => {
+    setCliSettingsReader(undefined)
+  })
+
+  /** A repository with the session in a subdirectory, so only the root's local file has a
+   * CLAUDE_PROJECT_DIR of its own. */
+  const layout = (): { repo: string; sub: string } => {
+    const repo = tempDir('hooks-repo-')
+    mkdirSync(join(repo, '.git'))
+    const sub = join(repo, 'packages', 'api')
+    mkdirSync(sub, { recursive: true })
+    return { repo, sub }
+  }
+
+  const declare = (source: Source, dirs: { repo: string; sub: string }, fields: Record<string, unknown>): void => {
+    const hooks = { PreToolUse: [{ matcher: 'Bash', hooks: [{ command: guard, ...fields }] }] }
+    const files: Record<Source, string> = {
+      user: join(hoisted.home, '.claude', 'settings.json'),
+      project: join(dirs.sub, '.claude', 'settings.json'),
+      local: join(dirs.repo, '.claude', 'settings.local.json'),
+      flag: join(tempDir('hooks-flag-'), 'settings.json'),
+      managed: join(hoisted.home, 'managed-settings.json'),
+    }
+    mkdirSync(dirname(files[source]), { recursive: true })
+    writeFileSync(files[source], JSON.stringify({ hooks }))
+    if (source === 'flag') setCliSettingsReader(() => ({ settingsFile: files.flag, sources: new Set(['user', 'project', 'local'] as const), forwardArgs: [], errors: [] }))
+  }
+
+  /** Declares a blocking copy in one source and an async copy in the other, then makes a Bash call. */
+  const run = async (blocking: Source, background: Source) => {
+    const dirs = layout()
+    declare(blocking, dirs, {})
+    declare(background, dirs, { async: true })
+    script(guard, { code: 2, stderr: ['GUARD-BLOCK'] })
+    const ext = setupExtension()
+    await ext.sessionStart('startup', { cwd: dirs.sub, ...trustedStart })
+    const result = await ext.toolCall('bash', {}, 't1', { cwd: dirs.sub })
+    const options = recordFor(guard).options as { env?: Record<string, string> }
+    return { result, projectDir: options.env?.CLAUDE_PROJECT_DIR, ...dirs }
+  }
+
+  const pairs: Array<[Source, Source]> = [
+    ['user', 'project'],
+    ['project', 'local'],
+    ['local', 'flag'],
+    ['flag', 'managed'],
+    ['project', 'managed'],
+  ]
+  const needsRootLocalFile = (lower: Source, higher: Source): boolean => process.platform === 'win32' && (lower === 'local' || higher === 'local')
+  /** CLAUDE_PROJECT_DIR of the winning copy: the checkout root for the root's local file, else the session cwd. */
+  const ownProjectDir = (winner: Source, dirs: { repo: string; sub: string }): string => (winner === 'local' ? dirs.repo : dirs.sub)
+
+  for (const [lower, higher] of pairs) {
+    it.skipIf(needsRootLocalFile(lower, higher))(`should block the call when the blocking copy is in ${higher} settings and an async copy is in ${lower} settings`, async () => {
+      const ran = await run(higher, lower)
+
+      expect(ran.result, `the ${higher} copy blocks`).toEqual({ block: true, reason: 'GUARD-BLOCK' })
+      expect(commandsRun(), 'the handler runs once').toEqual([guard])
+      expect(ran.projectDir, `the ${higher} copy's own CLAUDE_PROJECT_DIR`).toBe(ownProjectDir(higher, ran))
+    })
+
+    it.skipIf(needsRootLocalFile(lower, higher))(`should not block the call when the async copy is in ${higher} settings and a blocking copy is in ${lower} settings`, async () => {
+      const ran = await run(lower, higher)
+
+      expect(ran.result, `the ${higher} async copy runs in the background`).toBeUndefined()
+      expect(commandsRun(), 'the handler runs once').toEqual([guard])
+      expect(ran.projectDir, `the ${higher} copy's own CLAUDE_PROJECT_DIR`).toBe(ownProjectDir(higher, ran))
+    })
+  }
 })
 
 describe('hooks from managed policy settings', () => {
