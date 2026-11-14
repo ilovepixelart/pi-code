@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -16,8 +16,11 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync }
 })
 
+import { initTheme } from '@earendil-works/pi-coding-agent'
+
 import { setCliSettingsReader } from '../extensions/internal/cli-settings.ts'
-import { installedPlugins, managedForceEnabled, pluginComponentPath, resetInstalledPluginsCache, substitutePluginVars } from '../extensions/internal/plugins.ts'
+import { installedPlugins, managedForceEnabled, type PluginState, pluginComponentPath, pluginStates, resetInstalledPluginsCache, setPiPluginEnabled, substitutePluginVars } from '../extensions/internal/plugins.ts'
+import pluginsExtension from '../extensions/plugins.ts'
 
 describe('substitutePluginVars user_config', () => {
   const plugin = { name: 'p', root: '/r', dataDir: '/d', manifest: {}, userConfig: { token: 'secret-x', region: 'eu' } }
@@ -377,10 +380,10 @@ describe('installedPlugins cache', () => {
 
     const mark = fsHoisted.reads
     expect(installedPlugins(h)).toEqual(first)
-    // The walk is memoized. Revalidation re-reads only the small settings file and Claude's
-    // install index (content-hashed so a same-size rewrite is seen); the expensive part,
-    // re-parsing every manifest in the tree, must not happen.
-    expect(fsHoisted.reads).toBe(mark + 2)
+    // The walk is memoized. Revalidation re-reads only the small settings files (Claude's and
+    // pi's) and Claude's install index (content-hashed so a same-size rewrite is seen); the
+    // expensive part, re-parsing every manifest in the tree, must not happen.
+    expect(fsHoisted.reads).toBe(mark + 3)
   })
 
   it('re-reads after resetInstalledPluginsCache', () => {
@@ -472,6 +475,213 @@ describe('plugin default enablement and managed control', () => {
     } finally {
       setManagedSettingsPath(undefined)
     }
+  })
+})
+
+describe('pi-only plugin enablement', () => {
+  /** Point pi's agent dir at a fresh directory holding the given settings.json. */
+  const withPiSettings = (settings: Record<string, unknown>, run: () => void): void => {
+    const saved = process.env.PI_CODING_AGENT_DIR
+    const agentDir = mkdtempSync(join(tmpdir(), 'plugins-agentdir-'))
+    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(settings))
+    process.env.PI_CODING_AGENT_DIR = agentDir
+    try {
+      run()
+    } finally {
+      process.env.PI_CODING_AGENT_DIR = saved
+    }
+  }
+
+  it('should skip a plugin when piCode.enabledPlugins disables it by bare name over a qualified Claude entry', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    install(h, 'community', 'linter', '1.0.0')
+    enable(h, { 'formatter@community': true, 'linter@community': true })
+
+    withPiSettings({ piCode: { enabledPlugins: { formatter: false } } }, () => {
+      const names = installedPlugins(h, []).map((p) => p.name)
+
+      expect(names, 'the pi override disables formatter while linter keeps its Claude setting').toEqual(['linter'])
+    })
+  })
+
+  it('should keep a managed force-enable when piCode.enabledPlugins disables the plugin', async () => {
+    const { setManagedSettingsPath } = await import('../extensions/internal/managed-settings.ts')
+    const h = home()
+    install(h, 'community', 'forced', '1.0.0')
+    writeFileSync(join(h, 'managed-settings.json'), JSON.stringify({ enabledPlugins: { forced: true } }))
+    setManagedSettingsPath(join(h, 'managed-settings.json'))
+
+    try {
+      withPiSettings({ piCode: { enabledPlugins: { 'forced@community': false } } }, () => {
+        expect(
+          installedPlugins(h, []).map((p) => p.name),
+          'managed policy outranks the pi override',
+        ).toEqual(['forced'])
+      })
+    } finally {
+      setManagedSettingsPath(undefined)
+    }
+  })
+
+  it('should report each plugin with the setting that decided it and its state without the pi override', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+    install(h, 'community', 'linter', '1.0.0')
+    enable(h, { 'linter@community': true })
+
+    withPiSettings({ piCode: { enabledPlugins: { 'linter@community': false } } }, () => {
+      const states = pluginStates(h).map(({ qualified, enabled, decidedBy, withoutPi }) => ({ qualified, enabled, decidedBy, withoutPi }))
+
+      expect(states, 'formatter runs by default; linter is off by the pi override over Claude true').toEqual([
+        { qualified: 'formatter@community', enabled: true, decidedBy: 'default', withoutPi: true },
+        { qualified: 'linter@community', enabled: false, decidedBy: 'pi', withoutPi: true },
+      ])
+    })
+  })
+
+  const piFile = (): string => join(process.env.PI_CODING_AGENT_DIR ?? '', 'settings.json')
+  const stateOf = (h: string, qualified: string) => pluginStates(h).find((state) => state.qualified === qualified)
+
+  it('should write the entry and keep the other pi settings when setPiPluginEnabled turns a plugin off', () => {
+    withPiSettings({ defaultModel: 'm', piCode: { other: 1 } }, () => {
+      setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, false)
+
+      const written = JSON.parse(readFileSync(piFile(), 'utf-8'))
+      expect(written, 'only piCode.enabledPlugins gains the entry').toEqual({ defaultModel: 'm', piCode: { other: 1, enabledPlugins: { 'ponytail@ponytail': false } } })
+    })
+  })
+
+  it('should remove the entry when setPiPluginEnabled wants the state Claude settings give', () => {
+    withPiSettings({ piCode: { enabledPlugins: { 'ponytail@ponytail': false, 'x@y': true } } }, () => {
+      setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, true)
+
+      const written = JSON.parse(readFileSync(piFile(), 'utf-8'))
+      expect(written.piCode.enabledPlugins, 'only the named entry is gone').toEqual({ 'x@y': true })
+    })
+  })
+
+  it('should turn a plugin back on when a bare-name pi entry disables it', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+
+    withPiSettings({ piCode: { enabledPlugins: { formatter: false } } }, () => {
+      setPiPluginEnabled(stateOf(h, 'formatter@community') as PluginState, true)
+
+      expect(stateOf(h, 'formatter@community')?.enabled, 'the qualified entry outranks the bare one').toBe(true)
+    })
+  })
+
+  it('should leave a same-named plugin from another marketplace off when one is turned back on', () => {
+    const h = home()
+    install(h, 'a', 'fmt', '1.0.0')
+    install(h, 'b', 'fmt', '1.0.0')
+
+    withPiSettings({ piCode: { enabledPlugins: { fmt: false } } }, () => {
+      setPiPluginEnabled(stateOf(h, 'fmt@a') as PluginState, true)
+
+      expect(
+        pluginStates(h).map(({ qualified, enabled }) => ({ qualified, enabled })),
+        'fmt@a is on and the bare entry still keeps fmt@b off',
+      ).toEqual([
+        { qualified: 'fmt@a', enabled: true },
+        { qualified: 'fmt@b', enabled: false },
+      ])
+    })
+  })
+
+  it('should create pi settings.json when the agent dir does not exist yet', () => {
+    const saved = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = join(mkdtempSync(join(tmpdir(), 'plugins-agentdir-')), 'missing', 'agent')
+    try {
+      setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, false)
+
+      expect(JSON.parse(readFileSync(piFile(), 'utf-8')), 'the directory and file are created').toEqual({ piCode: { enabledPlugins: { 'ponytail@ponytail': false } } })
+    } finally {
+      process.env.PI_CODING_AGENT_DIR = saved
+    }
+  })
+
+  it('should throw and leave the file untouched when pi settings.json does not parse', () => {
+    withPiSettings({}, () => {
+      writeFileSync(piFile(), '{ broken')
+
+      expect(() => setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, false), 'an unparseable file is not rewritten').toThrow()
+      expect(readFileSync(piFile(), 'utf-8'), 'the broken content survives').toBe('{ broken')
+    })
+  })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('should throw and keep the other pi settings when settings.json cannot be read', () => {
+    withPiSettings({ defaultModel: 'm' }, () => {
+      chmodSync(piFile(), 0o200)
+      try {
+        expect(() => setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, false), 'an unreadable file is not treated as missing').toThrow()
+      } finally {
+        chmodSync(piFile(), 0o600)
+      }
+      expect(JSON.parse(readFileSync(piFile(), 'utf-8')), 'the other settings survive').toEqual({ defaultModel: 'm' })
+    })
+  })
+})
+
+describe('/claude-plugins command', () => {
+  type Component = { handleInput: (data: string) => void; render: (width: number) => string[] }
+  type Factory = (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => Component
+
+  /** Run /claude-plugins against `h`, typing `keys` into the list; resolves with the notices shown. */
+  const runPlugin = async (h: string, keys: string[]): Promise<string[]> => {
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
+    pluginsExtension({ registerCommand: (name: string, spec: never) => commands.set(name, spec) } as never)
+    const notices: string[] = []
+    const ctx = {
+      mode: 'tui',
+      ui: {
+        notify: (message: string) => notices.push(message),
+        custom: (factory: Factory) =>
+          new Promise((resolve) => {
+            const component = factory({ requestRender: () => {} }, {}, {}, resolve)
+            for (const key of keys) component.handleInput(key)
+          }),
+      },
+    }
+    const savedHome = process.env.HOME
+    process.env.HOME = h
+    process.env.USERPROFILE = h // os.homedir() reads USERPROFILE on Windows; global setup restores it
+    try {
+      await commands.get('claude-plugins')?.handler('', ctx)
+    } finally {
+      process.env.HOME = savedHome
+    }
+    return notices
+  }
+
+  it('should save the plugin off in pi and ask for /reload when Space toggles it and Esc closes', async () => {
+    initTheme()
+    const h = home()
+    install(h, 'ponytail', 'ponytail', '1.0.0')
+    enable(h, { 'ponytail@ponytail': true })
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? ''
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'settings.json'), '{}')
+
+    const notices = await runPlugin(h, [' ', '\x1b'])
+
+    const written = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf-8'))
+    expect(written.piCode?.enabledPlugins, 'Space flipped ponytail off and saved it').toEqual({ 'ponytail@ponytail': false })
+    expect(notices, 'closing asks for /reload without reloading').toEqual(['Plugin changes saved. Run /reload to apply them.'])
+  })
+
+  it('should not ask for /reload when a plugin is toggled off and back on', async () => {
+    initTheme()
+    const h = home()
+    install(h, 'ponytail', 'ponytail', '1.0.0')
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? ''
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'settings.json'), '{}')
+
+    const notices = await runPlugin(h, [' ', ' ', '\x1b'])
+
+    expect(notices, 'nothing differs from when the list opened').toEqual([])
   })
 })
 
