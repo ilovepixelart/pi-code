@@ -41,10 +41,10 @@ import { constants as osConstants } from 'node:os'
 import * as path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
-import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, getShellConfig } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, createBashToolDefinition, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize, getShellConfig, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 
-import { allShells, type BackgroundShell, commandPreview, dropWithoutBash, MAX_OUTPUT_BYTES, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { allShells, type BackgroundShell, commandPreview, MAX_OUTPUT_BYTES, registerShell, settleShell, shellOutputDir, shellSettings, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { killProcessTree } from './internal/process-tree.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
@@ -206,6 +206,16 @@ export function deadlineMs(requested: number | undefined, minMs: number = MIN_DE
   if (requested === undefined) return DEFAULT_DEADLINE_MS
   if (!Number.isFinite(requested) || requested < minMs) throw new Error(`timeout_ms must be a number of milliseconds, at least ${minMs} (a value over ${MAX_DEADLINE_MS} is capped)`)
   return Math.min(Math.floor(requested), MAX_DEADLINE_MS)
+}
+
+/** Whether pi's `defaultTools` setting lists `monitor`. A pi without the setting has no such list. */
+function defaultToolsName(ctx: Pick<ExtensionContext, 'cwd' | 'isProjectTrusted'>): boolean {
+  try {
+    const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true })
+    return settings.getDefaultTools()?.includes('monitor') === true
+  } catch {
+    return false
+  }
 }
 
 export function monitorAllowed(ctx: Pick<ExtensionContext, 'hasUI'>): string | undefined {
@@ -405,26 +415,42 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     return shell
   }
 
-  pi.registerTool({
-    name: 'monitor',
-    label: 'monitor',
-    description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Only stdout lines are events; stderr goes to the output file. Lines are delivered in batches (at most one message every ${MIN_INTERVAL_MS / 1000} seconds), and a monitor that produces too many events is stopped automatically, so filter the command down to the lines worth reacting to. The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
-    promptSnippet: 'Watch a background command and react to each line it prints',
-    promptGuidelines: ['Use monitor to watch logs, CI or PR status, or file changes instead of polling with sleep; make the command print only lines worth reacting to. Stop a monitor with task_stop once it is no longer needed.'],
-    parameters: schema,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
-      const refusal = monitorAllowed(ctx)
-      if (refusal) throw new Error(refusal)
-      if (params.command.trim() === '') throw new Error('command must not be empty')
-      if ((params.description ?? '').trim() === '') throw new Error('description must not be empty')
-      const limitMs = deadlineMs(params.timeout_ms, limits.minDeadlineMs)
-      const shell = start({ description: params.description, command: params.command, limitMs }, ctx)
-      return text(`Monitor started with ID: ${shell.id}. Each line the command prints is delivered to you as it arrives, in batches. It stops at its ${formatDuration(limitMs)} deadline; use task_stop to stop it sooner. Full output is written to: ${shell.outputFile}`)
-    },
-  })
+  const registerMonitor = (): void => {
+    pi.registerTool({
+      name: 'monitor',
+      label: 'monitor',
+      description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Only stdout lines are events; stderr goes to the output file. Lines are delivered in batches (at most one message every ${MIN_INTERVAL_MS / 1000} seconds), and a monitor that produces too many events is stopped automatically, so filter the command down to the lines worth reacting to. The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
+      promptSnippet: 'Watch a background command and react to each line it prints',
+      promptGuidelines: ['Use monitor to watch logs, CI or PR status, or file changes instead of polling with sleep; make the command print only lines worth reacting to. Stop a monitor with task_stop once it is no longer needed.'],
+      parameters: schema,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
+        const refusal = monitorAllowed(ctx)
+        if (refusal) throw new Error(refusal)
+        if (params.command.trim() === '') throw new Error('command must not be empty')
+        if ((params.description ?? '').trim() === '') throw new Error('description must not be empty')
+        const limitMs = deadlineMs(params.timeout_ms, limits.minDeadlineMs)
+        const shell = start({ description: params.description, command: params.command, limitMs }, ctx)
+        return text(`Monitor started with ID: ${shell.id}. Each line the command prints is delivered to you as it arrives, in batches. It stops at its ${formatDuration(limitMs)} deadline; use task_stop to stop it sooner. Full output is written to: ${shell.outputFile}`)
+      },
+    })
+  }
+  registerMonitor()
+
+  /** Claude: with Bash denied when the session starts, "Claude doesn't have the Monitor
+   * tool"; a tool list that names Monitor keeps it without Bash. Checked at session start
+   * only: later, `bash` can be away for one run (plan mode, a command's allowed-tools)
+   * that restores the set itself. */
+  const followBash = (ctx: ExtensionContext): void => {
+    const active = pi.getActiveTools()
+    if (!active.includes('monitor') || active.includes('bash') || defaultToolsName(ctx)) return
+    pi.setActiveTools(active.filter((name) => name !== 'monitor'))
+    // pi activates the tools a `--tools` allowlist names each time a tool is registered,
+    // and no tool that was registered before: this puts back a monitor the allowlist names.
+    registerMonitor()
+  }
 
   pi.on('session_start', (_event, ctx) => {
-    dropWithoutBash(pi, 'monitor')
+    followBash(ctx)
     events.attach(pi, sessionHasTurns(ctx))
   })
   pi.on('agent_start', () => events.markPrompted(pi))

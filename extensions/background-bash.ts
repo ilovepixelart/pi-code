@@ -30,7 +30,7 @@ import * as path from 'node:path'
 import { type AgentToolResult, type BashOperations, type BashToolDetails, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, formatSize } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
-import { type BackgroundShell, dropWithoutBash, forgetShell, MAX_OUTPUT_BYTES, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { type BackgroundShell, forgetShell, MAX_OUTPUT_BYTES, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** BASH_DEFAULT_TIMEOUT_MS out of the box: two minutes. */
@@ -290,7 +290,6 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
 
   pi.on('session_start', (_event, ctx) => {
     registerBash(backgroundAllowed(ctx))
-    dropWithoutBash(pi, 'task_stop')
     notices.attach(pi, sessionHasTurns(ctx))
     setShellsListener(() => showFooter(ctx))
     // Commands that kept running across a session switch show from the start.
