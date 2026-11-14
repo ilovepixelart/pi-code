@@ -27,10 +27,10 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { type AgentToolResult, type BashOperations, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { type AgentToolResult, type BashOperations, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { type Static, Type } from 'typebox'
 
-import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
+import { type BackgroundShell, forgetShell, markBackground, registerShell, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellSettings, shellsFooterText, stopAllShells, stopShell } from './internal/background-shells.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 
 /** BASH_DEFAULT_TIMEOUT_MS out of the box: two minutes. */
@@ -79,16 +79,6 @@ type ToolResult = AgentToolResult<unknown>
 type Outcome = { result: ToolResult } | { error: unknown }
 
 const text = (body: string): ToolResult => ({ content: [{ type: 'text', text: body }], details: undefined })
-
-/** pi's own bash settings, which the built-in tool reads and a replacement must too. */
-function shellSettings(ctx: ExtensionContext): { shellPath?: string; commandPrefix?: string } {
-  try {
-    const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true })
-    return { shellPath: settings.getShellPath(), commandPrefix: settings.getShellCommandPrefix() }
-  } catch {
-    return {}
-  }
-}
 
 /** The exit code a settled run reports: the built-in tool resolves with it, and throws
  * for an aborted or killed command, which has none. */
@@ -212,8 +202,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'task_stop',
     label: 'task_stop',
-    description: 'Stop a running background bash command by its ID.',
-    promptSnippet: 'Stop a background bash command',
+    description: 'Stop a running background bash command or monitor by its ID.',
+    promptSnippet: 'Stop a background bash command or monitor',
     parameters: stopSchema,
     async execute(_toolCallId, { task_id }) /* NOSONAR typescript:S7503 - pi types execute as returning a Promise */ {
       const outcome = stopShell(task_id)

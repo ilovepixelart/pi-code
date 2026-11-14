@@ -1,7 +1,8 @@
 /**
  * Background shell commands: Bash commands Claude runs with `run_in_background`, or
  * moves to the background when a foreground command reaches its timeout (tools-reference,
- * "Background commands"). The bash extension starts and settles them; the subagent
+ * "Background commands"), and the commands Monitor watches. The bash and monitor
+ * extensions start and settle them, task_stop stops either kind; the subagent
  * extension's /tasks lists them next to background agent runs, since Claude's /tasks
  * shows "running shells and subagents" together.
  *
@@ -14,12 +15,19 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+import { type ExtensionContext, SettingsManager } from '@earendil-works/pi-coding-agent'
+
 import { sharedSlot } from './shared-slot.ts'
 
 export type ShellState = 'running' | 'completed' | 'failed' | 'killed'
 
+/** A background Bash command, or a command the Monitor tool watches. */
+export type ShellKind = 'shell' | 'monitor'
+
 export interface BackgroundShell {
   id: string
+  /** Absent for a background Bash command. */
+  kind?: ShellKind
   command: string
   /** Every byte the command wrote to stdout and stderr, for the model to read. */
   outputFile: string
@@ -82,7 +90,18 @@ export function shellOutputDir(): string {
   return state.outputDir
 }
 
-export function registerShell(shell: Pick<BackgroundShell, 'id' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {
+/** pi's own bash settings (shell path, command prefix), which the built-in tool reads
+ * and anything running a command in its place must read too. */
+export function shellSettings(ctx: Pick<ExtensionContext, 'cwd' | 'isProjectTrusted'>): { shellPath?: string; commandPrefix?: string } {
+  try {
+    const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true })
+    return { shellPath: settings.getShellPath(), commandPrefix: settings.getShellCommandPrefix() }
+  } catch {
+    return {}
+  }
+}
+
+export function registerShell(shell: Pick<BackgroundShell, 'id' | 'kind' | 'command' | 'outputFile' | 'stop'> & { background?: boolean }): BackgroundShell {
   const record: BackgroundShell = { ...shell, state: 'running', background: shell.background ?? true }
   registry().shells.set(record.id, record)
   if (record.background) changed()
@@ -180,7 +199,7 @@ function stateLabel(shell: Pick<BackgroundShell, 'state' | 'exitCode'>): string 
 /** The /tasks section for shells; empty when there are none, so /tasks can omit it. */
 export function shellsStatusText(shells: ReadonlyArray<BackgroundShell>): string {
   if (shells.length === 0) return ''
-  return shells.map((shell) => `${shell.id} shell: ${stateLabel(shell)} - ${commandPreview(shell.command)}\n  output: ${shell.outputFile}`).join('\n')
+  return shells.map((shell) => `${shell.id} ${shell.kind ?? 'shell'}: ${stateLabel(shell)} - ${commandPreview(shell.command)}\n  output: ${shell.outputFile}`).join('\n')
 }
 
 /** What the model is told when a background command finishes. */

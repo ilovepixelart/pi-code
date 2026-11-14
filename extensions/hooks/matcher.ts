@@ -186,7 +186,10 @@ export function passesIfFilter(hook: HookCommand, target: IfFilterTarget | undef
   if (!parsed) return false
   const fold = (name: string): string => name.toLowerCase().replaceAll('-', '_')
   const ruleTools = new Set(parsed[1].split('|').map(fold))
-  const toolMatches = ruleTools.has(fold(target.piName)) || (target.claudeName !== undefined && ruleTools.has(fold(target.claudeName)))
+  // tools-reference: Monitor "uses the same permission rules as Bash", so a Bash rule
+  // also judges a Monitor command.
+  const bashCoversMonitor = ruleTools.has('bash') && fold(target.piName) === 'monitor'
+  const toolMatches = bashCoversMonitor || ruleTools.has(fold(target.piName)) || (target.claudeName !== undefined && ruleTools.has(fold(target.claudeName)))
   if (!toolMatches) return false
   const pattern = parsed[2]
   if (pattern === undefined) return true
@@ -212,6 +215,7 @@ function matchesToolPattern(piName: string, input: Record<string, unknown> | nul
   const str = (value: unknown): string => (typeof value === 'string' ? value : '')
   switch (piName) {
     case 'bash':
+    case 'monitor':
       return str(input?.command).length > 0 && matchesBashIfFilter(str(input?.command), pattern)
     case 'web_fetch':
       return matchesDomainRules(str(input?.url), [pattern])
