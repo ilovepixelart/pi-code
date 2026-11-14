@@ -159,7 +159,10 @@ function buildQuestionLines(view: QuestionView): string[] {
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
   add(theme.fg('accent', '─'.repeat(width)))
-  if (header) add(theme.fg('muted', ` [${header}]`))
+  if (header) {
+    add(theme.bg('selectedBg', theme.fg('text', ` ☐ ${header} `)))
+    lines.push('')
+  }
   add(theme.fg('text', ` ${question}`))
   lines.push('')
 
@@ -192,7 +195,7 @@ function buildQuestionLines(view: QuestionView): string[] {
 
 function navHint(editMode: boolean, multiSelect: boolean): string {
   if (editMode) return ' Enter to submit · Esc to go back'
-  if (multiSelect) return ' Space to toggle · Enter to confirm · Esc to cancel'
+  if (multiSelect) return ' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel'
   return ' Enter to select · ↑/↓ to navigate · Esc to cancel'
 }
 
@@ -654,10 +657,7 @@ export function askViaOverlay(params: QuestionSpec, ctx: ExtensionContext, allOp
     function render(width: number): string[] {
       if (cachedLines && cachedWidth === width) return cachedLines
       cachedWidth = width
-      cachedLines = buildQuestionLines({ width, question: theme.bold(params.question), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds: lastCountdown })
-      const header = shortHeader(params.header)
-      // The header is a chip inside the frame, under its top border.
-      if (header) cachedLines.splice(1, 0, truncateToWidth(theme.bg('selectedBg', theme.fg('text', ` ☐ ${header} `)), width), '')
+      cachedLines = buildQuestionLines({ width, question: theme.bold(params.question), header: shortHeader(params.header), options: allOptions, optionIndex, editMode, multiSelect, checked, editor, theme, countdownSeconds: lastCountdown })
       return cachedLines
     }
 

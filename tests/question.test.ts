@@ -837,7 +837,7 @@ describe('question header and multiSelect', () => {
     expect(out).toContain('❯ 1. [ ] Alpha')
     expect(out).toContain('  2. [ ] Beta')
     expect(out.some((l) => l.includes('Type something.'))).toBe(false)
-    expect(out).toContain(' Space to toggle · Enter to confirm · Esc to cancel')
+    expect(out).toContain(' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel')
   })
 
   it('should show the header as a highlighted chip under the border and the question in bold', () => {
