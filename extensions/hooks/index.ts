@@ -105,7 +105,6 @@ import { resolveModelOverride } from '../internal/model-lookup.ts'
 import { isPlanModeState, PLAN_MODE_CHANNEL } from '../internal/plan-mode-state.ts'
 import { installedPlugins, managedForceEnabled } from '../internal/plugins.ts'
 import { approvalRecheck, isProjectApproved } from '../internal/project-approval.ts'
-import { checkoutRoot } from '../internal/project-root.ts'
 import { watchSettingsFiles } from '../internal/settings-watch.ts'
 import { isSkillHooksEvent, SKILL_HOOKS_CHANNEL } from '../internal/skill-hooks.ts'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from '../internal/subagent-events.ts'
@@ -555,10 +554,10 @@ export default function hooksExtension(pi: ExtensionAPI) {
     registeredSkillHooks.length = 0
     spentOnce.clear()
     const trusted = await isProjectApproved(ctx)
-    // Claude's CLAUDE_PROJECT_DIR is the project root, not the session cwd; a hook
-    // referencing $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve from a
-    // subdirectory session too.
-    projectDir = checkoutRoot(ctx.cwd)
+    // Claude's CLAUDE_PROJECT_DIR is the session's initial working directory,
+    // not necessarily the Git repository root. Hooks referencing
+    // $CLAUDE_PROJECT_DIR/.claude/hooks/helper.sh must resolve relative to it.
+    projectDir = ctx.cwd
     resolveConfig(ctx.cwd, trusted)
     // Claude picks up direct settings edits mid-session via a file watcher. The reload
     // closes over the cwd value, never ctx: the poll has no awaiter, and every getter of

@@ -879,10 +879,8 @@ describe('hooks extension session_start', () => {
     expect(options.env?.PATH).toBe(process.env.PATH)
   })
 
-  it('points CLAUDE_PROJECT_DIR at the worktree a session started in, not the main checkout', async () => {
-    // Claude: "the project root where the session started". repoRoot resolves a worktree to
-    // its main checkout, so `cd "$CLAUDE_PROJECT_DIR" && npm run format` acted on the user's
-    // main checkout from inside an isolated tree.
+  it('should set CLAUDE_PROJECT_DIR to the session cwd when the session starts inside a worktree subdirectory', async () => {
+    // A worktree session must never point hooks at the main checkout.
     const { main, tree } = makeWorktree(tempDir('hooks-wt-'))
     mkdirSync(join(tree, 'src'))
     writeSettings(hoisted.home, 'settings.json', homeConfig)
@@ -892,8 +890,8 @@ describe('hooks extension session_start', () => {
     await ext.toolCall('bash', {})
 
     const options = recordFor('home-pre').options as { env?: Record<string, string> }
-    expect(options.env?.CLAUDE_PROJECT_DIR).toBe(tree)
-    expect(options.env?.CLAUDE_PROJECT_DIR).not.toBe(main)
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is the cwd the session started in').toBe(join(tree, 'src'))
+    expect(options.env?.CLAUDE_PROJECT_DIR, 'CLAUDE_PROJECT_DIR is not the main checkout').not.toBe(main)
   })
 
   it('exports CLAUDE_CODE_SESSION_ID and CLAUDE_PID to hook commands', async () => {
