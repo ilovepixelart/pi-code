@@ -1,18 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import memoryExtension, {
-  capIndexForPrompt,
-  claudeMemoryDir,
-  claudeProjectSlug,
-  indexWouldOverflow,
-  readMemorySettings,
-  resolveMemoryDir,
-  upsertIndexLine,
-} from '../extensions/memory.ts'
+import memoryExtension, { capIndexForPrompt, claudeMemoryDir, claudeProjectSlug, indexWouldOverflow, readMemorySettings, resolveMemoryDir, upsertIndexLine } from '../extensions/memory.ts'
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown>
 type Tool = { execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }
@@ -44,9 +36,7 @@ describe('claudeProjectSlug', () => {
   it('replaces every non-alphanumeric character with one dash each', () => {
     // A CJK path segment observed on disk: 26 survives, each of the eight CJK
     // characters becomes its own dash.
-    expect(claudeProjectSlug('/Users/tttinkl/Documents/hey/26宁波事业考点强化')).toBe(
-      '-Users-tttinkl-Documents-hey-26--------',
-    )
+    expect(claudeProjectSlug('/Users/tttinkl/Documents/hey/26宁波事业考点强化')).toBe('-Users-tttinkl-Documents-hey-26--------')
     // Spaces and underscores become dashes too, as paths such as "my projects/demo_app" show.
     expect(claudeProjectSlug('/tmp/my projects/demo_app')).toBe('-tmp-my-projects-demo-app')
   })
@@ -92,8 +82,7 @@ describe('claude memory storage', () => {
     return { handlers, tool }
   }
 
-  const start = async (handlers: Map<string, Handler>, cwd: string) =>
-    handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
+  const start = async (handlers: Map<string, Handler>, cwd: string) => handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
 
   it('places the store under the Claude projects directory, keyed on the repository root', () => {
     const repo = mkdtempSync(join(tmpdir(), 'mem-repo-'))
@@ -200,8 +189,7 @@ describe('reading and writing a Claude-written store', () => {
     mkdirSync(join(home, '.claude'), { recursive: true })
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(settings))
   }
-  const claudeStoreOf = (dir: string): string =>
-    join(home, '.claude', 'projects', claudeProjectSlug(dir), 'memory')
+  const claudeStoreOf = (dir: string): string => join(home, '.claude', 'projects', claudeProjectSlug(dir), 'memory')
 
   function wire() {
     const handlers = new Map<string, Handler>()
@@ -217,8 +205,7 @@ describe('reading and writing a Claude-written store', () => {
     return { handlers, tool }
   }
 
-  const start = async (handlers: Map<string, Handler>) =>
-    handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
+  const start = async (handlers: Map<string, Handler>) => handlers.get('session_start')?.({}, { cwd, isProjectTrusted: () => false, hasUI: false, ui: { notify: () => {} } })
 
   const tool = async (): Promise<Tool> => {
     const wired = wire()
