@@ -706,6 +706,28 @@ describe('pi-only plugin enablement', () => {
     })
   })
 
+  // pi's own settings reader strips a UTF-8 byte order mark before parsing.
+  it('should honor piCode.enabledPlugins when pi settings.json starts with a byte order mark', () => {
+    const h = home()
+    install(h, 'community', 'formatter', '1.0.0')
+
+    withPiSettings({}, () => {
+      writeFileSync(piFile(), `\uFEFF${JSON.stringify({ piCode: { enabledPlugins: { formatter: false } } })}`)
+
+      expect(installedPlugins(h, []), 'the entry behind the mark is read').toEqual([])
+    })
+  })
+
+  it('should write the entry and keep the other pi settings when settings.json starts with a byte order mark', () => {
+    withPiSettings({}, () => {
+      writeFileSync(piFile(), `\uFEFF${JSON.stringify({ defaultModel: 'm' })}`)
+
+      setPiPluginEnabled({ qualified: 'ponytail@ponytail', directory: 'ponytail', withoutPi: true }, false)
+
+      expect(JSON.parse(readFileSync(piFile(), 'utf-8')), 'the file pi accepts is rewritten, not refused').toEqual({ defaultModel: 'm', piCode: { enabledPlugins: { 'ponytail@ponytail': false } } })
+    })
+  })
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('should throw and keep the other pi settings when settings.json cannot be read', () => {
     withPiSettings({ defaultModel: 'm' }, () => {
       chmodSync(piFile(), 0o200)

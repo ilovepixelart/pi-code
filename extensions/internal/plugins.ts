@@ -40,7 +40,7 @@ export interface InstalledPlugin {
   userConfig?: Record<string, string>
 }
 
-function readJson(file: string): Record<string, unknown> {
+function readJson(file: string, decode: (raw: string) => string = (raw) => raw): Record<string, unknown> {
   let raw: string
   try {
     raw = fs.readFileSync(file, 'utf-8')
@@ -48,7 +48,7 @@ function readJson(file: string): Record<string, unknown> {
     return {} // no such file: nothing to read, and most callers expect that
   }
   try {
-    const parsed: unknown = JSON.parse(raw)
+    const parsed: unknown = JSON.parse(decode(raw))
     // isRecord, not a hand-written object check: a manifest or settings file that is a
     // JSON array is not a config object, and every caller here reads it by key.
     return isRecord(parsed) ? parsed : {}
@@ -158,8 +158,14 @@ function piSettingsFile(): string {
   return path.join(getAgentDir(), 'settings.json')
 }
 
+/** pi's settings reader strips a leading UTF-8 byte order mark before it parses, so a
+ * settings.json pi accepts can begin with one. */
+function stripBom(raw: string): string {
+  return raw.startsWith('\uFEFF') ? raw.slice(1) : raw
+}
+
 function piEnabledMap(): Record<string, boolean> {
-  const piCode = readJson(piSettingsFile()).piCode
+  const piCode = readJson(piSettingsFile(), stripBom).piCode
   const entries = isRecord(piCode) && isRecord(piCode.enabledPlugins) ? piCode.enabledPlugins : {}
   return Object.fromEntries(Object.entries(entries).filter(([, value]) => typeof value === 'boolean')) as Record<string, boolean>
 }
@@ -399,7 +405,7 @@ export function setPiPluginEnabled(state: Pick<PluginState, 'qualified' | 'direc
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
-  const parsed: unknown = raw === undefined ? {} : JSON.parse(raw)
+  const parsed: unknown = raw === undefined ? {} : JSON.parse(stripBom(raw))
   if (!isRecord(parsed)) throw new Error(`${file} is not a JSON object`)
   const piCode = isRecord(parsed.piCode) ? parsed.piCode : {}
   const entries = isRecord(piCode.enabledPlugins) ? { ...piCode.enabledPlugins } : {}
