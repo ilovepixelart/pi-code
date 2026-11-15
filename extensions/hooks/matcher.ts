@@ -158,10 +158,12 @@ function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: H
 }
 
 /** Command specs whose matcher applies to any of the given tool/source names.
- * Multiple candidates let one event offer both the pi name and its Claude alias. */
-export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[]): HookCommand[] {
+ * Multiple candidates let one event offer both the pi name and its Claude alias.
+ * A group whose matcher also applies to any `unless` name is left out, so a call
+ * offered under two identities runs each group once. */
+export function matchingCommands(matchers: HookMatcher[] | undefined, names: string | readonly string[], unless: readonly string[] = []): HookCommand[] {
   const candidates = typeof names === 'string' ? [names] : names
-  return collectCommands(matchers, (entry) => matcherApplies(entry.matcher, candidates))
+  return collectCommands(matchers, (entry) => matcherApplies(entry.matcher, candidates) && !(unless.length > 0 && matcherApplies(entry.matcher, unless)))
 }
 
 /** Command specs for an event without matcher support (Stop, UserPromptSubmit): a

@@ -14,7 +14,9 @@ Claude's Monitor tool as pi's `monitor` tool: it runs a command in the backgroun
 - **Stdout only**: only stdout lines are events. Stderr is written to the output file and never starts a message.
 - **Not covered by `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`**: the variable turns off background Bash, not Monitor.
 - **Stops with the session**: quitting pi stops every monitor, and so does a session switch (`/new`, `/resume`, `/fork`). `/reload` keeps them running, since the session continues.
-- **Same rules as Bash**: a hook `if` filter written as `Bash(…)` also judges Monitor commands, and `Monitor(…)` judges them alone. In `allowed-tools`, `Monitor(…)` and `Bash(…)` scopes both apply to monitor commands (see [commands](commands.md)). Hook payloads name the tool `Monitor`.
+- **Bash hooks see Monitor commands**: a PreToolUse group whose matcher is a Bash matcher (`Bash`, `^Bash$`, `Bash|Read`, `Bash.*`) also runs on a monitor command, as in Claude Code, so a Bash guard that blocks (exit 2, `permissionDecision: "deny"`, `decision: "block"`) blocks the monitor call. The hook gets a Bash call: `tool_name` is `Bash` and `tool_input` holds `command` and `description`. In `if`, name Bash (`Bash(tail *)`); a hook in such a group whose `if` names Monitor does not run. Its `allow` and `updatedInput` have no effect on the monitor call. A PostToolUse hook with a Bash matcher does not run for monitor.
+- **Monitor hooks**: a group whose matcher meets Monitor itself (`Monitor`, `Bash|Monitor`, `*`, or no matcher) runs once, with `tool_name` `Monitor` and the monitor input, on PreToolUse and PostToolUse; there an `if` of `Monitor(…)` or `Bash(…)` judges the command, and `updatedInput` rewrites the monitor input.
+- **Scopes**: in `allowed-tools`, `Monitor(…)` and `Bash(…)` scopes both apply to monitor commands (see [commands](commands.md)).
 - The command runs in the shell and environment of the `bash` tool: pi's `shellPath` and `shellCommandPrefix` settings and the `PI_*` session variables.
 
 ## Batching and flood protection
