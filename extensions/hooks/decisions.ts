@@ -35,14 +35,12 @@ export interface HookDecision {
  * arrives here as a parse failure and hookJsonError sorts it from a real error). */
 export function tryParseJson(text: string):
   | {
-      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown; suppressOriginalPrompt?: boolean }
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string; updatedInput?: unknown; suppressOriginalPrompt?: boolean; updatedToolOutput?: unknown; updatedMCPToolOutput?: unknown }
       decision?: string
       reason?: string
       continue?: boolean
       stopReason?: string
       systemMessage?: string
-      updatedToolOutput?: unknown
-      updatedMCPToolOutput?: unknown
       ok?: boolean
     }
   | undefined {
@@ -58,7 +56,7 @@ export function tryParseJson(text: string):
 
 /** Top-level JSON output fields; a multi-line output where a line sets one of
  * these is a parse failure rather than plain text, as Claude documents. */
-const OUTPUT_FIELDS = new Set(['decision', 'reason', 'continue', 'stopReason', 'systemMessage', 'suppressOutput', 'hookSpecificOutput', 'updatedToolOutput', 'updatedMCPToolOutput', 'ok'])
+const OUTPUT_FIELDS = new Set(['decision', 'reason', 'continue', 'stopReason', 'systemMessage', 'suppressOutput', 'hookSpecificOutput', 'ok'])
 
 /** Claude reports a `<hook> hook error` notice when {..}-shaped stdout cannot be
  * read as JSON output, and does not treat that stdout as plain text. Returns the
