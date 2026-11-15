@@ -471,8 +471,9 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
 
   /** Claude: with Bash denied when the session starts, "Claude doesn't have the Monitor
    * tool"; a tool list that names Monitor keeps it without Bash. Checked at session start
-   * only: later, `bash` can be away for one run (plan mode, a command's allowed-tools)
-   * that restores the set itself. */
+   * and after tree navigation, where pi rebuilds the active set and activates every
+   * extension tool the branch never mentioned. Not checked in between: `bash` can be away
+   * for one run (plan mode, a command's allowed-tools) that restores the set itself. */
   const followBash = (ctx: ExtensionContext): void => {
     const active = pi.getActiveTools()
     if (!active.includes('monitor') || active.includes('bash') || defaultToolsName(ctx)) return
@@ -486,6 +487,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     followBash(ctx)
     events.attach(pi, sessionHasTurns(ctx))
   })
+  pi.on('session_tree', (_event, ctx) => followBash(ctx))
   pi.on('agent_start', () => events.markPrompted(pi))
   pi.on('session_shutdown', (event) => {
     events.detach(pi)
