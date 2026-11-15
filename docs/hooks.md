@@ -7,7 +7,7 @@ Hook locations (settings.json from the session's primary working directory, sett
 ## Events
 
 - **PreToolUse**: blocks tools, rewrites input via `updatedInput`, injects `additionalContext` beside the eventual tool result.
-- **PostToolUse**: feedback and `additionalContext` land next to the tool result; `updatedToolOutput`/`updatedMCPToolOutput` replace what the model sees (schema-checked for built-ins, unvalidated for MCP).
+- **PostToolUse**: feedback and `additionalContext` land next to the tool result; `hookSpecificOutput.updatedToolOutput` replaces what the model sees (schema-checked for built-ins, unvalidated for MCP); an MCP tool falls back to `hookSpecificOutput.updatedMCPToolOutput`. As in Claude Code, neither field is read at the top level of the output.
 - **PostToolUseFailure**: notify-only (the tool already failed); the hook's stderr is shown to the model.
 - **SessionStart**: context injection before the first prompt.
 - **UserPromptSubmit**: blocks the prompt or adds context to it.

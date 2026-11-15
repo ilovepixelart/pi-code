@@ -211,14 +211,15 @@ function continueFalseReason(results: HookRunResult[]): string | undefined {
   return postToolStop ? (postToolStop.stopReason ?? 'Stopped by hook') : undefined
 }
 
-/** The first completed result's updatedToolOutput, as the pi output text. An MCP tool
- * also reads updatedMCPToolOutput. */
+/** The first completed result's hookSpecificOutput.updatedToolOutput, as the pi output
+ * text. As in Claude Code, the field is read there only, and an MCP tool falls back to
+ * updatedMCPToolOutput when updatedToolOutput is absent. */
 function updatedToolOutput(results: HookRunResult[], toolName: string, isMcp: boolean): string | undefined {
   return results
     .filter((result) => !result.timedOut)
     .map((result) => {
-      const parsed = tryParseJson(result.stdout)
-      const value = isMcp ? (parsed?.updatedMCPToolOutput ?? parsed?.updatedToolOutput) : parsed?.updatedToolOutput
+      const output = tryParseJson(result.stdout)?.hookSpecificOutput
+      const value = isMcp ? (output?.updatedToolOutput ?? output?.updatedMCPToolOutput) : output?.updatedToolOutput
       return value === undefined ? undefined : piToolOutput(toolName, value, isMcp)
     })
     .find((text) => text !== undefined)

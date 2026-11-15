@@ -2835,15 +2835,34 @@ describe('Claude vocabulary and decision-control conformance', () => {
   it('replaces the tool output the model sees via a schema-valid updatedToolOutput', async () => {
     // Claude: "Replaces the tool's output ... The value must match the tool's output shape."
     const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
-    script('redact', { stdout: [JSON.stringify({ updatedToolOutput: { stdout: '[redacted]', stderr: '', interrupted: false, isImage: false } })], code: 0 })
+    script('redact', { stdout: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: { stdout: '[redacted]', stderr: '', interrupted: false, isImage: false } } })], code: 0 })
     const patch = (await ext.toolResult('bash', { input: { command: 'env' }, content: [{ type: 'text', text: 'SECRET=x' }] })) as { content: Array<{ type: string; text: string }> }
     expect(patch.content[0].text).toBe('[redacted]')
+  })
+
+  it('ignores an updatedToolOutput outside hookSpecificOutput, as Claude Code does', async () => {
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
+    script('redact', { stdout: [JSON.stringify({ updatedToolOutput: { stdout: '[redacted]', stderr: '', interrupted: false, isImage: false } })], code: 0 })
+    const patch = await ext.toolResult('bash', { input: { command: 'env' }, content: [{ type: 'text', text: 'SECRET=x' }] })
+    expect(patch).toBeUndefined()
+  })
+
+  it('replaces an MCP tool output via updatedToolOutput, and via updatedMCPToolOutput only without it', async () => {
+    const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
+    ext.emitMcpTools([{ pi: 'github_create_issue', claude: 'mcp__github__create_issue' }])
+    const run = async (output: Record<string, unknown>) => {
+      script('redact', { stdout: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', ...output } })], code: 0 })
+      const patch = (await ext.toolResult('github_create_issue', { input: { title: 't' }, content: [{ type: 'text', text: 'SECRET=x' }] })) as { content: Array<{ type: string; text: string }> }
+      return patch.content[0].text
+    }
+    expect(await run({ updatedToolOutput: 'general', updatedMCPToolOutput: 'mcp only' })).toBe('general')
+    expect(await run({ updatedMCPToolOutput: 'mcp only' })).toBe('mcp only')
   })
 
   it('ignores a schema-mismatched updatedToolOutput and keeps the original output', async () => {
     // Claude: "a value that doesn't match the tool's output schema is ignored".
     const ext = await withHooks({ PostToolUse: [{ hooks: [{ command: 'redact' }] }] })
-    script('redact', { stdout: [JSON.stringify({ updatedToolOutput: 'just a string' })], code: 0 })
+    script('redact', { stdout: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: 'just a string' } })], code: 0 })
     const patch = await ext.toolResult('bash', { input: { command: 'env' }, content: [{ type: 'text', text: 'SECRET=x' }] })
     expect(patch).toBeUndefined()
   })
