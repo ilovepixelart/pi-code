@@ -1,12 +1,14 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
+import * as path from 'node:path'
 
-import { createBashToolDefinition } from '@earendil-works/pi-coding-agent'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, createBashToolDefinition, SessionManager } from '@earendil-works/pi-coding-agent'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
 import { allShells, commandPreview, forgetShell, MAX_FINISHED_SHELLS, markBackground, registerShell, resetShells, runningShells, setShellsListener, settleShell, shellCompletionText, shellOutputDir, shellsFooterText, shellsStatusText, stopAllShells, stopShell } from '../extensions/internal/background-shells.ts'
 import { CLAUDE_TOOL_MAP, claudeToolName } from '../extensions/internal/claude-tool-names.ts'
+import monitorExtension from '../extensions/monitor.ts'
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean; structuredContent?: { exit_code?: number } }
 type Execute = (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: (update: unknown) => void, ctx?: unknown) => Promise<ToolResult>
@@ -21,16 +23,22 @@ interface Harness {
   emit: (event: string, payload?: Record<string, unknown>) => void
   ctx: Record<string, unknown>
   footer: () => string | undefined
+  active: () => string[]
 }
 
-const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number } = {}): Harness => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: number; active?: string[] } = {}): Harness => {
   const tools = new Map<string, { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> }; promptGuidelines?: string[] }>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
+  let active = options.active ?? ['read', 'bash', 'task_stop']
   const pi = {
     registerTool: (tool: { name: string; execute: Execute; description: string; parameters: { properties: Record<string, unknown> } }) => tools.set(tool.name, tool),
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => {
+      active = names
+    },
   }
   backgroundBashExtension(pi as never, { maxOutputBytes: options.maxOutputBytes })
   const statuses = new Map<string, string | undefined>()
@@ -62,6 +70,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; maxOutputBytes?: 
     emit,
     ctx,
     footer: () => statuses.get('background-shells'),
+    active: () => active,
   }
 }
 
@@ -116,6 +125,20 @@ describe('foregroundLimitMs', () => {
     expect(foregroundLimitMs(3600, { BASH_MAX_TIMEOUT_MS: '60000' })).toBe(120_000)
     expect(foregroundLimitMs(3600, { BASH_DEFAULT_TIMEOUT_MS: '900000', BASH_MAX_TIMEOUT_MS: '60000' })).toBe(900_000)
     expect(foregroundLimitMs(3600, { BASH_MAX_TIMEOUT_MS: '1800000' })).toBe(1_800_000)
+  })
+
+  it('clamps an oversized value to the longest delay a timer holds', () => {
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '3000000000' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(4_000_000, { BASH_MAX_TIMEOUT_MS: '3000000000' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '2147483647' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '2147483648' })).toBe(2_147_483_647)
+  })
+
+  it('ignores an infinite value', () => {
+    for (const raw of ['Infinity', '1e400']) {
+      expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: raw })).toBe(120_000)
+      expect(foregroundLimitMs(3600, { BASH_MAX_TIMEOUT_MS: raw })).toBe(600_000)
+    }
   })
 })
 
@@ -252,6 +275,15 @@ describe('bash tool', () => {
     const timeout = setup().tool('bash').parameters.properties.timeout as { description: string }
     expect(timeout.description).toContain('after 30 seconds')
     expect(timeout.description).not.toContain('120')
+  })
+
+  it.each([{ hasUI: true }, { hasUI: false }])('runs a command under an oversized default timeout (hasUI: $hasUI)', async (options) => {
+    process.env.BASH_DEFAULT_TIMEOUT_MS = '3000000000'
+    const result = await setup(options).bash('t1', { command: 'echo a; echo b' })
+    expect(textOf(result)).toMatch(/a\r?\nb/)
+    expect(textOf(result)).not.toContain('moved to the background')
+    expect(result.structuredContent?.exit_code).toBe(0)
+    expect(allShells()).toHaveLength(0)
   })
 
   it('returns a quick command in the foreground, untracked', async () => {
@@ -627,5 +659,111 @@ describe('task_stop tool', () => {
   it('rejects an unknown id', async () => {
     const h = setup()
     await expect(h.stop('t1', { task_id: 'b12345678' })).rejects.toThrow('No background command with ID b12345678')
+  })
+
+  it('stays in a session that starts without bash', () => {
+    expect(setup({ active: ['read', 'task_stop', 'todo'] }).active()).toEqual(['read', 'task_stop', 'todo'])
+  })
+})
+
+// Against a real pi session: which tools a session starts with is decided by pi from what
+// is registered when, and a stubbed pi cannot say what that comes to.
+describe('tool selection', () => {
+  const SHELL_TOOLS = ['bash', 'monitor', 'task_stop']
+  // Every pi mode binds something, and pi starts the session again after /reload only then.
+  const BINDINGS = { shutdownHandler: () => {} }
+  type SessionOptions = { tools?: string[]; noTools?: 'all' | 'builtin'; defaultTools?: string[] }
+
+  afterEach(async () => {
+    vi.unstubAllEnvs()
+    await stopAndWait()
+  })
+
+  const start = async (options: SessionOptions = {}) => {
+    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-cwd-')))
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-agent-'))
+    if (options.defaultTools) fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultTools: options.defaultTools }))
+    // Where an extension finds the settings pi was started with.
+    vi.stubEnv('PI_CODING_AGENT_DIR', agentDir)
+    const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+      const services = await createAgentSessionServices({ cwd, agentDir, resourceLoaderOptions: { noExtensions: true, extensionFactories: [(pi) => backgroundBashExtension(pi), (pi) => monitorExtension(pi)] } })
+      return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, tools: options.tools, noTools: options.noTools })), services, diagnostics: services.diagnostics }
+    }
+    const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) })
+    await runtime.session.bindExtensions(BINDINGS)
+    return runtime
+  }
+  type Runtime = Awaited<ReturnType<typeof start>>
+  const shellTools = (runtime: Runtime): string[] => SHELL_TOOLS.filter((name) => runtime.session.getActiveToolNames().includes(name))
+  /** The shell tools at the start of the session, after /reload and after /new. */
+  const shellToolsAcross = async (runtime: Runtime): Promise<string[][]> => {
+    const seen = [shellTools(runtime)]
+    await runtime.session.reload()
+    seen.push(shellTools(runtime))
+    await runtime.newSession()
+    await runtime.session.bindExtensions(BINDINGS)
+    seen.push(shellTools(runtime))
+    return seen
+  }
+
+  it('offers its bash, task_stop and monitor in a default session', async () => {
+    const runtime = await start()
+    try {
+      expect(shellTools(runtime)).toEqual(SHELL_TOOLS)
+      expect(runtime.session.getToolDefinition('bash')?.description).toContain('A command still running at its timeout is stopped.')
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  // Claude Code with Bash denied: no Bash, no Monitor, TaskStop stays.
+  it.each<[string, SessionOptions]>([
+    ['the defaultTools setting leaves bash out', { defaultTools: ['read'] }],
+    ['built-in tools are off', { noTools: 'builtin' }],
+    ['--tools removes bash', { tools: ['-bash'] }],
+  ])('offers task_stop, and neither bash nor monitor, where %s', async (_name, options) => {
+    const runtime = await start(options)
+    try {
+      expect(await shellToolsAcross(runtime)).toEqual([['task_stop'], ['task_stop'], ['task_stop']])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('keeps bash off across /reload once the session turned it off, and monitor with it', async () => {
+    const runtime = await start()
+    try {
+      runtime.session.setActiveToolsByName(runtime.session.getActiveToolNames().filter((name) => name !== 'bash'))
+      await runtime.session.reload()
+      expect(shellTools(runtime)).toEqual(['task_stop'])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  // Claude Code with `--tools "Monitor,Read"`: Monitor without Bash, and it runs.
+  it('keeps a monitor that an allowlist names without bash, and it runs', async () => {
+    const runtime = await start({ tools: ['read', 'monitor'] })
+    try {
+      expect(await shellToolsAcross(runtime)).toEqual([['monitor'], ['monitor'], ['monitor']])
+      const ctx = { cwd: os.tmpdir(), hasUI: true, isProjectTrusted: () => false, sessionManager: { getSessionId: () => 'test-session', getSessionFile: () => undefined, getBranch: () => [] } }
+      const result = (await runtime.session.getToolDefinition('monitor')?.execute('call-1', { description: 'the watch', command: 'echo hi' }, undefined, undefined, ctx as never)) as ToolResult
+      expect(textOf(result)).toMatch(/ID: m[0-9a-f]{8}/)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  it('keeps a monitor that the defaultTools setting names without bash', async () => {
+    const runtime = await start({ defaultTools: ['read', 'monitor'] })
+    try {
+      expect(await shellToolsAcross(runtime)).toEqual([
+        ['monitor', 'task_stop'],
+        ['monitor', 'task_stop'],
+        ['monitor', 'task_stop'],
+      ])
+    } finally {
+      await runtime.dispose()
+    }
   })
 })
