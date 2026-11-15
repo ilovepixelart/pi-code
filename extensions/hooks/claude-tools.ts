@@ -74,6 +74,13 @@ export function claudeToolInput(piName: string, input: unknown, cwd: string): Re
   return TO_CLAUDE_INPUT[piName]?.(raw, cwd)
 }
 
+/** A monitor call as the Bash call a Bash-matched hook receives for it: Claude sends
+ * the command and the description, and none of Monitor's own fields. */
+export function monitorAsBashInput(input: unknown): Record<string, unknown> {
+  const raw = record(input) ?? {}
+  return pick({ command: raw.command, description: raw.description })
+}
+
 type RewriteMapper = (updated: Record<string, unknown>) => Record<string, unknown> | undefined
 
 const FROM_CLAUDE_INPUT: Record<string, RewriteMapper> = {

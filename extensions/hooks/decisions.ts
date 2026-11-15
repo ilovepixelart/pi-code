@@ -7,8 +7,8 @@
 import type { ToolCallEventResult } from '@earendil-works/pi-coding-agent'
 import type { PathAnchors } from '../internal/path-rules.ts'
 import { errorMessage, isRecord } from '../internal/values.ts'
-import { claudeToolInput, claudeToolName, piToolInput } from './claude-tools.ts'
-import type { HookCommand, HooksConfig } from './config.ts'
+import { claudeToolInput, claudeToolName, monitorAsBashInput, piToolInput } from './claude-tools.ts'
+import type { HookCommand, HookMatcher, HooksConfig } from './config.ts'
 import { allCommands, matchingCommands, passesIfFilter } from './matcher.ts'
 import { type HookRunner, type HookRunResult, timeoutMs } from './runners.ts'
 
@@ -224,6 +224,29 @@ function preToolContexts(results: HookRunResult[]): string[] {
   })
 }
 
+/** The hooks one PreToolUse payload goes to, and whether their updatedInput applies
+ * to the call. */
+interface PreToolPass {
+  commands: HookCommand[]
+  payload: Record<string, unknown>
+  rewrites: boolean
+}
+
+const BASH_NAMES = ['bash', 'Bash']
+
+/** Claude: "A PreToolUse or PermissionRequest hook with a Bash matcher also runs on
+ * shell commands Claude starts with the Monitor tool, but its allow and updatedInput
+ * have no effect on them", and "the hook gets a Bash call ... The hook doesn't run if
+ * its if names Monitor". A group whose matcher meets Monitor itself runs once, with
+ * the Monitor payload, and is left out here. Without this pass a `matcher: "Bash"`
+ * guard never saw a command started through monitor. */
+function monitorAsBashPass(matchers: HookMatcher[] | undefined, toolName: string, toolInput: unknown, monitorNames: readonly string[], anchors?: PathAnchors): PreToolPass | undefined {
+  if (toolName !== 'monitor') return undefined
+  const target = anchors ? { piName: BASH_NAMES[0], claudeName: BASH_NAMES[1], input: toolInput, anchors } : undefined
+  const commands = matchingCommands(matchers, BASH_NAMES, monitorNames).filter((command) => passesIfFilter(command, target))
+  return { commands, payload: { hook_event_name: 'PreToolUse', tool_name: BASH_NAMES[1], tool_input: monitorAsBashInput(toolInput) }, rewrites: false }
+}
+
 /** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
  * verdict in config order wins. The payload reports the Claude vocabulary: the MCP
  * alias for MCP tools, and the documented name and tool_input shape for pi's
@@ -232,7 +255,8 @@ function preToolContexts(results: HookRunResult[]): string[] {
  * completes, translated back to the pi shape for a built-in (an incomplete rewrite
  * keeps the original input rather than corrupting it), so with several rewrites
  * the last to finish takes effect (the docs leave multi-rewrite ordering
- * unspecified). */
+ * unspecified). A monitor call is also offered to Bash-matched groups as a Bash
+ * call (see monitorAsBashPass). */
 export async function runPreToolUse(config: HooksConfig, toolName: string, toolInput: unknown, runner: HookRunner, claudeName?: string, onSystemMessage?: SystemMessageSink, anchors?: PathAnchors): Promise<PreToolUseOutcome> {
   const cwd = anchors?.cwd ?? process.cwd()
   const translatedName = claudeName ?? claudeToolName(toolName)
@@ -241,12 +265,18 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
   const translatedInput = claudeName === undefined ? claudeToolInput(toolName, toolInput, cwd) : undefined
   const names = translatedName ? [toolName, translatedName] : [toolName]
   const target = anchors ? { piName: toolName, claudeName: translatedName, input: toolInput, anchors } : undefined
-  const commands = matchingCommands(config.PreToolUse, names).filter((command) => passesIfFilter(command, target))
-  const payload = { hook_event_name: 'PreToolUse', tool_name: translatedName ?? toolName, tool_input: translatedInput ?? toolInput }
+  const own: PreToolPass = {
+    commands: matchingCommands(config.PreToolUse, names).filter((command) => passesIfFilter(command, target)),
+    payload: { hook_event_name: 'PreToolUse', tool_name: translatedName ?? toolName, tool_input: translatedInput ?? toolInput },
+    rewrites: true,
+  }
+  const asBash = monitorAsBashPass(config.PreToolUse, toolName, toolInput, names, anchors)
+  const runs = [own, ...(asBash ? [asBash] : [])].flatMap((pass) => pass.commands.map((command) => ({ command, pass })))
+  const commands = runs.map((run) => run.command)
   const results = await Promise.all(
-    commands.map((command) =>
-      runner(command, payload, timeoutMs(command)).then((result) => {
-        applyUpdatedInput(toolName, toolInput, translatedInput !== undefined, result.stdout)
+    runs.map(({ command, pass }) =>
+      runner(command, pass.payload, timeoutMs(command)).then((result) => {
+        if (pass.rewrites) applyUpdatedInput(toolName, toolInput, translatedInput !== undefined, result.stdout)
         return result
       }),
     ),
