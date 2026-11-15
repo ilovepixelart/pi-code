@@ -62,6 +62,39 @@ describe('PreToolUse on a monitor call', () => {
     expect(seen.map((run) => run.label).sort()).toEqual([...expected].sort())
   })
 
+  it('runs a handler declared under a Monitor-meeting group and a Bash group once, as Monitor', async () => {
+    // Claude Code 2.1.325: the same command under "Bash|Monitor" and under "Bash" ran once, with the Monitor payload.
+    const { seen, runner } = recorder()
+    const config: HooksConfig = {
+      PreToolUse: [
+        { matcher: 'Bash|Monitor', hooks: [{ command: 'audit' }] },
+        { matcher: 'Bash', hooks: [{ command: 'audit' }, { command: 'other' }] },
+      ],
+    }
+    await runPreToolUse(config, 'monitor', { ...MONITOR_INPUT }, runner, undefined, undefined, anchors)
+    expect(seen).toEqual([
+      { label: 'audit', payload: AS_MONITOR },
+      { label: 'other', payload: AS_BASH },
+    ])
+  })
+
+  it('keeps the higher-precedence copy when the Bash group holds it', async () => {
+    const seen: Array<{ async: boolean | undefined; payload: unknown }> = []
+    const runner: HookRunner = async (hook, payload) => {
+      seen.push({ async: hook.async, payload })
+      return { code: 2, stdout: '', stderr: 'no', timedOut: false }
+    }
+    const config: HooksConfig = {
+      PreToolUse: [
+        { matcher: '*', hooks: [{ command: 'guard', async: true, sourceRank: 2 }] },
+        { matcher: 'Bash', hooks: [{ command: 'guard', sourceRank: Number.POSITIVE_INFINITY }] },
+      ],
+    }
+    const outcome = await runPreToolUse(config, 'monitor', { ...MONITOR_INPUT }, runner, undefined, undefined, anchors)
+    expect(seen).toEqual([{ async: undefined, payload: AS_BASH }])
+    expect(outcome.block).toBe(true)
+  })
+
   it('treats a regex that meets Bash as a Bash matcher, and one that meets Monitor as a Monitor matcher', async () => {
     const { seen, runner } = recorder()
     const rows: Row[] = [

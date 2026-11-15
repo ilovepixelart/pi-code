@@ -9,7 +9,7 @@ import type { PathAnchors } from '../internal/path-rules.ts'
 import { errorMessage, isRecord } from '../internal/values.ts'
 import { claudeToolInput, claudeToolName, monitorAsBashInput, piToolInput } from './claude-tools.ts'
 import type { HookCommand, HookMatcher, HooksConfig } from './config.ts'
-import { allCommands, matchingCommands, passesIfFilter } from './matcher.ts'
+import { allCommands, handlerKey, matchingCommands, passesIfFilter } from './matcher.ts'
 import { type HookRunner, type HookRunResult, timeoutMs } from './runners.ts'
 
 export interface HookDecision {
@@ -245,6 +245,25 @@ function monitorAsBashPass(matchers: HookMatcher[] | undefined, toolName: string
   return { commands, payload: { hook_event_name: 'PreToolUse', tool_name: BASH_NAMES[1], tool_input: monitorAsBashInput(toolInput) }, rewrites: false }
 }
 
+/** Claude runs a handler that both passes select once, as the Monitor call. The copy
+ * of the Bash pass runs instead only where it comes from a higher-precedence source:
+ * a repository's `async` copy under `*` must not unblock a managed `Bash` guard. */
+function oncePerCall(own: PreToolPass, asBash: PreToolPass): PreToolPass[] {
+  const ownByKey = new Map(own.commands.map((command) => [handlerKey(command), command]))
+  const outranked = new Set<HookCommand>()
+  const bashCommands = asBash.commands.filter((command) => {
+    const twin = ownByKey.get(handlerKey(command))
+    if (!twin) return true
+    if ((command.sourceRank ?? 0) <= (twin.sourceRank ?? 0)) return false
+    outranked.add(twin)
+    return true
+  })
+  return [
+    { ...own, commands: own.commands.filter((command) => !outranked.has(command)) },
+    { ...asBash, commands: bashCommands },
+  ]
+}
+
 /** Run PreToolUse hooks for a tool, in parallel as Claude does; the first blocking
  * verdict in config order wins. The payload reports the Claude vocabulary: the MCP
  * alias for MCP tools, and the documented name and tool_input shape for pi's
@@ -269,7 +288,7 @@ export async function runPreToolUse(config: HooksConfig, toolName: string, toolI
     rewrites: true,
   }
   const asBash = monitorAsBashPass(config.PreToolUse, toolName, toolInput, names, anchors)
-  const runs = [own, ...(asBash ? [asBash] : [])].flatMap((pass) => pass.commands.map((command) => ({ command, pass })))
+  const runs = (asBash ? oncePerCall(own, asBash) : [own]).flatMap((pass) => pass.commands.map((command) => ({ command, pass })))
   const commands = runs.map((run) => run.command)
   const results = await Promise.all(
     runs.map(({ command, pass }) =>
