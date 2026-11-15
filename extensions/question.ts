@@ -1,9 +1,10 @@
 /**
  * Question Tool - 1-4 questions with options, single- or multi-select.
- * On the TUI the questions share one form: an inline "Type something." text row and,
- * for several questions, tabs and a final review. Escape anywhere cancels, as in
- * Claude Code. Each question is also offered to a remote responder over pi.events (REMOTE_QUESTION_CHANNEL);
- * the first answer, local or remote, wins.
+ * On the TUI the questions share one form: an inline "Type something." text row, a
+ * "Chat about this" row and, for several questions, tabs and a final review. Escape
+ * anywhere cancels, as in Claude Code. Each question is also offered to a remote
+ * responder over pi.events (REMOTE_QUESTION_CHANNEL); the first answer, local or
+ * remote, wins.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -30,6 +31,8 @@ interface QuestionDetails {
   multiSelect?: boolean
   /** Auto-continued on askUserQuestionTimeout rather than answered or cancelled. */
   timedOut?: boolean
+  /** The user chose "Chat about this" to clarify the questions. */
+  chat?: boolean
 }
 
 type QuestionResult = { content: Array<{ type: 'text'; text: string }>; details: QuestionDetails }
@@ -137,10 +140,10 @@ function optionLine(label: string, index: number, selected: boolean, theme: Them
 }
 
 /** One row of a question; the cursor indexes into the question's rows. */
-type Row = { kind: 'option'; index: number; option: OptionWithDesc } | { kind: 'text' }
+type Row = { kind: 'option'; index: number; option: OptionWithDesc } | { kind: 'text' } | { kind: 'chat' }
 
 function questionRows(spec: QuestionSpec): Row[] {
-  return [...spec.options.map((option, index): Row => ({ kind: 'option', index, option })), { kind: 'text' }]
+  return [...spec.options.map((option, index): Row => ({ kind: 'option', index, option })), { kind: 'text' }, { kind: 'chat' }]
 }
 
 type SingleAnswer = { kind: 'option'; index: number } | { kind: 'text'; text: string }
@@ -152,7 +155,7 @@ type TimedOut = { kind: 'timedOut'; selected?: MultiAnswer }
 type Outcome = Answer | TimedOut
 
 /** What the form ends with; `undefined` in `answers` is an unanswered question. A cancel is null. */
-type FormResult = { kind: 'submit'; answers: Array<Answer | undefined> } | { kind: 'timeout'; answers: Outcome[] }
+type FormResult = { kind: 'submit'; answers: Array<Answer | undefined> } | { kind: 'timeout'; answers: Outcome[] } | { kind: 'chat'; answers: Array<Answer | undefined> }
 
 /** A question is answered exactly when `confirmed` is set. */
 type QuestionState = { rows: Row[]; cursor: number; typing: boolean; draft: Input } & ({ mode: 'single'; confirmed?: SingleAnswer } | { mode: 'multi'; checked: boolean[]; confirmed?: MultiAnswer })
@@ -218,6 +221,10 @@ function buildQuestionLines(view: QuestionView): string[] {
       case 'text':
         // A multiSelect free-text row is checked exactly when it has text; Space never toggles it.
         add(optionLine(box(state.draft.getValue().trim() !== ''), i, selected, theme, field))
+        return
+      case 'chat':
+        add(theme.fg('dim', '─'.repeat(width)))
+        add(optionLine('Chat about this', i, selected, theme))
         return
       default:
         unreachable(row)
@@ -346,6 +353,8 @@ export default function question(pi: ExtensionAPI) {
         const text = result.content[0]
         return new Text(text?.type === 'text' ? text.text : '', 0, 0)
       }
+
+      if (details.chat) return new Text(theme.fg('warning', 'User wants to clarify these questions'), 0, 0)
 
       if (details.questions && details.answer !== null) {
         return new Text(
@@ -519,6 +528,8 @@ function overlayResult(specs: QuestionSpec[], result: FormResult | null | undefi
   if (!result) return cancelled(specs)
   const lone = specs.length === 1
   switch (result.kind) {
+    case 'chat':
+      return chatResult(specs, result.answers)
     case 'submit':
       return combine(
         specs,
@@ -536,6 +547,23 @@ function overlayResult(specs: QuestionSpec[], result: FormResult | null | undefi
     default:
       return unreachable(result)
   }
+}
+
+/** Claude Code's clarify text for "Chat about this", followed by each question and the answer Submit would send. */
+function chatResult(specs: QuestionSpec[], answers: Array<Answer | undefined>): QuestionResult {
+  const asked = specs.map((spec, index) => {
+    const answer = answers[index]
+    return `- "${spec.question}"\n  ${answer ? `Answer: ${answerText(spec, answer)}` : '(No answer provided)'}`
+  })
+  const text = `The user wants to clarify these questions.
+    This means they may have additional information, context or questions for you.
+    Take their response into account and then reformulate the questions if appropriate.
+    Start by asking them what they would like to clarify.
+
+    Questions asked:
+${asked.join('\n')}`
+  const collected = specs.map((spec, index) => answerToResult(spec, answers[index]).details)
+  return { content: [{ type: 'text', text }], details: { ...collected[0], ...(specs.length > 1 ? { questions: collected } : {}), chat: true } }
 }
 
 const AWAY_NOTICE = 'No response after the configured idle timeout; the user may be away from the keyboard.'
@@ -596,7 +624,7 @@ const COUNTDOWN_WINDOW_MS = 20_000
 const IDLE_TICK_MS = 250
 
 /** Terminal path: the form for one or several questions. Each row is an option, then
- * the free-text row; several questions add tabs and a review.
+ * the free-text row, then "Chat about this"; several questions add tabs and a review.
  *
  * `timeoutMs`, when set, is Claude's askUserQuestionTimeout: "After a question sits
  * that long with no input, the dialog closes on its own: it submits any options
@@ -760,7 +788,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       function confirmSelection(state: QuestionState): void {
         const row = state.rows[state.cursor]
-        if (row.kind === 'text' && !state.typing) state.typing = true
+        if (row.kind === 'chat') finish({ kind: 'chat', answers: answers() })
+        else if (row.kind === 'text' && !state.typing) state.typing = true
         else if (state.mode === 'multi') confirmChecked(state)
         else confirmRow(state, row)
       }
@@ -773,7 +802,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
           navigate(active + 1)
         }
       }
-      function confirmRow(state: QuestionState, row: Row): void {
+      function confirmRow(state: QuestionState, row: Exclude<Row, { kind: 'chat' }>): void {
         switch (row.kind) {
           case 'text': {
             const text = state.draft.getValue().trim()
