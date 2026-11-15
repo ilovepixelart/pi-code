@@ -2238,6 +2238,50 @@ describe('question batch lifecycle', () => {
     expect(submitted.content[0].text).toBe('First?\nUser selected: Alpha\nUser wrote: half typed\n\nSecond?\nUser selected: 2. Beta')
   })
 
+  it('should submit when a remote answer completes the batch after a multi-select text answer was confirmed', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('xy')
+    overlay.handleInput(RAW.enter)
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const submitted = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+
+    expect(submitted?.content[0].text, 'The highlight is on no field, so the remote answer should complete the call').toBe('First?\nUser wrote: xy\n\nSecond?\nUser selected: 2. Beta')
+  })
+
+  it('should submit when a remote answer completes the batch after the highlight left a multi-select field with text', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('zz')
+    overlay.handleInput(RAW.up)
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const submitted = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+
+    expect(submitted?.content[0].text, 'Typing stopped when the highlight left the field').toBe('First?\nUser wrote: zz\n\nSecond?\nUser selected: 2. Beta')
+  })
+
   it('should submit when a remote answer completes the batch while the highlight rests on a confirmed question text row', async () => {
     const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
     const tool = setupRemote((offer) => {
