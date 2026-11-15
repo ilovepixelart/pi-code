@@ -34,18 +34,27 @@ type Sent = { message: { customType: string; content: string; display: boolean }
 
 /** Both extensions on one stubbed pi, as the pack loads them: task_stop is the bash
  * extension's, and the registry it stops through is shared. */
-const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits } = {}) => {
+const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; limits?: MonitorLimits; active?: string[]; allowlist?: string[] } = {}) => {
   const tools = new Map<string, Tool>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
   // The mailbox is process state: a monitor an earlier test left on its way out reports
   // to whichever session is current, so only this session's own monitors are recorded.
   const own = new Set<string>()
+  let active = options.active ?? ['read', 'bash', 'task_stop', 'monitor']
   const pi = {
-    registerTool: (tool: Tool) => tools.set(tool.name, tool),
+    registerTool: (tool: Tool) => {
+      tools.set(tool.name, tool)
+      // pi activates every registered tool an allowlist names, each time a tool is registered.
+      active = [...new Set([...active, ...(options.allowlist ?? []).filter((name) => tools.has(name))])]
+    },
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
     sendMessage: (message: Sent['message'], opts: Sent['options']) => {
       if ([...own].some((id) => message.content.startsWith(`Monitor ${id} `))) sent.push({ message, options: opts })
+    },
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => {
+      active = names
     },
   }
   monitorExtension(pi as never, { windowMs: 10, minDeadlineMs: 100, ...options.limits })
@@ -82,6 +91,7 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     sent,
     emit,
     footer: () => statuses.get('background-shells'),
+    active: () => active,
   }
 }
 
@@ -688,5 +698,26 @@ describe('monitor tool', () => {
     expect(shell(id)?.state).toBe('running')
     emit('session_shutdown', { reason: 'quit' })
     expect(shell(id)?.state).toBe('killed')
+  })
+
+  it('leaves a session that starts without bash, and no other', () => {
+    expect(setup({ active: ['read', 'monitor', 'task_stop', 'todo'] }).active()).toEqual(['read', 'task_stop', 'todo'])
+    expect(setup({ active: ['read', 'bash', 'monitor'] }).active()).toEqual(['read', 'bash', 'monitor'])
+  })
+
+  it('stays where the tool allowlist names it: pi activates an allowlisted tool whenever one is registered', () => {
+    expect(setup({ active: ['read', 'monitor'], allowlist: ['read', 'monitor'] }).active()).toEqual(['read', 'monitor'])
+  })
+
+  it('stays where the defaultTools setting names it', () => {
+    const agentDir = fs.mkdtempSync(`${os.tmpdir()}/monitor-agent-`)
+    fs.writeFileSync(`${agentDir}/settings.json`, JSON.stringify({ defaultTools: ['read', 'monitor'] }))
+    vi.stubEnv('PI_CODING_AGENT_DIR', agentDir)
+    try {
+      expect(setup({ active: ['read', 'monitor'] }).active()).toEqual(['read', 'monitor'])
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(agentDir, { recursive: true, force: true })
+    }
   })
 })

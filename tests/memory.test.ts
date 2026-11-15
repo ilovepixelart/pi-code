@@ -166,6 +166,33 @@ describe('memory helpers', () => {
     expect(removeIndexLine(index, 'wip-thing')).toBe('# Memory index\n')
   })
 
+  describe('a line whose first link is not the memory', () => {
+    const docs = '- [docs](https://example.com/guide) relates to [b](b.md)'
+    const todo = '- [ ] todo: revisit [b](b.md) later'
+    const index = `# Memory index\n${docs}\n${todo}\n- [b](b.md): two\n- [c](c.md): three\n`
+
+    it('saving rewrites only the entry the memory starts', () => {
+      expect(upsertIndexLine(index, 'b', 'NEW desc')).toBe(`# Memory index\n${docs}\n${todo}\n- [b](b.md): NEW desc\n- [c](c.md): three\n`)
+    })
+
+    it('removing drops only the entry the memory starts', () => {
+      expect(removeIndexLine(index, 'b')).toBe(`# Memory index\n${docs}\n${todo}\n- [c](c.md): three\n`)
+    })
+
+    it('never takes a checkbox line or a non-memory first link for an entry', () => {
+      const mentions = `# Memory index\n${todo}\n- [x](x.txt) and [a](a.md): tail\n`
+      expect(removeIndexLine(mentions, 'b')).toBe(mentions)
+      expect(removeIndexLine(mentions, 'a')).toBe(mentions)
+      expect(upsertIndexLine(mentions, 'a', 'one')).toBe(`${mentions}- [a](a.md): one\n`)
+    })
+
+    it('still recognises a bracketed title, indented, with any separator', () => {
+      const bracketed = `# Memory index\n${todo}\n  - [Fix [WIP] thing](wip-thing.md) - x\n`
+      expect(upsertIndexLine(bracketed, 'wip-thing', 'new')).toBe(`# Memory index\n${todo}\n  - [Fix [WIP] thing](wip-thing.md) - new\n`)
+      expect(removeIndexLine(bracketed, 'wip-thing')).toBe(`# Memory index\n${todo}\n`)
+    })
+  })
+
   it('adds no second heading to an index that starts with a blank line', () => {
     const index = '\n# Memory index\n- [a](a.md): one\n'
     expect(upsertIndexLine(index, 'b', 'two')).toBe(`${index}- [b](b.md): two\n`)

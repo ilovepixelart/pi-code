@@ -37,6 +37,9 @@ import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 const DEFAULT_TIMEOUT_MS = 120_000
 /** BASH_MAX_TIMEOUT_MS out of the box: ten minutes. */
 const MAX_TIMEOUT_MS = 600_000
+/** setTimeout keeps its delay in 32 bits and fires a larger one after 1 ms; pi's bash
+ * rejects a timeout over this many milliseconds. */
+const MAX_TIMER_MS = 2_147_483_647
 
 const positiveMs = (raw: string | undefined): number | undefined => {
   const value = Number(raw)
@@ -49,7 +52,7 @@ const positiveMs = (raw: string | undefined): number | undefined => {
 export function foregroundLimitMs(timeoutSeconds: number | undefined, env: NodeJS.ProcessEnv = process.env): number {
   const fallback = positiveMs(env.BASH_DEFAULT_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS
   const ceiling = Math.max(fallback, positiveMs(env.BASH_MAX_TIMEOUT_MS) ?? MAX_TIMEOUT_MS)
-  return timeoutSeconds === undefined ? fallback : Math.min(timeoutSeconds * 1000, ceiling)
+  return Math.min(timeoutSeconds === undefined ? fallback : Math.min(timeoutSeconds * 1000, ceiling), MAX_TIMER_MS)
 }
 
 /** Claude stops, rather than backgrounds, a command that "starts with `sleep`". */
@@ -234,7 +237,9 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
 
   /** What the model is shown follows the session: pi re-describes a registered tool's
    * parameters only by registering it again, and whether a session has a UI is not known
-   * before it starts. */
+   * before it starts. Called at session start only: pi activates every tool an extension
+   * registers while it loads, whatever the session's tool selection is, and a tool that
+   * replaces a registered one later is active only where that one was. */
   const registerBash = (background: boolean): void => {
     const defaultMs = foregroundLimitMs(undefined)
     pi.registerTool({
@@ -263,8 +268,6 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
       },
     })
   }
-  registerBash(backgroundAllowed({ hasUI: true }))
-
   pi.registerTool({
     name: 'task_stop',
     label: 'task_stop',
