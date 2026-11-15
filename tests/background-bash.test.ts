@@ -2,7 +2,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, createBashToolDefinition, SessionManager } from '@earendil-works/pi-coding-agent'
+import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai'
+import { type CreateAgentSessionRuntimeFactory, createAgentSession, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, createBashToolDefinition, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import backgroundBashExtension, { backgroundAllowed, foregroundLimitMs, startsWithSleep } from '../extensions/background-bash.ts'
@@ -755,6 +756,32 @@ describe('tool selection', () => {
       expect(shellTools(runtime)).toEqual(['task_stop'])
     } finally {
       await runtime.dispose()
+    }
+  })
+
+  // pi rebuilds the active tools on tree navigation and activates every extension tool the
+  // branch never mentioned, without a session_start.
+  it('keeps monitor off after tree navigation in a session without bash', async () => {
+    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-tree-')))
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-tools-agent-'))
+    vi.stubEnv('PI_CODING_AGENT_DIR', agentDir)
+    vi.stubEnv('PI_OFFLINE', '1')
+    const faux = fauxProvider({ provider: 'tree-fixture', api: 'tree-fixture', tokensPerSecond: Number.POSITIVE_INFINITY })
+    const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } })
+    const extensionFactories = [(pi: Parameters<typeof backgroundBashExtension>[0]) => backgroundBashExtension(pi), (pi: Parameters<typeof monitorExtension>[0]) => monitorExtension(pi), (pi: Parameters<typeof monitorExtension>[0]) => pi.registerProvider(faux.provider)]
+    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, agentsFilesOverride: () => ({ agentsFiles: [] }), extensionFactories })
+    await resourceLoader.reload()
+    const { session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd), model: faux.getModel(), thinkingLevel: 'off', tools: ['-bash'] })
+    try {
+      await session.bindExtensions(BINDINGS)
+      faux.setResponses([fauxAssistantMessage('one.'), fauxAssistantMessage('two.')])
+      await session.prompt('first')
+      await session.prompt('second')
+      const firstUser = session.sessionManager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'user')
+      await session.navigateTree(firstUser?.id ?? '')
+      expect(session.getActiveToolNames().filter((name) => SHELL_TOOLS.includes(name))).toEqual(['task_stop'])
+    } finally {
+      session.dispose()
     }
   })
 
