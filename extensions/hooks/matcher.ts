@@ -134,7 +134,7 @@ function withCommand(raw: HookCommand): HookCommand {
  * mcp_tool input) are different handlers: `if` is applied after this, so collapsing two
  * filters left the other tool call with no guard. */
 function keepOnce(result: HookCommand[], seen: Map<string, number>, hook: HookCommand): void {
-  const key = `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
+  const key = handlerKey(hook)
   const kept = seen.get(key)
   if (kept === undefined) {
     seen.set(key, result.length)
@@ -143,6 +143,11 @@ function keepOnce(result: HookCommand[], seen: Map<string, number>, hook: HookCo
   }
   // Replaced in place: the handler keeps the position of its first occurrence.
   if ((hook.sourceRank ?? 0) > (result[kept].sourceRank ?? 0)) result[kept] = hook
+}
+
+/** What makes two declarations the same handler. */
+export function handlerKey(hook: HookCommand): string {
+  return `${hook.origin ?? 'settings'}\n${hook.command}\n${JSON.stringify([hook.headers, hook.args, hook.if, hook.input])}`
 }
 
 function collectCommands(matchers: HookMatcher[] | undefined, applies: (entry: HookMatcher) => boolean): HookCommand[] {
