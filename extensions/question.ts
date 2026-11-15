@@ -677,9 +677,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         return state.checked.some(Boolean) || text ? multiAnswer(state.checked, text) : undefined
       }
       /** Text in the field under the highlight that Enter has not confirmed as it stands. */
-      function unconfirmedText(state: QuestionState): boolean {
-        const text = state.draft.getValue().trim()
-        if (!state.typing || !text) return false
+      function unconfirmedText(state: QuestionState | undefined): boolean {
+        const text = state?.draft.getValue().trim()
+        if (!state?.typing || !text) return false
         return state.mode === 'multi' || state.confirmed?.kind !== 'text' || state.confirmed.text !== text
       }
       function answers(): Array<Answer | undefined> {
@@ -727,7 +727,7 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         }
         restoreRemoteAnswer(index, value)
         // Text still being typed is not submitted from under the user: the form stays open.
-        if (answers().every(Boolean) && !states.some(unconfirmedText)) finish({ kind: 'submit', answers: answers() })
+        if (answers().every(Boolean) && !unconfirmedText(states[active])) finish({ kind: 'submit', answers: answers() })
         else if (index === active) navigate(active + 1)
         else refresh()
       }
