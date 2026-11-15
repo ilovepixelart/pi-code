@@ -660,7 +660,7 @@ describe('question renderCall', () => {
       ),
     )
 
-    expect(rendered, 'Single-select batch questions should list the free-text entry; multi-select ones should not').toEqual(['question [Q1] First?', '  Options: 1. Alpha, 2. Beta, 3. Type something.', '', 'question [Q2] Second?', '  Options (multi): 1. Alpha, 2. Beta'])
+    expect(rendered, 'Every batch question should list the free-text entry').toEqual(['question [Q1] First?', '  Options: 1. Alpha, 2. Beta, 3. Type something.', '', 'question [Q2] Second?', '  Options (multi): 1. Alpha, 2. Beta, 3. Type something.'])
   })
 
   it('should render a batch question without options when its arguments are still streaming', () => {
@@ -875,29 +875,64 @@ describe('question overlay', () => {
     })
   })
 
-  it('shows the editor and its own hint after entering the free-text option', () => {
-    const { overlay } = openOverlay(setup())
+  it('should type into the free-text row when focus moves onto it', async () => {
+    const { overlay, result } = openOverlay(setup())
     for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    const empty = overlay.render(60).map(stripTerminalSequences)
+    overlay.handleInput('hi')
+    const typed = overlay.render(60).map(stripTerminalSequences)
     overlay.handleInput(RAW.enter)
-    const out = overlay.render(60)
-    expect(out).toContain('❯ 3. Type something. ✎')
-    expect(out).toContain(' Your answer:')
-    expect(out).toContain(' Enter to submit · Esc to go back')
+    const submitted = await result
+
+    expect(empty, 'The empty row should show the placeholder').toContain('❯ 3. Type something.')
+    expect(typed.join('\n'), 'The draft should appear inline in the row').toContain('❯ 3. hi')
+    expect(typed, 'There should be no separate answer editor').not.toContain(' Your answer:')
+    expect(typed, 'The hint should not change while typing, as in Claude Code').toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
+    expect(submitted.content[0].text, 'Enter should confirm the typed text').toBe('User wrote: hi')
+  })
+
+  it('should keep the draft when Up and Down leave and re-enter the free-text row', async () => {
+    const { overlay, result } = openOverlay(setup())
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('hi')
+    overlay.handleInput(RAW.up)
+    const away = overlay.render(60).map(stripTerminalSequences)
+    overlay.handleInput('x')
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(away, 'Up should move focus off the row').toContain('❯ 2. Beta')
+    expect(away, 'The draft should stay in the row').toContain('  3. hi')
+    expect(submitted.content[0].text, 'Keys pressed off the row should not reach the draft').toBe('User wrote: hi')
+  })
+
+  it('should cancel when Escape is pressed on a free-text row with a draft', async () => {
+    const { overlay, result } = openOverlay(setup())
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('hi')
+    overlay.handleInput(RAW.escape)
+    expect((await result).content[0].text, 'Escape should cancel even with a draft, as in Claude Code').toBe('User cancelled the selection')
+  })
+
+  it('should cancel when Escape is pressed on an empty free-text row', async () => {
+    const { overlay, result } = openOverlay(setup())
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.escape)
+    expect((await result).content[0].text, 'Escape on an empty row should cancel').toBe('User cancelled the selection')
   })
 
   it('echoes typed characters into the editor', () => {
     const { overlay } = openOverlay(setup())
     for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput('h')
-    overlay.handleInput('i')
-    expect(overlay.render(60).some((line) => line.includes('hi'))).toBe(true)
+    overlay.handleInput('x')
+    overlay.handleInput('y')
+    expect(overlay.render(60).map(stripTerminalSequences).join('\n')).toContain('❯ 3. xy')
   })
 
   it('resolves a typed answer as custom when the editor submits', async () => {
     const { overlay, result } = openOverlay(setup())
     for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
     overlay.handleInput('h')
     overlay.handleInput('i')
     overlay.handleInput(RAW.enter)
@@ -907,43 +942,27 @@ describe('question overlay', () => {
     })
   })
 
-  it('returns to the option list and discards the draft on escape from the editor', () => {
-    const { overlay } = openOverlay(setup())
-    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput('x')
-    overlay.handleInput(RAW.escape)
-
-    const out = overlay.render(60)
-    expect(out).toContain('❯ 3. Type something.')
-    expect(out).toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
-    expect(out.some((line) => line.includes('x'))).toBe(false)
-  })
-
-  it('stays open on a blank submission instead of answering', async () => {
+  it('should cancel a lone question when Enter is pressed on a blank free-text row', async () => {
     const { overlay, result } = openOverlay(setup())
     for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
     overlay.handleInput(' ')
     overlay.handleInput(RAW.enter)
-    expect(overlay.render(60)).toContain(' Enter to select · ↑/↓ to navigate · Esc to cancel')
 
-    overlay.handleInput(RAW.escape)
-    expect((await result).content).toEqual([{ type: 'text', text: 'User cancelled the selection' }])
+    expect((await result).content, 'Enter on a blank row should cancel, as in Claude Code').toEqual([{ type: 'text', text: 'User cancelled the selection' }])
   })
 })
 
 describe('question header and multiSelect', () => {
   const multiParams = { question: 'Pick some', header: 'Scope', options: OPTIONS, multiSelect: true }
 
-  it('should show the header and the multi-select hint, and no free-text option, when one question is multiSelect', () => {
+  it('should show the header, the multi-select hint and an unboxed free-text row when one question is multiSelect', () => {
     const { overlay } = openOverlayWith(setup(), multiParams)
     const out = overlay.render(80)
     expect(out[1], 'A lone question should show its header with no tab bar').toBe(' ☐ Scope ')
     expect(out).toContain(' Pick some')
     expect(out).toContain('❯ 1. [ ] Alpha')
     expect(out).toContain('  2. [ ] Beta')
-    expect(out.some((l) => l.includes('Type something.'))).toBe(false)
+    expect(out, 'The empty free-text row should show an unchecked box').toContain('  3. [ ] Type something')
     expect(out).toContain(' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel')
   })
 
@@ -954,6 +973,58 @@ describe('question header and multiSelect', () => {
     void setup().execute('call-1', multiParams as never, undefined, undefined, ctx)
     const out = overlay?.render(80) ?? []
     expect(out.slice(1, 4)).toEqual(['<selectedBg> ☐ Scope </selectedBg>', '', ' *Pick some*'])
+  })
+
+  it('should type a space instead of toggling when Space is pressed in the multi-select free-text row', () => {
+    const { overlay } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('a')
+    overlay.handleInput(RAW.space)
+    overlay.handleInput('b')
+    const out = overlay.render(80).map(stripTerminalSequences)
+
+    expect(out.join('\n'), 'Space should type into the row').toContain('❯ 3. [x] a b')
+    expect(out, 'The hint should not change while typing').toContain(' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel')
+    expect(out, 'No other option should be toggled').toEqual(expect.arrayContaining(['  1. [ ] Alpha', '  2. [ ] Beta']))
+  })
+
+  it('should check the multi-select free-text box exactly while the row has text', () => {
+    const { overlay } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    const empty = stripTerminalSequences(overlay.render(80).join('\n'))
+    overlay.handleInput('x')
+    const typed = stripTerminalSequences(overlay.render(80).join('\n'))
+    overlay.handleInput('\x7f')
+    const deleted = stripTerminalSequences(overlay.render(80).join('\n'))
+
+    expect(empty, 'An empty row should be unchecked').toContain('❯ 3. [ ] Type something')
+    expect(typed, 'Typing should check the row').toContain('❯ 3. [x] x')
+    expect(deleted, 'Deleting the text should uncheck the row').toContain('❯ 3. [ ] Type something')
+  })
+
+  it('should send checked options and typed text when Enter is pressed while typing in a multi-select question', async () => {
+    const tool = setup()
+    const { overlay, result } = openOverlayWith(tool, multiParams)
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('Gamma')
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'The model should get the checked labels and the typed text').toBe('User selected: Alpha\nUser wrote: Gamma')
+    expect(submitted.details, 'The transcript answer should list both').toMatchObject({ answer: 'Alpha, Gamma', multiSelect: true })
+  })
+
+  it('should send the typed text alone when nothing is checked in a multi-select question', async () => {
+    const { overlay, result } = openOverlayWith(setup(), multiParams)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('Gamma')
+    overlay.handleInput(RAW.enter)
+    expect((await result).content[0].text, 'Only the typed text should be sent').toBe('User wrote: Gamma')
   })
 
   it('toggles a checkbox with space', () => {
@@ -976,15 +1047,17 @@ describe('question header and multiSelect', () => {
     })
   })
 
-  it('reports (none) when nothing is toggled', async () => {
+  it('should stay open when Enter is pressed with nothing checked on a single multi-select question', async () => {
     const { overlay, result } = openOverlayWith(setup(), multiParams)
     overlay.handleInput(RAW.enter)
-    expect((await result).content).toEqual([{ type: 'text', text: 'User selected: (none)' }])
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.enter)
+    expect((await result).content, 'Only the Enter after checking an option should answer').toEqual([{ type: 'text', text: 'User selected: Alpha' }])
   })
 
-  it('renders the header and multi tag in the call, without the free-text entry', () => {
+  it('should render the header, multi tag and free-text entry in the call when the question is multiSelect', () => {
     const rendered = setup().renderCall(multiParams, theme)
-    expect(lines(rendered)).toEqual(['question [Scope] Pick some', '  Options (multi): 1. Alpha, 2. Beta'])
+    expect(lines(rendered)).toEqual(['question [Scope] Pick some', '  Options (multi): 1. Alpha, 2. Beta, 3. Type something.'])
   })
 
   it('renders a multi-select result as the joined answer', () => {
@@ -1092,10 +1165,10 @@ describe('question navigation hints', () => {
     expect(hints, 'Each form state should show its own keys').toEqual([
       ' Enter to select · ↑/↓ to navigate · Esc to cancel',
       ' Space to toggle · ↑/↓ to navigate · Enter to confirm · Esc to cancel',
-      ' Enter to submit · Esc to go back',
+      ' Enter to select · ↑/↓ to navigate · Esc to cancel',
       ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
       ' Space to toggle · Tab/Arrow keys to navigate · Enter to confirm · Esc to cancel',
-      ' Enter to submit · Esc to go back',
+      ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
       ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
     ])
     for (const text of hints) expect(visibleWidth(text), `"${text}" should fit an 80 column terminal`).toBeLessThanOrEqual(80)
@@ -1147,6 +1220,75 @@ describe('question batch submission', () => {
     expect(submitted.content[0].text, 'The submitted answer should be what the screen showed as checked').toContain('First?\nUser selected: Alpha, Beta\n')
   })
 
+  it('should submit the edited text when a confirmed multi-select text answer is changed without Enter', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('a')
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput('b')
+    overlay.handleInput(RAW.up)
+    overlay.handleInput(RAW.right)
+    overlay.handleInput(RAW.right)
+    const review = overlay.render(120).join('\n')
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(review, 'The review should list the edited text').toContain('→ ab')
+    expect(submitted.content[0].text, 'The submitted answer should be the edited text').toContain('First?\nUser wrote: ab\n')
+  })
+
+  it('should keep the confirmed text when a single-select text answer is edited without Enter', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('a')
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput('b')
+    overlay.handleInput(RAW.up)
+    overlay.handleInput(RAW.right)
+    overlay.handleInput(RAW.right)
+    const review = overlay.render(120).join('\n')
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(review, 'The review should list the confirmed text, as in Claude Code').toMatch(/→ a$/m)
+    expect(submitted.content[0].text, 'The submitted answer should be the confirmed text').toContain('First?\nUser wrote: a\n')
+  })
+
+  it('should leave a confirmed multi-select text answer unanswered when its text is deleted', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    for (let i = 0; i < 2; i++) overlay.handleInput(RAW.down)
+    overlay.handleInput('a')
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput('\x7f')
+    overlay.handleInput(RAW.up)
+    const tabs = overlay.render(120).join('\n')
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(tabs, 'The tab should go back to unanswered').toContain('☐ Q1')
+  })
+
   it('should leave a multi-select question unanswered and advance when Enter is pressed with nothing checked', async () => {
     const { overlay, result } = openOverlayWith(setup(), {
       questions: [
@@ -1165,6 +1307,43 @@ describe('question batch submission', () => {
     expect(advanced, 'Enter should advance to the next question').toContain('Second?')
     expect(review, 'The question should stay unanswered in the tab bar').toContain('☐ Q1')
     expect(submitted.details?.questions?.[0], 'Submit should count the question as skipped').toMatchObject({ answer: '', skipped: true })
+  })
+
+  it('should leave a multi-select question unanswered when Enter is pressed on an empty free-text row with nothing checked', () => {
+    const { overlay } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.enter)
+    const out = overlay.render(120).join('\n')
+
+    expect(out, 'Enter should advance to the next question').toContain('Second?')
+    expect(out, 'The question should stay unanswered').toContain('☐ Q1')
+  })
+
+  it('should show checked labels and typed text in the review when a multi-select question has both', () => {
+    const { overlay } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('Gamma')
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.right)
+    const review = overlay.render(120)
+
+    expect(review, 'The review should join labels and typed text').toContain('   → Alpha, Beta, Gamma')
   })
 
   it('should return a confirmed multi-select answer to unanswered when every box is cleared and confirmed', async () => {
@@ -1190,25 +1369,21 @@ describe('question batch submission', () => {
     expect(submitted.details?.questions?.[0], 'Submit should count the cleared question as skipped').toMatchObject({ answer: '', skipped: true })
   })
 
-  it('should retain earlier answers when an empty custom answer is submitted', async () => {
+  it('should cancel the call when Enter is pressed on a blank free-text field', async () => {
     const { overlay, result } = openOverlayWith(setup(), {
       questions: [
         { question: 'First?', options: OPTIONS },
         { question: 'Second?', options: OPTIONS },
       ],
     })
-
     overlay.handleInput(RAW.enter)
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput(RAW.up)
-    overlay.handleInput(RAW.right)
+    overlay.handleInput('  ')
     overlay.handleInput(RAW.enter)
     const submitted = await result
 
-    expect(submitted.details?.questions, 'An empty custom submission should not discard earlier answers or cancel the form').toMatchObject([{ answer: 'Alpha' }, { answer: '', skipped: true }])
+    expect(submitted.content[0].text, 'Enter on a blank field should cancel, as in Claude Code').toBe('User cancelled the selection')
   })
 
   it('should cancel the whole call when Cancel is chosen in the review', async () => {
@@ -1362,7 +1537,6 @@ describe('question batch submission', () => {
 
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
     overlay.handleInput('abc')
     overlay.handleInput(RAW.left)
     overlay.handleInput('X')
@@ -1384,19 +1558,39 @@ describe('question batch submission', () => {
 
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
     overlay.handleInput('ab')
     for (let i = 0; i < 3; i++) overlay.handleInput(RAW.left)
     const atStart = stripTerminalSequences(overlay.render(120).join('\n'))
     for (let i = 0; i < 3; i++) overlay.handleInput(RAW.right)
     const atEnd = stripTerminalSequences(overlay.render(120).join('\n'))
-    overlay.handleInput(RAW.escape)
+    overlay.handleInput(RAW.up)
     overlay.handleInput(RAW.right)
     const switched = stripTerminalSequences(overlay.render(120).join('\n'))
 
     expect(atStart, 'Left at the start should stay on the question').toContain('First?')
     expect(atEnd, 'Right at the end should stay on the question').toContain('First?')
-    expect(switched, 'Right should switch questions after Escape stops typing').toContain('Second?')
+    expect(switched, 'Right should switch questions once Up leaves the row').toContain('Second?')
+  })
+
+  it('should leave an unconfirmed single-select draft unanswered when navigating directly to Submit', async () => {
+    const { overlay, result } = openOverlayWith(setup(), {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('keep this draft')
+    overlay.handleInput(RAW.up)
+    overlay.handleInput(RAW.tab)
+    overlay.handleInput(RAW.right)
+    overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(submitted.details?.questions?.[0]?.answer, 'Text that Enter did not confirm is not an answer, as in Claude Code').toBe('')
+    expect(submitted.content[0].text).not.toContain('keep this draft')
   })
 
   it('should render only bounded lines when question headers exceed the terminal width', async () => {
@@ -1467,9 +1661,8 @@ describe('question batch submission', () => {
     overlay.handleInput(RAW.left)
     overlay.handleInput(RAW.down)
     overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
     overlay.handleInput('oops')
-    overlay.handleInput(RAW.escape)
+    overlay.handleInput(RAW.up)
     overlay.handleInput(RAW.tab)
     overlay.handleInput(RAW.right)
     overlay.handleInput(RAW.enter)
@@ -1477,32 +1670,6 @@ describe('question batch submission', () => {
 
     expect(submitted.content[0].text, 'The confirmed option should reach the model').toContain('First?\nUser selected: 1. Alpha')
     expect(submitted.content[0].text, 'The abandoned draft should not replace the confirmed answer').not.toContain('oops')
-  })
-
-  it('should keep the confirmed answer when Escape leaves a later free-text draft', async () => {
-    const { overlay, result } = openOverlayWith(setup(), {
-      questions: [
-        { question: 'First?', options: OPTIONS },
-        { question: 'Second?', options: OPTIONS },
-      ],
-    })
-
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput(RAW.left)
-    overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.down)
-    overlay.handleInput(RAW.enter)
-    overlay.handleInput('draft')
-    overlay.handleInput(RAW.escape)
-    const options = overlay.render(120).join('\n')
-    overlay.handleInput(RAW.right)
-    overlay.handleInput(RAW.right)
-    overlay.handleInput(RAW.enter)
-    const submitted = await result
-
-    expect(options, 'Escape in the editor should return to the option list').toContain('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
-    expect(submitted.content[0].text, 'The confirmed option should reach the model').toContain('First?\nUser selected: 1. Alpha')
-    expect(submitted.content[0].text, 'The draft should not replace the confirmed answer').not.toContain('draft')
   })
 })
 
@@ -1798,7 +1965,7 @@ describe('question batch lifecycle', () => {
     overlay.handleInput(RAW.escape)
     await result
 
-    expect(rendered, 'The free-text row should have focus for a remote custom answer').toContain('❯ 3. Type something.')
+    expect(rendered, 'The free-text row should have focus for a remote custom answer').toContain('❯ 3. remote words')
   })
 
   it('should submit saved answers and unchecked questions distinctly when the batch times out', async () => {
@@ -1832,6 +1999,39 @@ describe('question batch lifecycle', () => {
       vi.useRealTimers()
     }
   })
+  it('should send unconfirmed multi-select text with the checks when the batch times out while typing', async () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), 'q-batch-timeout-'))
+    const settings = join(dir, 'managed-settings.json')
+    writeFileSync(settings, JSON.stringify({ askUserQuestionTimeout: '60s' }))
+    setManagedSettingsPath(settings)
+    try {
+      const { overlay, result } = openOverlayWith(setup(), {
+        questions: [
+          { question: 'First?', options: OPTIONS },
+          { question: 'Second?', options: OPTIONS, multiSelect: true },
+          { question: 'Third?', options: OPTIONS },
+        ],
+      })
+
+      overlay.handleInput(RAW.enter)
+      overlay.handleInput(RAW.space)
+      overlay.handleInput(RAW.down)
+      overlay.handleInput(RAW.down)
+      overlay.handleInput('Gamma')
+      vi.advanceTimersByTime(60_000)
+      const submitted = await result
+
+      expect(submitted.details?.questions, 'Timeout should preserve confirmed answers and unconfirmed checks and text without inventing a focused answer').toMatchObject([{ answer: 'Alpha' }, { answer: 'Alpha, Gamma', timedOut: true }, { answer: '', timedOut: true }])
+      expect(submitted.content[0].text, 'The unconfirmed text should be sent apart from the checks').toContain('Second?\nNo response. Already selected: Alpha. Already typed: Gamma.')
+      expect(submitted.content[0].text, 'Timeout should tell the model the user may be away').toContain('No response after the configured idle timeout')
+      expect(vi.getTimerCount(), 'Timeout should stop the form timer').toBe(0)
+    } finally {
+      setManagedSettingsPath(undefined)
+      rmSync(dir, { recursive: true, force: true })
+      vi.useRealTimers()
+    }
+  })
 
   it('should report confirmed answers as a normal submit when the form times out', async () => {
     vi.useFakeTimers()
@@ -1852,12 +2052,10 @@ describe('question batch lifecycle', () => {
       overlay.handleInput(RAW.enter)
       overlay.handleInput(RAW.down)
       overlay.handleInput(RAW.down)
-      overlay.handleInput(RAW.enter)
       overlay.handleInput('mine')
       overlay.handleInput(RAW.enter)
       overlay.handleInput(RAW.down)
       overlay.handleInput(RAW.down)
-      overlay.handleInput(RAW.enter)
       overlay.handleInput('draft')
       vi.advanceTimersByTime(60_000)
       const submitted = await result
@@ -1956,8 +2154,135 @@ describe('question batch lifecycle', () => {
     overlay.handleInput(RAW.escape)
     await result
 
-    expect(rendered, 'Typing should stop once a remote answer lands').not.toContain('Esc to stop typing')
     expect(rendered, 'The remote answer should have focus').toContain('❯ 1. Alpha')
+  })
+
+  it('should not submit a half-typed draft when a remote answer completes the rest of the batch', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('half')
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const early = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+    overlay.handleInput(' typed')
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(early, 'The form should stay open while the first answer is being typed').toBeUndefined()
+    expect(submitted.content[0].text, 'The finished text and the remote answer should be sent').toBe('First?\nUser wrote: half typed\n\nSecond?\nUser selected: 2. Beta')
+  })
+
+  it('should stay open when a remote answer completes the batch while a confirmed text answer is being edited', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('yes')
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput(' but')
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const early = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+    overlay.handleInput(' later')
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(early, 'The form should stay open while the edit is unconfirmed').toBeUndefined()
+    expect(submitted.content[0].text).toBe('First?\nUser wrote: yes but later\n\nSecond?\nUser selected: 2. Beta')
+  })
+
+  it('should stay open when a remote answer completes the batch while multi-select text is being typed', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.space)
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('half')
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const early = await Promise.race([result, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20))])
+    overlay.handleInput(' typed')
+    for (let i = 0; i < 3; i++) overlay.handleInput(RAW.enter)
+    const submitted = await result
+
+    expect(early, 'The form should stay open while the text is being typed').toBeUndefined()
+    expect(submitted.content[0].text).toBe('First?\nUser selected: Alpha\nUser wrote: half typed\n\nSecond?\nUser selected: 2. Beta')
+  })
+
+  it('should submit when a remote answer completes the batch while the highlight rests on a confirmed question text row', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    replies[1]?.({ action: 'answer', indices: [2] })
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'The confirmed and the remote answer should complete the call').toBe('First?\nUser selected: 1. Alpha\n\nSecond?\nUser selected: 2. Beta')
+  })
+
+  it('should replace a local multi-select draft when a remote answer lands on that question', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS, multiSelect: true },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('x')
+    replies[0]?.({ action: 'answer', indices: [1] })
+    overlay.handleInput(RAW.left)
+    const rendered = stripTerminalSequences(overlay.render(120).join('\n'))
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(rendered, 'The remote answer should check its option').toContain('1. [x] Alpha')
+    expect(rendered, 'The remote answer should replace the local draft, so what is shown is what is submitted').toContain('3. [ ] Type something')
   })
 
   it('should cancel after remote withdrawal when the turn aborts', async () => {
@@ -2228,6 +2553,15 @@ describe('askViaOverlay idle timeout', () => {
     overlay.handleInput(RAW.space) // check Alpha only
     await vi.advanceTimersByTimeAsync(60_000)
     expect(await result).toEqual({ kind: 'timedOut', selected: { kind: 'multi', indices: [0] } })
+  })
+
+  it('should not send a single-select text draft when the timeout fires while typing', async () => {
+    const { overlay, result } = openTimed(OPTIONS, false, 60_000)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('half typed')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await result, 'An unconfirmed single-select draft should not be sent').toEqual({ kind: 'timedOut' })
   })
 
   it('a keypress resets the timer, so it does not fire on the original schedule', async () => {

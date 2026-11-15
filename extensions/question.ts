@@ -1,16 +1,15 @@
 /**
  * Question Tool - 1-4 questions with options, single- or multi-select.
- * On the TUI the questions share one form: options, a "Type something." entry with an
- * editor (single-select only) and, for several questions, tabs and a final review.
- * Escape in the editor returns to the options; Escape anywhere else cancels.
- * Each question is also offered to a remote responder over pi.events
- * (REMOTE_QUESTION_CHANNEL); the first answer, local or remote, wins.
+ * On the TUI the questions share one form: an inline "Type something." text row and,
+ * for several questions, tabs and a final review. Escape anywhere cancels, as in
+ * Claude Code. Each question is also offered to a remote responder over pi.events (REMOTE_QUESTION_CHANNEL);
+ * the first answer, local or remote, wins.
  */
 
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
+import { Input, Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { readManagedSettings } from './internal/managed-settings.ts'
 import { readUserSetting } from './internal/settings-chain.ts'
@@ -132,21 +131,21 @@ function checkbox(checked: boolean): string {
   return checked ? '[x] ' : '[ ] '
 }
 
-function optionLine(label: string, index: number, selected: boolean, theme: Theme): string {
-  return (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(selected ? 'accent' : 'text', `${index + 1}. ${label}`)
+/** `field` is a pre-rendered text field appended after the label. */
+function optionLine(label: string, index: number, selected: boolean, theme: Theme, field = ''): string {
+  return (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(selected ? 'accent' : 'text', `${index + 1}. ${label}`) + field
 }
 
 /** One row of a question; the cursor indexes into the question's rows. */
 type Row = { kind: 'option'; index: number; option: OptionWithDesc } | { kind: 'text' }
 
 function questionRows(spec: QuestionSpec): Row[] {
-  // The free-text entry does not compose with checkbox selection, so it is single-select only.
-  return [...spec.options.map((option, index): Row => ({ kind: 'option', index, option })), ...(spec.multiSelect ? [] : [{ kind: 'text' } as const])]
+  return [...spec.options.map((option, index): Row => ({ kind: 'option', index, option })), { kind: 'text' }]
 }
 
 type SingleAnswer = { kind: 'option'; index: number } | { kind: 'text'; text: string }
-/** The checked option indices in option order. */
-type MultiAnswer = { kind: 'multi'; indices: number[] }
+/** The checked option indices in option order, plus the free-text row when it has text. */
+type MultiAnswer = { kind: 'multi'; indices: number[]; text?: string }
 type Answer = SingleAnswer | MultiAnswer
 /** An unconfirmed question when the idle timeout fires; a multiSelect sends what is checked. */
 type TimedOut = { kind: 'timedOut'; selected?: MultiAnswer }
@@ -156,10 +155,15 @@ type Outcome = Answer | TimedOut
 type FormResult = { kind: 'submit'; answers: Array<Answer | undefined> } | { kind: 'timeout'; answers: Outcome[] }
 
 /** A question is answered exactly when `confirmed` is set. */
-type QuestionState = { rows: Row[]; cursor: number; typing: boolean; draft: Editor } & ({ mode: 'single'; confirmed?: SingleAnswer } | { mode: 'multi'; checked: boolean[]; confirmed?: MultiAnswer })
+type QuestionState = { rows: Row[]; cursor: number; typing: boolean; draft: Input } & ({ mode: 'single'; confirmed?: SingleAnswer } | { mode: 'multi'; checked: boolean[]; confirmed?: MultiAnswer })
 
-function multiAnswer(checked: boolean[]): MultiAnswer {
-  return { kind: 'multi', indices: checked.flatMap((on, index) => (on ? [index] : [])) }
+/** Text still being typed counts once typing stops, so a remote answer never submits a half-typed draft. */
+function settledText(state: QuestionState): string {
+  return state.typing ? '' : state.draft.getValue().trim()
+}
+
+function multiAnswer(checked: boolean[], text = ''): MultiAnswer {
+  return { kind: 'multi', indices: checked.flatMap((on, index) => (on ? [index] : [])), ...(text ? { text } : {}) }
 }
 
 function answerText(spec: QuestionSpec, answer: Answer): string {
@@ -169,7 +173,7 @@ function answerText(spec: QuestionSpec, answer: Answer): string {
     case 'text':
       return answer.text
     case 'multi':
-      return answer.indices.map((index) => spec.options[index].label).join(', ')
+      return [...answer.indices.map((index) => spec.options[index].label), ...(answer.text ? [answer.text] : [])].join(', ')
     default:
       return unreachable(answer)
   }
@@ -180,12 +184,13 @@ interface QuestionView {
   question: string
   header?: string
   state: QuestionState
+  field: string
   theme: Theme
 }
 
 /** The top border, question and rows; the caller adds the tab bar and footer. */
 function buildQuestionLines(view: QuestionView): string[] {
-  const { width, question, header, state, theme } = view
+  const { width, question, header, state, field, theme } = view
   const lines: string[] = []
   const add = (s: string) => lines.push(truncateToWidth(s, width))
 
@@ -211,22 +216,17 @@ function buildQuestionLines(view: QuestionView): string[] {
         if (row.option.description) wrapIndented(row.option.description, 5, 'muted')
         return
       case 'text':
-        add(optionLine(state.typing ? 'Type something. ✎' : 'Type something.', i, selected, theme))
+        // A multiSelect free-text row is checked exactly when it has text; Space never toggles it.
+        add(optionLine(box(state.draft.getValue().trim() !== ''), i, selected, theme, field))
         return
       default:
         unreachable(row)
     }
   })
-  if (state.typing) {
-    lines.push('')
-    add(theme.fg('muted', ' Your answer:'))
-    for (const line of state.draft.render(width - 2)) add(` ${line}`)
-  }
   return lines
 }
 
-function navHint(typing: boolean, multiSelect: boolean, tabs: boolean): string {
-  if (typing) return ' Enter to submit · Esc to go back'
+function navHint(multiSelect: boolean, tabs: boolean): string {
   // The longest variant, a multiSelect question in a batch, is exactly 80 columns.
   const move = tabs ? 'Tab/Arrow keys to navigate' : '↑/↓ to navigate'
   return multiSelect ? ` Space to toggle · ${move} · Enter to confirm · Esc to cancel` : ` Enter to select · ${move} · Esc to cancel`
@@ -271,14 +271,18 @@ function renderAnswered(details: QuestionDetails, answer: string, theme: Theme):
   return theme.fg('success', '✓ ') + theme.fg('accent', display)
 }
 
+/** Claude Code's wording for each kind of question. */
+function textRowLabel(multiSelect: boolean | undefined): string {
+  return multiSelect ? 'Type something' : 'Type something.'
+}
+
 /** Arguments stream in partially, so any field may still be missing. */
 function renderOptions(args: Partial<QuestionSpec>, theme: Theme): string {
   const multi = args.multiSelect === true
   const opts = Array.isArray(args.options) ? args.options : []
   if (!opts.length) return ''
   const labels = opts.map((o: OptionWithDesc) => o.label)
-  const shown = multi ? labels : [...labels, 'Type something.']
-  const numbered = shown.map((o, i) => `${i + 1}. ${o}`)
+  const numbered = [...labels, 'Type something.'].map((o, i) => `${i + 1}. ${o}`)
   return `\n${theme.fg('dim', `  Options${multi ? ' (multi)' : ''}: ${numbered.join(', ')}`)}`
 }
 
@@ -537,6 +541,13 @@ function overlayResult(specs: QuestionSpec[], result: FormResult | null | undefi
 const AWAY_NOTICE = 'No response after the configured idle timeout; the user may be away from the keyboard.'
 const PROCEED_NOTICE = 'Proceed on your own judgment; you can ask again later if needed.'
 
+/** The checked labels, then the typed text on its own line; "(none)" only when both are empty. */
+function multiResultText(spec: QuestionSpec, answer: MultiAnswer): string {
+  const labels = answerText(spec, { kind: 'multi', indices: answer.indices })
+  const selected = labels || !answer.text ? [`User selected: ${labels || '(none)'}`] : []
+  return [...selected, ...(answer.text ? [`User wrote: ${answer.text}`] : [])].join('\n')
+}
+
 /** `outcome` undefined is a skipped question and null a cancel. `awayNotice` false
  * leaves the timeout notice to the caller, which sends it once per call. */
 function answerToResult(spec: QuestionSpec, outcome: Outcome | null | undefined, awayNotice = true): QuestionResult {
@@ -557,7 +568,9 @@ function answerToResult(spec: QuestionSpec, outcome: Outcome | null | undefined,
       // '' rather than null, so renderResult and a batch's own null-check both read it
       // as "answered nothing, but not declined" rather than the user having said no.
       const selected = outcome.selected ? answerText(spec, outcome.selected) : ''
-      const already = selected ? ` Already selected: ${selected}.` : ''
+      const labels = outcome.selected ? answerText(spec, { kind: 'multi', indices: outcome.selected.indices }) : ''
+      const typed = outcome.selected?.text
+      const already = (labels ? ` Already selected: ${labels}.` : '') + (typed ? ` Already typed: ${typed}.` : '')
       return {
         content: [{ type: 'text', text: awayNotice ? `${AWAY_NOTICE}${already} ${PROCEED_NOTICE}` : `No response.${already}` }],
         details: { ...base, answer: selected, timedOut: true },
@@ -569,10 +582,8 @@ function answerToResult(spec: QuestionSpec, outcome: Outcome | null | undefined,
       const label = spec.options[outcome.index].label
       return { content: [{ type: 'text', text: `User selected: ${outcome.index + 1}. ${label}` }], details: { ...base, answer: label, wasCustom: false } }
     }
-    case 'multi': {
-      const labels = answerText(spec, outcome)
-      return { content: [{ type: 'text', text: `User selected: ${labels || '(none)'}` }], details: { ...base, answer: labels, wasCustom: false } }
-    }
+    case 'multi':
+      return { content: [{ type: 'text', text: multiResultText(spec, outcome) }], details: { ...base, answer: answerText(spec, outcome), wasCustom: false } }
     default:
       return unreachable(outcome)
   }
@@ -585,7 +596,7 @@ const COUNTDOWN_WINDOW_MS = 20_000
 const IDLE_TICK_MS = 250
 
 /** Terminal path: the form for one or several questions. Each row is an option, then
- * the free-text entry for a single-select; several questions add tabs and a review.
+ * the free-text row; several questions add tabs and a review.
  *
  * `timeoutMs`, when set, is Claude's askUserQuestionTimeout: "After a question sits
  * that long with no input, the dialog closes on its own: it submits any options
@@ -619,28 +630,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
     let active = saved.indexOf(undefined)
 
     return await ctx.ui.custom<FormResult | null>((tui, theme, _kb, done) => {
-      const editorTheme: EditorTheme = {
-        borderColor: (s) => theme.fg('accent', s),
-        selectList: {
-          selectedPrefix: (t) => theme.fg('accent', t),
-          selectedText: (t) => theme.fg('accent', t),
-          description: (t) => theme.fg('muted', t),
-          scrollInfo: (t) => theme.fg('dim', t),
-          noMatch: (t) => theme.fg('warning', t),
-        },
-      }
       const states = specs.map((spec): QuestionState => {
-        const draft = new Editor(tui, editorTheme)
-        const common = { rows: questionRows(spec), cursor: 0, typing: false, draft }
-        const state: QuestionState = spec.multiSelect ? { ...common, mode: 'multi', checked: spec.options.map(() => false) } : { ...common, mode: 'single' }
-        draft.onSubmit = (value) => {
-          const text = value.trim()
-          state.typing = false
-          draft.setText('')
-          if (text) commit({ kind: 'text', text })
-          else refresh()
-        }
-        return state
+        const common = { rows: questionRows(spec), cursor: 0, typing: false, draft: new Input({ prompt: '', placeholder: textRowLabel(spec.multiSelect), placeholderStyle: (text) => theme.fg('dim', text) }) }
+        return spec.multiSelect ? { ...common, mode: 'multi', checked: spec.options.map(() => false) } : { ...common, mode: 'single' }
       })
       saved.forEach((value, index) => {
         if (value) restoreRemoteAnswer(index, value)
@@ -672,24 +664,32 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function abort(): void {
         finish(null)
       }
-      /** A confirmed multi-select with nothing left checked is unanswered. */
+      /** A confirmed multi-select with nothing left checked and no text is unanswered. */
       function confirmedAnswer(state: QuestionState): Answer | undefined {
-        return state.mode === 'multi' && !state.checked.some(Boolean) ? undefined : state.confirmed
+        return state.mode === 'multi' && !state.checked.some(Boolean) && !state.confirmed?.text ? undefined : state.confirmed
       }
-      /** The confirmed answer, else whatever is checked. */
+      /** The confirmed answer, else what a multiSelect has filled in. As in Claude Code, single-select
+       * text is an answer only once Enter confirms it. */
       function draftAnswer(state: QuestionState): Answer | undefined {
         const confirmed = confirmedAnswer(state)
-        if (confirmed) return confirmed
-        return state.mode === 'multi' && state.checked.some(Boolean) ? multiAnswer(state.checked) : undefined
+        if (confirmed || state.mode === 'single') return confirmed
+        const text = settledText(state)
+        return state.checked.some(Boolean) || text ? multiAnswer(state.checked, text) : undefined
+      }
+      /** Text in the field under the highlight that Enter has not confirmed as it stands. */
+      function unconfirmedText(state: QuestionState): boolean {
+        const text = state.draft.getValue().trim()
+        if (!state.typing || !text) return false
+        return state.mode === 'multi' || state.confirmed?.kind !== 'text' || state.confirmed.text !== text
       }
       function answers(): Array<Answer | undefined> {
         return states.map(draftAnswer)
       }
-      /** The confirmed answer, else only the checked options. */
+      /** The confirmed answer, else only the checked options and multiSelect text. */
       function timeoutAnswer(state: QuestionState): Outcome {
         const confirmed = confirmedAnswer(state)
         if (confirmed) return confirmed
-        return state.mode === 'multi' ? { kind: 'timedOut', selected: multiAnswer(state.checked) } : { kind: 'timedOut' }
+        return state.mode === 'multi' ? { kind: 'timedOut', selected: multiAnswer(state.checked, state.draft.getValue().trim()) } : { kind: 'timedOut' }
       }
       /** Confirms an answer that matches the question's mode. */
       function confirm(state: QuestionState, answer: Answer): void {
@@ -701,15 +701,17 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const state = states[index]
         confirm(state, value)
         state.typing = false
-        state.draft.setText('')
         switch (value.kind) {
           case 'multi':
             if (state.mode === 'multi') state.checked = state.checked.map((_, option) => value.indices.includes(option))
+            state.draft.setValue(value.text ?? '')
             return
           case 'text':
+            state.draft.setValue(value.text)
             state.cursor = state.rows.findIndex((row) => row.kind === 'text')
             return
           case 'option':
+            state.draft.setValue('')
             state.cursor = state.rows.findIndex((row) => row.kind === 'option' && row.index === value.index)
             return
           default:
@@ -724,7 +726,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
           return
         }
         restoreRemoteAnswer(index, value)
-        if (answers().every(Boolean)) finish({ kind: 'submit', answers: answers() })
+        // Text still being typed is not submitted from under the user: the form stays open.
+        if (answers().every(Boolean) && !states.some(unconfirmedText)) finish({ kind: 'submit', answers: answers() })
         else if (index === active) navigate(active + 1)
         else refresh()
       }
@@ -757,30 +760,39 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       }
       function confirmSelection(state: QuestionState): void {
         const row = state.rows[state.cursor]
+        if (row.kind === 'text' && !state.typing) state.typing = true
+        else if (state.mode === 'multi') confirmChecked(state)
+        else confirmRow(state, row)
+      }
+      function confirmChecked(state: Extract<QuestionState, { mode: 'multi' }>): void {
+        const answer = multiAnswer(state.checked, state.draft.getValue().trim())
+        if (answer.indices.length > 0 || answer.text) commit(answer)
+        else if (!lone) {
+          // Nothing filled in leaves the question unanswered; a lone question has nowhere to advance.
+          state.confirmed = undefined
+          navigate(active + 1)
+        }
+      }
+      function confirmRow(state: QuestionState, row: Row): void {
         switch (row.kind) {
-          case 'text':
-            state.typing = true
+          case 'text': {
+            const text = state.draft.getValue().trim()
+            if (text) commit({ kind: 'text', text })
             return
+          }
           case 'option':
-            break
+            state.draft.setValue('')
+            commit({ kind: 'option', index: row.index })
+            return
           default:
             unreachable(row)
         }
-        if (state.mode === 'multi') {
-          // A lone question answers with nothing checked; in a batch that leaves the question unanswered.
-          if (state.checked.some(Boolean) || lone) commit(multiAnswer(state.checked))
-          else {
-            state.confirmed = undefined
-            navigate(active + 1)
-          }
-          return
-        }
-        commit({ kind: 'option', index: row.index })
       }
       function moveFocus(state: QuestionState, data: string): boolean {
         if (matchesKey(data, Key.up)) state.cursor = Math.max(0, state.cursor - 1)
         else if (matchesKey(data, Key.down)) state.cursor = Math.min(state.rows.length - 1, state.cursor + 1)
         else return false
+        state.typing = state.rows[state.cursor].kind === 'text'
         refresh()
         return true
       }
@@ -788,25 +800,27 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const row = state.rows[state.cursor]
         if (state.mode !== 'multi' || row.kind !== 'option') return
         state.checked[row.index] = !state.checked[row.index]
-        // A confirmed answer follows every toggle, so what is checked is what is submitted.
-        if (state.confirmed) state.confirmed = multiAnswer(state.checked)
+        followEdits(state)
+      }
+      /** A confirmed multiSelect follows every toggle and keystroke. As in Claude Code, a confirmed
+       * single-select text answer changes only when Enter confirms the edited text. */
+      function followEdits(state: QuestionState): void {
+        if (state.mode === 'multi' && state.confirmed) state.confirmed = multiAnswer(state.checked, state.draft.getValue().trim())
       }
       function handleTypingInput(state: QuestionState, data: string): void {
-        if (matchesKey(data, Key.escape)) {
-          state.typing = false
-          state.draft.setText('')
+        if (matchesKey(data, Key.escape)) finish(null)
+        else if (matchesKey(data, Key.enter)) {
+          if (state.mode === 'single' && !state.draft.getValue().trim()) finish(null)
+          else confirmSelection(state)
         } else if (!matchesKey(data, Key.tab) && !matchesKey(data, Key.shift('tab'))) {
           state.draft.handleInput(data)
+          followEdits(state)
         }
-        refresh()
       }
       function handleQuestionInput(state: QuestionState, data: string): void {
-        if (state.typing) {
-          handleTypingInput(state, data)
-          return
-        }
         if (moveFocus(state, data)) return
-        if (matchesKey(data, Key.escape)) finish(null)
+        if (state.typing) handleTypingInput(state, data)
+        else if (matchesKey(data, Key.escape)) finish(null)
         else if (matchesKey(data, Key.enter)) confirmSelection(state)
         else if (data === ' ') toggleChecked(state)
         refresh()
@@ -838,6 +852,13 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         else handleReviewInput(data)
       }
 
+      function textField(state: QuestionState, width: number): string {
+        const draft = state.draft.getValue()
+        state.draft.focused = state.typing
+        // The row's prefix and number take five columns, a checkbox four more.
+        if (state.typing) return state.draft.render(Math.max(1, width - (state.mode === 'multi' ? 9 : 5)))[0].trimEnd()
+        return draft ? theme.fg('text', draft) : theme.fg('dim', textRowLabel(state.mode === 'multi'))
+      }
       function renderTabs(width: number, saved: Array<Answer | undefined>): string {
         const tabs = specs.map((spec, index) => ` ${saved[index] ? '☒' : '☐'} ${spec.header ?? `Q${index + 1}`} `)
         tabs.push(' ✔ Submit ')
@@ -872,8 +893,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const spec = specs[active]
         const saved = answers()
         const rule = theme.fg('accent', '─'.repeat(width))
-        const lines = state ? buildQuestionLines({ width, question: theme.bold(spec.question), header: lone ? spec.header : undefined, state, theme }) : [rule, ...reviewBody(width, saved)]
-        lines.push('', theme.fg('dim', navHint(state?.typing === true, spec?.multiSelect === true, !lone)))
+        const lines = state ? buildQuestionLines({ width, question: theme.bold(spec.question), header: lone ? spec.header : undefined, state, field: textField(state, width), theme }) : [rule, ...reviewBody(width, saved)]
+        lines.push('', theme.fg('dim', navHint(spec?.multiSelect === true, !lone)))
         if (countdown !== undefined) lines.push(theme.fg('warning', ` Auto-continuing in ${countdown}s if idle · press any key to stay`))
         lines.push(rule)
         // The tab bar sits inside the frame, under its top border.
