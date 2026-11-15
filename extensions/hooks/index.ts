@@ -919,13 +919,18 @@ export default function hooksExtension(pi: ExtensionAPI) {
     const results = await runNotifyHooks(matchingCommands(config.PostCompact, trigger.names), payload, boundRunner(ctx))
     surfaceSystemMessages(results, (message) => ctx.ui.notify(message, 'warning'))
     // Claude also fires SessionStart with source "compact" when the session
-    // continues after compaction; its stdout context rides the next agent start,
-    // the same as any other SessionStart context.
+    // continues after compaction, and attaches its context right after the summary.
+    // A run that compacts midway never reaches before_agent_start, so the context is
+    // sent here: steered into a running agent, appended to the session when idle.
     const sessionStart = matchingCommands(config.SessionStart, 'compact')
     if (sessionStart.length > 0) {
       const startResults = await runNotifyHooks(sessionStart, { hook_event_name: 'SessionStart', source: 'compact' }, boundRunner(ctx))
       surfaceSystemMessages(startResults, (message) => ctx.ui.notify(message, 'warning'))
-      pendingSessionContext.push(...startResults.map((result) => promptContext(result.stdout)).filter(Boolean))
+      const content = startResults
+        .map((result) => promptContext(result.stdout))
+        .filter(Boolean)
+        .join('\n')
+      if (content) pi.sendMessage({ customType: 'claude-hook-context', content, display: false }, { deliverAs: 'steer' })
     }
   })
 

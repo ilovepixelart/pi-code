@@ -3089,6 +3089,24 @@ describe('hooks extension SessionStart compact source', () => {
     expect(JSON.parse(recordFor('fresh-context').stdin)).toMatchObject({ hook_event_name: 'SessionStart', source: 'compact' })
   })
 
+  it('sends the compact SessionStart context at the compaction, not on the next agent start', async () => {
+    // Claude attaches the hook output right after the compact summary, so a run that
+    // continues past an automatic compaction reads it on its next request.
+    const ext = await withHooks({ SessionStart: [{ matcher: 'compact', hooks: [{ command: 'fresh-context' }, { command: 'more-context' }] }] })
+    script('fresh-context', { stdout: ['re-read the plan'], code: 0 })
+    script('more-context', { stdout: ['and the notes'], code: 0 })
+    await ext.compacted('threshold')
+
+    expect(ext.sent).toEqual([{ message: { customType: 'claude-hook-context', content: 're-read the plan\nand the notes', display: false }, options: { deliverAs: 'steer' } }])
+    await expect(ext.beforeAgentStart()).resolves.toBeUndefined()
+  })
+
+  it('sends nothing when the compact SessionStart hooks print no context', async () => {
+    const ext = await withHooks({ SessionStart: [{ matcher: 'compact', hooks: [{ command: 'fresh-context' }] }] })
+    await ext.compacted('threshold')
+    expect(ext.sent).toEqual([])
+  })
+
   it('does not fire compact-matched SessionStart hooks on a startup begin', async () => {
     const ext = await withHooks({ SessionStart: [{ matcher: 'compact', hooks: [{ command: 'fresh-context' }] }] })
     await ext.agentEnd()
