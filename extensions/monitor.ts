@@ -13,13 +13,13 @@
  * /tasks lists it next to background Bash commands. Only its stdout lines are events, as
  * in Claude; stdout and stderr both go to an output file, as a background Bash command's do.
  *
- * Lines are not delivered one message each: a chatty command would start a turn per
- * line. They are coalesced over a short window, at most one message per interval, and a
- * message carries a bounded number of lines and characters; the rest are counted and the
- * message points at the output file. Blank lines are not events. A monitor that keeps
- * sending past its message allowance, or whose delivery leaves out too many lines, is
- * stopped with one notice, as Claude stops "monitors that produce too many events"; so
- * is one whose output passes the cap a background Bash command has.
+ * Events follow Claude Code's Monitor (2.1.325). Stdout lines that arrive within 200 ms
+ * of the first one form one event; a line and an event are cut at fixed lengths, and
+ * blank lines are not events. Each event spends one token of an allowance. An event
+ * with no token left is suppressed and counted, and the count goes out ahead of the
+ * next event that is delivered. A monitor suppressed for 30 seconds without a break is
+ * stopped with one notice; so is one whose output passes the cap a background Bash
+ * command has.
  *
  * Deviations: the `ws` (WebSocket) source is not offered; a polling command covers the
  * same ground. Claude's 10-minute ceiling under `-p` has no counterpart, because a
@@ -28,10 +28,9 @@
  * turn it off (env-vars: "MCP tasks and the Monitor tool still run in the background").
  * Claude's permission prompt has no pi counterpart; a hook `if` filter and an
  * allowed-tools scope written for `Bash(...)` cover Monitor commands, as Claude's Bash
- * rules do. The batch window, message rate and stop thresholds are pi-code's own
- * (docs/monitor.md sets them against Claude's). A session switch
- * (/new, /resume, /fork) ends the watches, since their events belong to the session
- * that asked; /reload keeps them.
+ * rules do. The two flood notices have a colon where Claude's have a dash, and name
+ * task_stop. A session switch (/new, /resume, /fork) ends the watches, since their
+ * events belong to the session that asked; /reload keeps them.
  */
 
 import { spawn } from 'node:child_process'
@@ -55,149 +54,178 @@ export const MAX_DEADLINE_MS = 30 * 60_000
 /** Claude's schema takes no `timeout_ms` under one second. */
 export const MIN_DEADLINE_MS = 1_000
 
-/** How long lines gather after the first one before they are delivered. */
-export const BATCH_WINDOW_MS = 1_000
-/** The least time between two deliveries from one monitor. */
-export const MIN_INTERVAL_MS = 5_000
-/** Lines and characters one delivery carries; the rest are counted, not shown. */
-export const MAX_BATCH_LINES = 50
-export const MAX_BATCH_CHARS = 4_000
+/** How long lines gather after the first one before they go out as one event. */
+export const BATCH_WINDOW_MS = 200
 /** One line longer than this is cut. */
 export const MAX_LINE_CHARS = 500
+/** One event longer than this is cut. */
+export const MAX_EVENT_CHARS = 3_000
+/** How much of a line that has not ended yet is kept: its end. */
+export const MAX_PARTIAL_CHARS = 1_048_576
 
-/** Messages one monitor may send at once before it counts as flooding; Claude's bucket
- * also holds 10. */
+/** Events one monitor may send at once. */
 export const FLOOD_BURST = 10
-/** How long until a monitor may send one more message. Claude refills every 2 seconds;
- * a message costs a turn here, so the allowance comes back more slowly. */
-export const FLOOD_REFILL_MS = 30_000
-/** Lines one delivery may leave out before the command counts as unfiltered output. */
-export const MAX_OMITTED_LINES = 1_000
+/** How long until a monitor may send one more event. */
+export const FLOOD_REFILL_MS = 2_000
+/** How long a monitor may be suppressed without a break before it is stopped. */
+export const SUPPRESSION_LIMIT_MS = 30_000
 
-const TOO_MANY_EVENTS = 'it produced too many events. Start it again with a tighter filter, so it prints only the lines worth reacting to'
+const TRUNCATED = '...(truncated)'
 
 /** `capacity` uses at once, then one more every `refillMs`, never more than `capacity`. */
-export function tokenBucket(capacity: number, refillMs: number, now: () => number = Date.now): { tryConsume: () => boolean } {
+export function tokenBucket(capacity: number, refillMs: number, now: () => number = Date.now): { tryConsume: () => boolean; tokens: () => number } {
   let tokens = capacity
   let refilledAt = now()
+  const refill = (): void => {
+    const gained = Math.floor((now() - refilledAt) / refillMs)
+    if (gained === 0) return
+    tokens = Math.min(capacity, tokens + gained)
+    refilledAt += gained * refillMs
+  }
   return {
     tryConsume() {
-      const gained = Math.floor((now() - refilledAt) / refillMs)
-      if (gained > 0) {
-        tokens = Math.min(capacity, tokens + gained)
-        refilledAt += gained * refillMs
-      }
+      refill()
       if (tokens === 0) return false
       tokens--
       return true
     },
+    tokens() {
+      refill()
+      return tokens
+    },
   }
 }
 
-export interface Batch {
-  lines: string[]
-  /** Lines that arrived but did not fit the delivery. */
-  omitted: number
-}
+/** Claude's text counts "events" whatever the number, one included. */
+export const suppressionNotice = (count: number): string => `[${count} events suppressed: output rate too high. Consider using task_stop to restart this monitor with a more selective filter.]`
 
-export interface LineBatcher {
-  /** Feed decoded output; complete lines are queued for delivery. */
-  push: (text: string) => void
-  /** Take what is queued now, the unterminated last line included, and stop the timer. */
-  drain: () => Batch | undefined
-  /** Lines the next delivery already leaves out. */
-  omitted: () => number
-}
-
-export interface BatcherOptions {
-  emit: (batch: Batch) => void
-  windowMs?: number
-  minIntervalMs?: number
-  maxLines?: number
-  maxChars?: number
-  maxLineChars?: number
+export interface EventGateOptions {
+  send: (event: string) => void
+  /** Called once the monitor has been suppressed for too long, with the notice to end it on. */
+  stop: (notice: string) => void
+  capacity?: number
+  refillMs?: number
+  suppressionLimitMs?: number
   now?: () => number
 }
 
-const cut = (line: string, max: number): string => {
-  const chars = Array.from(line)
-  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : line
+export interface EventGate {
+  /** Spend a token on an event; the count of those suppressed before it is sent first. */
+  admit: () => boolean
+  /** Send the event, or suppress it and stop a monitor suppressed for too long. */
+  offer: (event: string) => void
 }
 
-/** Splits output into lines and delivers them in bounded batches: the first queued
- * line opens a window, and no delivery follows the previous one sooner than the
- * minimum interval. */
+/** The allowance events are sent under. Suppression counts as unbroken until the
+ * monitor has been quiet for three refills or its allowance is whole again. */
+export function eventGate(options: EventGateOptions): EventGate {
+  const capacity = options.capacity ?? FLOOD_BURST
+  const refillMs = options.refillMs ?? FLOOD_REFILL_MS
+  const suppressionLimitMs = options.suppressionLimitMs ?? SUPPRESSION_LIMIT_MS
+  const now = options.now ?? Date.now
+  const bucket = tokenBucket(capacity, refillMs, now)
+  let suppressed = 0
+  let suppressedSince: number | undefined
+  let lastEventAt = now()
+
+  const admit = (): boolean => {
+    const at = now()
+    if (at - lastEventAt > refillMs * 3 || bucket.tokens() === capacity) suppressedSince = undefined
+    lastEventAt = at
+    if (!bucket.tryConsume()) {
+      suppressed++
+      suppressedSince ??= at
+      return false
+    }
+    if (suppressed > 0) options.send(suppressionNotice(suppressed))
+    suppressed = 0
+    return true
+  }
+
+  return {
+    admit,
+    offer(event) {
+      if (admit()) {
+        options.send(event)
+        return
+      }
+      const lasted = now() - (suppressedSince ?? now())
+      if (lasted > suppressionLimitMs) options.stop(`[Monitor stopped: too much output (${suppressed} events suppressed over ${Math.round(lasted / 1000)}s). Restart with a more selective source.]`)
+    },
+  }
+}
+
+export interface LineBatcher {
+  /** Feed decoded output; complete lines are queued for the next event. */
+  push: (text: string) => void
+  /** Take what is queued now, the unterminated last line included, and stop the timer. */
+  drain: () => string | undefined
+}
+
+export interface BatcherOptions {
+  emit: (event: string) => void
+  windowMs?: number
+  now?: () => number
+}
+
+const cut = (text: string, max: number, mark: string): string => (text.length > max ? `${text.slice(0, max)}${mark}` : text)
+
+/** Splits output into lines and emits them as events: the first queued line opens a
+ * window, and the lines queued when it closes are one event. */
 export function createLineBatcher(options: BatcherOptions): LineBatcher {
   const windowMs = options.windowMs ?? BATCH_WINDOW_MS
-  const minIntervalMs = options.minIntervalMs ?? MIN_INTERVAL_MS
-  const maxLines = options.maxLines ?? MAX_BATCH_LINES
-  const maxChars = options.maxChars ?? MAX_BATCH_CHARS
-  const maxLineChars = options.maxLineChars ?? MAX_LINE_CHARS
   const now = options.now ?? Date.now
 
   let partial = ''
   let lines: string[] = []
   let chars = 0
-  let omitted = 0
-  let lastEmit: number | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
+  let openedAt = 0
 
   const queue = (raw: string): void => {
-    const line = cut(raw.replace(/\r$/, ''), maxLineChars)
-    if (line.trim() === '') return
-    // Once one line is left out, so is every later one: the trailer counts the tail.
-    if (omitted > 0 || lines.length >= maxLines || chars + line.length > maxChars) {
-      omitted++
-      return
-    }
+    const line = cut(raw.trim(), MAX_LINE_CHARS, TRUNCATED)
+    // An event already past its cut shows no later line: a command printing without
+    // pause must not queue them without bound.
+    if (line === '' || chars > MAX_EVENT_CHARS) return
     lines.push(line)
-    chars += line.length
+    chars += line.length + (lines.length > 1 ? 1 : 0)
   }
 
-  const take = (): Batch | undefined => {
-    if (lines.length === 0 && omitted === 0) return undefined
-    const batch = { lines, omitted }
+  const take = (): string | undefined => {
+    if (lines.length === 0) return undefined
+    const event = cut(lines.join('\n'), MAX_EVENT_CHARS, `\n${TRUNCATED}`)
     lines = []
     chars = 0
-    omitted = 0
-    return batch
+    return event
   }
 
   const fire = (): void => {
+    if (timer) clearTimeout(timer)
     timer = undefined
-    const batch = take()
-    if (!batch) return
-    lastEmit = now()
-    options.emit(batch)
-  }
-
-  const schedule = (): void => {
-    if (timer || (lines.length === 0 && omitted === 0)) return
-    const sinceLast = lastEmit === undefined ? Number.POSITIVE_INFINITY : now() - lastEmit
-    timer = setTimeout(fire, Math.max(windowMs, minIntervalMs - sinceLast))
-    timer.unref?.()
+    const event = take()
+    if (event !== undefined) options.emit(event)
   }
 
   return {
     push(text) {
+      // A command printing without pause can keep the event loop on its pipe, and no
+      // timer runs meanwhile: a window the clock has closed is emitted from here.
+      if (timer && now() - openedAt >= windowMs) fire()
       const parts = (partial + text).split('\n')
-      partial = parts.pop() ?? ''
-      // A line that never ends must not grow without bound: past the cap it is queued as is.
-      if (partial.length > maxLineChars * 4) {
-        parts.push(partial)
-        partial = ''
-      }
+      partial = (parts.pop() ?? '').slice(-MAX_PARTIAL_CHARS)
       for (const part of parts) queue(part)
-      schedule()
+      if (timer || lines.length === 0) return
+      openedAt = now()
+      timer = setTimeout(fire, windowMs)
+      timer.unref?.()
     },
     drain() {
       if (timer) clearTimeout(timer)
       timer = undefined
-      if (partial) queue(partial)
+      queue(partial)
       partial = ''
       return take()
     },
-    omitted: () => omitted,
   }
 }
 
@@ -239,10 +267,8 @@ function endNotice(end: { label: string; outputFile: string; limitMs: number; re
   return `${end.label} ended: the command exited with code ${end.exitCode ?? '?'}. Full output: ${end.outputFile}`
 }
 
-export function batchText(id: string, description: string, batch: Batch, outputFile: string): string {
-  const head = `${label(id, description)} output:`
-  const more = batch.omitted > 0 ? [`[${batch.omitted} more line${batch.omitted === 1 ? '' : 's'} not shown; full output: ${outputFile}]`] : []
-  return [head, ...batch.lines, ...more].join('\n')
+export function eventText(id: string, description: string, event: string): string {
+  return `${label(id, description)} output:\n${event}`
 }
 
 const schema = Type.Object({
@@ -254,7 +280,7 @@ const schema = Type.Object({
 type ToolResult = AgentToolResult<unknown>
 
 /** What a test may shorten; pi runs with the constants above. */
-export type MonitorLimits = Pick<BatcherOptions, 'windowMs' | 'minIntervalMs'> & { minDeadlineMs?: number; floodBurst?: number; floodRefillMs?: number; maxOmittedLines?: number; maxOutputBytes?: number }
+export type MonitorLimits = Pick<BatcherOptions, 'windowMs'> & { minDeadlineMs?: number; floodBurst?: number; floodRefillMs?: number; suppressionLimitMs?: number; maxOutputBytes?: number }
 
 interface Watch {
   description: string
@@ -317,7 +343,6 @@ const ENDING_REASONS = new Set(['quit', 'new', 'resume', 'fork'])
 
 /** `limits` is a test seam; pi passes only `pi`. */
 export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits = {}) {
-  const maxOmittedLines = limits.maxOmittedLines ?? MAX_OMITTED_LINES
   const maxOutputBytes = limits.maxOutputBytes ?? MAX_OUTPUT_BYTES
   // Events go to whichever session is current: after /reload this instance's pi throws.
   const events = sessionMailbox('monitor')
@@ -337,13 +362,23 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
 
     const lifetime = new AbortController()
     const shell = registerShell({ id, kind: 'monitor', description, command, outputFile, stop: () => lifetime.abort() })
-    const allowance = tokenBucket(limits.floodBurst ?? FLOOD_BURST, limits.floodRefillMs ?? FLOOD_REFILL_MS)
-    // A delivery that would flood the session is not sent: the stop notice stands in for it.
-    const deliver = (batch: Batch): void => {
-      if (!allowance.tryConsume()) stopShell(id, TOO_MANY_EVENTS)
-      else send(batchText(id, description, batch, outputFile))
-    }
-    const batcher = createLineBatcher({ ...limits, emit: deliver })
+    let floodNotice: string | undefined
+    const gate = eventGate({
+      send: (event) => send(eventText(id, description, event)),
+      stop: (notice) => {
+        floodNotice = notice
+        stopShell(id, 'too much output')
+      },
+      capacity: limits.floodBurst,
+      refillMs: limits.floodRefillMs,
+      suppressionLimitMs: limits.suppressionLimitMs,
+    })
+    const batcher = createLineBatcher({
+      windowMs: limits.windowMs,
+      emit: (event) => {
+        if (shell.state === 'running') gate.offer(event)
+      },
+    })
     const decoder = new StringDecoder('utf8')
     let written = 0
     /** Both streams go to the output file, under the cap a background Bash command has. */
@@ -377,9 +412,6 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
             record(data)
             if (shell.state !== 'running') return
             batcher.push(decoder.write(data))
-            // Judged as the output arrives, not at delivery: a command printing without
-            // pause can keep the event loop on its pipe, and no timer runs meanwhile.
-            if (batcher.omitted() > maxOmittedLines) stopShell(id, TOO_MANY_EVENTS)
           },
           onStderr: record,
         })
@@ -401,9 +433,10 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
         settleShell(shell, exitCode)
         // Stopped through task_stop or the session ending: nothing is waiting for it.
         if (stoppedOnRequest) return
-        // What a flooding command left queued is the flood itself.
-        const lines = rest && stopReason === undefined ? [batchText(id, description, rest, outputFile)] : []
-        send([...lines, endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, stopReason, exitCode, error })].join('\n'))
+        // The last event spends a token as any other does; a stopped command's is not sent.
+        const last = rest !== undefined && stopReason === undefined && gate.admit() ? [eventText(id, description, rest)] : []
+        const notice = floodNotice === undefined ? endNotice({ label: label(id, description), outputFile, limitMs, reachedDeadline, stopReason, exitCode, error }) : eventText(id, description, floodNotice)
+        send([...last, notice].join('\n'))
       }
       // Settled once the output file is closed: the file named in the notice is then
       // complete, and Windows cannot remove a directory that holds an open file.
@@ -419,7 +452,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
     pi.registerTool({
       name: 'monitor',
       label: 'monitor',
-      description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Only stdout lines are events; stderr goes to the output file. Lines are delivered in batches (at most one message every ${MIN_INTERVAL_MS / 1000} seconds), and a monitor that produces too many events is stopped automatically, so filter the command down to the lines worth reacting to. The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
+      description: `Run a command in the background and receive each line it prints as an event, so you can react to log entries, file changes, or polled status while the conversation continues. Only stdout lines are events; stderr goes to the output file. Lines that arrive within ${BATCH_WINDOW_MS} ms of the first are delivered together as one event. A monitor may send ${FLOOD_BURST} events at once and one more every ${FLOOD_REFILL_MS / 1000} seconds; events past that are suppressed and reported as a count, and a monitor suppressed for ${SUPPRESSION_LIMIT_MS / 1000} seconds without a break is stopped automatically, so filter the command down to the lines worth reacting to. The watch ends at its deadline (${DEFAULT_DEADLINE_MS / 60_000} minutes by default, at most ${MAX_DEADLINE_MS / 60_000}) with one notice; stop it earlier with task_stop.`,
       promptSnippet: 'Watch a background command and react to each line it prints',
       promptGuidelines: ['Use monitor to watch logs, CI or PR status, or file changes instead of polling with sleep; make the command print only lines worth reacting to. Stop a monitor with task_stop once it is no longer needed.'],
       parameters: schema,
