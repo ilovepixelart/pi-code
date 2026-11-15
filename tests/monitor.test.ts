@@ -207,6 +207,16 @@ describe('createLineBatcher', () => {
 })
 
 describe('tokenBucket', () => {
+  it('stays empty when the clock steps back, and refills once it has caught up', () => {
+    let now = 10_000
+    const bucket = tokenBucket(2, 1000, () => now)
+    expect([bucket.tryConsume(), bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, true, false])
+    now = 5000
+    expect([bucket.tryConsume(), bucket.tryConsume()]).toEqual([false, false])
+    now = 11_000
+    expect([bucket.tryConsume(), bucket.tryConsume()]).toEqual([true, false])
+  })
+
   it('allows the burst, then one more per refill interval, never past the burst', () => {
     let now = 0
     const bucket = tokenBucket(2, 1000, () => now)

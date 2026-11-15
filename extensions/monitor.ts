@@ -78,7 +78,8 @@ export function tokenBucket(capacity: number, refillMs: number, now: () => numbe
   let refilledAt = now()
   const refill = (): void => {
     const gained = Math.floor((now() - refilledAt) / refillMs)
-    if (gained === 0) return
+    // A clock that stepped back gains nothing: a negative count would never read as empty.
+    if (gained <= 0) return
     tokens = Math.min(capacity, tokens + gained)
     refilledAt += gained * refillMs
   }
