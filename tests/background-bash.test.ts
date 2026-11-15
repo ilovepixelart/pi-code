@@ -450,6 +450,23 @@ describe('bash tool', () => {
     })
   })
 
+  it('sends the completion notice once the output file holds the whole output', async () => {
+    // A slow disk: every write to an output file takes 150 ms to land.
+    const write = fs.WriteStream.prototype._write
+    const slow = vi.spyOn(fs.WriteStream.prototype, '_write').mockImplementation(function (this: fs.WriteStream, chunk, encoding, done) {
+      setTimeout(() => write.call(this, chunk, encoding, done), 150)
+    })
+    try {
+      const h = setup()
+      await h.bash('t1', { command: 'echo finished', run_in_background: true })
+      const [shell] = allShells()
+      await until(() => h.sent.length > 0)
+      expect(fs.readFileSync(shell?.outputFile ?? '', 'utf8')).toContain('finished')
+    } finally {
+      slow.mockRestore()
+    }
+  })
+
   it('records the notice without a turn before the session has had one', async () => {
     const h = setup({ prompted: false })
     await h.bash('t1', { command: 'echo hi', run_in_background: true })

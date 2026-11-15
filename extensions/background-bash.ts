@@ -208,9 +208,11 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
       (result) => ({ result: result as ToolResult }),
       (error: unknown) => ({ error }),
     )
-    void settled.then((outcome) => {
+    void settled.then(async (outcome) => {
       signal?.removeEventListener('abort', forwardAbort)
       log.end()
+      // The file is written asynchronously; whoever is told the command ended reads it next.
+      await closed
       settleShell(shell, exitCodeOf(outcome))
       dropBuiltinCopy()
       if (!backgrounded) return
