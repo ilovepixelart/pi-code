@@ -668,13 +668,19 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function confirmedAnswer(state: QuestionState): Answer | undefined {
         return state.mode === 'multi' && !state.checked.some(Boolean) && !state.confirmed?.text ? undefined : state.confirmed
       }
-      /** The confirmed answer, else whatever is filled in. */
+      /** The confirmed answer, else what a multiSelect has filled in. As in Claude Code, single-select
+       * text is an answer only once Enter confirms it. */
       function draftAnswer(state: QuestionState): Answer | undefined {
         const confirmed = confirmedAnswer(state)
-        if (confirmed) return confirmed
+        if (confirmed || state.mode === 'single') return confirmed
         const text = settledText(state)
-        if (state.mode === 'single') return text ? { kind: 'text', text } : undefined
         return state.checked.some(Boolean) || text ? multiAnswer(state.checked, text) : undefined
+      }
+      /** Text in the field under the highlight that Enter has not confirmed as it stands. */
+      function unconfirmedText(state: QuestionState): boolean {
+        const text = state.draft.getValue().trim()
+        if (!state.typing || !text) return false
+        return state.mode === 'multi' || state.confirmed?.kind !== 'text' || state.confirmed.text !== text
       }
       function answers(): Array<Answer | undefined> {
         return states.map(draftAnswer)
@@ -720,7 +726,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
           return
         }
         restoreRemoteAnswer(index, value)
-        if (answers().every(Boolean)) finish({ kind: 'submit', answers: answers() })
+        // Text still being typed is not submitted from under the user: the form stays open.
+        if (answers().every(Boolean) && !states.some(unconfirmedText)) finish({ kind: 'submit', answers: answers() })
         else if (index === active) navigate(active + 1)
         else refresh()
       }
@@ -795,12 +802,10 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         state.checked[row.index] = !state.checked[row.index]
         followEdits(state)
       }
-      /** A confirmed multiSelect or typed answer follows every toggle and keystroke, so what is shown is what is submitted. */
+      /** A confirmed multiSelect follows every toggle and keystroke. As in Claude Code, a confirmed
+       * single-select text answer changes only when Enter confirms the edited text. */
       function followEdits(state: QuestionState): void {
-        const text = state.draft.getValue().trim()
-        if (state.mode === 'multi') {
-          if (state.confirmed) state.confirmed = multiAnswer(state.checked, text)
-        } else if (state.confirmed?.kind === 'text') state.confirmed = text ? { kind: 'text', text } : undefined
+        if (state.mode === 'multi' && state.confirmed) state.confirmed = multiAnswer(state.checked, state.draft.getValue().trim())
       }
       function handleTypingInput(state: QuestionState, data: string): void {
         if (matchesKey(data, Key.escape)) finish(null)
