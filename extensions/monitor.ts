@@ -165,6 +165,7 @@ export interface LineBatcher {
 export interface BatcherOptions {
   emit: (event: string) => void
   windowMs?: number
+  now?: () => number
 }
 
 const cut = (text: string, max: number, mark: string): string => (text.length > max ? `${text.slice(0, max)}${mark}` : text)
@@ -173,11 +174,13 @@ const cut = (text: string, max: number, mark: string): string => (text.length > 
  * window, and the lines queued when it closes are one event. */
 export function createLineBatcher(options: BatcherOptions): LineBatcher {
   const windowMs = options.windowMs ?? BATCH_WINDOW_MS
+  const now = options.now ?? Date.now
 
   let partial = ''
   let lines: string[] = []
   let chars = 0
   let timer: ReturnType<typeof setTimeout> | undefined
+  let openedAt = 0
 
   const queue = (raw: string): void => {
     const line = cut(raw.trim(), MAX_LINE_CHARS, TRUNCATED)
@@ -197,6 +200,7 @@ export function createLineBatcher(options: BatcherOptions): LineBatcher {
   }
 
   const fire = (): void => {
+    if (timer) clearTimeout(timer)
     timer = undefined
     const event = take()
     if (event !== undefined) options.emit(event)
@@ -204,10 +208,14 @@ export function createLineBatcher(options: BatcherOptions): LineBatcher {
 
   return {
     push(text) {
+      // A command printing without pause can keep the event loop on its pipe, and no
+      // timer runs meanwhile: a window the clock has closed is emitted from here.
+      if (timer && now() - openedAt >= windowMs) fire()
       const parts = (partial + text).split('\n')
       partial = (parts.pop() ?? '').slice(-MAX_PARTIAL_CHARS)
       for (const part of parts) queue(part)
       if (timer || lines.length === 0) return
+      openedAt = now()
       timer = setTimeout(fire, windowMs)
       timer.unref?.()
     },

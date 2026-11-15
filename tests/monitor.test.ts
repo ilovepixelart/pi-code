@@ -38,10 +38,15 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
   const tools = new Map<string, Tool>()
   const handlers = new Map<string, Handler[]>()
   const sent: Sent[] = []
+  // The mailbox is process state: a monitor an earlier test left on its way out reports
+  // to whichever session is current, so only this session's own monitors are recorded.
+  const own = new Set<string>()
   const pi = {
     registerTool: (tool: Tool) => tools.set(tool.name, tool),
     on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-    sendMessage: (message: Sent['message'], opts: Sent['options']) => sent.push({ message, options: opts }),
+    sendMessage: (message: Sent['message'], opts: Sent['options']) => {
+      if ([...own].some((id) => message.content.startsWith(`Monitor ${id} `))) sent.push({ message, options: opts })
+    },
   }
   monitorExtension(pi as never, { windowMs: 10, minDeadlineMs: 100, ...options.limits })
   backgroundBashExtension(pi as never)
@@ -67,7 +72,11 @@ const setup = (options: { hasUI?: boolean; prompted?: boolean; cwd?: string; lim
     return tool
   }
   return {
-    monitor: (params: Record<string, unknown>) => get('monitor').execute('call-1', { description: 'the watch', ...params }, undefined, undefined, ctx),
+    monitor: async (params: Record<string, unknown>) => {
+      const result = await get('monitor').execute('call-1', { description: 'the watch', ...params }, undefined, undefined, ctx)
+      own.add(idOf(result))
+      return result
+    },
     stop: (task_id: string) => get('task_stop').execute('call-2', { task_id }, undefined, undefined, ctx),
     tool: get,
     sent,
@@ -359,6 +368,37 @@ describe('events under the limits in force', () => {
     expect(sent.filter(isNotice)).toEqual([...Array.from({ length: 15 }, () => suppressionNotice(3)), '[Monitor stopped: too much output (2 events suppressed over 31s). Restart with a more selective source.]'])
     expect(sent.slice(13, 16)).toEqual([suppressionNotice(3), 'b 17', suppressionNotice(3)])
     expect(stoppedAt()).toBe(37_200)
+  })
+
+  // Nothing here lets a timer fire, as none fires while a command keeps the event loop
+  // on its pipe: the events can only come from the output arriving.
+  it('forms events as output arrives while no timer runs, and stops the command after 30 seconds of suppression', () => {
+    const clock = { now: 0 }
+    const now = (): number => clock.now
+    const sent: string[] = []
+    let stoppedAt: number | undefined
+    const gate = eventGate({
+      now,
+      send: (event) => sent.push(event),
+      stop: (notice) => {
+        sent.push(notice)
+        stoppedAt = clock.now
+      },
+    })
+    const batcher = createLineBatcher({
+      now,
+      emit: (event) => {
+        if (stoppedAt === undefined) gate.offer(event)
+      },
+    })
+    for (; clock.now <= 40_000 && stoppedAt === undefined; clock.now += 50) batcher.push('line\n')
+    batcher.drain()
+    const events = sent.filter((event) => !isNotice(event))
+    expect(new Set(events)).toEqual(new Set(['line\nline\nline\nline']))
+    expect(events).toHaveLength(26)
+    expect(sent.slice(10, 14)).toEqual([events[0], suppressionNotice(8), events[0], suppressionNotice(9)])
+    expect(sent.at(-1)).toBe('[Monitor stopped: too much output (3 events suppressed over 30s). Restart with a more selective source.]')
+    expect(stoppedAt).toBe(32_600)
   })
 
   it('stops a command that prints without pause after 30 seconds of suppression', () => {
