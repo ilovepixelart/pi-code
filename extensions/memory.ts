@@ -422,9 +422,9 @@ export function slugifyName(name: string): string {
 
 /** One index entry line: the link it starts with names the memory, so only that
  * link identifies the entry. A link appearing later in a description is a
- * mention, not the entry. The title is free text and may itself hold brackets, so
- * the entry is recognised by its link target. */
-const ENTRY_LINE = /^(\s*-\s*\[.*?\]\(([^()\s]+)\.md\))(.*)$/
+ * mention, not the entry. The title may hold bracket pairs but may not span a
+ * `](`, which ends the first link. */
+const ENTRY_LINE = /^(\s*-\s*\[(?:[^[\]]|\[[^[\]]*\])*\]\(([^()\s]+)\.md\))(.*)$/
 
 /** What a new entry puts between its link and its description: each store's own
  * format, so a pi save leaves a Claude index in the shape Claude Code writes. */
