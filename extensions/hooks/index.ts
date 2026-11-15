@@ -257,6 +257,27 @@ function rewrittenUserBash(typed: string, rewritten: unknown, ctx: ExtensionCont
   }
 }
 
+/** What each settings file stamps on its hooks. Every file gives its place in the chain
+ * as the dedup precedence (later files outrank earlier ones, managed hooks outrank them
+ * all, see keepOnce); a file listed twice keeps its later, higher place. A project or
+ * local settings hook also gets the checkout folder holding its `.claude` as
+ * CLAUDE_PROJECT_DIR, so `$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh` in the repo root's
+ * settings.local.json still resolves from a subdirectory session. Claude passes the
+ * cwd there and the script is not found. A worktree's local file lives in the main
+ * checkout, and its hooks must still act on the worktree the session is in. */
+function settingsSourceStamps(cwd: string, home: string, trusted: boolean): Map<string, Pick<HookCommand, 'sourceRank' | 'projectDir'>> {
+  const stamps = new Map<string, Pick<HookCommand, 'sourceRank' | 'projectDir'>>()
+  for (const [index, source] of claudeSettingsSources(cwd, home, trusted).entries()) {
+    const stamp: Pick<HookCommand, 'sourceRank' | 'projectDir'> = { sourceRank: index + 1 }
+    if (source.scope === 'project' || source.scope === 'local') {
+      const dir = path.dirname(path.dirname(source.file))
+      stamp.projectDir = path.resolve(dir) === path.resolve(cwd) ? cwd : checkoutRoot(cwd)
+    }
+    stamps.set(source.file, stamp)
+  }
+  return stamps
+}
+
 export default function hooksExtension(pi: ExtensionAPI) {
   let config: HooksConfig = {}
   let projectDir = ''
@@ -531,22 +552,15 @@ export default function hooksExtension(pi: ExtensionAPI) {
       return
     }
     mergeNonManagedHooks(files)
-    stampSettingsProjectDirs(cwd, trusted)
+    stampSettingsSources(cwd, trusted)
   }
 
-  /** A project or local settings hook gets the checkout folder holding its `.claude` as
-   * CLAUDE_PROJECT_DIR, so `$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh` in the repo root's
-   * settings.local.json still resolves from a subdirectory session. Claude passes the
-   * cwd there and the script is not found. A worktree's local file lives in the main
-   * checkout, and its hooks must still act on the worktree the session is in. */
-  function stampSettingsProjectDirs(cwd: string, trusted: boolean): void {
-    const projectFiles = new Set(claudeSettingsSources(cwd, os.homedir(), trusted).flatMap((source) => (source.scope === 'project' || source.scope === 'local' ? [source.file] : [])))
+  function stampSettingsSources(cwd: string, trusted: boolean): void {
+    const stamps = settingsSourceStamps(cwd, os.homedir(), trusted)
     for (const matcher of Object.values(config).flat()) {
-      const file = hookSources.get(matcher)
-      if (file === undefined || !projectFiles.has(file)) continue
-      const dir = path.dirname(path.dirname(file))
-      const projectDir = path.resolve(dir) === path.resolve(cwd) ? cwd : checkoutRoot(cwd)
-      for (const hook of matcher.hooks ?? []) hook.projectDir = projectDir
+      const stamp = stamps.get(hookSources.get(matcher) ?? '')
+      if (stamp === undefined) continue
+      for (const hook of matcher.hooks ?? []) Object.assign(hook, stamp)
     }
   }
 

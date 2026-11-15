@@ -40,6 +40,9 @@ export interface HookCommand {
   pluginDataDir?: string
   /** CLAUDE_PROJECT_DIR for a hook from a project or local settings file; unset hooks get the session cwd. */
   projectDir?: string
+  /** Precedence of the settings source that declared the hook, higher winning when
+   * copies of one handler collapse (see keepOnce); unset outside settings sources. */
+  sourceRank?: number
   /** http entries: the endpoint POSTed to; `command` mirrors it for dedup and display. */
   url?: string
   headers?: Record<string, string>
@@ -110,6 +113,8 @@ export function readSettingsDisableAllHooks(files: string[]): boolean {
 export function loadManagedHooks(sources?: Map<HookMatcher, string>, managed: Record<string, unknown> = readManagedSettings()): HooksConfig {
   const config: HooksConfig = {}
   if (isRecord(managed.hooks)) mergeHooksJson(config, JSON.stringify({ hooks: managed.hooks }), 'managed settings', sources)
+  // Above every settings file, the `--settings` flag included.
+  for (const hook of Object.values(config).flatMap((matchers) => matchers.flatMap((matcher) => matcher.hooks ?? []))) hook.sourceRank = Number.POSITIVE_INFINITY
   return config
 }
 
