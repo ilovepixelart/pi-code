@@ -117,6 +117,20 @@ describe('foregroundLimitMs', () => {
     expect(foregroundLimitMs(3600, { BASH_DEFAULT_TIMEOUT_MS: '900000', BASH_MAX_TIMEOUT_MS: '60000' })).toBe(900_000)
     expect(foregroundLimitMs(3600, { BASH_MAX_TIMEOUT_MS: '1800000' })).toBe(1_800_000)
   })
+
+  it('clamps an oversized value to the longest delay a timer holds', () => {
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '3000000000' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(4_000_000, { BASH_MAX_TIMEOUT_MS: '3000000000' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '2147483647' })).toBe(2_147_483_647)
+    expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: '2147483648' })).toBe(2_147_483_647)
+  })
+
+  it('ignores an infinite value', () => {
+    for (const raw of ['Infinity', '1e400']) {
+      expect(foregroundLimitMs(undefined, { BASH_DEFAULT_TIMEOUT_MS: raw })).toBe(120_000)
+      expect(foregroundLimitMs(3600, { BASH_MAX_TIMEOUT_MS: raw })).toBe(600_000)
+    }
+  })
 })
 
 describe('startsWithSleep', () => {
@@ -252,6 +266,15 @@ describe('bash tool', () => {
     const timeout = setup().tool('bash').parameters.properties.timeout as { description: string }
     expect(timeout.description).toContain('after 30 seconds')
     expect(timeout.description).not.toContain('120')
+  })
+
+  it.each([{ hasUI: true }, { hasUI: false }])('runs a command under an oversized default timeout (hasUI: $hasUI)', async (options) => {
+    process.env.BASH_DEFAULT_TIMEOUT_MS = '3000000000'
+    const result = await setup(options).bash('t1', { command: 'echo a; echo b' })
+    expect(textOf(result)).toMatch(/a\r?\nb/)
+    expect(textOf(result)).not.toContain('moved to the background')
+    expect(result.structuredContent?.exit_code).toBe(0)
+    expect(allShells()).toHaveLength(0)
   })
 
   it('returns a quick command in the foreground, untracked', async () => {

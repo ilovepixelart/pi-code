@@ -11,7 +11,7 @@ Claude's background commands on pi's `bash` tool. Source: [`extensions/backgroun
 
 ## Aligned with Claude
 
-- **Timeouts**: `BASH_DEFAULT_TIMEOUT_MS` (two minutes) applies when the model passes no timeout; a requested timeout is capped at the larger of that and `BASH_MAX_TIMEOUT_MS` (ten minutes). An unset, blank, zero, negative or non-numeric value keeps the default.
+- **Timeouts**: `BASH_DEFAULT_TIMEOUT_MS` (two minutes) applies when the model passes no timeout; a requested timeout is capped at the larger of that and `BASH_MAX_TIMEOUT_MS` (ten minutes). An unset, blank, zero, negative or non-numeric value keeps the default. A timeout over 2147483647 ms (about 24.8 days, the longest delay a timer holds) runs as that one, as Claude accepts any positive value.
 - **`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`** turns background commands off: the tool has no `run_in_background` parameter, a call that passes it anyway fails, and a command still running at its timeout is stopped. The default timeout still applies.
 - **A command outlives a session switch**: across `/new`, `/resume`, `/fork` and `/reload` it keeps running. In a session that has not had a turn yet, its completion message is recorded for the next prompt instead of starting one, as background subagent results are.
 - **Quitting pi stops every background command** and removes their output files.
