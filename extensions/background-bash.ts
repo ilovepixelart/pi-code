@@ -237,7 +237,9 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
 
   /** What the model is shown follows the session: pi re-describes a registered tool's
    * parameters only by registering it again, and whether a session has a UI is not known
-   * before it starts. */
+   * before it starts. Called at session start only: pi activates every tool an extension
+   * registers while it loads, whatever the session's tool selection is, and a tool that
+   * replaces a registered one later is active only where that one was. */
   const registerBash = (background: boolean): void => {
     const defaultMs = foregroundLimitMs(undefined)
     pi.registerTool({
@@ -266,8 +268,6 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
       },
     })
   }
-  registerBash(backgroundAllowed({ hasUI: true }))
-
   pi.registerTool({
     name: 'task_stop',
     label: 'task_stop',
