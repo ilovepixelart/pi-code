@@ -59,8 +59,6 @@ if [ -z "$WORKDIR" ]; then
   git -C "$WORKDIR" -c user.name=e2e -c user.email=e2e@local commit -q --allow-empty -m init
   mkdir -p "$WORKDIR/.claude/rules"
   printf -- '- Tests must be deterministic.\n' > "$WORKDIR/.claude/rules/testing.md"
-  mkdir -p "$WORKDIR/.pi"
-  printf '{"mcpServers": {}}\n' > "$WORKDIR/.pi/mcp.json"
 fi
 
 say "workdir: $WORKDIR"
