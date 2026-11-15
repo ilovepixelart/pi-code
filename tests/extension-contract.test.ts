@@ -382,7 +382,7 @@ describe('extension module graph', () => {
     for (const match of source.matchAll(/^(?:import|export)\s+(type\s+)?(?:\{([^}]*)\}|[^'"]*?)\s*from\s+'(\.[^']+)'/gm)) {
       const [, typeOnly, names, target] = match
       if (typeOnly) continue
-      if (names !== undefined && names.split(',').every((name) => name.trim() === '' || name.trim().startsWith('type '))) continue
+      if (names?.split(',').every((name) => name.trim() === '' || name.trim().startsWith('type '))) continue
       targets.push(path.resolve(path.dirname(file), target))
     }
     return targets
