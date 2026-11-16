@@ -2508,6 +2508,28 @@ describe('question batch lifecycle', () => {
     expect(submitted.content[0].text, 'The finished text and the remote answer should be sent').toBe('First?\nUser wrote: half typed\n\nSecond?\nUser selected: 2. Beta')
   })
 
+  it('should submit when the remote answer is for the question being typed in, without the typed text', async () => {
+    const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
+    const tool = setupRemote((offer) => {
+      replies.push(offer.claim())
+    })
+    const { overlay, result } = openOverlayWith(tool, {
+      questions: [
+        { question: 'First?', options: OPTIONS },
+        { question: 'Second?', options: OPTIONS },
+      ],
+    })
+
+    replies[1]?.({ action: 'answer', indices: [1] })
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.down)
+    overlay.handleInput('maria')
+    replies[0]?.({ action: 'answer', indices: [2] })
+    const submitted = await result
+
+    expect(submitted.content[0].text, 'The remote answer replaces the text being typed in that question').toBe('First?\nUser selected: 2. Beta\n\nSecond?\nUser selected: 1. Alpha')
+  })
+
   it('should stay open when a remote answer completes the batch while a confirmed text answer is being edited', async () => {
     const replies: Array<ReturnType<RemoteQuestionOffer['claim']>> = []
     const tool = setupRemote((offer) => {
