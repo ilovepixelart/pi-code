@@ -61,7 +61,7 @@ import {
   summaryText,
 } from './internal/goal-evaluator.ts'
 import { readManagedSettings } from './internal/managed-settings.ts'
-import { completeText } from './internal/model-complete.ts'
+import { completeText, modelOutputLimit } from './internal/model-complete.ts'
 import { resolveModelOverride } from './internal/model-lookup.ts'
 import { isProjectApprovedSilently } from './internal/project-approval.ts'
 import { isSubagentPhaseEvent, SUBAGENT_CHANNEL } from './internal/subagent-events.ts'
@@ -317,7 +317,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     // completeText requests no thinking level, which is the same for pi.
     // Claude Code sets no output cap on the evaluator: the model's own limit applies, so a
     // reason quoting the transcript at length is never cut off mid-JSON.
-    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: model.maxTokens, signal, registry: ctx.modelRegistry })
+    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: modelOutputLimit(model), signal, registry: ctx.modelRegistry })
     active.evaluatorTokens += usageTokens(usage as TokenUsage | undefined)
     const verdict = parseVerdict(text)
     if (!verdict) throw new Error(`unreadable verdict: ${text.slice(0, 200)}`)

@@ -76,6 +76,13 @@ function standaloneBackend(): Promise<CompleteFn> {
   return backend
 }
 
+/** The model's own output limit as a `maxTokens` option, for a call Claude Code leaves uncapped.
+ * pi gives a model without a declared limit (a virtual model, for one) `maxTokens: 0`, meaning
+ * unknown; sent as a cap that rejects every request, so it falls back to the default instead. */
+export function modelOutputLimit(model: Pick<Model<Api>, 'maxTokens'>): number | undefined {
+  return model.maxTokens > 0 ? model.maxTokens : undefined
+}
+
 /**
  * Run `prompt` through `model` as a single user turn and return the reply text plus
  * the call's usage. A tool that makes a nested LLM call must return that usage on
