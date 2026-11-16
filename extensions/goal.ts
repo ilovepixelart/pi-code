@@ -73,8 +73,6 @@ const GOAL_ENTRY = 'goal'
 const GOAL_MESSAGE = 'goal'
 /** Claude's prompt-hook default; a slow evaluator is an error, not a stall. */
 const EVALUATOR_TIMEOUT_MS = 30_000
-/** A verdict is one JSON object; the cap stops a runaway reply. */
-const EVALUATOR_MAX_TOKENS = 512
 /** Claude trims the transcript to half the evaluator's context window. */
 const TRANSCRIPT_WINDOW_SHARE = 0.5
 const CHARS_PER_TOKEN = 4
@@ -317,7 +315,9 @@ export default function goalExtension(pi: ExtensionAPI) {
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline
     // Claude runs its evaluator with thinking disabled: the verdict is mechanical.
     // completeText requests no thinking level, which is the same for pi.
-    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: EVALUATOR_MAX_TOKENS, signal, registry: ctx.modelRegistry })
+    // Claude Code sets no output cap on the evaluator: the model's own limit applies, so a
+    // reason quoting the transcript at length is never cut off mid-JSON.
+    const { text, usage } = await completeText(model, evaluatorPrompt(transcript, active.condition), { system: EVALUATOR_SYSTEM, maxTokens: model.maxTokens, signal, registry: ctx.modelRegistry })
     active.evaluatorTokens += usageTokens(usage as TokenUsage | undefined)
     const verdict = parseVerdict(text)
     if (!verdict) throw new Error(`unreadable verdict: ${text.slice(0, 200)}`)
