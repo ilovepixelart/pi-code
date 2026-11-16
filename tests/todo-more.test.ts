@@ -126,6 +126,7 @@ const resultEntry = (todos: unknown[], nextId: number) => ({
 
 const branchCtx = (entries: unknown[], ui: FakeUI, hasUI = true) => ({
   hasUI,
+  mode: 'tui',
   ui: ui.ui,
   sessionManager: { getBranch: () => entries },
 })
@@ -564,6 +565,16 @@ describe('todo widget modes', () => {
     await h.runCommand('todos-widget', { ...ctx, hasUI: false }, 'off')
     expect(ui.notices.at(-1)).toEqual({ message: '/todos-widget requires interactive mode', type: 'error' })
     expect(ui.widget().render(80)).toHaveLength(5)
+  })
+
+  it('says the widget needs the terminal UI in RPC mode, where widgets are not drawn', async () => {
+    // RPC binds a UI context but ignores widget factories, so a mode change would show nothing.
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(todos, 4)], ui)
+    await h.fire('session_start', {}, ctx)
+    await h.runCommand('todos-widget', { ...ctx, mode: 'rpc' }, 'compact')
+    expect(ui.notices.at(-1)).toEqual({ message: '/todos-widget needs the terminal UI; /todos lists the todos', type: 'warning' })
   })
 })
 
