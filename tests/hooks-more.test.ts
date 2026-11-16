@@ -3030,6 +3030,16 @@ describe('hooks polish: interrupts, timeout defaults, prompt-hook contract', () 
     expect(seenMaxTokens).toBe(64_000)
   })
 
+  it('never sends a prompt hook output cap of 0 for a model whose limit is unknown', async () => {
+    let seenMaxTokens: number | undefined
+    setCompleteBackend((async (_model: unknown, _context: unknown, options: { maxTokens?: number }) => {
+      seenMaxTokens = options.maxTokens
+      return { role: 'assistant', content: [{ type: 'text', text: '{"ok": true}' }], api: 'x', provider: 'x', model: 'm', usage: {}, stopReason: 'stop', timestamp: 0 }
+    }) as never)
+    await runPromptHook({ command: '', type: 'prompt', prompt: 'Should this stop?' }, { hook_event_name: 'Stop' }, { id: 'router/auto', maxTokens: 0 } as never, 5000)
+    expect(seenMaxTokens).toBeGreaterThan(0)
+  })
+
   it('reports a prompt hook that ran out of time as timed out, so the gated events fail closed', async () => {
     // The real backend answers a fired AbortSignal by resolving an aborted message with
     // no text. Read as an answer, that was exit 0 with empty stdout: a PreToolUse gate
