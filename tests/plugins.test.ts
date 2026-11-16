@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -379,6 +379,93 @@ describe('installedPlugins manifest failures', () => {
   })
 })
 
+/** A local marketplace registered the way `claude plugin marketplace add <path>` records it:
+ * `installLocation` is the marketplace root for both a `directory` and a `file` source. */
+const localMarketplace = (h: string, name: string, type: 'directory' | 'file', entries: Array<Record<string, unknown>>): string => {
+  const root = mkdtempSync(join(tmpdir(), 'plugins-source-'))
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+  const manifest = join(root, '.claude-plugin', 'marketplace.json')
+  writeFileSync(manifest, JSON.stringify({ name, owner: { name: 't' }, plugins: entries }))
+  mkdirSync(join(h, '.claude', 'plugins'), { recursive: true })
+  const source = { source: type, path: type === 'directory' ? root : manifest }
+  writeFileSync(join(h, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({ [name]: { source, installLocation: root } }))
+  return root
+}
+
+const pluginManifest = (dir: string, manifest: Record<string, unknown>): string => {
+  mkdirSync(join(dir, '.claude-plugin'), { recursive: true })
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify(manifest))
+  return dir
+}
+
+describe('plugins from a local marketplace', () => {
+  // Claude Code reads a plugin whose marketplace is a local directory or file from its source,
+  // not from the copy cached at install time, so source edits apply without `plugin update` (#457).
+  it('loads a directory marketplace plugin from its source, not the cached copy', () => {
+    const h = home()
+    const cached = install(h, 'localmp', 'lp', '0.1.0')
+    writeInstallIndex(h, { 'lp@localmp': [{ scope: 'user', installPath: cached, version: '0.1.0' }] })
+    const source = pluginManifest(localMarketplace(h, 'localmp', 'directory', [{ name: 'lp', source: './' }]), { name: 'lp', version: '0.2.0' })
+
+    expect(installedPlugins(h).map((plugin) => [plugin.root, plugin.manifest.version])).toEqual([[source, '0.2.0']])
+  })
+
+  it('resolves a relative entry of a file marketplace against the marketplace root', () => {
+    const h = home()
+    install(h, 'mp3', 'fp', '1.0.0')
+    const root = localMarketplace(h, 'mp3', 'file', [{ name: 'fp', source: './plugins/fp' }])
+    pluginManifest(join(root, 'plugins', 'fp'), { name: 'fp' })
+
+    expect(rootsOf(h)).toEqual([join(root, 'plugins', 'fp')])
+  })
+
+  it('does not fall back to the cached copy when the source is gone', () => {
+    // Claude Code reports the plugin as failed to load rather than running the stale copy.
+    const h = home()
+    install(h, 'localmp', 'lp', '0.1.0')
+    const root = localMarketplace(h, 'localmp', 'directory', [{ name: 'lp', source: './' }])
+    rmSync(root, { recursive: true })
+
+    expect(rootsOf(h)).toEqual([])
+  })
+
+  it('refuses an entry that climbs out of the marketplace directory', () => {
+    const h = home()
+    install(h, 'mp4', 'esc', '1.0.0')
+    const root = localMarketplace(h, 'mp4', 'directory', [{ name: 'esc', source: './../outside' }])
+    pluginManifest(join(root, '..', 'outside'), { name: 'esc' })
+
+    expect(rootsOf(h)).toEqual([])
+  })
+
+  it('refuses an entry that leaves the marketplace directory through a link', () => {
+    const h = home()
+    install(h, 'mp5', 'linked', '1.0.0')
+    const root = localMarketplace(h, 'mp5', 'directory', [{ name: 'linked', source: './linked' }])
+    symlinkSync(pluginManifest(mkdtempSync(join(tmpdir(), 'plugins-elsewhere-')), { name: 'linked' }), join(root, 'linked'), 'junction')
+
+    expect(rootsOf(h)).toEqual([])
+  })
+
+  it('keeps the cached copy for a remote entry of a local marketplace', () => {
+    const h = home()
+    const cached = install(h, 'mixed', 'remote', '1.0.0')
+    localMarketplace(h, 'mixed', 'directory', [{ name: 'remote', source: { source: 'github', repo: 'o/r' } }])
+
+    expect(rootsOf(h)).toEqual([cached])
+  })
+
+  it('sees an edit of the source manifest on the next call', () => {
+    const h = home()
+    install(h, 'localmp', 'lp', '0.1.0')
+    const source = pluginManifest(localMarketplace(h, 'localmp', 'directory', [{ name: 'lp', source: './' }]), { name: 'lp', version: '0.2.0' })
+    expect(installedPlugins(h)[0]?.manifest.version).toBe('0.2.0')
+
+    pluginManifest(source, { name: 'lp', version: '0.3.0-longer' })
+    expect(installedPlugins(h)[0]?.manifest.version).toBe('0.3.0-longer')
+  })
+})
+
 describe('installedPlugins cache', () => {
   it('serves a repeat call without re-reading settings or manifests', () => {
     const h = home()
@@ -390,9 +477,10 @@ describe('installedPlugins cache', () => {
     const mark = fsHoisted.reads
     expect(installedPlugins(h)).toEqual(first)
     // The walk is memoized. Revalidation re-reads only the small settings files (Claude's and
-    // pi's) and Claude's install index (content-hashed so a same-size rewrite is seen); the
-    // expensive part, re-parsing every manifest in the tree, must not happen.
-    expect(fsHoisted.reads).toBe(mark + 3)
+    // pi's), Claude's install index (content-hashed so a same-size rewrite is seen) and its
+    // marketplace list (a local marketplace's plugins load from their source); the expensive
+    // part, re-parsing every manifest in the tree, must not happen.
+    expect(fsHoisted.reads).toBe(mark + 4)
   })
 
   it('re-reads after resetInstalledPluginsCache', () => {
