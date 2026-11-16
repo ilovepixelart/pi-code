@@ -69,19 +69,26 @@ interface Harness {
   renderCall: (args: Record<string, unknown>) => string[]
   renderResult: (result: ToolResult, expanded: boolean) => string[]
   commandNames: string[]
-  runCommand: (name: string, ctx: unknown) => Promise<void>
+  runCommand: (name: string, ctx: unknown, args?: string) => Promise<void>
+  completions: (name: string, prefix: string) => Array<{ value: string; label: string }> | null | undefined
+}
+
+type CommandConfig = {
+  description: string
+  handler: (args: string, ctx: unknown) => Promise<void>
+  getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null
 }
 
 /** Fresh extension instance so module-level todo state is isolated per test. */
 const setup = (): Harness => {
   const handlers = new Map<string, Handler>()
-  const commands = new Map<string, { description: string; handler: (args: string, ctx: unknown) => Promise<void> }>()
+  const commands = new Map<string, CommandConfig>()
   let tool: Record<string, (...a: never[]) => unknown> | undefined
 
   todoExtension({
     appendEntry: () => {},
     on: (name: string, fn: Handler) => handlers.set(name, fn),
-    registerCommand: (name: string, config: { description: string; handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, config),
+    registerCommand: (name: string, config: CommandConfig) => commands.set(name, config),
     registerTool: (t: Record<string, unknown>) => {
       if (t.name === 'todo') tool = t as Record<string, (...a: never[]) => unknown>
     },
@@ -99,10 +106,11 @@ const setup = (): Harness => {
     renderCall: (args) => trimmed((t.renderCall as never as (a: unknown, th: unknown, c: unknown) => Component)(args, theme, {}).render(200)),
     renderResult: (result, expanded) => trimmed((t.renderResult as never as (r: unknown, o: unknown, th: unknown, c: unknown) => Component)(result, { expanded }, theme, {}).render(200)),
     commandNames: [...commands.keys()],
-    runCommand: async (name, ctx) => {
+    completions: (name, prefix) => commands.get(name)?.getArgumentCompletions?.(prefix),
+    runCommand: async (name, ctx, args = '') => {
       const config = commands.get(name)
       if (!config) throw new Error(`no command ${name}`)
-      await config.handler('', ctx)
+      await config.handler(args, ctx)
     },
   }
 }
@@ -272,6 +280,7 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'alpha'), completed(2, 'beta')], 3)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)).toEqual(['● Todos (1/2)', '├─ ○ alpha', '└─ ✓ beta', ''])
   })
 
@@ -287,6 +296,7 @@ describe('todo overlay widget', () => {
     const ui = fakeUI()
     const todo = { id: 1, text: 'write tests', status: 'in_progress', activeForm: 'Writing tests' }
     await h.fire('session_start', {}, branchCtx([resultEntry([todo], 2)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)[1]).toBe('└─ ◐ Writing tests')
   })
 
@@ -294,6 +304,7 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write tests', status: 'in_progress' }], 2)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)[1]).toBe('└─ ◐ write tests')
   })
 
@@ -303,6 +314,7 @@ describe('todo overlay widget', () => {
     // 12 todos against the 11-row content budget: 10 rows show, 2 pending truncate.
     const todos = Array.from({ length: 12 }, (_, i) => pending(i + 1, `p${i + 1}`))
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 13)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     const lines = ui.widget().render(60)
     expect(lines[0]).toBe('● Todos (0/12)')
     expect(lines.slice(1, 11)).toEqual(todos.slice(0, 10).map((t) => `├─ ○ ${t.text}`))
@@ -316,6 +328,7 @@ describe('todo overlay widget', () => {
     // 8 pending + 4 completed: all pending fit, 2 completed fill the budget, 2 hide.
     const todos = [...Array.from({ length: 8 }, (_, i) => pending(i + 1, `p${i + 1}`)), ...Array.from({ length: 4 }, (_, i) => completed(i + 9, `c${i + 1}`))]
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 13)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     const lines = ui.widget().render(60)
     expect(lines.at(-2)).toBe('└─ +2 more (2 completed)')
   })
@@ -326,6 +339,7 @@ describe('todo overlay widget', () => {
     // 11 pending + 2 completed: 10 pending show, 1 pending truncates, 2 completed hide.
     const todos = [...Array.from({ length: 11 }, (_, i) => pending(i + 1, `p${i + 1}`)), completed(12, 'x'), completed(13, 'y')]
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 14)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60).at(-2)).toBe('└─ +3 more (2 completed, 1 pending)')
   })
 
@@ -333,6 +347,7 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'ABCDEFGHIJKLMNOP')], 2)], ui))
+    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     // "└─ ○ " is 5 columns wide, leaving 2 characters plus the ellipsis at width 8.
     expect(plain(ui.widget().render(8)[1])).toBe('└─ ○ AB…')
   })
@@ -430,6 +445,115 @@ describe('todo overlay widget', () => {
   })
 })
 
+describe('todo widget modes', () => {
+  const todos: Todo[] = [completed(1, 'done'), { id: 2, text: 'write tests', status: 'in_progress', activeForm: 'Writing tests' }, pending(3, 'later')]
+
+  it('defaults to one line with counts and the active task, without a spacer', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.fire('session_start', {}, branchCtx([resultEntry(todos, 4)], ui))
+    expect(ui.widget().render(80)).toEqual(['● Todos (1/3) · ◐ Writing tests'])
+  })
+
+  it('shows only counts without an active task and dims a completed list', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'next')], 2)], ui))
+    const component = ui.widget()
+    expect(component.render(60)).toEqual(['● Todos (0/1)'])
+    await h.call({ action: 'complete', id: 1 })
+    expect(component.render(60)).toEqual(['○ Todos (1/1)'])
+  })
+
+  it('flattens multiline text, falls back to task text and truncates to terminal width', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write\ntests\r\nnow', status: 'in_progress' }], 2)], ui))
+    const component = ui.widget()
+    expect(component.render(80)).toEqual(['● Todos (0/1) · ◐ write tests now'])
+    expect(component.render(20).map(plain)).toEqual(['● Todos (0/1) · ◐ wr…'])
+  })
+
+  it('switches immediately between full, compact and off without changing tasks', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(todos, 4)], ui)
+    await h.fire('session_start', {}, ctx)
+    const component = ui.widget()
+    await h.runCommand('todos-widget', ctx, 'full')
+    expect(component.render(80)).toHaveLength(5)
+    expect(ui.renderRequests()).toBe(1)
+    await h.runCommand('todos-widget', ctx, 'compact')
+    expect(component.render(80)).toEqual(['● Todos (1/3) · ◐ Writing tests'])
+    await h.runCommand('todos-widget', ctx, 'off')
+    expect(ui.widgetCalls.at(-1)?.content).toBeUndefined()
+    expect(component.render(80)).toEqual([])
+    await h.runCommand('todos-widget', ctx, 'full')
+    expect(ui.widget().render(80)).toHaveLength(5)
+    expect((await h.call({ action: 'list' })).details?.todos).toEqual(todos)
+  })
+
+  it('stays off across updates, tree navigation and compaction; /todos still shows the list', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(todos, 4)], ui)
+    await h.fire('session_start', {}, ctx)
+    await h.runCommand('todos-widget', ctx, 'off')
+    await h.call({ action: 'add', text: 'new task' })
+    await h.fire('tool_execution_end', { toolName: 'todo', isError: false }, ctx)
+    await h.fire('session_tree', {}, ctx)
+    await h.fire('session_compact', {}, ctx)
+    expect(ui.widgetCalls).toHaveLength(2)
+    expect(ui.widgetCalls.at(-1)?.content).toBeUndefined()
+    await h.runCommand('todos', { ...ctx, mode: 'tui' })
+    const lines = ui.customFactories[0](null, theme, null, () => {})
+      .render(80)
+      .join('\n')
+    for (const todo of todos) expect(lines).toContain(todo.text)
+  })
+
+  it('never shows an empty list in any mode', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([], ui)
+    await h.fire('session_start', {}, ctx)
+    for (const mode of ['off', 'full', 'compact']) await h.runCommand('todos-widget', ctx, mode)
+    expect(ui.widgetCalls).toEqual([])
+  })
+
+  it('reports the current mode and rejects invalid arguments without changing it', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(todos, 4)], ui)
+    await h.fire('session_start', {}, ctx)
+    await h.runCommand('todos-widget', ctx, ' full ')
+    await h.runCommand('todos-widget', ctx)
+    expect(ui.notices.at(-1)).toEqual({ message: 'Todo widget: full. Usage: /todos-widget off|compact|full', type: 'info' })
+    for (const arg of ['typo', 'off full']) {
+      await h.runCommand('todos-widget', ctx, arg)
+      expect(ui.notices.at(-1)).toEqual({ message: 'Usage: /todos-widget off|compact|full', type: 'warning' })
+      expect(ui.widget().render(80)).toHaveLength(5)
+    }
+  })
+
+  it('offers mode completions and returns null for an unmatched prefix', () => {
+    const h = setup()
+    expect(h.completions('todos-widget', '')?.map((item) => item.value)).toEqual(['off', 'compact', 'full'])
+    expect(h.completions('todos-widget', 'c')).toEqual([{ value: 'compact', label: 'compact' }])
+    expect(h.completions('todos-widget', 'x')).toBeNull()
+  })
+
+  it('requires interactive mode and leaves the widget unchanged without UI', async () => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(todos, 4)], ui)
+    await h.fire('session_start', {}, ctx)
+    await h.runCommand('todos-widget', { ...ctx, hasUI: false }, 'off')
+    expect(ui.notices.at(-1)).toEqual({ message: '/todos-widget requires interactive mode', type: 'error' })
+    expect(ui.widget().render(80)).toEqual(['● Todos (1/3) · ◐ Writing tests'])
+  })
+})
+
 describe('renderCall', () => {
   it('renders the action alone when no other argument is set', () => {
     expect(setup().renderCall({ action: 'list' })).toEqual(['todo list'])
@@ -502,7 +626,7 @@ describe('renderResult', () => {
 
 describe('/todos command', () => {
   it('is registered under the name todos', () => {
-    expect(setup().commandNames).toEqual(['todos'])
+    expect(setup().commandNames).toEqual(['todos-widget', 'todos'])
   })
 
   it('notifies instead of opening the list outside interactive mode', async () => {
