@@ -41,7 +41,7 @@ import { ancestorDirs } from './internal/project-root.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.ts'
-import { errorMessage, isDirectory, isRecord, realpathOr } from './internal/values.ts'
+import { errorMessage, isDirectory, isRecord } from './internal/values.ts'
 import { warnOnce } from './internal/warn-once.ts'
 
 /** The extra skill directories a manifest declares, as a list. A string is one entry,
@@ -78,13 +78,11 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
   return dirs
 }
 
+/** Claude Code skips the cache by its directory name only, so a personal link into it
+ * stays an ordinary personal skill. */
 function isSyncedSkill(filePath: string, home: string): boolean {
-  const syncedDir = path.join(claudeConfigDir(home), 'skills', 'synced')
-  const contains = (root: string, target: string): boolean => {
-    const relative = path.relative(root, target)
-    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-  }
-  return contains(syncedDir, filePath) || contains(realpathOr(syncedDir), realpathOr(filePath))
+  const relative = path.relative(path.join(claudeConfigDir(home), 'skills', 'synced'), filePath)
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
 /** Let pi own discovery and validation; only remove Claude's managed sync cache. */

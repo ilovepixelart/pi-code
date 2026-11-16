@@ -76,38 +76,37 @@ describe('local Claude skill discovery', () => {
     expect(await fixture.discover('reload')).toBeUndefined()
   })
 
-  it('filters cache aliases before name resolution and continues to a trusted project skill', async () => {
+  // Claude Code skips the cache by its directory name only, so a personal link into it
+  // is an ordinary personal skill there and takes precedence over a project skill.
+  it('loads a personal link into the cache as a personal skill, ahead of a project skill', async () => {
     const cached = join(personal, 'synced', 'bucket', 'greet')
-    writeSkill(cached, 'greet', 'CACHE !`echo forbidden`')
+    writeSkill(cached, 'greet', 'LINKED $ARGUMENTS')
     symlinkSync(cached, join(personal, 'alias'), 'junction')
     const project = writeSkill(join(cwd, '.claude', 'skills', 'greet'), 'greet', 'PROJECT $ARGUMENTS')
     new ProjectTrustStore(agentDir).set(cwd, true)
     const fixture = wire()
     const result = await fixture.discover()
-    expect(result?.skillPaths).toEqual([project])
-    expect(native(result?.skillPaths ?? []).skills[0]?.filePath).toBe(project)
-    expect(await fixture.input('/skill:greet world')).toMatchObject({ action: 'transform', text: expect.stringContaining('PROJECT world') })
-    expect(fixture.exec).not.toHaveBeenCalled()
+    const linked = join(personal, 'alias', 'SKILL.md')
+    expect(result?.skillPaths).toEqual([linked, project])
+    expect(native(result?.skillPaths ?? []).skills[0]?.filePath).toBe(linked)
+    expect(await fixture.input('/skill:greet world')).toMatchObject({ action: 'transform', text: expect.stringContaining('LINKED world') })
   })
 
   it('leaves cached skill invocations to pi without running injected commands', async () => {
     const cached = join(personal, 'synced', 'bucket', 'greet')
     writeSkill(cached, 'greet', 'CACHE !`echo forbidden`')
-    symlinkSync(cached, join(personal, 'alias'), 'junction')
     const fixture = wire()
     expect(await fixture.discover()).toBeUndefined()
     expect(await fixture.input('/skill:greet')).toBeUndefined()
     expect(fixture.exec).not.toHaveBeenCalled()
   })
 
-  it('also excludes a cache file linked into an otherwise ordinary skill directory', async () => {
+  it('loads a cache file linked into an ordinary skill directory', async () => {
     const cached = writeSkill(join(personal, 'synced', 'bucket', 'remote'), 'remote')
     const alias = join(personal, 'alias')
     mkdirSync(alias)
     symlinkSync(cached, join(alias, 'SKILL.md'), 'file')
-    const fixture = wire()
-    expect(await fixture.discover()).toBeUndefined()
-    expect(await fixture.input('/skill:remote')).toBeUndefined()
+    expect((await wire().discover())?.skillPaths).toEqual([join(alias, 'SKILL.md')])
   })
 
   it('excludes the lexical cache subtree even when a nested cache entry links outside it', async () => {
