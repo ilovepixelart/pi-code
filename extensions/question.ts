@@ -130,13 +130,20 @@ function unreachable(value: never): never {
   throw new Error(`Unhandled ${JSON.stringify(value)}`)
 }
 
-function checkbox(checked: boolean): string {
-  return checked ? '[x] ' : '[ ] '
+function checkbox(checked: boolean, theme: Theme): string {
+  return checked ? theme.fg('success', '[✔] ') : theme.fg('text', '[ ] ')
 }
 
-/** `field` is a pre-rendered text field appended after the label. */
-function optionLine(label: string, index: number, selected: boolean, theme: Theme, field = ''): string {
-  return (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(selected ? 'accent' : 'text', `${index + 1}. ${label}`) + field
+/** `field` is a pre-rendered text field appended after the label, `box` a rendered checkbox
+ * before it. A `confirmed` row is the question's single-select answer. */
+type RowMarks = { field?: string; box?: string; confirmed?: boolean; width?: number }
+
+function optionLine(label: string, index: number, selected: boolean, theme: Theme, { field = '', box = '', confirmed = false, width }: RowMarks = {}): string {
+  const color = confirmed ? 'success' : selected ? 'accent' : 'text'
+  const tick = confirmed ? theme.fg('success', ' ✔') : ''
+  const body = (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(color, `${index + 1}. `) + box + theme.fg(color, label) + field
+  // As in Claude Code, a long label is cut short and the tick stays in view.
+  return (width === undefined ? body : truncateToWidth(body, Math.max(0, width - visibleWidth(tick)))) + tick
 }
 
 /** One row of a question; the cursor indexes into the question's rows. */
@@ -210,17 +217,19 @@ function buildQuestionLines(view: QuestionView): string[] {
   wrapIndented(question, 1, 'text')
   lines.push('')
 
-  const box = (checked: boolean) => (state.mode === 'multi' ? checkbox(checked) : '')
+  const box = (checked: boolean) => (state.mode === 'multi' ? checkbox(checked, theme) : '')
+  const confirmed = state.mode === 'single' ? state.confirmed : undefined
   state.rows.forEach((row, i) => {
     const selected = i === state.cursor
     switch (row.kind) {
       case 'option':
-        add(optionLine(box(state.mode === 'multi' && state.checked[row.index]) + row.option.label, i, selected, theme))
+        add(optionLine(row.option.label, i, selected, theme, { box: box(state.mode === 'multi' && state.checked[row.index]), confirmed: confirmed?.kind === 'option' && confirmed.index === row.index, width }))
         if (row.option.description) wrapIndented(row.option.description, 5, 'muted')
         return
       case 'text':
         // A multiSelect free-text row is checked exactly when it has text; Space never toggles it.
-        add(optionLine(box(state.draft.getValue().trim() !== ''), i, selected, theme, field))
+        // As in Claude Code, a confirmed text answer keeps its tick while the field is edited.
+        add(optionLine('', i, selected, theme, { field, box: box(state.draft.getValue().trim() !== ''), confirmed: confirmed?.kind === 'text', width }))
         return
       case 'chat':
         add(theme.fg('dim', '─'.repeat(width)))
@@ -736,11 +745,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
             return
           case 'text':
             state.draft.setValue(value.text)
-            state.cursor = state.rows.findIndex((row) => row.kind === 'text')
             return
           case 'option':
-            state.draft.setValue('')
-            state.cursor = state.rows.findIndex((row) => row.kind === 'option' && row.index === value.index)
             return
           default:
             unreachable(value)
@@ -759,8 +765,17 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         else if (index === active) navigate(active + 1)
         else refresh()
       }
+      /** As in Claude Code, entering a question focuses its first row, so a confirmed answer is
+       * told apart only by its tick and never by where the focus was left. */
       function navigate(index: number): void {
+        // Claude Code ignores a step past either end: the question in view keeps its focus.
+        if (index === active) return
         active = index
+        const state = states[index]
+        if (state) {
+          state.cursor = 0
+          state.typing = false
+        }
         refresh()
       }
       function commit(value: Answer): void {
@@ -810,7 +825,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
             return
           }
           case 'option':
-            state.draft.setValue('')
             commit({ kind: 'option', index: row.index })
             return
           default:
@@ -884,8 +898,9 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       function textField(state: QuestionState, width: number): string {
         const draft = state.draft.getValue()
         state.draft.focused = state.typing
-        // The row's prefix and number take five columns, a checkbox four more.
-        if (state.typing) return state.draft.render(Math.max(1, width - (state.mode === 'multi' ? 9 : 5)))[0].trimEnd()
+        // The row's prefix and number take five columns, a checkbox four more, a confirmed tick two.
+        const reserved = state.mode === 'multi' ? 9 : state.confirmed?.kind === 'text' ? 7 : 5
+        if (state.typing) return state.draft.render(Math.max(1, width - reserved))[0].trimEnd()
         return draft ? theme.fg('text', draft) : theme.fg('dim', textRowLabel(state.mode === 'multi'))
       }
       function renderTabs(width: number, saved: Array<Answer | undefined>): string {
