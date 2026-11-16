@@ -471,7 +471,17 @@ describe('todo widget modes', () => {
     await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write\ntests\r\nnow', status: 'in_progress' }], 2)], ui))
     const component = ui.widget()
     expect(component.render(80)).toEqual(['● Todos (0/1) · ◐ write tests now'])
-    expect(component.render(20).map(plain)).toEqual(['● Todos (0/1) · ◐ wr…'])
+    expect(component.render(20).map(plain)).toEqual(['● Todos (0/1) · ◐ w…'])
+  })
+
+  it.each([
+    ['Writing\ntests', '● Todos (0/1) · ◐ Writing tests'],
+    ['   ', '● Todos (0/1)'],
+  ])('keeps the activeForm %j on a single line', async (activeForm, expected) => {
+    const h = setup()
+    const ui = fakeUI()
+    await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write tests', status: 'in_progress', activeForm }], 2)], ui))
+    expect(ui.widget().render(80)).toEqual([expected])
   })
 
   it('switches immediately between full, compact and off without changing tasks', async () => {

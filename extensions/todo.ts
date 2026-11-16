@@ -3,8 +3,8 @@
  *
  * This extension:
  * - Registers a `todo` tool for the LLM (add, start, complete, delete, clear, list)
- * - Registers a `/todos` command for users to view the list
- * - Shows a persistent widget above the editor with live todo status
+ * - Registers `/todos` to view the list and `/todos-widget` to choose its display
+ * - Shows a compact progress line above the editor by default
  *
  * Todos move through a status machine: pending -> in_progress -> completed.
  * Exactly one todo is in_progress at a time; `start` moves any other
@@ -70,6 +70,8 @@ type TodoParamsType = Static<typeof TodoParams>
 const TOOL_NAME = 'todo'
 const STATE_ENTRY_TYPE = 'pi-code:todo'
 const WIDGET_KEY = 'todos'
+const WIDGET_MODES = ['off', 'compact', 'full'] as const
+type WidgetMode = (typeof WIDGET_MODES)[number]
 // Content budget: heading + todo rows + optional "+N more" summary. The
 // rendered widget is one line taller (trailing spacer below the panel).
 const MAX_WIDGET_LINES = 12
@@ -141,6 +143,7 @@ export const layoutOverlay = (todos: Todo[], budget: number): OverlayLayout => {
  * Reads live state via getTodos() at render time.
  */
 class TodoOverlay {
+  mode: WidgetMode = 'compact'
   private uiCtx?: ExtensionUIContext
   private widgetRegistered = false
   private tui?: TUI
@@ -162,7 +165,7 @@ class TodoOverlay {
 
   update(): void {
     if (!this.uiCtx) return
-    if (this.getTodos().length === 0) {
+    if (this.mode === 'off' || this.getTodos().length === 0) {
       this.hide()
       return
     }
@@ -201,14 +204,21 @@ class TodoOverlay {
 
   private renderWidget(theme: Theme, width: number): string[] {
     const todos = this.getTodos()
-    if (todos.length === 0) return []
+    if (this.mode === 'off' || todos.length === 0) return []
     const truncate = (line: string): string => truncateToWidth(line, width, '…')
 
     const completed = todos.filter((t) => t.status === 'completed').length
     const hasActive = completed < todos.length
     const headingColor = hasActive ? 'accent' : 'dim'
     const headingIcon = hasActive ? '●' : '○'
-    const lines = [truncate(theme.fg(headingColor, `${headingIcon} Todos (${completed}/${todos.length})`))]
+    const heading = theme.fg(headingColor, `${headingIcon} Todos (${completed}/${todos.length})`)
+    if (this.mode === 'compact') {
+      const active = todos.find((todo) => todo.status === 'in_progress')
+      const label = (active?.activeForm ?? active?.text ?? '').replace(/\s+/g, ' ').trim()
+      const detail = label && ` · ${statusGlyph('in_progress', theme)} ${theme.fg('text', label)}`
+      return [truncate(heading + detail)]
+    }
+    const lines = [truncate(heading)]
 
     const layout = layoutOverlay(todos, MAX_WIDGET_LINES - 1)
     for (const todo of layout.visible) {
@@ -530,6 +540,34 @@ export default function todoExtension(pi: ExtensionAPI) {
       const msg = text?.type === 'text' ? text.text : ''
       const glyph = details.action === 'start' ? theme.fg('accent', '◐ ') : theme.fg('success', '✓ ')
       return new Text(glyph + theme.fg('muted', msg), 0, 0)
+    },
+  })
+
+  pi.registerCommand('todos-widget', {
+    description: 'Set the todo widget display: off, compact (default), or full',
+    getArgumentCompletions: (prefix) => {
+      const modes = WIDGET_MODES.filter((mode) => mode.startsWith(prefix))
+      return modes.length ? modes.map((mode) => ({ value: mode, label: mode })) : null
+    },
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('/todos-widget requires interactive mode', 'error')
+        return
+      }
+      const arg = args.trim()
+      const usage = 'Usage: /todos-widget off|compact|full'
+      if (!arg) {
+        ctx.ui.notify(`Todo widget: ${overlay.mode}. ${usage}`, 'info')
+        return
+      }
+      const mode = WIDGET_MODES.find((value) => value === arg)
+      if (!mode) {
+        ctx.ui.notify(usage, 'warning')
+        return
+      }
+      overlay.mode = mode
+      overlay.update()
+      ctx.ui.notify(`Todo widget: ${mode}`, 'info')
     },
   })
 
