@@ -4,7 +4,7 @@
  * This extension:
  * - Registers a `todo` tool for the LLM (add, start, complete, delete, clear, list)
  * - Registers `/todos` to view the list and `/todos-widget` to choose its display
- * - Shows a compact progress line above the editor by default
+ * - Shows the full list above the editor by default, or one progress line on request
  *
  * Todos move through a status machine: pending -> in_progress -> completed.
  * Exactly one todo is in_progress at a time; `start` moves any other
@@ -143,7 +143,7 @@ export const layoutOverlay = (todos: Todo[], budget: number): OverlayLayout => {
  * Reads live state via getTodos() at render time.
  */
 class TodoOverlay {
-  mode: WidgetMode = 'compact'
+  mode: WidgetMode = 'full'
   private uiCtx?: ExtensionUIContext
   private widgetRegistered = false
   private tui?: TUI
@@ -214,7 +214,8 @@ class TodoOverlay {
     const heading = theme.fg(headingColor, `${headingIcon} Todos (${completed}/${todos.length})`)
     if (this.mode === 'compact') {
       const active = todos.find((todo) => todo.status === 'in_progress')
-      const label = (active?.activeForm ?? active?.text ?? '').replace(/\s+/g, ' ').trim()
+      // As Claude Code's spinner label: the first of activeForm and text that is not blank.
+      const label = [active?.activeForm, active?.text].map((part) => part?.replace(/\s+/g, ' ').trim()).find(Boolean) ?? ''
       const detail = label && ` · ${statusGlyph('in_progress', theme)} ${theme.fg('text', label)}`
       return [truncate(heading + detail)]
     }
@@ -544,12 +545,12 @@ export default function todoExtension(pi: ExtensionAPI) {
   })
 
   pi.registerCommand('todos-widget', {
-    description: 'Set the todo widget display: off, compact (default), or full',
+    description: 'Set the todo widget display: off, compact, or full (default)',
     getArgumentCompletions: (prefix) => {
       const modes = WIDGET_MODES.filter((mode) => mode.startsWith(prefix))
       return modes.length ? modes.map((mode) => ({ value: mode, label: mode })) : null
     },
-    handler: async (args, ctx) => {
+    handler: async (args, ctx) => /* NOSONAR typescript:S7503 - pi types a command handler as returning Promise<void> */ {
       if (!ctx.hasUI) {
         ctx.ui.notify('/todos-widget requires interactive mode', 'error')
         return

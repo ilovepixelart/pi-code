@@ -280,7 +280,6 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'alpha'), completed(2, 'beta')], 3)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)).toEqual(['● Todos (1/2)', '├─ ○ alpha', '└─ ✓ beta', ''])
   })
 
@@ -296,7 +295,6 @@ describe('todo overlay widget', () => {
     const ui = fakeUI()
     const todo = { id: 1, text: 'write tests', status: 'in_progress', activeForm: 'Writing tests' }
     await h.fire('session_start', {}, branchCtx([resultEntry([todo], 2)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)[1]).toBe('└─ ◐ Writing tests')
   })
 
@@ -304,7 +302,6 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write tests', status: 'in_progress' }], 2)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60)[1]).toBe('└─ ◐ write tests')
   })
 
@@ -314,7 +311,6 @@ describe('todo overlay widget', () => {
     // 12 todos against the 11-row content budget: 10 rows show, 2 pending truncate.
     const todos = Array.from({ length: 12 }, (_, i) => pending(i + 1, `p${i + 1}`))
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 13)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     const lines = ui.widget().render(60)
     expect(lines[0]).toBe('● Todos (0/12)')
     expect(lines.slice(1, 11)).toEqual(todos.slice(0, 10).map((t) => `├─ ○ ${t.text}`))
@@ -328,7 +324,6 @@ describe('todo overlay widget', () => {
     // 8 pending + 4 completed: all pending fit, 2 completed fill the budget, 2 hide.
     const todos = [...Array.from({ length: 8 }, (_, i) => pending(i + 1, `p${i + 1}`)), ...Array.from({ length: 4 }, (_, i) => completed(i + 9, `c${i + 1}`))]
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 13)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     const lines = ui.widget().render(60)
     expect(lines.at(-2)).toBe('└─ +2 more (2 completed)')
   })
@@ -339,7 +334,6 @@ describe('todo overlay widget', () => {
     // 11 pending + 2 completed: 10 pending show, 1 pending truncates, 2 completed hide.
     const todos = [...Array.from({ length: 11 }, (_, i) => pending(i + 1, `p${i + 1}`)), completed(12, 'x'), completed(13, 'y')]
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 14)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     expect(ui.widget().render(60).at(-2)).toBe('└─ +3 more (2 completed, 1 pending)')
   })
 
@@ -347,7 +341,6 @@ describe('todo overlay widget', () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'ABCDEFGHIJKLMNOP')], 2)], ui))
-    await h.runCommand('todos-widget', { hasUI: true, ui: ui.ui }, 'full')
     // "└─ ○ " is 5 columns wide, leaving 2 characters plus the ellipsis at width 8.
     expect(plain(ui.widget().render(8)[1])).toBe('└─ ○ AB…')
   })
@@ -448,17 +441,30 @@ describe('todo overlay widget', () => {
 describe('todo widget modes', () => {
   const todos: Todo[] = [completed(1, 'done'), { id: 2, text: 'write tests', status: 'in_progress', activeForm: 'Writing tests' }, pending(3, 'later')]
 
-  it('defaults to one line with counts and the active task, without a spacer', async () => {
+  /** A session restored with `entries`, switched to the compact widget. */
+  const compact = async (entries: Todo[]) => {
+    const h = setup()
+    const ui = fakeUI()
+    const ctx = branchCtx([resultEntry(entries, entries.length + 1)], ui)
+    await h.fire('session_start', {}, ctx)
+    await h.runCommand('todos-widget', ctx, 'compact')
+    return { h, ui }
+  }
+
+  it('defaults to the full panel, as Claude Code shows the whole list when tasks change', async () => {
     const h = setup()
     const ui = fakeUI()
     await h.fire('session_start', {}, branchCtx([resultEntry(todos, 4)], ui))
+    expect(ui.widget().render(80)).toHaveLength(5)
+  })
+
+  it('shows one line with counts and the active task, without a spacer', async () => {
+    const { ui } = await compact(todos)
     expect(ui.widget().render(80)).toEqual(['● Todos (1/3) · ◐ Writing tests'])
   })
 
   it('shows only counts without an active task and dims a completed list', async () => {
-    const h = setup()
-    const ui = fakeUI()
-    await h.fire('session_start', {}, branchCtx([resultEntry([pending(1, 'next')], 2)], ui))
+    const { h, ui } = await compact([pending(1, 'next')])
     const component = ui.widget()
     expect(component.render(60)).toEqual(['● Todos (0/1)'])
     await h.call({ action: 'complete', id: 1 })
@@ -466,9 +472,7 @@ describe('todo widget modes', () => {
   })
 
   it('flattens multiline text, falls back to task text and truncates to terminal width', async () => {
-    const h = setup()
-    const ui = fakeUI()
-    await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write\ntests\r\nnow', status: 'in_progress' }], 2)], ui))
+    const { ui } = await compact([{ id: 1, text: 'write\ntests\r\nnow', status: 'in_progress' }])
     const component = ui.widget()
     expect(component.render(80)).toEqual(['● Todos (0/1) · ◐ write tests now'])
     expect(component.render(20).map(plain)).toEqual(['● Todos (0/1) · ◐ w…'])
@@ -476,11 +480,10 @@ describe('todo widget modes', () => {
 
   it.each([
     ['Writing\ntests', '● Todos (0/1) · ◐ Writing tests'],
-    ['   ', '● Todos (0/1)'],
+    // A blank activeForm falls back to the task text, as Claude Code's spinner label does.
+    ['   ', '● Todos (0/1) · ◐ write tests'],
   ])('keeps the activeForm %j on a single line', async (activeForm, expected) => {
-    const h = setup()
-    const ui = fakeUI()
-    await h.fire('session_start', {}, branchCtx([resultEntry([{ id: 1, text: 'write tests', status: 'in_progress', activeForm }], 2)], ui))
+    const { ui } = await compact([{ id: 1, text: 'write tests', status: 'in_progress', activeForm }])
     expect(ui.widget().render(80)).toEqual([expected])
   })
 
@@ -560,7 +563,7 @@ describe('todo widget modes', () => {
     await h.fire('session_start', {}, ctx)
     await h.runCommand('todos-widget', { ...ctx, hasUI: false }, 'off')
     expect(ui.notices.at(-1)).toEqual({ message: '/todos-widget requires interactive mode', type: 'error' })
-    expect(ui.widget().render(80)).toEqual(['● Todos (1/3) · ◐ Writing tests'])
+    expect(ui.widget().render(80)).toHaveLength(5)
   })
 })
 
