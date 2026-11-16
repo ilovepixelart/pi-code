@@ -1191,6 +1191,44 @@ describe('question revisit', () => {
     expect(rendered, 'The focus should start on the first option, not on the confirmed one').toContain('❯ 1. Alpha')
   })
 
+  it('should keep the focus where it is when Left is pressed on the first question', async () => {
+    const { overlay, result } = openOverlayWith(setup(), pair)
+
+    overlay.handleInput(RAW.down)
+    overlay.handleInput(RAW.left)
+    const rendered = overlay.render(120)
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(rendered, 'There is no earlier question, so the focus should stay on Beta').toContain('❯ 2. Beta')
+  })
+
+  it('should keep the tick of a confirmed option whose label is wider than the form', async () => {
+    const long = 'L'.repeat(60)
+    const { overlay, result } = openOverlayWith(setup(), { questions: [{ question: 'First?', options: [{ label: long }, { label: 'Short' }] }, pair.questions[1]] })
+
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    const row = overlay.render(40).find((line) => line.includes('1. L'))
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(row, 'The label should give way to the tick').toMatch(/✔$/)
+  })
+
+  it('should keep the tick of a confirmed typed answer wider than the form', async () => {
+    const { overlay, result } = openOverlayWith(setup(), pair)
+
+    typeText(overlay, 'y'.repeat(50))
+    overlay.handleInput(RAW.enter)
+    overlay.handleInput(RAW.left)
+    const row = overlay.render(40).find((line) => line.includes('3. y'))
+    overlay.handleInput(RAW.escape)
+    await result
+
+    expect(row, 'The typed text should give way to the tick').toMatch(/✔$/)
+  })
+
   it('should focus the first row when returning to a multi-select question', async () => {
     const { overlay, result } = openOverlayWith(setup(), { questions: [{ question: 'First?', options: OPTIONS, multiSelect: true }, pair.questions[1]] })
 

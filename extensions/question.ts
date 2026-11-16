@@ -136,12 +136,14 @@ function checkbox(checked: boolean, theme: Theme): string {
 
 /** `field` is a pre-rendered text field appended after the label, `box` a rendered checkbox
  * before it. A `confirmed` row is the question's single-select answer. */
-type RowMarks = { field?: string; box?: string; confirmed?: boolean }
+type RowMarks = { field?: string; box?: string; confirmed?: boolean; width?: number }
 
-function optionLine(label: string, index: number, selected: boolean, theme: Theme, { field = '', box = '', confirmed = false }: RowMarks = {}): string {
+function optionLine(label: string, index: number, selected: boolean, theme: Theme, { field = '', box = '', confirmed = false, width }: RowMarks = {}): string {
   const color = confirmed ? 'success' : selected ? 'accent' : 'text'
   const tick = confirmed ? theme.fg('success', ' ✔') : ''
-  return (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(color, `${index + 1}. `) + box + theme.fg(color, label) + field + tick
+  const body = (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(color, `${index + 1}. `) + box + theme.fg(color, label) + field
+  // As in Claude Code, a long label is cut short and the tick stays in view.
+  return (width === undefined ? body : truncateToWidth(body, Math.max(0, width - visibleWidth(tick)))) + tick
 }
 
 /** One row of a question; the cursor indexes into the question's rows. */
@@ -221,13 +223,13 @@ function buildQuestionLines(view: QuestionView): string[] {
     const selected = i === state.cursor
     switch (row.kind) {
       case 'option':
-        add(optionLine(row.option.label, i, selected, theme, { box: box(state.mode === 'multi' && state.checked[row.index]), confirmed: confirmed?.kind === 'option' && confirmed.index === row.index }))
+        add(optionLine(row.option.label, i, selected, theme, { box: box(state.mode === 'multi' && state.checked[row.index]), confirmed: confirmed?.kind === 'option' && confirmed.index === row.index, width }))
         if (row.option.description) wrapIndented(row.option.description, 5, 'muted')
         return
       case 'text':
         // A multiSelect free-text row is checked exactly when it has text; Space never toggles it.
         // As in Claude Code, a confirmed text answer keeps its tick while the field is edited.
-        add(optionLine('', i, selected, theme, { field, box: box(state.draft.getValue().trim() !== ''), confirmed: confirmed?.kind === 'text' }))
+        add(optionLine('', i, selected, theme, { field, box: box(state.draft.getValue().trim() !== ''), confirmed: confirmed?.kind === 'text', width }))
         return
       case 'chat':
         add(theme.fg('dim', '─'.repeat(width)))
@@ -766,6 +768,8 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
       /** As in Claude Code, entering a question focuses its first row, so a confirmed answer is
        * told apart only by its tick and never by where the focus was left. */
       function navigate(index: number): void {
+        // Claude Code ignores a step past either end: the question in view keeps its focus.
+        if (index === active) return
         active = index
         const state = states[index]
         if (state) {
