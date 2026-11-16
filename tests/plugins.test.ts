@@ -447,6 +447,27 @@ describe('plugins from a local marketplace', () => {
     expect(rootsOf(h)).toEqual([])
   })
 
+  it('does not load a local plugin that was uninstalled', () => {
+    // `claude plugin uninstall` empties the install record and marks the cached copy orphaned;
+    // the source directory stays, and Claude Code loads nothing from it.
+    const h = home()
+    orphan(install(h, 'localmp', 'kit', '1.0.0'))
+    writeInstallIndex(h, {})
+    pluginManifest(localMarketplace(h, 'localmp', 'directory', [{ name: 'kit', source: './' }]), { name: 'kit' })
+
+    expect(rootsOf(h)).toEqual([])
+    expect(pluginStates(h)).toEqual([])
+  })
+
+  it('does not load a plugin the local marketplace no longer lists', () => {
+    // Claude Code reports `Plugin kit not found in marketplace localmp` and loads no component.
+    const h = home()
+    install(h, 'localmp', 'kit', '1.0.0')
+    localMarketplace(h, 'localmp', 'directory', [{ name: 'other', source: './' }])
+
+    expect(rootsOf(h)).toEqual([])
+  })
+
   it('keeps the cached copy for a remote entry of a local marketplace', () => {
     const h = home()
     const cached = install(h, 'mixed', 'remote', '1.0.0')
