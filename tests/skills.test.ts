@@ -142,6 +142,9 @@ describe('extension wiring', () => {
     mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true })
     const homeSkills = join(hoisted.home, '.claude', 'skills')
     mkdirSync(homeSkills, { recursive: true })
+    const homeSkill = join(homeSkills, 'greet', 'SKILL.md')
+    mkdirSync(join(homeSkills, 'greet'))
+    writeFileSync(homeSkill, '---\nname: greet\ndescription: greets\n---\nHello')
 
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>()
     skillsExt({ on: (name: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(name, fn) } as never)
@@ -149,10 +152,10 @@ describe('extension wiring', () => {
     // silently but has no stored decision for contributes nothing: only the hermetic home
     // skills survive, and never the project's, trusted or not.
     const trusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => true })) as { skillPaths: string[] } | undefined
-    expect(trusted).toEqual({ skillPaths: [homeSkills] })
+    expect(trusted).toEqual({ skillPaths: [homeSkill] })
 
     const untrusted = (await handlers.get('resources_discover')?.({ reason: 'startup' }, { cwd, isProjectTrusted: () => false })) as { skillPaths: string[] } | undefined
-    expect(untrusted).toEqual({ skillPaths: [homeSkills] })
+    expect(untrusted).toEqual({ skillPaths: [homeSkill] })
   })
 
   it('registers an enabled plugin skill as a /plugin:name command and expands it', async () => {

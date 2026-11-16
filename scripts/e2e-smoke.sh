@@ -72,6 +72,11 @@ write(`${plugin}/.claude-plugin/plugin.json`, { name: 'smoke-kit' })
 write(`${home}/.claude/settings.json`, { enabledPlugins: { 'smoke-kit@smoke': true } })
 fs.writeFileSync(`${plugin}/skills/deploy/SKILL.md`, '---\nname: deploy\ndescription: SMOKE USER ONLY DESCRIPTION\ndisable-model-invocation: true\n---\nSMOKE PLUGIN BODY $ARGUMENTS\n${CLAUDE_PLUGIN_ROOT}\n')
 fs.writeFileSync(`${plugin}/skills/guide/SKILL.md`, '---\nname: guide\ndescription: SMOKE MODEL SKILL DESCRIPTION\n---\nGuide the user.\n')
+const personal = `${home}/.claude/skills`
+fs.mkdirSync(`${personal}/local-guide`, { recursive: true })
+fs.mkdirSync(`${personal}/synced/test-bucket/remote-guide`, { recursive: true })
+fs.writeFileSync(`${personal}/local-guide/SKILL.md`, '---\nname: local-guide\ndescription: SMOKE LOCAL SKILL DESCRIPTION\n---\nLocal guide.\n')
+fs.writeFileSync(`${personal}/synced/test-bucket/remote-guide/SKILL.md`, '---\nname: remote-guide\ndescription: SMOKE SYNCED CACHE DESCRIPTION\n---\nCached guide.\n')
 const { ProjectTrustStore } = await import(pathToFileURL(`${repo}/node_modules/@earendil-works/pi-coding-agent/dist/index.js`).href)
 new ProjectTrustStore(agent).set(process.cwd(), true)
 JS
@@ -95,6 +100,8 @@ if wire_has 'ZANZIBAR'; then ok "smoke: @import chain content on the wire"; else
 if wire_has 'PERSONAL LOCAL NOTE MARKER'; then ok "smoke: CLAUDE.local.md on the wire"; else bad "smoke: local marker missing from payload"; fi
 if wire_has 'Tests must be deterministic'; then ok "smoke: project rule on the wire"; else bad "smoke: project rule missing from payload"; fi
 if wire_has 'available_skills' && wire_has 'greet'; then ok "smoke: skills listing on the wire"; else bad "smoke: skills listing missing from payload"; fi
+if wire_has 'SMOKE LOCAL SKILL DESCRIPTION'; then ok "smoke: personal local skill listed"; else bad "smoke: personal local skill missing"; fi
+if wire_has 'SMOKE SYNCED CACHE DESCRIPTION'; then bad "smoke: synced account cache offered to model"; else ok "smoke: synced account cache kept out of model listing"; fi
 if wire_has 'plugin_skill' && wire_has '/smoke-kit:guide'; then ok "smoke: plugin skill listed with its namespace"; else bad "smoke: namespaced plugin skill missing"; fi
 if wire_has 'SMOKE USER ONLY DESCRIPTION'; then bad "smoke: user-only plugin skill offered to model"; else ok "smoke: user-only plugin skill kept out of model listing"; fi
 if [ "$MCP_TOOL" = smoke_echo ]; then

@@ -1,11 +1,10 @@
 /**
  * Claude Skills Extension
  *
- * Bridges Claude Code's skills into pi. On resources_discover it hands pi the
- * existing `.claude/skills` directories (user then project) as skill paths, so
- * pi discovers Claude Code skills the same way it loads its own `.pi/skills`.
- * pi implements the Agent Skills standard, so `SKILL.md` directories work
- * unchanged and register as `/skill:name`.
+ * Bridges Claude Code's local skills into pi. On resources_discover it hands pi
+ * the skill files discovered in `.claude/skills` (user then project), excluding
+ * Claude's personal `skills/synced` cache. pi implements the Agent Skills standard,
+ * so `SKILL.md` directories work unchanged and register as `/skill:name`.
  *
  * Plugin skills are the exception. pi's loader names a skill by its directory and
  * always registers it under the fixed `/skill:` prefix, so handing a plugin's skills
@@ -27,7 +26,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { type ExtensionAPI, type ExtensionContext, loadSkillsFromDir } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { expandCommand, pluginCommands, shellExecutionDisabled, slashCommandBudget, slashCommandToolDescription } from './commands.ts'
 import { runAgent } from './internal/agent-run.ts'
@@ -42,7 +41,7 @@ import { ancestorDirs } from './internal/project-root.ts'
 import { sessionHasTurns, sessionMailbox } from './internal/session-mailbox.ts'
 import { claudeSettingsChain, readSettingsChain } from './internal/settings-chain.ts'
 import { SKILL_HOOKS_CHANNEL } from './internal/skill-hooks.ts'
-import { errorMessage, isDirectory, isRecord } from './internal/values.ts'
+import { errorMessage, isDirectory, isRecord, realpathOr } from './internal/values.ts'
 import { warnOnce } from './internal/warn-once.ts'
 
 /** The extra skill directories a manifest declares, as a list. A string is one entry,
@@ -77,6 +76,28 @@ export function skillDirs(cwd: string, home: string, trusted: boolean): string[]
     if (!dirs.includes(dir) && isDirectory(dir)) dirs.push(dir)
   }
   return dirs
+}
+
+function isSyncedSkill(filePath: string, home: string): boolean {
+  const syncedDir = path.join(claudeConfigDir(home), 'skills', 'synced')
+  const contains = (root: string, target: string): boolean => {
+    const relative = path.relative(root, target)
+    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+  }
+  return contains(syncedDir, filePath) || contains(realpathOr(syncedDir), realpathOr(filePath))
+}
+
+/** Let pi own discovery and validation; only remove Claude's managed sync cache. */
+function localSkillPaths(roots: string[], home: string): string[] {
+  const paths = new Set<string>()
+  for (const dir of roots) {
+    const { skills, diagnostics } = loadSkillsFromDir({ dir, source: 'path' })
+    const candidates = skills.map((skill) => skill.filePath)
+    // Invalid skills still reach pi's loader so it retains their native diagnostics.
+    for (const diagnostic of diagnostics) if (diagnostic.path) candidates.push(diagnostic.path)
+    for (const filePath of candidates) if (!isSyncedSkill(filePath, home)) paths.add(filePath)
+  }
+  return [...paths]
 }
 
 interface FoundSkill {
@@ -184,7 +205,7 @@ export function pluginSkills(home: string): PluginSkill[] {
 
 /** A Claude-contributed skill by the name pi's loader gives it. One directory
  * level, the standard layout. */
-function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined {
+function findClaudeSkill(name: string, roots: string[], home: string): FoundSkill | undefined {
   for (const root of roots) {
     let entries: fs.Dirent[]
     try {
@@ -197,7 +218,7 @@ function findClaudeSkill(name: string, roots: string[]): FoundSkill | undefined 
       // leads to no SKILL.md (dangling, or to a plain file) into undefined.
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
       const skill = skillAt(root, entry.name)
-      if (skill?.name === name) return { filePath: skill.filePath, baseDir: path.dirname(skill.filePath) }
+      if (skill?.name === name && !isSyncedSkill(skill.filePath, home)) return { filePath: skill.filePath, baseDir: path.dirname(skill.filePath) }
     }
   }
   return undefined
@@ -306,7 +327,8 @@ export default function skillsExtension(pi: ExtensionAPI) {
   pi.on('resources_discover', (_event, ctx) => {
     // resources_discover fires after session_start, so the approval is already
     // resolved; reading it silently keeps a second trust dialog off the screen.
-    const skillPaths = skillDirs(ctx.cwd, os.homedir(), isProjectApprovedSilently(ctx))
+    const home = os.homedir()
+    const skillPaths = localSkillPaths(skillDirs(ctx.cwd, home, isProjectApprovedSilently(ctx)), home)
     return skillPaths.length > 0 ? { skillPaths } : undefined
   })
 
@@ -445,10 +467,11 @@ function resolveBarePluginSkill(bare: string): ResolvedSkill | undefined {
 /** Resolve a plugin skill, or a personal/project skill contributed to pi's loader. The
  * returned name is the skill's own, whichever spelling addressed it. */
 function resolveInvokedSkill(name: string, ctx: ExtensionContext, trusted: boolean): ResolvedSkill | undefined {
+  const home = os.homedir()
   const qualified = name.includes(':')
-  const pluginSkill = qualified ? findPluginSkill(pluginSkills(os.homedir()), name) : undefined
+  const pluginSkill = qualified ? findPluginSkill(pluginSkills(home), name) : undefined
   if (pluginSkill) return resolvedPluginSkill(pluginSkill)
-  const found = findClaudeSkill(name, skillDirs(ctx.cwd, os.homedir(), trusted))
+  const found = findClaudeSkill(name, skillDirs(ctx.cwd, home, trusted), home)
   if (found) return { name, ...found }
   return qualified ? undefined : resolveBarePluginSkill(name)
 }
