@@ -555,6 +555,11 @@ export default function todoExtension(pi: ExtensionAPI) {
         ctx.ui.notify('/todos-widget requires interactive mode', 'error')
         return
       }
+      // RPC binds a UI context but ignores widget factories, so no mode would show anything.
+      if (ctx.mode !== 'tui') {
+        ctx.ui.notify('/todos-widget needs the terminal UI; /todos lists the todos', 'warning')
+        return
+      }
       const arg = args.trim()
       const usage = 'Usage: /todos-widget off|compact|full'
       if (!arg) {
