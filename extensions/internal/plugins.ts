@@ -158,27 +158,31 @@ const contains = (root: string, target: string): boolean => {
 }
 
 /** Claude Code loads a local marketplace's `./` entry from the marketplace itself, not from
- * the copy cached at install time. Undefined leaves the cache to decide (no such entry, or a
- * remote source, which Claude does copy); null is a plugin that does not load: the marketplace
- * is gone, as Claude reports it failed, or the entry leaves the marketplace directory, by its
- * path or through a link, which Claude refuses. */
+ * the copy cached at install time. Undefined leaves the cache to decide (a remote source, which
+ * Claude does copy); null is a plugin that does not load: the marketplace is gone or no longer
+ * lists it, as Claude reports it failed or not found, or the entry leaves the marketplace
+ * directory, by its path or through a link, which Claude refuses. */
 function localPluginRoot(marketplaceRoot: string, directory: string): string | null | undefined {
   const plugins = readJson(path.join(marketplaceRoot, '.claude-plugin', 'marketplace.json')).plugins
   if (!Array.isArray(plugins)) return null
   const entry: unknown = plugins.find((plugin) => isRecord(plugin) && plugin.name === directory)
-  if (!isRecord(entry) || typeof entry.source !== 'string' || !entry.source.startsWith('./')) return undefined
+  if (!isRecord(entry)) return null
+  if (typeof entry.source !== 'string' || !entry.source.startsWith('./')) return undefined
   const root = path.resolve(marketplaceRoot, entry.source)
   // Resolving links catches both a climbing path and one that leaves through a link.
   if (!contains(realpathOr(marketplaceRoot), realpathOr(root)) || !isDirectory(root)) return null
   return root
 }
 
-/** The directory one installed plugin loads from: its local source, else its cached version. */
+/** The directory one installed plugin loads from: its local source, else its cached version.
+ * A live cached version is what says the plugin is installed at all: uninstalling leaves the
+ * source in place and only marks the cached copy orphaned. */
 function pluginRoot(cacheDir: string, marketplace: string, directory: string, installs: Map<string, string[]> | undefined, locals: Map<string, string>): string | undefined {
+  const cached = versionDir(path.join(cacheDir, marketplace, directory), installs?.get(`${directory}@${marketplace}`))
   const local = locals.get(marketplace)
-  const fromSource = local === undefined ? undefined : localPluginRoot(local, directory)
-  if (fromSource !== undefined) return fromSource ?? undefined
-  return versionDir(path.join(cacheDir, marketplace, directory), installs?.get(`${directory}@${marketplace}`))
+  if (cached === undefined || local === undefined) return cached
+  const fromSource = localPluginRoot(local, directory)
+  return fromSource === undefined ? cached : (fromSource ?? undefined)
 }
 
 /** The enablement map, later files winning per key, as settings scopes merge. */
