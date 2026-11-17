@@ -147,7 +147,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI, limits: { maxO
   /** Run `command` as a task that may move to the background: immediately when
    * `background` is set, otherwise once `limitMs` passes without it finishing. */
   async function runTask(toolCallId: string, params: BashParams, limitMs: number, signal: AbortSignal | undefined, onUpdate: ((update: ToolResult) => void) | undefined, ctx: ExtensionToolContext): Promise<ToolResult> {
-    const id = `b${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    const id = `b${randomUUID().replaceAll('-', '').slice(0, 8)}`
     const { outputFile, log, closed } = openOutputFile(id)
 
     // The process gets its own abort signal: the tool call's ends with the call, and a
