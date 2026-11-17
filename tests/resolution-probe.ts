@@ -21,7 +21,7 @@ process.env.USERPROFILE = home
 const agentDir = path.join(home, 'agent')
 
 // jiti stats through the CommonJS fs object, so the probe wraps that one.
-const cjsFs = createRequire(import.meta.url)('node:fs') as typeof fs
+const cjsFs = createRequire(import.meta.url)('node:fs') as { statSync: typeof fs.statSync }
 const statSync = cjsFs.statSync
 const misses = new Set<string>()
 cjsFs.statSync = ((target: fs.PathLike, options?: fs.StatOptions) => {
