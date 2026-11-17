@@ -2,9 +2,22 @@
 
 pi-code bridges a project's `.claude/` configuration into pi. That configuration can come from an untrusted cloned repository, so extensions that read project-controlled input act on it only once the project is approved: pi has marked it trusted (`ctx.isProjectTrusted()`) and, for a repository pi did not ask about, the user has answered pi-code's own prompt (`internal/project-approval.ts`, see Trust model). User-scoped config (`~/.claude`, `~/.pi`) is the user's own and always loaded.
 
+## Supported versions
+
+Security fixes are released only for the latest `1.x` version. Releases before `1.0.0` are no longer maintained; upgrade to the latest `1.x` release to receive a fix.
+
+| Version | Supported          |
+| ------- | ------------------ |
+| 1.x     | :white_check_mark: |
+| 0.x     | :x:                |
+
 ## Reporting a vulnerability
 
-Report privately via [GitHub Security Advisories](https://github.com/ilovepixelart/pi-code/security/advisories/new). Please do not open a public issue for a security report.
+Report privately via [GitHub Security Advisories](https://github.com/ilovepixelart/pi-code/security/advisories/new). Please do not open a public issue for a security report. Include the affected pi-code and pi versions, a minimal reproduction, and the impact you believe the issue has.
+
+- **Acknowledgement:** within 7 days of the report.
+- **Triage and fix window:** targeted within 30 days for confirmed issues, depending on severity and complexity.
+- **Disclosure:** coordinated via the GitHub advisory. A CVE is requested where applicable, and a patched release is published to npm before the advisory is made public.
 
 ## Trust model
 
