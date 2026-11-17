@@ -15,6 +15,7 @@ jobs:
   canary:
     name: Check against latest pi
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,6 +32,9 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Upgrade pi packages to latest
+        # Installing the newest unlocked release is the point of this job; it holds
+        # only contents: read and runs no install scripts.
+        # zizmor: ignore[adhoc-packages]
         run: npm install --no-save --ignore-scripts @earendil-works/pi-agent-core@latest @earendil-works/pi-ai@latest @earendil-works/pi-coding-agent@latest @earendil-works/pi-tui@latest
 
       - name: Report the versions under test
