@@ -217,6 +217,8 @@ export function shellsStatusText(shells: ReadonlyArray<BackgroundShell>): string
 /** What the model is told when a background command finishes. */
 export function shellCompletionText(shell: Pick<BackgroundShell, 'id' | 'command' | 'state' | 'exitCode' | 'outputFile' | 'stopReason'>): string {
   const stopped = shell.stopReason ? `was stopped: ${shell.stopReason}` : 'was stopped'
-  const how = shell.state === 'completed' ? 'completed (exit code 0)' : shell.state === 'killed' ? stopped : `failed (exit code ${shell.exitCode ?? '?'})`
+  let how = `failed (exit code ${shell.exitCode ?? '?'})`
+  if (shell.state === 'completed') how = 'completed (exit code 0)'
+  else if (shell.state === 'killed') how = stopped
   return `Background command ${shell.id} ("${commandPreview(shell.command)}") ${how}. Output: ${shell.outputFile}`
 }

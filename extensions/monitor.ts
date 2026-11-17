@@ -355,7 +355,7 @@ export default function monitorExtension(pi: ExtensionAPI, limits: MonitorLimits
   }
 
   function start({ description, command, limitMs }: Watch, ctx: ExtensionToolContext): BackgroundShell {
-    const id = `m${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    const id = `m${randomUUID().replaceAll('-', '').slice(0, 8)}`
     const outputFile = path.join(shellOutputDir(), `${id}.output`)
     const log = fs.createWriteStream(outputFile, { mode: 0o600 })
     // A full disk or a removed directory must not take pi down from a stream event.

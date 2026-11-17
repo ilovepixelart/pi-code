@@ -236,7 +236,8 @@ function registerPluginSkillCommand(pi: ExtensionAPI, skill: PluginSkill, parsed
   pi.registerCommand(skill.name, {
     description: parsed.argumentHint ? `${parsed.description} ${parsed.argumentHint}` : parsed.description,
     handler: async (args, commandCtx) => {
-      const outcome = await expandSkillInvocation(pi, `/${skill.name}${args.trim() ? ` ${args}` : ''}`, commandCtx)
+      const typed = args.trim() ? `/${skill.name} ${args}` : `/${skill.name}`
+      const outcome = await expandSkillInvocation(pi, typed, commandCtx)
       if (!outcome || outcome.action === 'handled') return
       pi.sendUserMessage(outcome.text, commandCtx.isIdle() ? {} : { deliverAs: 'followUp' })
     },
@@ -501,7 +502,8 @@ function refusedForUser(name: string, ctx: ExtensionContext): { action: 'handled
 function bareFormRefusal(typed: string, found: ResolvedSkill, ctx: ExtensionContext): { action: 'handled' } | undefined {
   if (!found.plugin || typed.includes(':')) return undefined
   if (found.ambiguous) {
-    notice(ctx, `/skill:${typed} matches more than one plugin skill and was not run. Use a qualified name: ${found.ambiguous.map((name) => `/${name}`).join(', ')}.`, 'warning')
+    const qualified = found.ambiguous.map((name) => `/${name}`).join(', ')
+    notice(ctx, `/skill:${typed} matches more than one plugin skill and was not run. Use a qualified name: ${qualified}.`, 'warning')
     return { action: 'handled' }
   }
   warnOnce(`/skill:${typed} is deprecated for plugin skills and will be removed in the next major version. Use /${found.name} instead.`, (message) => notice(ctx, message, 'warning'))

@@ -291,8 +291,11 @@ function withoutUserConfigShellCommands(raw: string, source: string): string {
 export function loadPluginHooks(config: HooksConfig, plugins: InstalledPlugin[], sources?: Map<HookMatcher, string>): void {
   for (const plugin of plugins) {
     const declared = plugin.manifest.hooks
+    let declaredEntries: unknown[] = []
+    if (Array.isArray(declared)) declaredEntries = declared
+    else if (declared !== undefined && declared !== null) declaredEntries = [declared]
     // Claude merges the manifest's paths and inline objects into hooks/hooks.json, which loads first.
-    const entries = [path.join('hooks', 'hooks.json'), ...(declared === undefined || declared === null ? [] : Array.isArray(declared) ? declared : [declared])]
+    const entries = [path.join('hooks', 'hooks.json'), ...declaredEntries]
     const loadedFiles = new Set<string>()
     for (const entry of entries) loadPluginHooksEntry(config, plugin, entry, loadedFiles, sources)
   }

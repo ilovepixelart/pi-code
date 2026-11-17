@@ -139,7 +139,9 @@ function checkbox(checked: boolean, theme: Theme): string {
 type RowMarks = { field?: string; box?: string; confirmed?: boolean; width?: number }
 
 function optionLine(label: string, index: number, selected: boolean, theme: Theme, { field = '', box = '', confirmed = false, width }: RowMarks = {}): string {
-  const color = confirmed ? 'success' : selected ? 'accent' : 'text'
+  let color: 'success' | 'accent' | 'text' = 'text'
+  if (confirmed) color = 'success'
+  else if (selected) color = 'accent'
   const tick = confirmed ? theme.fg('success', ' ✔') : ''
   const body = (selected ? theme.fg('accent', '❯ ') : '  ') + theme.fg(color, `${index + 1}. `) + box + theme.fg(color, label) + field
   // As in Claude Code, a long label is cut short and the tick stays in view.
@@ -174,6 +176,33 @@ function settledText(state: QuestionState): string {
 
 function multiAnswer(checked: boolean[], text = ''): MultiAnswer {
   return { kind: 'multi', indices: checked.flatMap((on, index) => (on ? [index] : [])), ...(text ? { text } : {}) }
+}
+
+/** Text in the field under the highlight that Enter has not confirmed as it stands. */
+function unconfirmedText(state: QuestionState | undefined): boolean {
+  const text = state?.draft.getValue().trim()
+  if (!state?.typing || !text) return false
+  return state.mode === 'multi' || state.confirmed?.kind !== 'text' || state.confirmed.text !== text
+}
+
+/** Confirms an answer that matches the question's mode. */
+function confirm(state: QuestionState, answer: Answer): void {
+  if (state.mode === 'multi') {
+    if (answer.kind === 'multi') state.confirmed = answer
+  } else if (answer.kind !== 'multi') state.confirmed = answer
+}
+
+/** A confirmed multiSelect follows every toggle and keystroke. As in Claude Code, a confirmed
+ * single-select text answer changes only when Enter confirms the edited text. */
+function followEdits(state: QuestionState): void {
+  if (state.mode === 'multi' && state.confirmed) state.confirmed = multiAnswer(state.checked, state.draft.getValue().trim())
+}
+
+function toggleChecked(state: QuestionState): void {
+  const row = state.rows[state.cursor]
+  if (state.mode !== 'multi' || row.kind !== 'option') return
+  state.checked[row.index] = !state.checked[row.index]
+  followEdits(state)
 }
 
 function answerText(spec: QuestionSpec, answer: Answer): string {
@@ -299,7 +328,8 @@ function renderOptions(args: Partial<QuestionSpec>, theme: Theme): string {
   if (!opts.length) return ''
   const labels = opts.map((o: OptionWithDesc) => o.label)
   const numbered = [...labels, 'Type something.'].map((o, i) => `${i + 1}. ${o}`)
-  return `\n${theme.fg('dim', `  Options${multi ? ' (multi)' : ''}: ${numbered.join(', ')}`)}`
+  const line = `  Options${multi ? ' (multi)' : ''}: ${numbered.join(', ')}`
+  return `\n${theme.fg('dim', line)}`
 }
 
 function renderBatchCall(specs: Array<Partial<QuestionSpec> | null>, theme: Theme): Text {
@@ -370,7 +400,8 @@ export default function question(pi: ExtensionAPI) {
           details.questions
             .map((detail) => {
               const rendered = detail.answer === null ? theme.fg('warning', 'Cancelled') : renderAnswered(detail, detail.answer, theme)
-              return `${detail.header ? `[${detail.header}] ` : ''}${detail.question}\n${rendered}`
+              const prefix = detail.header ? `[${detail.header}] ` : ''
+              return `${prefix}${detail.question}\n${rendered}`
             })
             .join('\n\n'),
           0,
@@ -562,7 +593,8 @@ function overlayResult(specs: QuestionSpec[], result: FormResult | null | undefi
 function chatResult(specs: QuestionSpec[], answers: Array<Answer | undefined>): QuestionResult {
   const asked = specs.map((spec, index) => {
     const answer = answers[index]
-    return `- "${spec.question}"\n  ${answer ? `Answer: ${answerText(spec, answer)}` : '(No answer provided)'}`
+    const given = answer ? `Answer: ${answerText(spec, answer)}` : '(No answer provided)'
+    return `- "${spec.question}"\n  ${given}`
   })
   const text = `The user wants to clarify these questions.
     This means they may have additional information, context or questions for you.
@@ -713,12 +745,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const text = settledText(state)
         return state.checked.some(Boolean) || text ? multiAnswer(state.checked, text) : undefined
       }
-      /** Text in the field under the highlight that Enter has not confirmed as it stands. */
-      function unconfirmedText(state: QuestionState | undefined): boolean {
-        const text = state?.draft.getValue().trim()
-        if (!state?.typing || !text) return false
-        return state.mode === 'multi' || state.confirmed?.kind !== 'text' || state.confirmed.text !== text
-      }
       function answers(): Array<Answer | undefined> {
         return states.map(draftAnswer)
       }
@@ -727,12 +753,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const confirmed = confirmedAnswer(state)
         if (confirmed) return confirmed
         return state.mode === 'multi' ? { kind: 'timedOut', selected: multiAnswer(state.checked, state.draft.getValue().trim()) } : { kind: 'timedOut' }
-      }
-      /** Confirms an answer that matches the question's mode. */
-      function confirm(state: QuestionState, answer: Answer): void {
-        if (state.mode === 'multi') {
-          if (answer.kind === 'multi') state.confirmed = answer
-        } else if (answer.kind !== 'multi') state.confirmed = answer
       }
       function restoreRemoteAnswer(index: number, value: Answer): void {
         const state = states[index]
@@ -839,17 +859,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         refresh()
         return true
       }
-      function toggleChecked(state: QuestionState): void {
-        const row = state.rows[state.cursor]
-        if (state.mode !== 'multi' || row.kind !== 'option') return
-        state.checked[row.index] = !state.checked[row.index]
-        followEdits(state)
-      }
-      /** A confirmed multiSelect follows every toggle and keystroke. As in Claude Code, a confirmed
-       * single-select text answer changes only when Enter confirms the edited text. */
-      function followEdits(state: QuestionState): void {
-        if (state.mode === 'multi' && state.confirmed) state.confirmed = multiAnswer(state.checked, state.draft.getValue().trim())
-      }
       function handleTypingInput(state: QuestionState, data: string): void {
         if (matchesKey(data, Key.escape)) finish(null)
         else if (matchesKey(data, Key.enter)) {
@@ -899,12 +908,17 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         const draft = state.draft.getValue()
         state.draft.focused = state.typing
         // The row's prefix and number take five columns, a checkbox four more, a confirmed tick two.
-        const reserved = state.mode === 'multi' ? 9 : state.confirmed?.kind === 'text' ? 7 : 5
+        let reserved = 5
+        if (state.mode === 'multi') reserved = 9
+        else if (state.confirmed?.kind === 'text') reserved = 7
         if (state.typing) return state.draft.render(Math.max(1, width - reserved))[0].trimEnd()
         return draft ? theme.fg('text', draft) : theme.fg('dim', textRowLabel(state.mode === 'multi'))
       }
       function renderTabs(width: number, saved: Array<Answer | undefined>): string {
-        const tabs = specs.map((spec, index) => ` ${saved[index] ? '☒' : '☐'} ${spec.header ?? `Q${index + 1}`} `)
+        const tabs = specs.map((spec, index) => {
+          const name = spec.header ?? `Q${index + 1}`
+          return ` ${saved[index] ? '☒' : '☐'} ${name} `
+        })
         tabs.push(' ✔ Submit ')
         const widths = tabs.map((tab) => visibleWidth(tab))
         const arrows = widths[active] + 4 <= width
