@@ -134,7 +134,7 @@ jobs:
           enable-cache: false
 
       - name: Audit workflows
-        run: uvx zizmor@1.32.0 --config .github/zizmor.yml --format=plain .github/workflows
+        run: uvx zizmor@1.32.0 --config .github/zizmor.yml --format=plain .github
 
   ci:
     # The single status a ruleset can require: it stays red unless every job above
