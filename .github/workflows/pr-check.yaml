@@ -56,7 +56,10 @@ jobs:
         # execute in every PR.
         run: npm ci --ignore-scripts
 
+      # npm 10 (bundled with Node 22) lacks the registry's newer signing keys and fails with
+      # EMISSINGSIGNATUREKEY; the tree is identical on every leg, so verify it once on npm 11.
       - name: Verify provenance signatures
+        if: matrix.node-version == '24.x'
         run: npm audit signatures
 
       - name: Check
