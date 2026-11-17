@@ -197,7 +197,7 @@ function declaredCharset(contentType: string): string {
 
 /** A decoder for `contentType`'s declared charset, or the platform default (UTF-8) for a
  * label TextDecoder does not recognize: a bad or made-up charset must not fail the fetch. */
-function decoderFor(contentType: string): TextDecoder {
+function decoderFor(contentType: string): InstanceType<typeof TextDecoder> {
   try {
     return new TextDecoder(declaredCharset(contentType))
   } catch {
@@ -206,7 +206,7 @@ function decoderFor(contentType: string): TextDecoder {
 }
 
 /** readCapped for a response with no body stream: the whole body is buffered, then cut or refused. */
-async function readUnstreamed(response: Response, decoder: TextDecoder, limit: BodyLimit, tooLarge: () => Error): Promise<string> {
+async function readUnstreamed(response: Response, decoder: InstanceType<typeof TextDecoder>, limit: BodyLimit, tooLarge: () => Error): Promise<string> {
   const bytes = new Uint8Array(await response.arrayBuffer())
   if (bytes.byteLength > limit.maxBytes && limit.overflow === 'refuse') throw tooLarge()
   return decoder.decode(bytes.subarray(0, limit.maxBytes))
