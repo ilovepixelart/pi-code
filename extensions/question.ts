@@ -198,6 +198,13 @@ function followEdits(state: QuestionState): void {
   if (state.mode === 'multi' && state.confirmed) state.confirmed = multiAnswer(state.checked, state.draft.getValue().trim())
 }
 
+function toggleChecked(state: QuestionState): void {
+  const row = state.rows[state.cursor]
+  if (state.mode !== 'multi' || row.kind !== 'option') return
+  state.checked[row.index] = !state.checked[row.index]
+  followEdits(state)
+}
+
 function answerText(spec: QuestionSpec, answer: Answer): string {
   switch (answer.kind) {
     case 'option':
@@ -851,12 +858,6 @@ export async function askViaOverlay(specs: QuestionSpec[], ctx: ExtensionContext
         state.typing = state.rows[state.cursor].kind === 'text'
         refresh()
         return true
-      }
-      function toggleChecked(state: QuestionState): void {
-        const row = state.rows[state.cursor]
-        if (state.mode !== 'multi' || row.kind !== 'option') return
-        state.checked[row.index] = !state.checked[row.index]
-        followEdits(state)
       }
       function handleTypingInput(state: QuestionState, data: string): void {
         if (matchesKey(data, Key.escape)) finish(null)
