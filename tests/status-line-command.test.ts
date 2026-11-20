@@ -836,6 +836,46 @@ describe('statusLine rate limits', () => {
     expect(notify.mock.calls[0][1]).toBe('warning')
     expect(String(notify.mock.calls[0][0])).toContain('30')
   })
+
+  describe('across a model switch', () => {
+    const anthropicHeaders = { 'anthropic-ratelimit-unified-5h-utilization': '0.4', 'anthropic-ratelimit-unified-5h-reset': '2026-08-16T12:00:00Z' }
+
+    const afterSwitch = async (next: { provider: string; id: string }) => {
+      const cwd = tempDir()
+      writeSettings(hoisted.home, 'settings.json', { statusLine: { type: 'command', command: 'seg.sh' } })
+      hoisted.result = { code: 0, stdout: 'x', stderr: '', timedOut: false }
+      const { handlers, ctx } = setup(cwd)
+      const previous = { id: 'claude-sonnet-4-5', name: 'Sonnet', provider: 'anthropic' }
+      Object.assign(ctx, { model: previous })
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
+      await handlers.get('session_start')?.({}, ctx)
+      await vi.advanceTimersByTimeAsync(400)
+      await handlers.get('after_provider_response')?.({ type: 'after_provider_response', status: 200, headers: anthropicHeaders }, ctx)
+      await handlers.get('turn_end')?.({}, ctx)
+      await vi.advanceTimersByTimeAsync(400)
+      const before = hoisted.runs.at(-1)?.payload as Record<string, unknown>
+      expect(before.rate_limits).toEqual({ five_hour: { used_percentage: 40, resets_at: Date.parse('2026-08-16T12:00:00Z') / 1000 } })
+
+      const model = { ...next, name: next.id }
+      Object.assign(ctx, { model })
+      await handlers.get('model_select')?.({ type: 'model_select', model, previousModel: previous, source: 'set' }, ctx)
+      await vi.advanceTimersByTimeAsync(400)
+      return hoisted.runs.at(-1)?.payload as Record<string, unknown>
+    }
+
+    it('drops the windows when the new model belongs to another provider', async () => {
+      // Only Anthropic sends these headers, so no later response would ever replace
+      // the snapshot: kept, the old account's windows showed for the rest of the session.
+      const payload = await afterSwitch({ provider: 'openai-codex', id: 'gpt-5.1-codex' })
+      expect(payload).not.toHaveProperty('rate_limits')
+    })
+
+    it('keeps the windows when the new model shares the provider', async () => {
+      const payload = await afterSwitch({ provider: 'anthropic', id: 'claude-opus-4-1' })
+      expect(payload.rate_limits).toEqual({ five_hour: { used_percentage: 40, resets_at: Date.parse('2026-08-16T12:00:00Z') / 1000 } })
+    })
+  })
 })
 
 describe('statusLine instant refresh', () => {

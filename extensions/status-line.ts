@@ -251,6 +251,8 @@ export default function statusLine(pi: ExtensionAPI) {
   // The most recent rate-limit snapshot parsed from provider response headers, and
   // a once-per-session guard so a 429 warns the user only the first time it lands.
   let rateLimits: RateLimitSnapshot | undefined
+  /** The provider of the model whose response produced `rateLimits`. */
+  let rateLimitsProvider: string | undefined
   let rateLimitWarned = false
   let refreshTimer: ReturnType<typeof setInterval> | undefined
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
@@ -468,6 +470,7 @@ export default function statusLine(pi: ExtensionAPI) {
     const snapshot = parseRateLimits(headers)
     if (snapshot) {
       rateLimits = snapshot
+      rateLimitsProvider = ctx.model?.provider
       scheduleExpiryRefresh(snapshot)
     }
     if (event.status === 429 && !rateLimitWarned) {
@@ -504,6 +507,7 @@ export default function statusLine(pi: ExtensionAPI) {
     requestStartMs = undefined
     lastUsage = undefined
     rateLimits = undefined
+    rateLimitsProvider = undefined
     rateLimitWarned = false
     clearInterval(refreshTimer)
     // Seed the running cost from the branch: a resumed or forked session starts
@@ -581,7 +585,14 @@ export default function statusLine(pi: ExtensionAPI) {
 
   // The model and effort segments of the payload go stale between turns; a switch
   // fires these events, so refresh at once instead of waiting for the next tick.
-  pi.on('model_select', () => {
+  pi.on('model_select', (event) => {
+    // The windows belong to the account that sent them, and only Anthropic sends these
+    // headers, so after a switch to another provider nothing would ever replace them.
+    if (rateLimits && event.model.provider !== rateLimitsProvider) {
+      rateLimits = undefined
+      rateLimitsProvider = undefined
+      clearTimeout(expiryTimer)
+    }
     scheduleRefresh()
   })
   pi.on('thinking_level_select', () => {
