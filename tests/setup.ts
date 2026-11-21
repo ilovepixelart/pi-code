@@ -17,6 +17,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterAll, afterEach, beforeEach } from 'vitest'
+import { removeTempRoot } from './temp-root.ts'
 
 const HOST_LEAK_VARS = [
   'CLAUDECODE',
@@ -75,7 +76,7 @@ if (process.platform !== 'win32') process.env.TMP = tmpRoot
 process.env.PI_CODING_AGENT_DIR = path.join(tmpRoot, 'pi-agent')
 
 afterAll(() => {
-  fs.rmSync(tmpRoot, { recursive: true, force: true })
+  removeTempRoot(tmpRoot)
 })
 
 let snapshot: NodeJS.ProcessEnv
