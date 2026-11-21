@@ -25,12 +25,12 @@ afterEach(() => {
 })
 
 describe('removeTempRoot', () => {
-  it('removes a populated tree', () => {
+  it('removes a populated tree', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'temp-root-'))
     fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true })
     fs.writeFileSync(path.join(dir, 'a', 'b', 'file.txt'), 'x')
 
-    removeTempRoot(dir)
+    await removeTempRoot(dir)
 
     expect(fs.existsSync(dir)).toBe(false)
   })
@@ -41,7 +41,7 @@ describe('removeTempRoot', () => {
     // The precondition: one attempt fails while the process is alive.
     expect(() => fs.rmSync(dir, { recursive: true, force: true })).toThrow(HELD)
 
-    removeTempRoot(dir)
+    await removeTempRoot(dir)
 
     expect(fs.existsSync(dir)).toBe(false)
   })
@@ -52,12 +52,12 @@ describe('removeTempRoot', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'temp-root-'))
       const child = await holdDirectory(dir, 60_000)
 
-      expect(() => removeTempRoot(dir)).toThrow(HELD)
+      await expect(removeTempRoot(dir)).rejects.toThrow(HELD)
       expect(fs.existsSync(dir)).toBe(true)
 
       child.kill()
       await new Promise((resolve) => child.once('exit', resolve))
-      removeTempRoot(dir)
+      await removeTempRoot(dir)
     },
     15_000,
   )

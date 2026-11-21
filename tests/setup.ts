@@ -75,8 +75,8 @@ if (process.platform !== 'win32') process.env.TMP = tmpRoot
 // the developer's real ~/.pi/agent whichever home it fakes.
 process.env.PI_CODING_AGENT_DIR = path.join(tmpRoot, 'pi-agent')
 
-afterAll(() => {
-  removeTempRoot(tmpRoot)
+afterAll(async () => {
+  await removeTempRoot(tmpRoot)
 })
 
 let snapshot: NodeJS.ProcessEnv
