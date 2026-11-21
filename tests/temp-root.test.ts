@@ -6,14 +6,15 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { removeTempRoot } from './temp-root.ts'
 
 const children: ChildProcess[] = []
+const HELD = expect.objectContaining({ code: expect.stringMatching(/^(EBUSY|EPERM)$/) })
 
-/** A process whose working directory is `cwd`, alive for `ms`: on Windows it holds the
- * directory, so the directory cannot be removed until the process exits. */
+/** A native process with its working directory in `cwd`, which exits on its own after `ms`.
+ * Resolves once it is running, when Windows refuses to remove `cwd`. */
 const holdDirectory = async (cwd: string, ms: number): Promise<ChildProcess> => {
-  const child = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${ms})`], { cwd, stdio: 'ignore' })
+  const child = spawn(process.execPath, ['-e', `console.log('up'); setTimeout(() => {}, ${ms})`], { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
   children.push(child)
   await new Promise<void>((resolve, reject) => {
-    child.once('spawn', resolve)
+    child.stdout?.once('data', () => resolve())
     child.once('error', reject)
   })
   return child
@@ -34,13 +35,11 @@ describe('removeTempRoot', () => {
     expect(fs.existsSync(dir)).toBe(false)
   })
 
-  // A stopped command's process tree is killed by a taskkill nobody waits for, so a
-  // child can still hold the root when the file's teardown runs.
-  it.runIf(process.platform === 'win32')('removes a root a process releases shortly after', async () => {
+  it.runIf(process.platform === 'win32')('removes a root that a process releases shortly after', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'temp-root-'))
-    await holdDirectory(dir, 1500)
-    // The lock is real: a single attempt fails while the process is alive.
-    expect(() => fs.rmSync(dir, { recursive: true, force: true })).toThrow(expect.objectContaining({ code: expect.stringMatching(/^(EBUSY|EPERM)$/) }))
+    await holdDirectory(dir, 1000)
+    // The precondition: one attempt fails while the process is alive.
+    expect(() => fs.rmSync(dir, { recursive: true, force: true })).toThrow(HELD)
 
     removeTempRoot(dir)
 
@@ -53,12 +52,12 @@ describe('removeTempRoot', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'temp-root-'))
       const child = await holdDirectory(dir, 60_000)
 
-      expect(() => removeTempRoot(dir)).toThrow(expect.objectContaining({ code: expect.stringMatching(/^(EBUSY|EPERM)$/) }))
+      expect(() => removeTempRoot(dir)).toThrow(HELD)
       expect(fs.existsSync(dir)).toBe(true)
 
       child.kill()
       await new Promise((resolve) => child.once('exit', resolve))
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      removeTempRoot(dir)
     },
     15_000,
   )
