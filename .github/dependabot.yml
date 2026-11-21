@@ -8,11 +8,12 @@ updates:
     # Version updates wait 7 days; security updates are never delayed.
     cooldown:
       default-days: 7
-    # @types/node follows the lowest supported Node (engines); a newer major would let code
-    # compile against APIs that runtime lacks, so majors move only with the engines floor.
+    # @types/node follows the lowest supported Node (engines); its minor tracks the Node
+    # minor, so a newer major or minor would let code compile against APIs that runtime
+    # lacks. Both move only with the engines floor; patches still arrive.
     ignore:
       - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       # A dependency joins the first group it matches, so the groups run from most to
       # least specific. The pi packages pin each other with caret ranges: a lone bump
